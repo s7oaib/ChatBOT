@@ -15,6 +15,61 @@ from database import db
 
 log = get_logger("camellia.responder")
 
+# Conversational intents used to branch the unmatched / escalation reply.
+# A single generic "we've notified our team" notice is wrong for a customer who
+# is only saying thanks, is complaining, or is trying to hand us a large order.
+CLOSING_ONLY_RE = re.compile(
+    r'^(thanks?|thank you|thank u|thnx|thnks|thx|tysm|ty|dhanyabad|dhonnobad|shukriya|'
+    r'bye+|goodbye|good bye|see you|see ya|tc|take care|good night|gn|'
+    r'thanks a lot|thank you so much|thanks so much|many thanks)'
+    r'[\s!.,\U0001F300-\U0001FAFF☀-➿]*$',
+    re.IGNORECASE
+)
+
+ACK_ONLY_RE = re.compile(
+    r'^(ok+|okay|okey|k|kk|hmm+|hm|sure|fine|alright|all right|right|got it|gotcha|'
+    r'noted|understood|cool|nice|great|good|super|acha|accha|theek hai|thik hai)'
+    r'[\s!.,\U0001F300-\U0001FAFF☀-➿]*$',
+    re.IGNORECASE
+)
+
+COMPLAINT_RE = re.compile(
+    r'\b(was bad|were bad|not good|no good|not fresh|wasn.?t fresh|stale|spoil(ed|t)?|rotten|'
+    r'smell(ed|s|y|ing)?|worst|terrible|horrible|awful|disgusting|pathetic|'
+    r'disappoint(ed|ing)?|unhappy|upset|angry|furious|'
+    r'poor quality|bad quality|bad experience|bad taste|tasted bad|'
+    r'damaged|broken|melted|leak(ed|ing)?|crushed|'
+    r'missing item|item missing|wrong item|wrong order|wrong flavour|wrong flavor|'
+    r'late delivery|delivered late|came late|arrived late|very late|'
+    r'never (arrived|came|received|delivered)|not (received|delivered)|'
+    r'didn.?t (arrive|come|receive|deliver)|did not (arrive|come|receive)|'
+    r'waste of money|bakwas|kharab|ganda)\b',
+    re.IGNORECASE
+)
+
+BULK_QTY_RE = re.compile(
+    r'\b(\d{2,})\s*(box|boxes|pcs|pieces|packs?|plates?|kgs?|kilos?|orders?|hampers?|people|guests|pax)\b',
+    re.IGNORECASE
+)
+
+BULK_CONTEXT_RE = re.compile(
+    r'\b(corporate|office|company|firm|bulk|wholesale|reseller|distributor|'
+    r'event|wedding|shaadi|sangeet|reception|party|conference|seminar|'
+    r'diwali|deepavali|puja|pujo|durga puja|holi|eid|christmas|new year|'
+    r'gift hamper|gift hampers|hampers|client gift|employee gift|festive gifting)\b',
+    re.IGNORECASE
+)
+
+ORDER_INTENT_RE = re.compile(
+    r'\b(place (the |my |this |an )?order|order (it|this|now|please)|'
+    r'confirm (the |my |this )?order|book (it|the order|my order|this)|'
+    r'i.?ll take|ill take|i want (it|this|that)|want to buy|'
+    r'let.?s order|lets order|go ahead|proceed|check ?out|'
+    r'buy (it|this|now)|finalise|finalize)\b',
+    re.IGNORECASE
+)
+
+
 @dataclass
 class BotResponse:
     text: str
@@ -65,6 +120,87 @@ class DeterministicResponder:
                 return f"Trigger keyword matched: '{kw}'"
         return None
 
+    def _generic_fallback(self) -> str:
+        """The scripted 'we've handed this to a human' notice from qa_templates.json."""
+        return self.qa_data.get("escalation_triggers", {}).get(
+            "fallback_response",
+            "Thank you for getting in touch! 🌸 I've notified our team (+91 87965 51990) regarding "
+            "your request and they'll connect with you directly on WhatsApp/call shortly.\n\n"
+            "In the meantime, feel free to ask me about:\n"
+            "• 🌸 Our fresh Sondesh, Kanchagolla & Jolbhora (Aamar Mishti & Signature Collections)\n"
+            "• 🍱 This week's fresh Bengali Lunch & Dinner Bento menu\n"
+            "• 🚚 Delivery details across Delhi NCR\n\n"
+            "Or reply 'menu' to see our complete price list!"
+        )
+
+    def classify_unmatched_intent(self, text: str) -> str:
+        """
+        Classifies a message we could not answer from a template, so the handover
+        notice can be worded for what the customer is actually doing.
+        Returns one of: 'complaint', 'bulk', 'order_intent', 'unknown'.
+        """
+        if not text:
+            return "unknown"
+
+        if COMPLAINT_RE.search(text):
+            return "complaint"
+
+        qty_match = BULK_QTY_RE.search(text)
+        big_qty = qty_match and int(qty_match.group(1)) >= 20
+        if big_qty or (BULK_CONTEXT_RE.search(text) and re.search(r'\b(order|book|quote|need|want|buy|gift)\w*\b', text, re.IGNORECASE)):
+            return "bulk"
+
+        if ORDER_INTENT_RE.search(text):
+            return "order_intent"
+
+        return "unknown"
+
+    def build_handover_response(self, user_message: str) -> Tuple[str, str]:
+        """
+        Builds the reply for a message that is being handed to a human.
+        Every branch here escalates, so all of them may say the team was notified.
+
+        Returns: (response_text, intent_tag)
+        """
+        intent = self.classify_unmatched_intent(user_message or "")
+
+        if intent == "complaint":
+            return (
+                "I'm really sorry that happened — that is not the experience we want you to have. 🙏\n\n"
+                "I've flagged this to our team (+91 87965 51990) along with this chat, and they will "
+                "reach out to you personally to put it right.\n\n"
+                "If you can share your order date and what went wrong, it helps us fix it faster.",
+                intent,
+            )
+
+        if intent == "bulk":
+            return (
+                "Wonderful — we would love to make this for you! 🌸\n\n"
+                "Bulk, corporate and festive orders are quoted personally so we can work out pricing, "
+                "packaging and delivery dates around your date.\n\n"
+                "I've passed this to our team (+91 87965 51990) and they will connect with you shortly. "
+                "To speed things up, do share:\n"
+                "• Approximate quantity\n"
+                "• Delivery date\n"
+                "• Delhi NCR area, or if you'd prefer kitchen pickup",
+                intent,
+            )
+
+        if intent == "order_intent":
+            return (
+                "Lovely — let's get this order placed! 🌸\n\n"
+                "Our team (+91 87965 51990) has your chat and will confirm on WhatsApp/call shortly.\n\n"
+                "To make it quick, please share:\n"
+                "1. Item & flavour\n"
+                "2. Pack size (250g / 500g / 1kg)\n"
+                "3. Delivery address & phone number\n"
+                "4. Preferred delivery date\n\n"
+                "Payment is UPI / bank transfer once the order is confirmed.",
+                intent,
+            )
+
+        return self._generic_fallback(), intent
+
     def match_and_respond(
         self,
         user_message: str,
@@ -89,25 +225,25 @@ class DeterministicResponder:
             return "", False, "ad_gate_blocked", None
 
         if not user_message or not user_message.strip():
-            fallback = self.qa_data.get("escalation_triggers", {}).get(
-                "fallback_response", "Thanks for reaching out! Let me connect you with our team."
-            )
-            return fallback, False, None, None
+            return self._generic_fallback(), False, None, None
 
         lowered_text = user_message.lower().strip()
 
+        # Normalise elongated / misspelled greetings ("hii", "heyyy", "helo") so they
+        # still reach the greeting template instead of falling through to escalation.
+        lowered_text = re.sub(r'^(?:h+i+|h+a+i+)\b', 'hi', lowered_text)
+        lowered_text = re.sub(r'^(?:h+e+y+)\b', 'hey', lowered_text)
+        lowered_text = re.sub(r'^(?:h+e+l+o+|h+e+l+l+o+|h+l+o+)\b', 'hello', lowered_text)
+        lowered_text = re.sub(r'^(?:namaskar|nomoshkar|nomoskar)\b', 'namaste', lowered_text)
+
         # 0.5 Spam / External Link / Unreadable Gibberish Detection
         if re.search(r'https?://|www\.|\.xyz|\.top|\.click\b', lowered_text):
-            fallback = self.qa_data.get("escalation_triggers", {}).get(
-                "fallback_response", "Thanks for reaching out! Let me connect you with our team."
-            )
+            fallback = self._generic_fallback()
             session_memory.add_turn(user_id, channel, user_message, fallback)
             return fallback, False, None, None
 
         if not re.search(r'[a-zA-Z\u0980-\u09FF]', user_message):
-            fallback = self.qa_data.get("escalation_triggers", {}).get(
-                "fallback_response", "Thanks for reaching out! Let me connect you with our team."
-            )
+            fallback = self._generic_fallback()
             session_memory.add_turn(user_id, channel, user_message, fallback)
             return fallback, False, None, None
 
@@ -160,12 +296,33 @@ class DeterministicResponder:
                 else:
                     intro_greeting_prefix = "Nice to meet you! 👋\n\n"
 
+        # 1.5 Pure sign-offs and acknowledgements. These carry no question, so handing
+        # them to a human — and telling the customer we did — is both noise and untrue.
+        if not intro_greeting_prefix:
+            if CLOSING_ONLY_RE.match(lowered_text):
+                response_text = (
+                    "Thank you so much! 🌸 Lovely chatting with you.\n\n"
+                    "Whenever you'd like Sondesh or this week's Bengali meals, just message here — "
+                    "our kitchen is open 10:00 AM – 7:30 PM every day. Take care!"
+                )
+                session_memory.add_turn(user_id, channel, user_message, response_text)
+                return response_text, True, "conversation_closing", None
+
+            if ACK_ONLY_RE.match(lowered_text):
+                response_text = (
+                    "Got it! 😊 What would you like to do next?\n\n"
+                    "• 🌸 Sondesh flavours & prices\n"
+                    "• 🍱 This week's Bengali meal menu\n"
+                    "• 🚚 Delivery details for your area\n"
+                    "• 🛒 Place an order"
+                )
+                session_memory.add_turn(user_id, channel, user_message, response_text)
+                return response_text, True, "acknowledgement", None
+
         # 2. Check explicit escalation triggers first (refund, complaint, etc.)
         escalation_reason = self.check_explicit_escalation_triggers(user_message)
         if escalation_reason:
-            fallback = self.qa_data.get("escalation_triggers", {}).get(
-                "fallback_response", "Thanks for reaching out! Let me connect you with our Kitchen Manager — they'll get back to you shortly. 🙏"
-            )
+            fallback, _intent = self.build_handover_response(user_message)
             if intro_greeting_prefix:
                 fallback = intro_greeting_prefix + fallback
             session_memory.add_turn(user_id, channel, user_message, fallback)
@@ -496,13 +653,23 @@ class DeterministicResponder:
             force_escalate = (best_template.get("escalate") is True) or is_null_or_empty_response
 
             if force_escalate:
-                fallback = self.qa_data.get("escalation_triggers", {}).get(
-                    "fallback_response", "Thank you for getting in touch! 🌸 I've notified our team (+91 87965 51990) regarding your request and they'll connect with you directly on WhatsApp/call shortly.\n\nIn the meantime, feel free to ask me about:\n• 🌸 Our fresh Sondesh, Kanchagolla & Jolbhora (Aamar Mishti & Signature Collections)\n• 🍱 This week's fresh Bengali Lunch & Dinner Bento menu\n• 🚚 Delivery details across Delhi NCR\n\nOr reply 'menu' to see our complete price list!"
-                )
+                escalate_image = None
+                if is_null_or_empty_response:
+                    # Nothing approved to say — use the intent-aware handover notice.
+                    fallback, _intent = self.build_handover_response(user_message)
+                else:
+                    # The template is escalation-flagged but has purpose-written copy
+                    # (e.g. order_next_steps). Send that copy rather than the generic
+                    # notice; the caller still escalates because was_matched is False.
+                    fallback, escalate_image = self._format_dynamic_response(
+                        tmpl_id, raw_response, user_id=user_id, channel=channel, user_message=user_message
+                    )
+                    if tmpl_id == "order_next_steps":
+                        session_memory.clear_order_draft(user_id, channel)
                 if intro_greeting_prefix:
                     fallback = intro_greeting_prefix + fallback
                 session_memory.add_turn(user_id, channel, user_message, fallback)
-                return fallback, False, tmpl_id, None
+                return fallback, False, tmpl_id, escalate_image
 
             response_text, image_url = self._format_dynamic_response(
                 tmpl_id, raw_response or "", user_id=user_id, channel=channel, user_message=user_message
@@ -581,9 +748,7 @@ class DeterministicResponder:
             return response_text, True, tmpl_id, image_url
 
         # Check Active AI Provider (Gemini / OpenAI RAG) when enabled
-        fallback = self.qa_data.get("escalation_triggers", {}).get(
-            "fallback_response", "Thanks for reaching out! Let me connect you with our team."
-        )
+        fallback, _intent = self.build_handover_response(user_message)
         if intro_greeting_prefix:
             fallback = intro_greeting_prefix + fallback
 
