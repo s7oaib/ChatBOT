@@ -606,6 +606,7 @@ class DeterministicResponder:
             "GUARD_halal_ingredients_oil", "GUARD_payment_method",
             "GUARD_allergen_nutfree_glutenfree", "GUARD_pickup_address_hours",
             "GUARD_shelf_life_storage", "GUARD_staff_names_manager_contact",
+            "GUARD_dietary_suitability",
             "bento_details"
         }
 
@@ -708,7 +709,10 @@ class DeterministicResponder:
                     "GUARD_halal_ingredients_oil": {"halal", "jhatka", "oil", "medium", "mustard", "ghee"},
                     "GUARD_payment_method": {"pay", "payment", "paying", "cod", "upi", "qr", "gpay", "paytm", "phonepe", "banking", "card", "cash"},
                     "GUARD_allergen_nutfree_glutenfree": {"allergy", "allergies", "allergic", "allergen", "allergens", "peanut", "peanuts", "cashew", "cashews", "pistachio", "pistachios", "gluten", "contamination", "nut", "nuts"},
-                    "GUARD_pickup_address_hours": {"pickup", "pick", "collect", "kitchen"},
+                    # Anchors are substring-matched, so these stay phrases: a bare
+                    # "address" would catch "my address is ...", which is a customer
+                    # giving their delivery address, not asking for the kitchen's.
+                    "GUARD_pickup_address_hours": {"pickup", "pick", "collect", "kitchen", "your address", "the address", "located", "location"},
                     "GUARD_shelf_life_storage": {"shelf", "storage", "refrigeration", "refrigerate", "unrefrigerated", "fridge", "expiry", "spoil", "heat", "store", "last", "room"},
                     "GUARD_staff_names_manager_contact": {"owner", "founder", "chef", "somdeb", "manager", "staff", "guru", "email"}
                 }

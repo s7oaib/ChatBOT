@@ -102,6 +102,18 @@ class SessionMemoryManager:
         # 1. Extract Name
         extracted_name = None
 
+        # "I am ..." is far more often a self-description than an introduction.
+        # Treating "I am diabetic" as a name meant greeting a customer as
+        # "Diabetic" and never answering what they disclosed, so these words are
+        # never accepted as a name.
+        self_descriptor_words = {
+            "vegan", "vegetarian", "veggie", "nonveg", "eggless", "jain", "halal", "kosher",
+            "diabetic", "diabetes", "allergic", "allergy", "intolerant", "lactose", "gluten",
+            "celiac", "coeliac", "pregnant", "sick", "ill", "unwell", "fasting",
+            "new", "old", "regular", "local", "back", "confused", "sorry", "angry", "upset",
+            "waiting", "coming", "calling", "asking", "hungry", "vegetarians", "vegans",
+        }
+
         ignored_name_words = {
             "a", "an", "the", "in", "at", "from", "near", "to", "around", "on", "into", "with", "by", "for",
             "located", "living", "based", "staying", "visiting", "asking", "looking", "ordering", "wanting", "having",
@@ -132,7 +144,9 @@ class SessionMemoryManager:
                 if (
                     raw_name
                     and first_word not in ignored_name_words
+                    and first_word not in self_descriptor_words
                     and raw_name.lower() not in ignored_name_words
+                    and not any(w.lower() in self_descriptor_words for w in raw_name.split())
                     and 2 <= len(raw_name) <= 30
                     and not any(char.isdigit() for char in raw_name)
                     and not any(term in raw_name.lower() for term in ["sondesh", "mishti", "menu", "price", "delivery", "bento", "box", "noida", "delhi", "gurgaon", "sector"])
@@ -160,6 +174,7 @@ class SessionMemoryManager:
                 and "?" not in clean_text
                 and clean_text.lower() not in ignored_name_words
                 and words[0].lower() not in ignored_name_words
+                and not any(w.lower().strip(".,!?") in self_descriptor_words for w in words)
                 and not any(term in text_lower for term in ["sondesh", "sandesh", "mishti", "menu", "price", "bento", "1kg", "500g", "250g", "box", "delivery", "order", "cancel", "refund"])
             ):
                 extracted_name = clean_text.strip(".,!?:;\"'").title()

@@ -1829,6 +1829,100 @@ class TestCamelliaBot(unittest.TestCase):
             self.assertIsNotNone(tmpl_wa)
 
 
+class TestAnswerAccuracy(unittest.TestCase):
+    """
+    Regressions found by auditing 71 real customer phrasings against the
+    category each one belongs to. Each case here was once answered with the
+    wrong thing, or handed to a human when the bot had the answer.
+    """
+
+    def _tmpl(self, msg, uid=None):
+        from session_memory import session_memory
+        uid = uid or f"acc_{abs(hash(msg))}"
+        session_memory.clear_session(uid, "whatsapp")
+        _, matched, tmpl, _ = responder.match_and_respond(msg, user_id=uid, channel="whatsapp")
+        return matched, tmpl
+
+    def test_condition_statements_are_not_taken_as_names(self):
+        """"I am diabetic" once stored the name "Diabetic" and greeted them by it."""
+        from session_memory import session_memory
+        for msg in ("i am vegan", "i am a vegan", "i am diabetic",
+                    "i am allergic to nuts", "i am lactose intolerant", "im pregnant"):
+            session_memory.clear_session("nm", "whatsapp")
+            facts = session_memory.extract_and_update_facts("nm", "whatsapp", msg)
+            self.assertIsNone(facts.get("name"), f"{msg!r} was stored as a name")
+
+    def test_real_introductions_still_capture_the_name(self):
+        from session_memory import session_memory
+        for msg, expected in (("i am Priya", "Priya"), ("my name is Sourav Das", "Sourav Das"),
+                              ("Hi, I am Ananya", "Ananya"), ("call me Rahul", "Rahul")):
+            session_memory.clear_session("nm2", "whatsapp")
+            facts = session_memory.extract_and_update_facts("nm2", "whatsapp", msg)
+            self.assertEqual(facts.get("name"), expected)
+
+    def test_dietary_questions_get_a_dietary_answer(self):
+        for msg in ("is it vegan", "i am vegan", "is it eggless", "is it vegetarian",
+                    "is it gluten free", "i am lactose intolerant", "do you have vegan options"):
+            matched, tmpl = self._tmpl(msg)
+            self.assertTrue(matched, f"{msg!r} fell through to a human")
+            self.assertEqual(tmpl, "GUARD_dietary_suitability", f"{msg!r} -> {tmpl}")
+
+    def test_dietary_answer_is_factually_correct(self):
+        """Sondesh is milk-based, so it is vegetarian but explicitly not vegan."""
+        from session_memory import session_memory
+        session_memory.clear_session("diet", "whatsapp")
+        text, _, _, _ = responder.match_and_respond("is it vegan", user_id="diet", channel="whatsapp")
+        lowered = text.lower()
+        self.assertIn("not suitable for a vegan", lowered,
+                      "Must state plainly that dairy-based Sondesh is not vegan")
+        self.assertIn("milk", lowered, "Should say why — it is milk-based")
+        self.assertIn("vegetarian", lowered, "Should still confirm it is vegetarian")
+
+    def test_price_questions_never_answer_with_packaging(self):
+        """A bare 'box' trigger meant price questions got the eco-packaging answer."""
+        for msg in ("what does a box cost", "what is the cheapest box",
+                    "how much for a box", "price of 500g box"):
+            matched, tmpl = self._tmpl(msg)
+            self.assertTrue(matched, f"{msg!r} fell through to a human")
+            self.assertNotEqual(tmpl, "packaging", f"{msg!r} answered with packaging info")
+
+    def test_packaging_questions_still_reach_packaging(self):
+        for msg in ("packaging", "is it eco friendly", "do you use plastic", "how is it packed"):
+            matched, tmpl = self._tmpl(msg)
+            self.assertTrue(matched, f"{msg!r} fell through")
+            self.assertEqual(tmpl, "packaging", f"{msg!r} -> {tmpl}")
+
+    def test_asking_for_kitchen_address_gets_the_address(self):
+        for msg in ("what is your address", "whats your address", "where are you located",
+                    "where is your kitchen", "kitchen location"):
+            matched, tmpl = self._tmpl(msg)
+            self.assertTrue(matched, f"{msg!r} fell through to a human")
+            self.assertEqual(tmpl, "GUARD_pickup_address_hours", f"{msg!r} -> {tmpl}")
+
+    def test_customer_giving_their_address_is_not_told_the_kitchen_address(self):
+        """"my address is ..." is someone ordering, not asking where we are."""
+        for msg in ("my address is 123 sector 45", "here is my address, sector 45 gurgaon"):
+            _, tmpl = self._tmpl(msg)
+            self.assertNotEqual(tmpl, "GUARD_pickup_address_hours", f"{msg!r} -> {tmpl}")
+
+    def test_qualified_weekly_menu_beats_the_generic_intro(self):
+        matched, tmpl = self._tmpl("Show me the veg menu this week")
+        self.assertTrue(matched)
+        self.assertEqual(tmpl, "weekly_menu_veg")
+        matched, tmpl = self._tmpl("show me the non veg menu this week")
+        self.assertTrue(matched)
+        self.assertEqual(tmpl, "weekly_menu_nonveg")
+
+    def test_previously_unanswered_phrasings_now_answer(self):
+        """Each of these used to reach a human despite the bot knowing the answer."""
+        for msg in ("how much for a kg", "kitna hai sondesh", "most expensive sondesh",
+                    "which areas do you cover", "can i get it today",
+                    "do you accept cards", "what curries do you have"):
+            matched, tmpl = self._tmpl(msg)
+            self.assertTrue(matched, f"{msg!r} still falls through to a human")
+            self.assertIsNotNone(tmpl)
+
+
 class TestInteractiveMenuFlow(unittest.TestCase):
     """
     A menu question shows the card with a short teaser and invites a choice,
