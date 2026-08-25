@@ -7,6 +7,8 @@ services:
     startCommand: python main.py
     envVars:
       - key: ENABLE_WEB_TESTER
+        value: "false"
+      - key: WHATSAPP_MOCK_MODE
         value: "true"
       - key: BYPASS_AD_GATE
         value: "false"

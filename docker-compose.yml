@@ -14,22 +14,39 @@ services:
       - META_APP_SECRET=${META_APP_SECRET}
       - PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-}
       - ADMIN_API_KEY=${ADMIN_API_KEY}
+      # Without this the /admin portal cannot be unlocked by PIN in a container
+      - ADMIN_PIN=${ADMIN_PIN}
+      - WHATSAPP_MOCK_MODE=${WHATSAPP_MOCK_MODE:-true}
       - WHATSAPP_ACCESS_TOKEN=${WHATSAPP_ACCESS_TOKEN}
       - WHATSAPP_PHONE_NUMBER_ID=${WHATSAPP_PHONE_NUMBER_ID}
+      - WHATSAPP_API_VERSION=${WHATSAPP_API_VERSION:-v19.0}
       - INSTAGRAM_PAGE_ID=${INSTAGRAM_PAGE_ID}
+      # Falls back to WHATSAPP_ACCESS_TOKEN; set only if the Page uses its own
+      - INSTAGRAM_ACCESS_TOKEN=${INSTAGRAM_ACCESS_TOKEN:-}
       - HUMAN_ESCALATION_PHONE=${HUMAN_ESCALATION_PHONE:-+918796551990}
       - HUMAN_ESCALATION_EMAIL=${HUMAN_ESCALATION_EMAIL:-owner@camelliaartisanal.com}
       # Must live under the mounted volume or all history is lost on rebuild
       - DB_PATH=/app/data/camellia.db
       # The /chat tester writes real rows and pages the owner; keep it off here
       - ENABLE_WEB_TESTER=${ENABLE_WEB_TESTER:-false}
+      # Auto-replies to organic Instagram DMs too when true — leave off unless asked
+      - BYPASS_AD_GATE=${BYPASS_AD_GATE:-false}
+      # Optional one-click menu sync from a published Google Sheet CSV
+      - GOOGLE_SHEET_CSV_URL=${GOOGLE_SHEET_CSV_URL:-}
       - DATA_RETENTION_DAYS=${DATA_RETENTION_DAYS:-90}
       - BUSINESS_LEGAL_NAME=${BUSINESS_LEGAL_NAME:-Camellia Artisanal}
       - PRIVACY_CONTACT_EMAIL=${PRIVACY_CONTACT_EMAIL:-owner@camelliaartisanal.com}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
-      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-flash-latest}
+      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-2.5-flash}
       - GEMINI_ENABLED=${GEMINI_ENABLED:-true}
+      # Tells a customer once, when replies have gone slow, to contact the
+      # Kitchen Manager directly. The copy promises a limited period, so
+      # SLOW_REPLY_NOTICE_UNTIL (YYYY-MM-DD) must be set when switching it on.
+      - SLOW_REPLY_NOTICE_ENABLED=${SLOW_REPLY_NOTICE_ENABLED:-true}
+      - SLOW_REPLY_THRESHOLD_MS=${SLOW_REPLY_THRESHOLD_MS:-3000}
+      - SLOW_REPLY_NOTICE_UNTIL=${SLOW_REPLY_NOTICE_UNTIL:-}
+      - SLOW_REPLY_NOTICE_TEXT=${SLOW_REPLY_NOTICE_TEXT:-}
     volumes:
       - camellia_db_data:/app/data
 
