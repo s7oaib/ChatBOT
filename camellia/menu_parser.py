@@ -18,7 +18,7 @@ class MenuParser:
     """
     Auto-extracts structured menu data (Items, Descriptions, Quantities, Prices, Categories)
     from raw unstructured text or uploaded menu card photos / flyers.
-    Supports Google Gemini (gemini-2.5-flash / gemini-1.5-pro) and OpenAI Vision (gpt-4o / gpt-4o-mini).
+    Supports Google Gemini (see GEMINI_MODEL) and OpenAI Vision (gpt-4o / gpt-4o-mini).
     """
 
     def parse_menu_text(self, raw_text: str) -> Dict[str, Any]:

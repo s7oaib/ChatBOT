@@ -40,7 +40,7 @@ services:
       - PRIVACY_CONTACT_EMAIL=${PRIVACY_CONTACT_EMAIL:-owner@camelliaartisanal.com}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
-      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-2.5-flash}
+      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-3.5-flash}
       - GEMINI_ENABLED=${GEMINI_ENABLED:-true}
       # Tells a customer once, when replies have gone slow, to contact the
       # Kitchen Manager directly. The copy promises a limited period, so

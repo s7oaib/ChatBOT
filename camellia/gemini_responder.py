@@ -14,7 +14,7 @@ class GeminiResponder:
     
     Supports:
     - OpenAI Reasoning & Chat Models (o3-mini, o1, gpt-4o, gpt-4o-mini)
-    - Google Gemini Models (gemini-flash-latest, gemini-1.5-flash, gemini-1.5-pro)
+    - Google Gemini Models (gemini-3.5-flash and other currently served models)
     
     Provides fast, context-grounded customer support answers based strictly on
     menu.json + qa_templates.json.

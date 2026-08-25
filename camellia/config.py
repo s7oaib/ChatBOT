@@ -158,7 +158,10 @@ class Config:
 
     # Gemini Cloud API Config (Google Gemini Flash)
     GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "") or os.getenv("GOOGLE_API_KEY", "")
-    GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+    # Verified against the live models endpoint on 2026-08-26. Avoid the
+    # `-latest` aliases here: they were returning 503 under load, which the
+    # caller waits out before failing, and a pinned model fails fast instead.
+    GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
     GEMINI_TIMEOUT: float = float(os.getenv("GEMINI_TIMEOUT", "20.0"))
     GEMINI_ENABLED: bool = os.getenv("GEMINI_ENABLED", "true").lower() in ("true", "1", "t", "yes")
     AI_FIRST_MODE: bool = os.getenv("AI_FIRST_MODE", "true").lower() in ("true", "1", "t", "yes")
