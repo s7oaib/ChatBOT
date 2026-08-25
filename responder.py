@@ -928,7 +928,7 @@ class DeterministicResponder:
             }
             if tmpl_id in savoury_templates and not facts.get("savoury_crosssell_sent"):
                 facts["savoury_crosssell_sent"] = True
-                crosssell_nudge = "\n\n*P.S.* We also make & send Bengali mishti - norom pak Sondesh. All milk protein, no gluten, mild sweet, no added fat - subtle natural flavours…. Handcrafted."
+                crosssell_nudge = "\n\n*P.S.* We also handcraft Bengali mishti — mild sweet, subtle natural flavours. Say *Sondesh* for prices."
                 response_text = response_text.rstrip() + crosssell_nudge
             elif tmpl_id == "savoury_crosssell_sondesh":
                 facts["savoury_crosssell_sent"] = True
@@ -942,7 +942,7 @@ class DeterministicResponder:
             }
             if tmpl_id in sondesh_templates and not facts.get("sondesh_crosssell_sent"):
                 facts["sondesh_crosssell_sent"] = True
-                crosssell_nudge = "\n\n*P.S.* We also prepare and deliver freshly cooked Bengali meals across Delhi NCR. I've attached this week's menu in case you'd like to have a look. Everything is cooked fresh in small batches, and some dishes are available only in limited quantities. If you'd like a recommendation based on whether you prefer vegetarian, fish or meat, just let me know — I'd be happy to help."
+                crosssell_nudge = "\n\n*P.S.* We also cook fresh Bengali meals for Delhi NCR — say *Meals* for this week's menu."
                 response_text = response_text.rstrip() + crosssell_nudge
             elif tmpl_id == "sondesh_crosssell_savoury":
                 facts["sondesh_crosssell_sent"] = True

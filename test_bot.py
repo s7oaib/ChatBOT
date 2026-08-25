@@ -1517,7 +1517,7 @@ class TestCamelliaBot(unittest.TestCase):
         self.assertIsNotNone(imgs)
         self.assertTrue("Thursday" in imgs or "Friday" in imgs)
         # First savoury message gets savoury cross-sell nudge
-        self.assertIn("We also make & send Bengali mishti - norom pak Sondesh", resp)
+        self.assertIn("We also handcraft Bengali mishti", resp)
         self.assertIn("subtle natural flavours", resp)
 
     def test_phase_b_bento_details_escalates_safely(self):
@@ -1620,7 +1620,7 @@ class TestCamelliaBot(unittest.TestCase):
         msg1 = "Show me the lunch options"
         resp1, matched1, tmpl1, _ = responder.match_and_respond(msg1, user_id=uid, channel="whatsapp")
         self.assertTrue(matched1)
-        self.assertIn("We also make & send Bengali mishti - norom pak Sondesh", resp1)
+        self.assertIn("We also handcraft Bengali mishti", resp1)
         self.assertIn("subtle natural flavours", resp1)
         self.assertTrue(session_memory.get_facts(uid, "whatsapp").get("savoury_crosssell_sent"))
 
@@ -1637,7 +1637,7 @@ class TestCamelliaBot(unittest.TestCase):
         resp3, matched3, tmpl3, _ = responder.match_and_respond(msg3, user_id=uid, channel="whatsapp")
         self.assertTrue(matched3)
         self.assertEqual(tmpl3, "savoury_crosssell_sondesh")
-        self.assertIn("We also make & send Bengali mishti - norom pak Sondesh", resp3)
+        self.assertIn("We also make & send Bengali mishti", resp3)
         self.assertIn("subtle natural flavours", resp3)
 
     def test_phase_e_sondesh_crosssell_savoury_nudge_and_template(self):
@@ -1651,7 +1651,7 @@ class TestCamelliaBot(unittest.TestCase):
         resp1, matched1, tmpl1, img1 = responder.match_and_respond(msg1, user_id=uid, channel="whatsapp")
         self.assertTrue(matched1)
         self.assertEqual(tmpl1, "sondesh_price_detailed")
-        self.assertIn("We also prepare and deliver freshly cooked Bengali meals across Delhi NCR", resp1)
+        self.assertIn("We also cook fresh Bengali meals for Delhi NCR", resp1)
         self.assertTrue(session_memory.get_facts(uid, "whatsapp").get("sondesh_crosssell_sent"))
 
         # Turn 2: Second sondesh query -> NO duplicate cross-sell nudge
@@ -1659,14 +1659,14 @@ class TestCamelliaBot(unittest.TestCase):
         resp2, matched2, tmpl2, _ = responder.match_and_respond(msg2, user_id=uid, channel="whatsapp")
         self.assertTrue(matched2)
         self.assertEqual(tmpl2, "sondesh_dispatch_time")
-        self.assertNotIn("We also prepare and deliver freshly cooked Bengali meals", resp2)
+        self.assertNotIn("We also cook fresh Bengali meals", resp2)
 
         # Direct inquiry for sondesh_crosssell_savoury template
         msg3 = "Do you also cook meals?"
         resp3, matched3, tmpl3, img3 = responder.match_and_respond(msg3, user_id=uid, channel="whatsapp")
         self.assertTrue(matched3)
         self.assertEqual(tmpl3, "sondesh_crosssell_savoury")
-        self.assertIn("We also prepare and deliver freshly cooked Bengali meals across Delhi NCR", resp3)
+        self.assertIn("We also prepare and deliver freshly cooked Bengali meals", resp3)
         self.assertIsNotNone(img3)
 
     def test_phase_e_savoury_best_time_to_book(self):
