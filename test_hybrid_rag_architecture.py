@@ -61,7 +61,11 @@ class TestHybridRAGArchitecture(unittest.TestCase):
         # Verify customer response is escalation
         text, was_matched, tmpl_id, img = responder.match_and_respond(user_msg, user_id=self.user_id, channel=self.channel)
         self.assertFalse(was_matched)
-        self.assertIn("notified our team", text.lower())
+        # Bulk/custom enquiries get an intent-specific handover (quote request)
+        # rather than the generic notice, but must still hand off to a human
+        # and never invent a price for an unsupported request.
+        self.assertIn("our team", text.lower())
+        self.assertNotRegex(text, r'₹\s?\d')
 
     def test_scenario_e_unsupported_shelf_life_query(self):
         """Scenario E: Unsupported shelf life query must never invent shelf life, must escalate to human."""

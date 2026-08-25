@@ -29,6 +29,7 @@ class SessionMemoryManager:
                     "awaiting_subscription_booking": False,
                     "savoury_crosssell_sent": False,
                     "sondesh_crosssell_sent": False,
+                    "last_topic": None,
                     "cart": [],
                     "order_draft": {
                         "flavour": None,
@@ -52,6 +53,7 @@ class SessionMemoryManager:
                 facts["last_greeting_index"] = None
                 facts["savoury_crosssell_sent"] = False
                 facts["sondesh_crosssell_sent"] = False
+                facts["last_topic"] = None
                 facts["cart"] = []
                 facts["order_draft"] = {
                     "flavour": None,
