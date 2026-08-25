@@ -20,18 +20,35 @@ DATA_DIR = BASE_DIR / "data"
 load_dotenv(BASE_DIR / ".env", override=True)
 
 
-def _resolve_path(env_var: str, default: Path) -> str:
+def _resolve_path(env_var: str, default: Path, must_exist: bool = False) -> str:
     """
     Resolves a configured path against the repo root rather than the working
     directory. A relative value like `data/menu.json` then means the same thing
     whether the process was started from the root, from a container, or from a
     test run — an absolute value is left untouched.
+
+    `must_exist` guards the files the bot cannot work without. A deployment
+    that still carries an older setting — `MENU_JSON_PATH=menu.json` from
+    before these files moved into data/ — would otherwise start cleanly, load
+    no templates at all, and answer every customer with the fallback. Rather
+    than serve a bot with nothing to say, fall back to the file that shipped
+    with the build and say so loudly in the logs.
     """
     raw = (os.getenv(env_var) or "").strip()
     if not raw:
         return str(default)
+
     path = Path(raw)
-    return str(path if path.is_absolute() else BASE_DIR / path)
+    resolved = path if path.is_absolute() else BASE_DIR / path
+
+    if must_exist and not resolved.exists() and default.exists():
+        print(
+            f"[config] {env_var}={raw!r} does not exist ({resolved}). "
+            f"Falling back to {default}. Update or remove {env_var} in this "
+            f"environment — the file moved into data/."
+        )
+        return str(default)
+    return str(resolved)
 
 
 class Config:
@@ -124,8 +141,8 @@ class Config:
     
     # Data Storage
     DB_PATH: str = _resolve_path("DB_PATH", BASE_DIR / "camellia.db")
-    MENU_JSON_PATH: str = _resolve_path("MENU_JSON_PATH", DATA_DIR / "menu.json")
-    QA_TEMPLATES_PATH: str = _resolve_path("QA_TEMPLATES_PATH", DATA_DIR / "qa_templates.json")
+    MENU_JSON_PATH: str = _resolve_path("MENU_JSON_PATH", DATA_DIR / "menu.json", must_exist=True)
+    QA_TEMPLATES_PATH: str = _resolve_path("QA_TEMPLATES_PATH", DATA_DIR / "qa_templates.json", must_exist=True)
     
     # Google Sheet CSV URL for Menu Updates (Option A in PRD)
     GOOGLE_SHEET_CSV_URL: str = os.getenv("GOOGLE_SHEET_CSV_URL", "")
