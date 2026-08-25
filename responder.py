@@ -69,6 +69,62 @@ ORDER_INTENT_RE = re.compile(
     re.IGNORECASE
 )
 
+# --- Context carry-over for bare follow-ups -------------------------------
+# A customer who just got a product answer often replies with a bare
+# "how much?" or "is it veg?" with no product words at all. Without tracking
+# what was just discussed, these fall straight to the human handover even
+# though the answer is obvious from the previous turn.
+BARE_PRICE_RE = re.compile(
+    r'^(how much|hw much|howmuch|price|prices|cost|rate|kitna|kitne|kitne ka|'
+    r'what.?s the price|whats the price|what is the price|price\??)[\s\?\.\!]*$',
+    re.IGNORECASE
+)
+
+BARE_VEG_RE = re.compile(
+    r'^(is it veg|is this veg|is that veg|is it vegetarian|is this vegetarian|'
+    r'veg or non.?veg|veg or nonveg)[\s\?\.\!]*$',
+    re.IGNORECASE
+)
+
+# Maps a matched template id to the product topic it just discussed, so the
+# next bare follow-up can be resolved against it.
+TOPIC_MAP = {
+    "aamar_mishti_collection": "aamar_mishti",
+    "pack_size_250g": "aamar_mishti",
+    "pack_size_500g": "aamar_mishti",
+    "pack_size_1kg": "aamar_mishti",
+    "nolen_gur_aamar": "aamar_mishti",
+    "sondesh_classic_rose": "aamar_mishti",
+    "sondesh_mango_kesar": "aamar_mishti",
+    "sondesh_nolen_gur": "aamar_mishti",
+    "kanchagolla": "aamar_mishti",
+    "jolbhora": "aamar_mishti",
+    "jolbhora_talgash_details": "aamar_mishti",
+    "signature_collection": "signature",
+    "mahua_signature_special": "signature",
+    "sondesh_price_detailed": "sondesh_general",
+    "product_overview": "sondesh_general",
+    "know_more": "sondesh_general",
+    "sugar_free_options": "sondesh_general",
+    "combo_bento": "savoury",
+    "weekly_menu_veg": "savoury",
+    "weekly_menu_nonveg": "savoury",
+    "savoury_food_intro": "savoury",
+    "subscription_details": "savoury",
+    "alacarte_prebooking_steps": "savoury",
+}
+
+# Rewording each topic maps onto an existing template's own trigger phrases,
+# so the normal matcher answers with a template that was already reviewed —
+# this only steers matching, it never invents new copy.
+TOPIC_PRICE_HINT = {
+    "aamar_mishti": "aamar mishti price",
+    "signature": "signature collection price",
+    "sondesh_general": "sondesh price",
+    "savoury": "combo bento price",
+}
+
+
 
 @dataclass
 class BotResponse:
@@ -336,7 +392,11 @@ class DeterministicResponder:
             "book an order", "confirm order", "need to order", "chahiye", "bhejo",
             "order 1", "order 2", "order 3", "order 4", "order 5"
         ])
-        is_general_menu_query = (not has_explicit_order_action) and any(phrase in lowered_text for phrase in [
+        has_quantity_order_signal = bool(
+            re.search(r'\b(order|deliver|send|buy|add|pack)\w*\b', lowered_text)
+            and re.search(r'\b\d+\b', lowered_text)
+        )
+        is_general_menu_query = (not has_explicit_order_action and not has_quantity_order_signal) and any(phrase in lowered_text for phrase in [
             "full menu", "send menu", "price list", "show menu", "what is your menu",
             "how much is sondesh", "sondesh price", "how much sondesh", "sondesh cost", "cost of sondesh", "price of sondesh",
             "tell me about your product", "about your product", "about your products", "what products", "your products", "product", "products",
@@ -403,6 +463,35 @@ class DeterministicResponder:
 
         cleaned_words = set(re.findall(r'\b\w+\b', cleaned_business_text)) if cleaned_business_text else set()
 
+        # 3.5 Resolve bare follow-ups ("how much?", "is it veg?") against the
+        # last product topic discussed this session, instead of letting a
+        # message with no product words of its own fall through to a human
+        # handover the customer didn't need.
+        last_topic = facts.get("last_topic")
+        stripped_for_bare_check = user_message.strip()
+        if last_topic and BARE_VEG_RE.match(stripped_for_bare_check):
+            if last_topic == "savoury":
+                response_text = (
+                    "Both! 🌸 Our weekly Bengali meals include vegetarian dishes (Aloor Dom, Dhokar Dalna, "
+                    "Basonti Polao) and non-vegetarian dishes (Bhetki Paturi, Chingri Malaikari, Robibarer Mangsho).\n\n"
+                    "Would you like to see the Veg or Non-Veg menu?"
+                )
+            else:
+                response_text = (
+                    "Yes, always! 🌸 Every Sondesh we make — Aamar Mishti and Signature Collection alike — is "
+                    "100% vegetarian, made from milk, sugar & natural flavourings only. No eggs, no meat extracts."
+                )
+            if intro_greeting_prefix:
+                response_text = intro_greeting_prefix + response_text
+            session_memory.add_turn(user_id, channel, user_message, response_text)
+            return response_text, True, "context_veg_followup", None
+
+        if last_topic and BARE_PRICE_RE.match(stripped_for_bare_check) and last_topic in TOPIC_PRICE_HINT:
+            hint = TOPIC_PRICE_HINT[last_topic]
+            lowered_text = f"{lowered_text} {hint}".strip()
+            cleaned_business_text = f"{cleaned_business_text} {hint}".strip()
+            cleaned_words = set(re.findall(r'\b\w+\b', cleaned_business_text))
+
         # Check if user message contains substantive business inquiry
         has_business_query = bool(
             (cleaned_words - STOP_WORDS) or
@@ -422,7 +511,8 @@ class DeterministicResponder:
             "GUARD_collection_differentiation", "GUARD_customization_flavour_mixing",
             "GUARD_halal_ingredients_oil", "GUARD_payment_method",
             "GUARD_allergen_nutfree_glutenfree", "GUARD_pickup_address_hours",
-            "GUARD_shelf_life_storage", "GUARD_staff_names_manager_contact"
+            "GUARD_shelf_life_storage", "GUARD_staff_names_manager_contact",
+            "bento_details"
         }
 
         TIER_2_SPECIFIC_INTENTS = {
@@ -743,6 +833,9 @@ class DeterministicResponder:
                 elif response_text.startswith("Hello! "):
                     response_text = response_text[7:]
                 response_text = intro_greeting_prefix + response_text
+
+            if tmpl_id in TOPIC_MAP:
+                facts["last_topic"] = TOPIC_MAP[tmpl_id]
 
             session_memory.add_turn(user_id, channel, user_message, response_text)
             return response_text, True, tmpl_id, image_url

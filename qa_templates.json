@@ -126,6 +126,36 @@
       "source_ref": "client Q&A script > PRODUCTS"
     },
     {
+      "id": "product_recommendation",
+      "triggers": [
+        "whats the best one",
+        "what's the best one",
+        "which one is best",
+        "which is best",
+        "what do you recommend",
+        "can you recommend",
+        "recommend something",
+        "recommend one",
+        "which one should i choose",
+        "which one should i pick",
+        "best one to try",
+        "which one is good",
+        "suggest something",
+        "suggest one",
+        "which flavour is best",
+        "which flavour do you recommend",
+        "what should i order",
+        "what should i try",
+        "whats good here",
+        "what's good here",
+        "any recommendation",
+        "any recommendations"
+      ],
+      "response": "Happy to help you pick! 🌸\n\nIf it is your first time, start with *Classic* or *Rose Sondesh* from Aamar Mishti — our most-loved everyday favourites.\n\nFor something special, *Nolen Gur Sondesh* is our signature: made with authentic date-palm jaggery, only available for a limited season.\n\nIf you want a truly premium gift or celebration box, the *Signature Collection* (pure desi A2 cow milk) is the one to pick.\n\nWant the price list for any of these?",
+      "escalate": false,
+      "source_ref": "operator-added: recommendation coverage gap"
+    },
+    {
       "id": "name_introduction",
       "triggers": [
         "my name is",
@@ -224,7 +254,18 @@
         "how long delivery takes",
         "delivery take how long",
         "how long does it take to deliver",
-        "how fast is delivery"
+        "how fast is delivery",
+        "when will it come",
+        "when will it reach",
+        "when will my order come",
+        "when will my order reach",
+        "when will i get it",
+        "when will i get my order",
+        "how long to receive",
+        "when will it get here",
+        "when will i receive it",
+        "how long will it take to reach",
+        "when does it reach"
       ],
       "response": "Hi! Thank you for getting in touch.\n\nOnce your sondesh order is confirmed, we usually dispatch it from our kitchen in Sushant Lok, Gurgaon within 15 minutes. Kanchagolla takes about 30 minutes. Jolbhora takes about an hour.\n\nDelivery time after that depends on the Porter rider's travel time, which varies based on traffic and the time of day.\n\nOur kitchen is open 10:00 AM – 7:30 PM every day. We always request a pre-order so we can make and send exactly what you want — we make in small batches, so we sometimes run out of stock. 🌸",
       "escalate": false,
