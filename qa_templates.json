@@ -120,7 +120,7 @@
         "what do you serve",
         "what do u serve"
       ],
-      "response": "Hi! Thanks for asking about our products. 🌸\n\nAt Camellia Artisanal, we craft authentic, Bengal-rooted culinary delicacies made fresh to order from our kitchen in Sushant Lok, Gurgaon:\n\n1. *Handcrafted Sondesh Collections*:\n• *Collection 1 — Aamar Mishti (আমার মিষ্টি)*: Made with pure dairy milk for daily sweet cravings — Classic, Rose, Mango, Kesar, Aam Ada, Kanchagolla, and our signature Nolen Gur & Liquid Jolbhora Sondesh.\n• *Collection 2 — Signature A2 Collection*: Hand-kneaded end-to-end with pure desi A2 cow milk & forest Mahua — exceptionally pure, rich, and perfect for special celebrations.\n\n2. *Fresh Bengali Bento Meals & Curries*:\n• Freshly cooked homestyle Bengali lunch & dinner meals delivered across Delhi NCR (including Aloor Dom, Dhokar Dalna, Bhetki Paturi, Chingri Malaikari, Robibarer Mangsho, and Daily Bento boxes).\n\nSharing our full Sondesh and fresh weekly meal cards below! Would you like to check out our flavours, prices, or place an order?",
+      "response": "Here's what we make! 🌸\n\n*Sondesh* — handcrafted Bengali sweets from ₹450. Classic, Rose, Mango and Kesar, plus our signature Nolen Gur and liquid Jolbhora.\n\n*Bengali meals* — fresh lunch & dinner across Delhi NCR, like Aloor Dom, Dhokar Dalna, Bhetki Paturi and Robibarer Mangsho.\n\nWhich sounds good — *Sondesh* or *Meals*? Happy to suggest something if you tell me what you're in the mood for.",
       "escalate": false,
       "note": "Sends 3 cards: Aamar Mishti, Signature Sondesh, and current weekly menu.",
       "source_ref": "client Q&A script > PRODUCTS"
@@ -211,7 +211,7 @@
         "collections",
         "both collections"
       ],
-      "response": "Hi! Thanks for getting in touch. 🌸\n\nAt Camellia.artisanal, every Sondesh is made from scratch using time-tested traditional recipes. We work with small-batch artisanal farmers, trusted dairies, and carefully selected partners — never general retail sourcing. An all-women team makes the sondesh for you.\n\nWe currently offer two collections:\n\n*Collection 1 — Aamar Mishti আমার মিষ্টি*\nIndulgence for sweet cravings at home or work — good dairy milk, partially mechanised, made in-house at our kitchen.\n\n*Collection 2 — Signature Collection*\nMishti for special occasions, gifting & when you are in the mood to give yourself a treat — made using pure desi A2 cow milk that has not been industrially processed. Completely handcrafted end to end.\n\nPorter charges are on actuals.\n\n*Also —* we prepare and deliver freshly cooked Bengali meals across Delhi NCR. Sharing this week's menu too. Everything is cooked fresh in small batches, and some dishes are available only in limited quantities.\n\nIf you'd like a recommendation based on whether you prefer vegetarian, fish or meat, just let me know — happy to help. Please feel free to ask anything before confirming! 🙏",
+      "response": "Here's this week's menu! 🌸\n\nHandcrafted Sondesh from ₹450 — our Nolen Gur and liquid Jolbhora are the ones people come back for — plus freshly cooked Bengali meals like Bhetki Paturi and Robibarer Mangsho, made in small batches daily.\n\nWhat would you like to explore — our *Sondesh*, this week's *Meals*, or shall I help you *place an order*?",
       "escalate": false,
       "note": "Sends 3 cards in sequence: Aamar Mishti, Signature Sondesh, and the current weekly menu.",
       "source_ref": "client Q&A script > GENERAL + ADDITIONAL"

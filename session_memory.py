@@ -30,6 +30,7 @@ class SessionMemoryManager:
                     "savoury_crosssell_sent": False,
                     "sondesh_crosssell_sent": False,
                     "slow_notice_sent": False,
+                    "awaiting_menu_choice": False,
                     "last_topic": None,
                     "cart": [],
                     "order_draft": {
@@ -55,6 +56,7 @@ class SessionMemoryManager:
                 facts["savoury_crosssell_sent"] = False
                 facts["sondesh_crosssell_sent"] = False
                 facts["slow_notice_sent"] = False
+                facts["awaiting_menu_choice"] = False
                 facts["last_topic"] = None
                 facts["cart"] = []
                 facts["order_draft"] = {

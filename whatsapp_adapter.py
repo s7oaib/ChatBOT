@@ -120,7 +120,14 @@ class WhatsAppAdapter:
 
     def _get_contextual_buttons(self, template_id: Optional[str], was_matched: bool) -> Optional[list]:
         """Generates dynamic, context-aware WhatsApp quick reply buttons (max 3 buttons)."""
-        if not was_matched or template_id in ["greeting", "menu_general", "know_more", "product_overview", "bot_capabilities", "bot_identity"]:
+        # The menu reply already shows the card and names the two ranges, so its
+        # buttons continue that choice instead of offering the menu again.
+        if template_id in ["know_more", "product_overview", "menu_general"]:
+            return ["🌸 Sondesh", "🍱 Meals", "🛍️ Place Order"]
+        # Asked "Veg or Non-Veg?" — the buttons must be the two answers.
+        if template_id in ["context_meal_price_followup", "savoury_food_intro", "context_veg_followup"]:
+            return ["🌿 Veg Menu", "🍗 Non-Veg Menu", "🛍️ Place Order"]
+        if not was_matched or template_id in ["greeting", "bot_capabilities", "bot_identity"]:
             return ["🌸 See Menu", "🍫 Sondesh Prices", "🛍️ Place Order"]
         elif template_id in ["pricing_general", "pricing_aamar", "pricing_signature", "nolen_gur_aamar", "nolen_gur_signature", "order_calculation"]:
             return ["🛍️ Place Order", "📦 Delivery Times", "👨‍🍳 Talk to Chef"]

@@ -223,9 +223,12 @@ class TestCamelliaBot(unittest.TestCase):
             resp, matched, tmpl_id, img_urls = responder.match_and_respond(query)
             self.assertTrue(matched, f"Query '{query}' should match product_overview")
             self.assertEqual(tmpl_id, "product_overview", f"Query '{query}' should map to product_overview")
-            self.assertIn("Aamar Mishti", resp)
-            self.assertIn("Signature A2", resp)
-            self.assertIn("Bengali Bento Meals", resp)
+            # The overview is now a short teaser over the photo cards rather than
+            # a full write-up, so it names both ranges and example dishes instead
+            # of spelling out the collection names the cards already carry.
+            self.assertRegex(resp, r"(?i)sondesh")
+            self.assertRegex(resp, r"(?i)meal")
+            self.assertIn("₹450", resp)
             self.assertIsInstance(img_urls, list)
             self.assertEqual(len(img_urls), 3)
 
@@ -1824,6 +1827,90 @@ class TestCamelliaBot(unittest.TestCase):
             resp_wa, matched_wa, tmpl_wa, _ = responder.match_and_respond(q, user_id="wa_user", channel="whatsapp")
             self.assertTrue(matched_wa, f"WhatsApp DM should pass for '{q}'")
             self.assertIsNotNone(tmpl_wa)
+
+
+class TestInteractiveMenuFlow(unittest.TestCase):
+    """
+    A menu question shows the card with a short teaser and invites a choice,
+    then each choice leads somewhere real rather than to a human handover.
+    """
+
+    def _reply(self, uid, msg):
+        from session_memory import session_memory  # noqa: F401
+        return responder.match_and_respond(msg, user_id=uid, channel="whatsapp")
+
+    def test_menu_reply_is_short_and_offers_a_choice(self):
+        from session_memory import session_memory
+        for msg in ("menu", "what do you have"):
+            session_memory.clear_session(f"menu_{msg}", "whatsapp")
+            text, matched, tmpl, images = self._reply(f"menu_{msg}", msg)
+            self.assertTrue(matched)
+            self.assertIn(tmpl, ("know_more", "product_overview"))
+            # The point of the change: a teaser, not a wall of text.
+            self.assertLess(len(text), 500, f"'{msg}' reply is still long: {len(text)} chars")
+            self.assertTrue(images, "Menu reply should still send the photo card")
+            self.assertRegex(text, r"(?i)sondesh")
+            self.assertRegex(text, r"(?i)meal")
+
+    def test_menu_buttons_continue_the_choice_offered(self):
+        from whatsapp_adapter import whatsapp_adapter
+        for tmpl in ("know_more", "product_overview"):
+            buttons = whatsapp_adapter._get_contextual_buttons(tmpl, True)
+            self.assertNotIn("🌸 See Menu", buttons, "Offers the menu to someone who just got it")
+            self.assertIn("🌸 Sondesh", buttons)
+            self.assertIn("🍱 Meals", buttons)
+
+    def test_every_menu_button_leads_somewhere_real(self):
+        from session_memory import session_memory
+        for label in ("🌸 Sondesh", "🍱 Meals"):
+            session_memory.clear_session(f"btn_{label}", "whatsapp")
+            text, matched, tmpl, _ = self._reply(f"btn_{label}", label)
+            self.assertTrue(matched, f"Button '{label}' dead-ends into a handover")
+            self.assertIsNotNone(tmpl)
+
+    def test_meal_price_question_asks_which_menu_instead_of_escalating(self):
+        """
+        Bento tier pricing is withheld by the bento_details guard, so a bare
+        "how much?" about meals must ask which menu rather than hand off.
+        """
+        from session_memory import session_memory
+        session_memory.clear_session("meal_price_user", "whatsapp")
+        self._reply("meal_price_user", "🍱 Meals")
+        text, matched, tmpl, _ = self._reply("meal_price_user", "how much?")
+        self.assertTrue(matched, "Meal price question fell through to a human handover")
+        self.assertEqual(tmpl, "context_meal_price_followup")
+        self.assertNotIn("notified our team", text.lower())
+        self.assertRegex(text, r"(?i)veg")
+
+    def test_one_word_veg_and_nonveg_answers_resolve(self):
+        """The bot asks "Veg or Non-Veg?", so a one-word reply has to work."""
+        from session_memory import session_memory
+        for answer, expected in (("veg", "weekly_menu_veg"), ("non veg", "weekly_menu_nonveg")):
+            uid = f"choice_{answer}"
+            session_memory.clear_session(uid, "whatsapp")
+            self._reply(uid, "🍱 Meals")
+            self._reply(uid, "how much?")
+            text, matched, tmpl, _ = self._reply(uid, answer)
+            self.assertTrue(matched, f"One-word '{answer}' dead-ended")
+            self.assertEqual(tmpl, expected, f"'{answer}' routed to {tmpl}")
+            self.assertIn("₹", text, f"'{answer}' menu came back without prices")
+
+    def test_bento_pricing_guard_still_holds(self):
+        """The pricing-conflict guard must not be weakened by the meals flow."""
+        from session_memory import session_memory
+        for msg in ("bento details", "bento prices", "bento tiers"):
+            session_memory.clear_session(f"guard_{msg}", "whatsapp")
+            _, matched, tmpl, _ = self._reply(f"guard_{msg}", msg)
+            self.assertFalse(matched, f"'{msg}' bypassed the bento pricing guard")
+            self.assertEqual(tmpl, "bento_details")
+
+    def test_sondesh_side_still_answers_bare_price(self):
+        from session_memory import session_memory
+        session_memory.clear_session("sondesh_user", "whatsapp")
+        self._reply("sondesh_user", "🌸 Sondesh")
+        text, matched, tmpl, _ = self._reply("sondesh_user", "how much?")
+        self.assertTrue(matched)
+        self.assertIn("₹", text)
 
 
 class TestSlowReplyNotice(unittest.TestCase):

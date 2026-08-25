@@ -87,6 +87,19 @@ BARE_VEG_RE = re.compile(
     re.IGNORECASE
 )
 
+# One-word answers to "Veg or Non-Veg?". Non-veg is matched first everywhere it
+# is used, because "non veg" also contains "veg".
+BARE_NONVEG_CHOICE_RE = re.compile(
+    r'^[\s\U0001F300-\U0001FAFF]*(non.?veg|nonveg|non.?vegetarian|'
+    r'chicken|mutton|fish|prawn)( menu)?[\s\?\.\!]*$',
+    re.IGNORECASE
+)
+
+BARE_VEG_CHOICE_RE = re.compile(
+    r'^[\s\U0001F300-\U0001FAFF]*(veg|vegetarian|niramish)( menu)?[\s\?\.\!]*$',
+    re.IGNORECASE
+)
+
 # Maps a matched template id to the product topic it just discussed, so the
 # next bare follow-up can be resolved against it.
 TOPIC_MAP = {
@@ -118,11 +131,14 @@ TOPIC_MAP = {
 # Rewording each topic maps onto an existing template's own trigger phrases,
 # so the normal matcher answers with a template that was already reviewed —
 # this only steers matching, it never invents new copy.
+# "savoury" is deliberately absent: meal pricing is per-dish across two weekly
+# menus, and every bento-worded hint lands on the bento_details guard, which is
+# withheld pending the client resolving a pricing conflict. Asking which menu
+# they want is handled separately instead of steering the matcher.
 TOPIC_PRICE_HINT = {
     "aamar_mishti": "aamar mishti price",
     "signature": "signature collection price",
     "sondesh_general": "sondesh price",
-    "savoury": "combo bento price",
 }
 
 
@@ -535,6 +551,34 @@ class DeterministicResponder:
                 response_text = intro_greeting_prefix + response_text
             session_memory.add_turn(user_id, channel, user_message, response_text)
             return response_text, True, "context_veg_followup", None
+
+        # Meals are priced per dish across two weekly menus, and bento tier
+        # pricing is withheld by the bento_details guard pending the client
+        # resolving a conflict — so ask which menu they want rather than
+        # steering a bare "how much?" into a price we must not quote.
+        if last_topic == "savoury" and BARE_PRICE_RE.match(stripped_for_bare_check):
+            response_text = (
+                "Our Bengali meals are priced per dish, and the menu changes every week 🍱\n\n"
+                "Would you like this week's *Veg* or *Non-Veg* menu? I'll send it across with prices."
+            )
+            if intro_greeting_prefix:
+                response_text = intro_greeting_prefix + response_text
+            facts["awaiting_menu_choice"] = True
+            session_memory.add_turn(user_id, channel, user_message, response_text)
+            return response_text, True, "context_meal_price_followup", None
+
+        # A one-word "veg" / "non veg" is only an answer to that question — on its
+        # own it is too thin to match a template, so resolve it here. Non-veg is
+        # tested first because "non veg" also contains "veg".
+        if facts.get("awaiting_menu_choice") or last_topic == "savoury":
+            is_nonveg = BARE_NONVEG_CHOICE_RE.match(stripped_for_bare_check)
+            is_veg = (not is_nonveg) and BARE_VEG_CHOICE_RE.match(stripped_for_bare_check)
+            if is_nonveg or is_veg:
+                facts["awaiting_menu_choice"] = False
+                hint = "non veg menu" if is_nonveg else "veg menu"
+                lowered_text = f"{lowered_text} {hint}".strip()
+                cleaned_business_text = f"{cleaned_business_text} {hint}".strip()
+                cleaned_words = set(re.findall(r'\b\w+\b', cleaned_business_text))
 
         if last_topic and BARE_PRICE_RE.match(stripped_for_bare_check) and last_topic in TOPIC_PRICE_HINT:
             hint = TOPIC_PRICE_HINT[last_topic]
