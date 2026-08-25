@@ -329,16 +329,23 @@ class GeminiResponder:
         if provider == "none":
             return template_text, False
 
-        context_str = self._build_context_string()
+        # Deliberately without the full knowledge base. Refinement rewords an
+        # answer the matcher has already chosen, and that answer is right here in
+        # template_text — the rest of the corpus adds nothing to the task. Sending
+        # it cost ~10,000 tokens on every single reply, which on the live service
+        # meant a read timeout at ten seconds, long enough to trip the slow-reply
+        # notice at customers before falling back to this same template anyway.
+        # `generate_response` still gets the full context, because answering an
+        # unmatched question genuinely needs it.
         user_ctx_block = f"\nACTIVE CUSTOMER PROFILE:\n{user_context}\n" if user_context else ""
 
         system_prompt = (
             "You are the warm, helpful customer support assistant for Camellia Artisanal, a boutique bakery & kitchen in Delhi NCR.\n\n"
             f"MATCHED SUPPORT TEMPLATE ({template_id}):\n{template_text}\n\n"
-            "Using the matched template and context below, reply warmly and naturally to the customer's message. "
+            "Reply warmly and naturally to the customer's message using ONLY the matched template above. "
+            "Do not add facts, prices or claims that are not in it. "
             "Preserve all structured monospace code-block tables (``` +---+---+ ```) exactly as provided in the template for crystal-clear readability on WhatsApp and mobile screens. "
-            "Keep prices and details accurate, address the customer by name if known, and keep formatting clear and concise.\n\n"
-            f"--- CONTEXT ---\n{context_str}\n"
+            "Keep prices and details accurate, address the customer by name if known, and keep formatting clear and concise.\n"
             f"{user_ctx_block}"
         )
 
