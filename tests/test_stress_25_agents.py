@@ -14,12 +14,12 @@ import sys
 import os
 import json
 import unittest
-from responder import responder, DeterministicResponder
-from session_memory import session_memory
-from order_calculator import order_calculator
-from config import config
+from camellia.responder import responder, DeterministicResponder
+from camellia.session_memory import session_memory
+from camellia.order_calculator import order_calculator
+from camellia.config import config
 
-from database import db
+from camellia.database import db
 
 class Test25AgentStressScenarios(unittest.TestCase):
     def setUp(self):
@@ -386,7 +386,7 @@ class Test25AgentStressScenarios(unittest.TestCase):
 
     def test_agent_28_first_time_vs_returning_customer_savoury_intro(self):
         """Agent 28 (Phase D): First-time customer vs returning customer detection on savoury intro."""
-        from database import db
+        from camellia.database import db
 
         # Scenario 1: First-time customer (no prior history)
         first_time_uid = "user_first_time_28"

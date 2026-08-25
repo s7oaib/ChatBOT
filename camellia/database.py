@@ -4,7 +4,7 @@ import sqlite3
 import json
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional
-from config import config
+from camellia.config import config
 
 class Database:
     def __init__(self, db_path: str = None):

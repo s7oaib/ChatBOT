@@ -231,7 +231,7 @@ class SessionMemoryManager:
             if turns and len(turns) > 0:
                 return True
         try:
-            from database import db
+            from camellia.database import db
             return db.get_conversations_count(user_id=str(user_id), channel=str(channel)) > 0
         except Exception:
             return False

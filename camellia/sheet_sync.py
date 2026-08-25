@@ -4,9 +4,9 @@ import json
 import httpx
 from urllib.parse import urlparse
 from typing import Dict, Any
-from config import config
-from monitoring import get_logger
-from responder import responder
+from camellia.config import config
+from camellia.monitoring import get_logger
+from camellia.responder import responder
 
 log = get_logger("camellia.sheet_sync")
 

@@ -25,8 +25,10 @@ services:
       - INSTAGRAM_ACCESS_TOKEN=${INSTAGRAM_ACCESS_TOKEN:-}
       - HUMAN_ESCALATION_PHONE=${HUMAN_ESCALATION_PHONE:-+918796551990}
       - HUMAN_ESCALATION_EMAIL=${HUMAN_ESCALATION_EMAIL:-owner@camelliaartisanal.com}
-      # Must live under the mounted volume or all history is lost on rebuild
-      - DB_PATH=/app/data/camellia.db
+      # Must live under the mounted volume or all history is lost on rebuild.
+      # Deliberately /app/var, not /app/data: the volume would otherwise hide
+      # the menu.json and qa_templates.json baked into the image.
+      - DB_PATH=/app/var/camellia.db
       # The /chat tester writes real rows and pages the owner; keep it off here
       - ENABLE_WEB_TESTER=${ENABLE_WEB_TESTER:-false}
       # Auto-replies to organic Instagram DMs too when true — leave off unless asked
@@ -48,7 +50,7 @@ services:
       - SLOW_REPLY_NOTICE_UNTIL=${SLOW_REPLY_NOTICE_UNTIL:-}
       - SLOW_REPLY_NOTICE_TEXT=${SLOW_REPLY_NOTICE_TEXT:-}
     volumes:
-      - camellia_db_data:/app/data
+      - camellia_db_data:/app/var
 
 volumes:
   camellia_db_data:

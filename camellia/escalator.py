@@ -1,10 +1,10 @@
 import httpx
 from typing import Dict, Any, Optional
-from config import config
-from database import db
-from monitoring import get_logger
+from camellia.config import config
+from camellia.database import db
+from camellia.monitoring import get_logger
 
-from session_memory import session_memory
+from camellia.session_memory import session_memory
 
 log = get_logger("camellia.escalator")
 

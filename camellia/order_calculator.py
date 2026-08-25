@@ -1,6 +1,6 @@
 import re
 from typing import Dict, Any, Optional, List
-from slang_normalizer import normalize_slang
+from camellia.slang_normalizer import normalize_slang
 
 PRICING_TABLE = {
     "aamar_mishti": {

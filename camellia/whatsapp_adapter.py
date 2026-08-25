@@ -1,10 +1,10 @@
 import httpx
 from typing import Dict, Any, Tuple, Optional
-from config import config
-from responder import responder
-from database import db
-from escalator import escalator
-from monitoring import get_logger, delivery_monitor
+from camellia.config import config
+from camellia.responder import responder
+from camellia.database import db
+from camellia.escalator import escalator
+from camellia.monitoring import get_logger, delivery_monitor
 
 log = get_logger("camellia.whatsapp")
 

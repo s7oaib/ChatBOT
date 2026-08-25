@@ -3,9 +3,9 @@ import json
 import base64
 import httpx
 from typing import Dict, Any, List, Optional
-from config import config
-from monitoring import get_logger
-from sheet_sync import sheet_sync
+from camellia.config import config
+from camellia.monitoring import get_logger
+from camellia.sheet_sync import sheet_sync
 
 log = get_logger("camellia.menu_parser")
 

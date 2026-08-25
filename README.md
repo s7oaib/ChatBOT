@@ -66,30 +66,40 @@ Built specifically to solve Meta Ad lead conversion bottlenecks, filter non-ad n
 
 ```
 Camellia.artisal/
-├── app.py                   # FastAPI app entry point, Webhooks & /admin Portal
-├── menu_parser.py           # Text & Multimodal image menu extraction engine
-├── ad_gate.py               # Instagram Ad-Gate filter module
-├── responder.py             # Deterministic Q&A matcher & Photo Card engine
-├── whatsapp_adapter.py      # Meta WhatsApp Cloud API integration adapter
-├── database.py              # SQLite storage (logs, ad sessions, escalations)
-├── escalator.py             # Human escalation & alert notification pipeline
-├── sheet_sync.py            # Self-service Google Sheet CSV live menu update module
-├── session_memory.py        # Customer fact & preference state retention
-├── config.py                # Environment variable loader
-├── simulate_bot.py          # Interactive CLI terminal simulator
-├── test_bot.py              # Core bot test suite (43 scenarios)
-├── test_admin_portal.py     # Admin portal & PIN auth test suite
-├── menu.json                # Structured weekly menu database
-├── qa_templates.json        # Q&A trigger keywords & template responses
-├── Till Thursday.jpeg       # Weekday Menu Photo Card
-├── From Friday.jpeg         # Weekend Menu Photo Card
-├── Signature Sondesh.jpeg   # Signature Sondesh Photo Card
-├── AAMAR MISHTI.jpeg        # Aamar Mishti Photo Card
-├── HANDOVER.md              # Client handoff guide & Meta setup docs
-├── PRD.md                   # Product Requirements Document
-├── requirements.txt         # Dependencies list
-└── LICENSE                  # MIT License
+├── main.py                      # Process entrypoint (Docker, Railway, Render)
+├── camellia/                    # Application package
+│   ├── app.py                   # FastAPI app, webhooks & /admin portal
+│   ├── responder.py             # Deterministic Q&A matcher & photo card engine
+│   ├── whatsapp_adapter.py      # Meta WhatsApp Cloud API adapter
+│   ├── ad_gate.py               # Instagram Ad-Gate filter
+│   ├── menu_parser.py           # Text & image menu extraction engine
+│   ├── order_calculator.py      # Order draft parsing & receipt totals
+│   ├── rag_fallback.py          # Controlled retrieval over approved sources
+│   ├── gemini_responder.py      # Optional Gemini refinement / RAG provider
+│   ├── session_memory.py        # Customer facts & conversation state
+│   ├── database.py              # SQLite storage (logs, sessions, escalations)
+│   ├── escalator.py             # Human escalation & alert pipeline
+│   ├── sheet_sync.py            # Google Sheet CSV live menu update
+│   ├── slang_normalizer.py      # Hinglish / shorthand normalisation
+│   ├── monitoring.py            # Logging, delivery health & reply latency
+│   └── config.py                # Environment variable loader
+├── data/                        # Seed configuration loaded at runtime
+│   ├── menu.json                # Structured weekly menu database
+│   └── qa_templates.json        # Q&A triggers & template responses
+├── images/                      # Menu photo cards served at /images
+├── tests/                       # Pytest suite (conftest puts the root on sys.path)
+├── scripts/                     # Operational tools, not shipped in the image
+│   ├── validate_schemas.py      # menu.json / qa_templates.json validator
+│   ├── simulate_bot.py          # Interactive CLI simulator
+│   └── generate_pdf.py          # Menu PDF generator
+├── Dockerfile, docker-compose.yml, render.yaml, railway.json, Procfile
+├── requirements.txt             # Dependencies list
+└── LICENSE                      # MIT License
 ```
+
+> The runtime SQLite database is **not** kept in `data/`. `docker-compose.yml`
+> mounts its persistent volume at `/app/var`, which would otherwise hide the
+> seed JSON baked into the image.
 
 ---
 
@@ -124,7 +134,7 @@ HUMAN_ESCALATION_PHONE=+918796551990
 ### 3. Run Server
 
 ```bash
-uvicorn app:app --reload --port 8000
+uvicorn camellia.app:app --reload --port 8000
 ```
 *(Server runs locally at `http://localhost:8000`)*
 
@@ -140,7 +150,7 @@ The bot comes with a built-in **Interactive Web Chat Tester** available at `/cha
 
 Start your server in terminal:
 ```bash
-ENABLE_WEB_TESTER=true uvicorn app:app --port 8000
+ENABLE_WEB_TESTER=true uvicorn camellia.app:app --port 8000
 ```
 
 Then open the Web Chat Interface in your browser:
@@ -209,17 +219,17 @@ curl -X POST "http://localhost:8000/admin/sync-menu?csv_url=https://docs.google.
 ### Method 1: Interactive Browser Web Interface (`/chat`)
 Set `ENABLE_WEB_TESTER=true`, then open **[http://localhost:8000/chat](http://localhost:8000/chat)** in your web browser.
 
-### Method 2: Automated Unit Test Suite (`test_bot.py`)
+### Method 2: Automated Unit Test Suite (`tests/test_bot.py`)
 Run all 25 automated unit tests:
 ```bash
-python test_bot.py
+python -m pytest tests/
 ```
 *Tests:* Ad-Gate inspection, webhook challenges (`GET /webhook/*`), webhook signature rejection, WhatsApp parsing, menu photo card logic, Ollama local RAG answers, refusals, offline fallbacks, SQLite logging, retention purge, per-user data deletion, legal pages, tester lockdown, and delivery-failure alerting.
 
-### Method 3: Interactive CLI Terminal Simulator (`simulate_bot.py`)
+### Method 3: Interactive CLI Terminal Simulator (`scripts/simulate_bot.py`)
 Run an interactive terminal chat session:
 ```bash
-python simulate_bot.py
+python scripts/simulate_bot.py
 ```
 Type queries directly in your terminal, toggle Ad vs Non-Ad DMs, and inspect live database analytics and human escalations.
 

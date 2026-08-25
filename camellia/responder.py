@@ -5,14 +5,14 @@ import re
 import time
 from dataclasses import dataclass
 from typing import Dict, Any, Tuple, Optional, List
-from config import config
-from monitoring import get_logger, latency_monitor
-from gemini_responder import gemini_responder
-from session_memory import session_memory
+from camellia.config import config
+from camellia.monitoring import get_logger, latency_monitor
+from camellia.gemini_responder import gemini_responder
+from camellia.session_memory import session_memory
 
-from order_calculator import order_calculator
-from rag_fallback import rag_fallback_engine
-from database import db
+from camellia.order_calculator import order_calculator
+from camellia.rag_fallback import rag_fallback_engine
+from camellia.database import db
 
 log = get_logger("camellia.responder")
 
@@ -515,7 +515,7 @@ class DeterministicResponder:
         
         # Check Self-Healing Learned Knowledge Base (Saved from Staff Escalation Resolutions)
         try:
-            from database import db
+            from camellia.database import db
             learned_items = db.get_learned_knowledge(limit=100)
             for item in learned_items:
                 pattern = item.get("question_pattern", "").lower().strip()

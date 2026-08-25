@@ -39,7 +39,7 @@ jobs:
 
       - name: Validate Menu & QA Template Schemas
         run: |
-          python validate_schemas.py
+          python scripts/validate_schemas.py
 
       - name: Run Pytest Test Suite
         env:
@@ -50,4 +50,4 @@ jobs:
           ENABLE_WEB_TESTER: "true"
           INSTAGRAM_ACCESS_TOKEN: "mock_test_token"
         run: |
-          python -m pytest test_bot.py test_admin_portal.py -v --tb=short
+          python -m pytest tests/test_bot.py tests/test_admin_portal.py -v --tb=short

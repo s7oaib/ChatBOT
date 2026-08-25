@@ -8,9 +8,16 @@ venv/
 env/
 .git/
 .gitignore
+.github/
 .vscode/
 .idea/
+.pytest_cache/
 *.db
 *.md
-simulate_bot.py
-test_bot.py
+
+# Not needed at runtime. data/ and images/ deliberately DO ship: the bot loads
+# menu.json and qa_templates.json from data/ and serves the menu cards.
+tests/
+scripts/
+scratch/
+simulation_results.json

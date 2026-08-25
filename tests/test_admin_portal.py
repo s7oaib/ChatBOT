@@ -3,10 +3,10 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
-from config import config
-import database as db_module
-from app import app
-from responder import responder
+from camellia.config import config
+import camellia.database as db_module
+from camellia.app import app
+from camellia.responder import responder
 
 # Ensure database is initialized for test client
 db_module.db.init_db()
@@ -150,11 +150,13 @@ def test_admin_analytics_and_escalations():
 
 def test_menu_and_qa_schema_validity():
     """Validates structural integrity of menu.json and qa_templates.json."""
-    from validate_schemas import validate_menu_schema, validate_qa_templates_schema
-    menu_ok, menu_errs = validate_menu_schema("menu.json")
+    from scripts.validate_schemas import validate_menu_schema, validate_qa_templates_schema
+    # No argument: both validators default to the same resolved paths the bot
+    # loads, so this cannot drift from where the files actually live.
+    menu_ok, menu_errs = validate_menu_schema()
     assert menu_ok, f"menu.json schema errors: {menu_errs}"
 
-    qa_ok, qa_errs = validate_qa_templates_schema("qa_templates.json")
+    qa_ok, qa_errs = validate_qa_templates_schema()
     assert qa_ok, f"qa_templates.json schema errors: {qa_errs}"
 
 
@@ -204,7 +206,7 @@ def test_admin_learned_knowledge_crud_and_live_bot_matching():
     assert any(k.get("topic") == "Corporate Diwali Hampers" for k in items)
 
     # 3. Verify bot matches the question via responder
-    from responder import responder
+    from camellia.responder import responder
     bot_resp = responder.respond("Do you have diwali bulk gifting hampers?")
     assert "customized artisanal Bengal sweet hampers" in bot_resp.text
 

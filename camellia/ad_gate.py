@@ -1,8 +1,8 @@
 import logging
 import httpx
 from typing import Dict, Any, Tuple, Optional
-from database import db
-from config import config
+from camellia.database import db
+from camellia.config import config
 
 log = logging.getLogger("camellia.ad_gate")
 

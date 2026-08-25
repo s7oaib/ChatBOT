@@ -3,11 +3,11 @@ Interactive CLI Simulator for Camellia Artisanal Bot.
 Allows testing Instagram (Ad vs Organic DMs) and WhatsApp messages locally.
 """
 import sys
-from database import db
-from ad_gate import ad_gate
-from responder import responder
-from whatsapp_adapter import whatsapp_adapter
-from escalator import escalator
+from camellia.database import db
+from camellia.ad_gate import ad_gate
+from camellia.responder import responder
+from camellia.whatsapp_adapter import whatsapp_adapter
+from camellia.escalator import escalator
 
 # Ensure Unicode stdout compatibility on Windows
 if hasattr(sys.stdout, "reconfigure"):

@@ -11,13 +11,13 @@ from fastapi.testclient import TestClient
 TEST_DB_PATH = "test_camellia.db"
 os.environ["DB_PATH"] = TEST_DB_PATH
 
-from config import config
-from database import db, Database
-from ad_gate import ad_gate
-from responder import responder
-from whatsapp_adapter import whatsapp_adapter
-from escalator import escalator
-from app import app
+from camellia.config import config
+from camellia.database import db, Database
+from camellia.ad_gate import ad_gate
+from camellia.responder import responder
+from camellia.whatsapp_adapter import whatsapp_adapter
+from camellia.escalator import escalator
+from camellia.app import app
 
 class TestCamelliaBot(unittest.TestCase):
 
@@ -40,10 +40,10 @@ class TestCamelliaBot(unittest.TestCase):
         # Ensure Ad-Gate and AI testing are isolated from .env overrides
         config.BYPASS_AD_GATE = False
         config.GEMINI_ENABLED = False
-        from gemini_responder import gemini_responder
+        from camellia.gemini_responder import gemini_responder
         gemini_responder._gemini_cooldown_until = 0.0
         gemini_responder._openai_cooldown_until = 0.0
-        from session_memory import session_memory
+        from camellia.session_memory import session_memory
         session_memory._sessions.clear()
         responder.qa_data = responder._load_json(responder.qa_path)
         # Clear tables between tests
@@ -116,7 +116,7 @@ class TestCamelliaBot(unittest.TestCase):
         is_ad, sender, text, _ = ad_gate.inspect_and_gate_message(next_event)
         self.assertTrue(is_ad, "Subsequent message in ad-qualified session must be allowed.")
 
-    @patch("ad_gate.httpx.Client")
+    @patch("camellia.ad_gate.httpx.Client")
     def test_ad_gate_message_edit_fallback(self, mock_client_cls):
         """Test fallback Graph API lookup for message_edit events lacking a sender field."""
         mock_response = MagicMock()
@@ -381,7 +381,7 @@ class TestCamelliaBot(unittest.TestCase):
                 }]
             }]
         }
-        with patch("app.send_instagram_reply"):
+        with patch("camellia.app.send_instagram_reply"):
             res_post_ad = self._post_signed("/webhook/instagram", payload_ad)
         self.assertEqual(res_post_ad.status_code, 200)
         data_ad = res_post_ad.json()
@@ -444,7 +444,7 @@ class TestCamelliaBot(unittest.TestCase):
 
     def test_session_memory_fact_extraction(self):
         """Test extraction of customer name in Session Memory."""
-        from session_memory import session_memory
+        from camellia.session_memory import session_memory
         session_memory.clear_session("test_mem_user", "whatsapp")
 
         facts = session_memory.extract_and_update_facts(
@@ -454,7 +454,7 @@ class TestCamelliaBot(unittest.TestCase):
 
     def test_conversational_name_flow_and_recall(self):
         """Test full multi-turn conversational name flow: ask name -> reply with single word -> recall name."""
-        from session_memory import session_memory
+        from camellia.session_memory import session_memory
         user_id = "test_conv_user"
         channel = "whatsapp"
         session_memory.clear_session(user_id, channel)
@@ -480,7 +480,7 @@ class TestCamelliaBot(unittest.TestCase):
 
     def test_direct_name_introduction_patterns(self):
         """Test various direct name introduction phrases."""
-        from session_memory import session_memory
+        from camellia.session_memory import session_memory
         patterns = [
             ("My name is Shoaib", "Shoaib"),
             ("Call me Rahul", "Rahul"),
@@ -519,7 +519,7 @@ class TestCamelliaBot(unittest.TestCase):
 
     def test_escalation_handoff_brief_generation(self):
         """Test escalation handoff brief includes customer name and recent chat history."""
-        from session_memory import session_memory
+        from camellia.session_memory import session_memory
         user_id = "user_handoff_test"
         channel = "instagram"
         session_memory.clear_session(user_id, channel)
@@ -544,7 +544,7 @@ class TestCamelliaBot(unittest.TestCase):
 
     def test_reset_session_endpoint(self):
         """Test /api/reset-session clears session memory correctly."""
-        from session_memory import session_memory
+        from camellia.session_memory import session_memory
         user_id = "user_reset_test"
         channel = "whatsapp"
 
@@ -637,7 +637,7 @@ class TestCamelliaBot(unittest.TestCase):
 
     def test_delivery_monitor_alerts_only_after_repeated_failures(self):
         """One network blip must not page the owner; a dead token must."""
-        from monitoring import DeliveryHealthMonitor
+        from camellia.monitoring import DeliveryHealthMonitor
 
         monitor = DeliveryHealthMonitor(failure_threshold=3)
         with patch.object(monitor, "_send_owner_alert") as alert:
@@ -669,7 +669,7 @@ class TestCamelliaBot(unittest.TestCase):
 
     def test_aamar_mishti_250g_query_and_repeat_image_delivery(self):
         """Verify 'aamar mishti 250g' matches collection template and attaches photo cards on every request."""
-        from session_memory import session_memory
+        from camellia.session_memory import session_memory
         session_memory._sessions.clear()
 
         # Turn 1: User asks for menu -> gets text + menu photo cards
@@ -692,8 +692,8 @@ class TestCamelliaBot(unittest.TestCase):
 
     def test_order_confirmation_escalation_and_verification(self):
         """Verify order confirmation triggers staff alert with verification status."""
-        from escalator import escalator
-        from whatsapp_adapter import whatsapp_adapter
+        from camellia.escalator import escalator
+        from camellia.whatsapp_adapter import whatsapp_adapter
 
         # 1. Test missing address/phone -> flags PENDING VERIFICATION
         res1 = escalator._evaluate_order_verification("I want 2 boxes of Nolen Gur", "no previous history")
@@ -712,7 +712,7 @@ class TestCamelliaBot(unittest.TestCase):
 
     def test_order_calculator_integration(self):
         """Verify OrderCalculator correctly parses quantities and generates itemized draft receipts."""
-        from order_calculator import order_calculator
+        from camellia.order_calculator import order_calculator
         msg = "I want to order 2 packs of 250g Nolen Gur sondesh"
         calc_res = order_calculator.parse_and_calculate(msg)
         self.assertIsNotNone(calc_res)
@@ -723,8 +723,8 @@ class TestCamelliaBot(unittest.TestCase):
 
     def test_multi_turn_order_slot_filling(self):
         """PRD Requirement: Multi-turn order slot memory carries preferences across turns without repeating menus."""
-        from responder import responder
-        from session_memory import session_memory
+        from camellia.responder import responder
+        from camellia.session_memory import session_memory
         session_memory.clear_session("test_slot_user", "whatsapp")
 
         # Turn 1: User says "rose"
@@ -744,8 +744,8 @@ class TestCamelliaBot(unittest.TestCase):
 
     def test_multi_item_cart_receipt(self):
         """PRD Requirement: Ordering multiple items in a single message or adding to cart calculates itemized receipt with grand total."""
-        from responder import responder
-        from session_memory import session_memory
+        from camellia.responder import responder
+        from camellia.session_memory import session_memory
         session_memory.clear_session("test_multi_cart_user", "whatsapp")
 
         # Test single message with multiple items: "add rose 250g and jolbhora nolen gur 500g both"
@@ -762,8 +762,8 @@ class TestCamelliaBot(unittest.TestCase):
 
     def test_cart_item_removal(self):
         """PRD Requirement: Removing an item from cart recalculates receipt for remaining items."""
-        from responder import responder
-        from session_memory import session_memory
+        from camellia.responder import responder
+        from camellia.session_memory import session_memory
         session_memory.clear_session("test_removal_user", "whatsapp")
 
         # Step 1: Add 3 items
@@ -787,8 +787,8 @@ class TestCamelliaBot(unittest.TestCase):
 
     def test_out_of_context_question_does_not_trigger_receipt(self):
         """Out-of-context questions like 'Who is the President of US?' must NOT trigger an order receipt even if draft slots exist."""
-        from responder import responder
-        from session_memory import session_memory
+        from camellia.responder import responder
+        from camellia.session_memory import session_memory
         session_memory.clear_session("test_ooc_user", "whatsapp")
 
         # Step 1: User says "rose 250g" -> generates order receipt
@@ -803,7 +803,7 @@ class TestCamelliaBot(unittest.TestCase):
 
     def test_whatsapp_quick_reply_buttons(self):
         """Verify WhatsAppAdapter includes quick reply interactive buttons for greetings and menu requests."""
-        from whatsapp_adapter import whatsapp_adapter
+        from camellia.whatsapp_adapter import whatsapp_adapter
         with patch.object(whatsapp_adapter, "send_message") as mock_send:
             whatsapp_adapter.process_incoming_message("919876543210", "Hi")
             self.assertTrue(mock_send.called)
@@ -815,7 +815,7 @@ class TestCamelliaBot(unittest.TestCase):
 
     def test_parse_raw_menu_text(self):
         """Test MenuParser regex extraction of items, quantities, prices, and categories from unstructured text."""
-        from menu_parser import menu_parser
+        from camellia.menu_parser import menu_parser
         raw = """
         Bengal Sweet Special:
         • Rose Sondesh 250g - ₹450
@@ -855,7 +855,7 @@ class TestCamelliaBot(unittest.TestCase):
 
     def test_collection_1_and_2_matching(self):
         """Verify that typing 'collection 1' or 'collection 2' matches specific collection templates and delivers only their respective menu card."""
-        from responder import responder
+        from camellia.responder import responder
         
         resp1, match1, tmpl1, imgs1 = responder.match_and_respond("collection 1", user_id="test_col1", channel="whatsapp")
         self.assertTrue(match1)
@@ -879,11 +879,11 @@ class TestCamelliaBot(unittest.TestCase):
         self.assertEqual(tmpl2_menu, "signature_collection")
         self.assertEqual(imgs2_menu, ["/images/Signature%20Sondesh.jpeg"])
 
-    @patch("gemini_responder.httpx.Client")
+    @patch("camellia.gemini_responder.httpx.Client")
     def test_gemini_template_refinement(self, mock_httpx_cls):
         """Verify Gemini AI refines template response when enabled."""
-        from responder import responder
-        from gemini_responder import gemini_responder
+        from camellia.responder import responder
+        from camellia.gemini_responder import gemini_responder
         
         mock_response = MagicMock()
         mock_response.status_code = 200
@@ -908,7 +908,7 @@ class TestCamelliaBot(unittest.TestCase):
 
     def test_how_much_is_sondesh_price_inquiry(self):
         """Verify 'How much is Sondesh?' returns price info template/RAG instead of order receipt draft."""
-        from responder import responder
+        from camellia.responder import responder
         resp, match, tmpl, _ = responder.match_and_respond("How much is Sondesh?", user_id="test_price_inquiry", channel="whatsapp")
         self.assertTrue(match)
         self.assertNotEqual(tmpl, "order_draft_receipt")
@@ -938,7 +938,7 @@ class TestCamelliaBot(unittest.TestCase):
 
     def test_collection_2_and_collection_1_full_precision_menu_details(self):
         """Verify Collection 2, Collection 1, and Kanchagolla responses list all flavours, items, Kanchagolla & Jolbhora explicitly."""
-        from responder import responder
+        from camellia.responder import responder
 
         # Collection 2 check
         resp2, match2, tmpl2, _ = responder.match_and_respond("collection 2 options", user_id="test_col2_user", channel="whatsapp")
@@ -971,7 +971,7 @@ class TestCamelliaBot(unittest.TestCase):
 
     def test_individual_flavour_and_pack_size_queries(self):
         """Verify queries for individual flavours, Mahua special, and pack size breakdowns."""
-        from responder import responder
+        from camellia.responder import responder
 
         # Mahua price check
         resp, match, tmpl, imgs = responder.match_and_respond("what are the price of mahua", user_id="test_mahua_user", channel="whatsapp")
@@ -1053,7 +1053,7 @@ class TestCamelliaBot(unittest.TestCase):
 
     def test_weekly_meals_and_bento_order_calculation(self):
         """Verify order calculation for weekly bentos, combos, and curries."""
-        from responder import responder
+        from camellia.responder import responder
 
         # Single meal order
         resp, match, tmpl, _ = responder.match_and_respond("I want to order 2 veg bento", user_id="test_bento_u1", channel="whatsapp")
@@ -1077,7 +1077,7 @@ class TestCamelliaBot(unittest.TestCase):
 
     def test_whatsapp_webhook_parsing(self):
         """Tests parsing of WhatsApp webhook payloads for text and interactive replies."""
-        from whatsapp_adapter import whatsapp_adapter
+        from camellia.whatsapp_adapter import whatsapp_adapter
 
         # 1. Text payload
         text_payload = {
@@ -1123,11 +1123,11 @@ class TestCamelliaBot(unittest.TestCase):
         # 3. Invalid/empty payload
         self.assertIsNone(whatsapp_adapter.parse_webhook_message({}))
 
-    @patch("whatsapp_adapter.WhatsAppAdapter.send_message")
+    @patch("camellia.whatsapp_adapter.WhatsAppAdapter.send_message")
     def test_whatsapp_process_incoming_message(self, mock_send):
         """Tests end-to-end processing of WhatsApp message and contextual quick replies."""
         mock_send.return_value = {"mock": True, "status": "sent"}
-        from whatsapp_adapter import whatsapp_adapter
+        from camellia.whatsapp_adapter import whatsapp_adapter
 
         # Greeting
         result = whatsapp_adapter.process_incoming_message("919876543210", "Hello")
@@ -1143,7 +1143,7 @@ class TestCamelliaBot(unittest.TestCase):
 
     def test_greeting_variations_do_not_repeat_immediately(self):
         """Greeting replies rotate randomly without leaving the approved response bank."""
-        from session_memory import session_memory
+        from camellia.session_memory import session_memory
 
         user_id = "greeting_variation_user"
         channel = "whatsapp"
@@ -1167,7 +1167,7 @@ class TestCamelliaBot(unittest.TestCase):
 
     def test_qa_rag_escalates_unknown_questions_without_guessing(self):
         """RAG may use approved QA sources, but unknown business questions remain escalated."""
-        from rag_fallback import rag_fallback_engine
+        from camellia.rag_fallback import rag_fallback_engine
 
         result = rag_fallback_engine.retrieve("what discount do you offer")
         self.assertFalse(result.auto_response)
@@ -1184,7 +1184,7 @@ class TestCamelliaBot(unittest.TestCase):
 
     def test_approved_learned_answer_is_used_by_rag(self):
         """A staff-approved learned answer is retrievable and safe to activate."""
-        from rag_fallback import rag_fallback_engine
+        from camellia.rag_fallback import rag_fallback_engine
 
         question = "camellia approved lookup 8472"
         answer = "This is an approved Camellia answer for testing."
@@ -1204,11 +1204,11 @@ class TestCamelliaBot(unittest.TestCase):
         finally:
             db.delete_learned_knowledge(knowledge_id)
 
-    @patch("whatsapp_adapter.WhatsAppAdapter.access_token", new_callable=PropertyMock)
+    @patch("camellia.whatsapp_adapter.WhatsAppAdapter.access_token", new_callable=PropertyMock)
     def test_whatsapp_mock_outbound_and_buttons(self, mock_token):
         """Tests mock WhatsApp outbound message dispatch with image and buttons."""
         mock_token.return_value = ""
-        from whatsapp_adapter import whatsapp_adapter
+        from camellia.whatsapp_adapter import whatsapp_adapter
 
         send_res = whatsapp_adapter.send_message(
             recipient_phone="919876543210",
@@ -1223,12 +1223,12 @@ class TestCamelliaBot(unittest.TestCase):
 
     def test_whatsapp_mock_mode_never_calls_meta(self):
         """Mock mode remains safe even if placeholder credentials are present."""
-        from whatsapp_adapter import whatsapp_adapter
+        from camellia.whatsapp_adapter import whatsapp_adapter
 
         with patch.object(config, "WHATSAPP_MOCK_MODE", True), \
              patch.object(config, "WHATSAPP_ACCESS_TOKEN", "placeholder-token"), \
              patch.object(config, "WHATSAPP_PHONE_NUMBER_ID", "placeholder-number"), \
-             patch("whatsapp_adapter.httpx.Client") as mock_client:
+             patch("camellia.whatsapp_adapter.httpx.Client") as mock_client:
             result = whatsapp_adapter.send_message("919876543210", "Mock delivery test")
 
         self.assertTrue(result["mock"])
@@ -1237,12 +1237,12 @@ class TestCamelliaBot(unittest.TestCase):
 
     def test_whatsapp_live_mode_requires_credentials_before_http(self):
         """Live mode fails closed when credentials are not configured."""
-        from whatsapp_adapter import whatsapp_adapter
+        from camellia.whatsapp_adapter import whatsapp_adapter
 
         with patch.object(config, "WHATSAPP_MOCK_MODE", False), \
              patch.object(config, "WHATSAPP_ACCESS_TOKEN", ""), \
              patch.object(config, "WHATSAPP_PHONE_NUMBER_ID", ""), \
-             patch("whatsapp_adapter.httpx.Client") as mock_client:
+             patch("camellia.whatsapp_adapter.httpx.Client") as mock_client:
             result = whatsapp_adapter.send_message("919876543210", "Should not send")
 
         self.assertEqual(result["status"], "not_configured")
@@ -1261,7 +1261,7 @@ class TestCamelliaBot(unittest.TestCase):
 
     def test_gemini_responder_provider_selection(self):
         """Tests get_active_provider logic for auto, openai, and gemini configurations."""
-        from gemini_responder import GeminiResponder
+        from camellia.gemini_responder import GeminiResponder
 
         gr = GeminiResponder()
         orig_prov = config.AI_PROVIDER
@@ -1303,10 +1303,10 @@ class TestCamelliaBot(unittest.TestCase):
             config.GEMINI_API_KEY = orig_gem
             config.GEMINI_ENABLED = orig_en
 
-    @patch("gemini_responder.httpx.Client")
+    @patch("camellia.gemini_responder.httpx.Client")
     def test_gemini_responder_openai_o3_mini_query(self, mock_httpx_cls):
         """Tests that querying OpenAI with o3-mini formats payload with max_completion_tokens and reasoning_effort without temperature."""
-        from gemini_responder import GeminiResponder
+        from camellia.gemini_responder import GeminiResponder
 
         mock_resp = MagicMock()
         mock_resp.status_code = 200
@@ -1363,10 +1363,10 @@ class TestCamelliaBot(unittest.TestCase):
             config.OPENAI_REASONING_EFFORT = orig_effort
             config.GEMINI_ENABLED = orig_en
 
-    @patch("gemini_responder.httpx.Client")
+    @patch("camellia.gemini_responder.httpx.Client")
     def test_gemini_responder_openai_out_of_context(self, mock_httpx_cls):
         """Tests that OUT_OF_CONTEXT from OpenAI is safely caught and triggers escalation fallback."""
-        from gemini_responder import GeminiResponder
+        from camellia.gemini_responder import GeminiResponder
 
         mock_resp = MagicMock()
         mock_resp.status_code = 200
@@ -1401,10 +1401,10 @@ class TestCamelliaBot(unittest.TestCase):
             config.OPENAI_API_KEY = orig_oai
             config.GEMINI_ENABLED = orig_en
 
-    @patch("gemini_responder.httpx.Client")
+    @patch("camellia.gemini_responder.httpx.Client")
     def test_gemini_responder_refine_template_openai(self, mock_httpx_cls):
         """Tests template refinement using OpenAI o3-mini."""
-        from gemini_responder import GeminiResponder
+        from camellia.gemini_responder import GeminiResponder
 
         mock_resp = MagicMock()
         mock_resp.status_code = 200
@@ -1446,7 +1446,7 @@ class TestCamelliaBot(unittest.TestCase):
 
     def test_human_simulation_scenarios_and_new_qa(self):
         """Test the real-world edge case scenarios identified by human simulation agents."""
-        from session_memory import session_memory
+        from camellia.session_memory import session_memory
         responder.reload_templates()
 
         # Scenario 1: Compound name introduction with gifting/difference inquiry (Confirmed collection difference)
@@ -1501,7 +1501,7 @@ class TestCamelliaBot(unittest.TestCase):
 
     def test_phase_b_savoury_food_intro_and_image(self):
         """Phase B: Test savoury_food_intro returns 3 ways to order with Gurgaon only restriction, No minimum order, and attaches weekly menu image."""
-        from session_memory import session_memory
+        from camellia.session_memory import session_memory
         session_memory.clear_session("test_savoury_intro_user", "whatsapp")
         msg = "What is your lunch menu and savoury food options?"
         resp, matched, tmpl, imgs = responder.match_and_respond(msg, user_id="test_savoury_intro_user", channel="whatsapp")
@@ -1522,7 +1522,7 @@ class TestCamelliaBot(unittest.TestCase):
 
     def test_phase_b_bento_details_escalates_safely(self):
         """Phase B: Test bento_details has response: null and escalate: true and safely escalates to human team."""
-        from session_memory import session_memory
+        from camellia.session_memory import session_memory
         session_memory.clear_session("test_bento_user", "whatsapp")
         msg = "What are the bento meal box details and prices?"
         resp, matched, tmpl, imgs = responder.match_and_respond(msg, user_id="test_bento_user", channel="whatsapp")
@@ -1532,7 +1532,7 @@ class TestCamelliaBot(unittest.TestCase):
 
     def test_phase_b_subscription_details_and_booking_steps_sequencing(self):
         """Phase B: Test subscription_details (Gurgaon only) followed by 'how do I book' sequences to 4-step subscription_booking_steps."""
-        from session_memory import session_memory
+        from camellia.session_memory import session_memory
         uid = "test_sub_seq_user"
         session_memory.clear_session(uid, "whatsapp")
 
@@ -1568,7 +1568,7 @@ class TestCamelliaBot(unittest.TestCase):
 
     def test_phase_b_alacarte_prebooking_steps(self):
         """Phase B: Test alacarte_prebooking_steps returns 5-point capture list."""
-        from session_memory import session_memory
+        from camellia.session_memory import session_memory
         session_memory.clear_session("test_alacarte_user", "whatsapp")
         msg = "How to order item from menu and pre-book savoury dishes?"
         resp, matched, tmpl, _ = responder.match_and_respond(msg, user_id="test_alacarte_user", channel="whatsapp")
@@ -1583,7 +1583,7 @@ class TestCamelliaBot(unittest.TestCase):
 
     def test_phase_b_sondesh_dispatch_time(self):
         """Phase B: Test sondesh_dispatch_time returns standard dispatch timings."""
-        from session_memory import session_memory
+        from camellia.session_memory import session_memory
         session_memory.clear_session("test_dispatch_user", "whatsapp")
         msg = "How long to dispatch Sondesh and what is your prep time?"
         resp, matched, tmpl, _ = responder.match_and_respond(msg, user_id="test_dispatch_user", channel="whatsapp")
@@ -1597,7 +1597,7 @@ class TestCamelliaBot(unittest.TestCase):
 
     def test_phase_b_sondesh_price_detailed_sourcing_and_images(self):
         """Phase B: Test sondesh_price_detailed returns client artisanal paragraph and images."""
-        from session_memory import session_memory
+        from camellia.session_memory import session_memory
         session_memory.clear_session("test_price_det_user", "whatsapp")
         msg = "What is the price of Sondesh?"
         resp, matched, tmpl, imgs = responder.match_and_respond(msg, user_id="test_price_det_user", channel="whatsapp")
@@ -1612,7 +1612,7 @@ class TestCamelliaBot(unittest.TestCase):
 
     def test_phase_b_savoury_crosssell_nudge_fires_once_per_session(self):
         """Phase B: Test savoury cross-sell nudge fires on first savoury query and not on subsequent queries."""
-        from session_memory import session_memory
+        from camellia.session_memory import session_memory
         uid = "test_crosssell_user"
         session_memory.clear_session(uid, "whatsapp")
 
@@ -1642,7 +1642,7 @@ class TestCamelliaBot(unittest.TestCase):
 
     def test_phase_e_sondesh_crosssell_savoury_nudge_and_template(self):
         """Phase E: Test sondesh -> savoury cross-sell nudge, once-per-session cap, and menu image attachment."""
-        from session_memory import session_memory
+        from camellia.session_memory import session_memory
         uid = "test_sondesh_crosssell_user"
         session_memory.clear_session(uid, "whatsapp")
 
@@ -1708,7 +1708,7 @@ class TestCamelliaBot(unittest.TestCase):
 
     def test_phase_c_subscription_booking_nudge(self):
         """Phase C: Test subscription_details response explicitly ends with 'Would you like to book?'."""
-        from session_memory import session_memory
+        from camellia.session_memory import session_memory
         session_memory.clear_session("test_sub_nudge_user", "whatsapp")
         msg = "Tell me about your everyday meal subscription"
         resp, matched, tmpl, _ = responder.match_and_respond(msg, user_id="test_sub_nudge_user", channel="whatsapp")
@@ -1720,8 +1720,8 @@ class TestCamelliaBot(unittest.TestCase):
 
     def test_phase_c_first_time_vs_returning_customer_detection(self):
         """Phase C: Test first-time vs returning customer detection on savoury_food_intro."""
-        from session_memory import session_memory
-        from database import db
+        from camellia.session_memory import session_memory
+        from camellia.database import db
 
         first_time_uid = "test_phase_c_first_time_user"
         session_memory.clear_session(first_time_uid, "whatsapp")
@@ -1757,7 +1757,7 @@ class TestCamelliaBot(unittest.TestCase):
     def test_phase_c_24h_hybrid_expiry_model(self):
         """Phase C: Test 24-hour hybrid expiry model (transient facts reset after 24h, name/history retained)."""
         import time
-        from session_memory import session_memory
+        from camellia.session_memory import session_memory
 
         expiry_uid = "test_24h_expiry_user"
         session_memory.clear_session(expiry_uid, "whatsapp")
@@ -1837,7 +1837,7 @@ class TestAnswerAccuracy(unittest.TestCase):
     """
 
     def _tmpl(self, msg, uid=None):
-        from session_memory import session_memory
+        from camellia.session_memory import session_memory
         uid = uid or f"acc_{abs(hash(msg))}"
         session_memory.clear_session(uid, "whatsapp")
         _, matched, tmpl, _ = responder.match_and_respond(msg, user_id=uid, channel="whatsapp")
@@ -1845,7 +1845,7 @@ class TestAnswerAccuracy(unittest.TestCase):
 
     def test_condition_statements_are_not_taken_as_names(self):
         """"I am diabetic" once stored the name "Diabetic" and greeted them by it."""
-        from session_memory import session_memory
+        from camellia.session_memory import session_memory
         for msg in ("i am vegan", "i am a vegan", "i am diabetic",
                     "i am allergic to nuts", "i am lactose intolerant", "im pregnant"):
             session_memory.clear_session("nm", "whatsapp")
@@ -1853,7 +1853,7 @@ class TestAnswerAccuracy(unittest.TestCase):
             self.assertIsNone(facts.get("name"), f"{msg!r} was stored as a name")
 
     def test_real_introductions_still_capture_the_name(self):
-        from session_memory import session_memory
+        from camellia.session_memory import session_memory
         for msg, expected in (("i am Priya", "Priya"), ("my name is Sourav Das", "Sourav Das"),
                               ("Hi, I am Ananya", "Ananya"), ("call me Rahul", "Rahul")):
             session_memory.clear_session("nm2", "whatsapp")
@@ -1869,7 +1869,7 @@ class TestAnswerAccuracy(unittest.TestCase):
 
     def test_dietary_answer_is_factually_correct(self):
         """Sondesh is milk-based, so it is vegetarian but explicitly not vegan."""
-        from session_memory import session_memory
+        from camellia.session_memory import session_memory
         session_memory.clear_session("diet", "whatsapp")
         text, _, _, _ = responder.match_and_respond("is it vegan", user_id="diet", channel="whatsapp")
         lowered = text.lower()
@@ -1933,7 +1933,7 @@ class TestClarifyBeforeEscalating(unittest.TestCase):
         return responder.match_and_respond(msg, user_id=uid, channel="whatsapp")
 
     def test_vague_message_asks_what_they_meant(self):
-        from session_memory import session_memory
+        from camellia.session_memory import session_memory
         for msg in ("india", "is it good", "anything else", "what about that one", "ok tell me"):
             uid = f"vague_{abs(hash(msg))}"
             session_memory.clear_session(uid, "whatsapp")
@@ -1944,7 +1944,7 @@ class TestClarifyBeforeEscalating(unittest.TestCase):
 
     def test_specific_unanswerable_message_still_reaches_a_human(self):
         """Detail we cannot answer is a real gap — a menu of options would insult it."""
-        from session_memory import session_memory
+        from camellia.session_memory import session_memory
         for msg in ("my order is late and wrong", "i need a gst invoice"):
             uid = f"spec_{abs(hash(msg))}"
             session_memory.clear_session(uid, "whatsapp")
@@ -1953,7 +1953,7 @@ class TestClarifyBeforeEscalating(unittest.TestCase):
             self.assertNotEqual(tmpl, "clarify_request")
 
     def test_clarifies_only_once_then_escalates(self):
-        from session_memory import session_memory
+        from camellia.session_memory import session_memory
         session_memory.clear_session("twice", "whatsapp")
         _, _, first, _ = self._reply("twice", "india")
         self.assertEqual(first, "clarify_request")
@@ -1966,7 +1966,7 @@ class TestClarifyBeforeEscalating(unittest.TestCase):
         Out-of-syllabus questions name something definite, so they keep going to
         a human rather than being redirected to a menu of our own options.
         """
-        from session_memory import session_memory
+        from camellia.session_memory import session_memory
         for msg in ("What is the capital of France?", "Do you serve steamed bhapa pitha?"):
             uid = f"off_{abs(hash(msg))}"
             session_memory.clear_session(uid, "whatsapp")
@@ -1975,7 +1975,7 @@ class TestClarifyBeforeEscalating(unittest.TestCase):
             self.assertNotEqual(tmpl, "clarify_request")
 
     def test_clarifier_buttons_match_the_options_offered(self):
-        from whatsapp_adapter import whatsapp_adapter
+        from camellia.whatsapp_adapter import whatsapp_adapter
         buttons = whatsapp_adapter._get_contextual_buttons("clarify_request", True)
         self.assertEqual(buttons, ["🌸 Sondesh", "🍱 Meals", "🚚 Delivery"])
 
@@ -1987,11 +1987,11 @@ class TestInteractiveMenuFlow(unittest.TestCase):
     """
 
     def _reply(self, uid, msg):
-        from session_memory import session_memory  # noqa: F401
+        from camellia.session_memory import session_memory  # noqa: F401
         return responder.match_and_respond(msg, user_id=uid, channel="whatsapp")
 
     def test_menu_reply_is_short_and_offers_a_choice(self):
-        from session_memory import session_memory
+        from camellia.session_memory import session_memory
         for msg in ("menu", "what do you have"):
             session_memory.clear_session(f"menu_{msg}", "whatsapp")
             text, matched, tmpl, images = self._reply(f"menu_{msg}", msg)
@@ -2004,7 +2004,7 @@ class TestInteractiveMenuFlow(unittest.TestCase):
             self.assertRegex(text, r"(?i)meal")
 
     def test_menu_buttons_continue_the_choice_offered(self):
-        from whatsapp_adapter import whatsapp_adapter
+        from camellia.whatsapp_adapter import whatsapp_adapter
         for tmpl in ("know_more", "product_overview"):
             buttons = whatsapp_adapter._get_contextual_buttons(tmpl, True)
             self.assertNotIn("🌸 See Menu", buttons, "Offers the menu to someone who just got it")
@@ -2012,7 +2012,7 @@ class TestInteractiveMenuFlow(unittest.TestCase):
             self.assertIn("🍱 Meals", buttons)
 
     def test_every_menu_button_leads_somewhere_real(self):
-        from session_memory import session_memory
+        from camellia.session_memory import session_memory
         for label in ("🌸 Sondesh", "🍱 Meals"):
             session_memory.clear_session(f"btn_{label}", "whatsapp")
             text, matched, tmpl, _ = self._reply(f"btn_{label}", label)
@@ -2024,7 +2024,7 @@ class TestInteractiveMenuFlow(unittest.TestCase):
         Bento tier pricing is withheld by the bento_details guard, so a bare
         "how much?" about meals must ask which menu rather than hand off.
         """
-        from session_memory import session_memory
+        from camellia.session_memory import session_memory
         session_memory.clear_session("meal_price_user", "whatsapp")
         self._reply("meal_price_user", "🍱 Meals")
         text, matched, tmpl, _ = self._reply("meal_price_user", "how much?")
@@ -2035,7 +2035,7 @@ class TestInteractiveMenuFlow(unittest.TestCase):
 
     def test_one_word_veg_and_nonveg_answers_resolve(self):
         """The bot asks "Veg or Non-Veg?", so a one-word reply has to work."""
-        from session_memory import session_memory
+        from camellia.session_memory import session_memory
         for answer, expected in (("veg", "weekly_menu_veg"), ("non veg", "weekly_menu_nonveg")):
             uid = f"choice_{answer}"
             session_memory.clear_session(uid, "whatsapp")
@@ -2048,7 +2048,7 @@ class TestInteractiveMenuFlow(unittest.TestCase):
 
     def test_bento_pricing_guard_still_holds(self):
         """The pricing-conflict guard must not be weakened by the meals flow."""
-        from session_memory import session_memory
+        from camellia.session_memory import session_memory
         for msg in ("bento details", "bento prices", "bento tiers"):
             session_memory.clear_session(f"guard_{msg}", "whatsapp")
             _, matched, tmpl, _ = self._reply(f"guard_{msg}", msg)
@@ -2056,7 +2056,7 @@ class TestInteractiveMenuFlow(unittest.TestCase):
             self.assertEqual(tmpl, "bento_details")
 
     def test_sondesh_side_still_answers_bare_price(self):
-        from session_memory import session_memory
+        from camellia.session_memory import session_memory
         session_memory.clear_session("sondesh_user", "whatsapp")
         self._reply("sondesh_user", "🌸 Sondesh")
         text, matched, tmpl, _ = self._reply("sondesh_user", "how much?")
@@ -2073,7 +2073,7 @@ class TestSlowReplyNotice(unittest.TestCase):
     NOTICE_START = "Hi thanks so much for connecting"
 
     def setUp(self):
-        from monitoring import latency_monitor
+        from camellia.monitoring import latency_monitor
         self.latency_monitor = latency_monitor
         self._orig_threshold = latency_monitor.slow_threshold_ms
         self._orig_until = config.SLOW_REPLY_NOTICE_UNTIL
@@ -2100,7 +2100,7 @@ class TestSlowReplyNotice(unittest.TestCase):
         self.latency_monitor._last_ms = 0.0
 
     def test_slow_reply_sends_notice_once_per_session(self):
-        from session_memory import session_memory
+        from camellia.session_memory import session_memory
         self._force_slow()
         session_memory.clear_session("slow_once_user", "whatsapp")
 
@@ -2117,7 +2117,7 @@ class TestSlowReplyNotice(unittest.TestCase):
             )
 
     def test_notice_is_per_session_not_global(self):
-        from session_memory import session_memory
+        from camellia.session_memory import session_memory
         self._force_slow()
         for uid in ("slow_a", "slow_b"):
             session_memory.clear_session(uid, "whatsapp")
@@ -2125,7 +2125,7 @@ class TestSlowReplyNotice(unittest.TestCase):
             self.assertTrue(text.startswith(self.NOTICE_START), f"{uid} did not get its own notice")
 
     def test_fast_reply_sends_no_notice(self):
-        from session_memory import session_memory
+        from camellia.session_memory import session_memory
         self._force_fast()
         session_memory.clear_session("fast_user", "whatsapp")
         text, _, _, _ = responder.match_and_respond("hi", user_id="fast_user", channel="whatsapp")
@@ -2133,7 +2133,7 @@ class TestSlowReplyNotice(unittest.TestCase):
 
     def test_notice_never_fills_a_blocked_reply(self):
         """An ad-gate-blocked DM must stay empty, not become a notice-only message."""
-        from session_memory import session_memory
+        from camellia.session_memory import session_memory
         self._force_slow()
         session_memory.clear_session("ig_blocked_user", "instagram")
         with patch.object(config, "BYPASS_AD_GATE", False):
@@ -2144,7 +2144,7 @@ class TestSlowReplyNotice(unittest.TestCase):
         self.assertEqual(text, "")
 
     def test_expired_notice_is_not_sent(self):
-        from session_memory import session_memory
+        from camellia.session_memory import session_memory
         self._force_slow()
         config.SLOW_REPLY_NOTICE_UNTIL = "2020-01-01"
         self.assertFalse(config.is_slow_reply_notice_active)
@@ -2162,7 +2162,7 @@ class TestSlowReplyNotice(unittest.TestCase):
         self.assertTrue(config.is_slow_reply_notice_active)
 
     def test_disabled_flag_overrides_everything(self):
-        from session_memory import session_memory
+        from camellia.session_memory import session_memory
         self._force_slow()
         config.SLOW_REPLY_NOTICE_ENABLED = False
         self.assertFalse(config.is_slow_reply_notice_active)

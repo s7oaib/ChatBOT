@@ -11,8 +11,28 @@ if hasattr(sys.stdout, "reconfigure"):
         pass
 
 # Load .env if present
-BASE_DIR = Path(__file__).resolve().parent
+# This module lives in camellia/, so the repo root is one level up. Everything
+# below is resolved from the root, not from the package directory.
+BASE_DIR = Path(__file__).resolve().parent.parent
+# Seed configuration that ships with the image. Kept out of the runtime data
+# directory because Docker mounts a volume there, which would hide these files.
+DATA_DIR = BASE_DIR / "data"
 load_dotenv(BASE_DIR / ".env", override=True)
+
+
+def _resolve_path(env_var: str, default: Path) -> str:
+    """
+    Resolves a configured path against the repo root rather than the working
+    directory. A relative value like `data/menu.json` then means the same thing
+    whether the process was started from the root, from a container, or from a
+    test run — an absolute value is left untouched.
+    """
+    raw = (os.getenv(env_var) or "").strip()
+    if not raw:
+        return str(default)
+    path = Path(raw)
+    return str(path if path.is_absolute() else BASE_DIR / path)
+
 
 class Config:
     # Meta & Webhook Config
@@ -103,9 +123,9 @@ class Config:
             return True
     
     # Data Storage
-    DB_PATH: str = os.getenv("DB_PATH", str(BASE_DIR / "camellia.db"))
-    MENU_JSON_PATH: str = os.getenv("MENU_JSON_PATH", str(BASE_DIR / "menu.json"))
-    QA_TEMPLATES_PATH: str = os.getenv("QA_TEMPLATES_PATH", str(BASE_DIR / "qa_templates.json"))
+    DB_PATH: str = _resolve_path("DB_PATH", BASE_DIR / "camellia.db")
+    MENU_JSON_PATH: str = _resolve_path("MENU_JSON_PATH", DATA_DIR / "menu.json")
+    QA_TEMPLATES_PATH: str = _resolve_path("QA_TEMPLATES_PATH", DATA_DIR / "qa_templates.json")
     
     # Google Sheet CSV URL for Menu Updates (Option A in PRD)
     GOOGLE_SHEET_CSV_URL: str = os.getenv("GOOGLE_SHEET_CSV_URL", "")

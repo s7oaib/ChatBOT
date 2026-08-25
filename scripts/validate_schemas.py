@@ -7,10 +7,17 @@ import os
 import json
 import re
 import sys
+from pathlib import Path
 from typing import List, Dict, Any, Tuple
 
-def validate_menu_schema(file_path: str = "menu.json") -> Tuple[bool, List[str]]:
+# Runnable from any directory: put the repo root on the path, then use the
+# same resolved data paths the bot itself loads.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from camellia.config import config
+
+def validate_menu_schema(file_path: str = None) -> Tuple[bool, List[str]]:
     """Validates the structure, types, and pricing values of menu.json."""
+    file_path = file_path or config.MENU_JSON_PATH
     errors = []
     if not os.path.exists(file_path):
         return False, [f"File not found: {file_path}"]
@@ -75,8 +82,9 @@ def validate_menu_schema(file_path: str = "menu.json") -> Tuple[bool, List[str]]
     return len(errors) == 0, errors
 
 
-def validate_qa_templates_schema(file_path: str = "qa_templates.json") -> Tuple[bool, List[str]]:
+def validate_qa_templates_schema(file_path: str = None) -> Tuple[bool, List[str]]:
     """Validates the QA templates dictionary, keywords, and placeholders."""
+    file_path = file_path or config.QA_TEMPLATES_PATH
     errors = []
     if not os.path.exists(file_path):
         return False, [f"File not found: {file_path}"]

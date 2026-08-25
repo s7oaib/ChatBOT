@@ -2,7 +2,7 @@ import logging
 import os
 import sys
 
-from config import config
+from camellia.config import config
 
 _LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 

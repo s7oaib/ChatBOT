@@ -1,8 +1,8 @@
 import os
 import unittest
-from responder import responder
-from rag_fallback import rag_fallback_engine
-from database import db
+from camellia.responder import responder
+from camellia.rag_fallback import rag_fallback_engine
+from camellia.database import db
 
 class TestHybridRAGArchitecture(unittest.TestCase):
     """

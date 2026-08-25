@@ -72,7 +72,7 @@ if __name__ == "__main__":
 
     print(f"Starting Camellia Artisanal Bot on 0.0.0.0:{port} (and bridging {alternate_port})...")
     uvicorn.run(
-        "app:app",
+        "camellia.app:app",
         host="0.0.0.0",
         port=port,
         proxy_headers=True,

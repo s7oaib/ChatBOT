@@ -2,9 +2,9 @@ import json
 import time
 import httpx
 from typing import Tuple, Dict, Any, List, Optional
-from config import config
-from database import db
-from monitoring import get_logger
+from camellia.config import config
+from camellia.database import db
+from camellia.monitoring import get_logger
 
 log = get_logger("camellia.ai_responder")
 

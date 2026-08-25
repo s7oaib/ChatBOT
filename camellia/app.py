@@ -12,16 +12,16 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
-from config import config
-from database import db
-from ad_gate import ad_gate
-from responder import responder
-from whatsapp_adapter import whatsapp_adapter
-from escalator import escalator
-from sheet_sync import sheet_sync
-from menu_parser import menu_parser
-from session_memory import session_memory
-from monitoring import get_logger, delivery_monitor, latency_monitor
+from camellia.config import config
+from camellia.database import db
+from camellia.ad_gate import ad_gate
+from camellia.responder import responder
+from camellia.whatsapp_adapter import whatsapp_adapter
+from camellia.escalator import escalator
+from camellia.sheet_sync import sheet_sync
+from camellia.menu_parser import menu_parser
+from camellia.session_memory import session_memory
+from camellia.monitoring import get_logger, delivery_monitor, latency_monitor
 
 log = get_logger("camellia.app")
 
@@ -76,7 +76,8 @@ async def add_security_headers(request: Request, call_next):
 
 # Serve menu photo JPEGs from the dedicated images/ subdirectory.
 # Mounting BASE_DIR directly would expose .env, source files and the database.
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# This module lives in camellia/, so images/ sits one level up at the repo root.
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 app.mount("/images", StaticFiles(directory=os.path.join(BASE_DIR, "images")), name="images")
 
 def verify_meta_signature(raw_body: bytes, signature_header: Optional[str]) -> None:
