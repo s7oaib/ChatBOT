@@ -16,6 +16,7 @@ from camellia.config import config
 from camellia.database import db
 from camellia.ad_gate import ad_gate
 from camellia.responder import responder
+from camellia.gemini_responder import gemini_responder
 from camellia.whatsapp_adapter import whatsapp_adapter
 from camellia.escalator import escalator
 from camellia.sheet_sync import sheet_sync
@@ -503,21 +504,63 @@ Haryana.</p>
 # --------------------------------------------------------------------------
 # Admin & Self-Service Endpoints
 # --------------------------------------------------------------------------
+def _answering_capability() -> dict:
+    """
+    Reports whether the bot can actually answer anything.
+
+    This exists because a deployment once came up reporting healthy while its
+    configured data paths pointed at files that no longer existed: the
+    responder held zero templates and every customer got the fallback, and
+    nothing in the process considered that a problem. Loading the JSON is not
+    the same as being able to answer, so this asserts there is real content
+    behind the paths rather than merely that the process started.
+    """
+    templates = (responder.qa_data or {}).get("templates") or []
+    collections = (responder.menu_data or {}).get("collections") or {}
+    weekly = (responder.menu_data or {}).get("weekly_menus") or []
+
+    problems = []
+    if len(templates) < 10:
+        problems.append(
+            f"only {len(templates)} Q&A templates loaded from {config.QA_TEMPLATES_PATH}"
+        )
+    if not collections and not weekly:
+        problems.append(f"no menu content loaded from {config.MENU_JSON_PATH}")
+
+    return {
+        "ready": not problems,
+        "templates_loaded": len(templates),
+        "menu_collections": len(collections),
+        "weekly_menus": len(weekly),
+        "qa_templates_path": config.QA_TEMPLATES_PATH,
+        "menu_json_path": config.MENU_JSON_PATH,
+        "problems": problems,
+    }
+
+
 @app.get("/health")
 def health_check():
     """Deep health check. Point an uptime monitor at this, not at /."""
     outbound = delivery_monitor.snapshot()
-    status_code = 200 if outbound["healthy"] else 503
+    answering = _answering_capability()
+
+    # A bot that cannot answer is down, whatever else is working.
+    healthy = outbound["healthy"] and answering["ready"]
+    if not answering["ready"]:
+        log.error("Health check failed — bot cannot answer: %s", "; ".join(answering["problems"]))
+
     return Response(
         content=json.dumps({
-            "status": "healthy" if outbound["healthy"] else "degraded",
+            "status": "healthy" if healthy else "degraded",
+            "answering": answering,
             "outbound_delivery": outbound,
+            "ai_provider": gemini_responder.get_active_provider(),
             "reply_latency": latency_monitor.snapshot(),
             "slow_reply_notice_active": config.is_slow_reply_notice_active,
             "retention_days": config.DATA_RETENTION_DAYS,
         }),
         media_type="application/json",
-        status_code=status_code,
+        status_code=200 if healthy else 503,
     )
 
 MAX_UPLOAD_SIZE = 10 * 1024 * 1024  # 10 MB limit for menu images

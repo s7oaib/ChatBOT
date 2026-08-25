@@ -248,3 +248,51 @@ def test_admin_escalation_resolve_and_learn_flow():
     assert resolved_esc["status"] == "resolved"
 
 
+
+
+def test_health_reports_healthy_when_the_bot_can_answer():
+    resp = client.get("/health")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "healthy"
+    assert body["answering"]["ready"] is True
+    assert body["answering"]["templates_loaded"] > 10
+    assert body["answering"]["problems"] == []
+
+
+def test_health_fails_when_no_templates_are_loaded():
+    """
+    A deployment once reported healthy while holding zero templates, so every
+    customer got the fallback and nothing noticed. Health must fail on that.
+    """
+    from camellia.responder import responder
+
+    saved = responder.qa_data
+    responder.qa_data = {}
+    try:
+        resp = client.get("/health")
+        assert resp.status_code == 503, "A bot with no templates must not report healthy"
+        body = resp.json()
+        assert body["status"] == "degraded"
+        assert body["answering"]["ready"] is False
+        assert any("template" in p.lower() for p in body["answering"]["problems"])
+    finally:
+        responder.qa_data = saved
+
+    # And recovers once the templates are back.
+    assert client.get("/health").status_code == 200
+
+
+def test_health_fails_when_the_menu_is_empty():
+    from camellia.responder import responder
+
+    saved = responder.menu_data
+    responder.menu_data = {}
+    try:
+        resp = client.get("/health")
+        assert resp.status_code == 503
+        assert any("menu" in p.lower() for p in resp.json()["answering"]["problems"])
+    finally:
+        responder.menu_data = saved
+
+    assert client.get("/health").status_code == 200
