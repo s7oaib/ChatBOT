@@ -221,8 +221,13 @@ class GeminiResponder:
             }
         }
 
+        # Refinement is optional polish on an answer we already hold, so it gets
+        # a short budget; answering an unmatched question is the only path worth
+        # making the customer wait for.
+        timeout = config.GEMINI_REFINE_TIMEOUT if is_refinement else config.GEMINI_TIMEOUT
+
         try:
-            with httpx.Client(timeout=config.GEMINI_TIMEOUT) as client:
+            with httpx.Client(timeout=timeout) as client:
                 resp = client.post(url, json=payload)
                 if resp.status_code != 200:
                     if resp.status_code in (429, 503, 500, 502):

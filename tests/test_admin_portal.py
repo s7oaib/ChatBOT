@@ -296,3 +296,16 @@ def test_health_fails_when_the_menu_is_empty():
         responder.menu_data = saved
 
     assert client.get("/health").status_code == 200
+
+
+def test_refinement_budget_stays_under_the_slow_notice_threshold():
+    """
+    Refinement is optional polish on an answer the bot already holds. If it can
+    outlast the slow-reply threshold it will tell customers the business is
+    running slow because an AI provider was overloaded — which is what a
+    7-second 503 was doing in production.
+    """
+    assert config.GEMINI_REFINE_TIMEOUT * 1000 < config.SLOW_REPLY_THRESHOLD_MS, (
+        f"Refinement may take up to {config.GEMINI_REFINE_TIMEOUT}s while the slow-reply "
+        f"notice fires at {config.SLOW_REPLY_THRESHOLD_MS}ms"
+    )

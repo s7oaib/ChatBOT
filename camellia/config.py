@@ -163,6 +163,12 @@ class Config:
     # caller waits out before failing, and a pinned model fails fast instead.
     GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
     GEMINI_TIMEOUT: float = float(os.getenv("GEMINI_TIMEOUT", "20.0"))
+    # Refinement only rewords an answer the bot already has, so the customer
+    # must never wait long for it. Kept below SLOW_REPLY_THRESHOLD_MS on
+    # purpose: a slow or overloaded provider should be abandoned in favour of
+    # the template rather than delay the reply far enough to tell the customer
+    # the business is running slow, which is what a 7-second 503 was doing.
+    GEMINI_REFINE_TIMEOUT: float = float(os.getenv("GEMINI_REFINE_TIMEOUT", "2.5"))
     GEMINI_ENABLED: bool = os.getenv("GEMINI_ENABLED", "true").lower() in ("true", "1", "t", "yes")
     AI_FIRST_MODE: bool = os.getenv("AI_FIRST_MODE", "true").lower() in ("true", "1", "t", "yes")
 

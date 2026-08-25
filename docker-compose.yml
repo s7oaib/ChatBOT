@@ -41,6 +41,9 @@ services:
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
       - GEMINI_MODEL=${GEMINI_MODEL:-gemini-3.5-flash}
+      # Optional polish only — kept under SLOW_REPLY_THRESHOLD_MS so a slow
+      # provider is abandoned rather than delaying the customer's reply.
+      - GEMINI_REFINE_TIMEOUT=${GEMINI_REFINE_TIMEOUT:-2.5}
       - GEMINI_ENABLED=${GEMINI_ENABLED:-true}
       # Tells a customer once, when replies have gone slow, to contact the
       # Kitchen Manager directly. The copy promises a limited period, so
