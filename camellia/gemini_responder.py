@@ -29,6 +29,29 @@ class GeminiResponder:
         self.qa_data = self._load_json(self.qa_path)
         self._gemini_cooldown_until: float = 0.0
         self._openai_cooldown_until: float = 0.0
+        # Outcome of the most recent provider call. Holding a key is not the
+        # same as the key working: an HTTP 400 or 404 fails fast and does not
+        # trip the cooldown, so the provider keeps reporting itself available
+        # while silently refining nothing. This is what health reports on.
+        self._last_call_ok: Optional[bool] = None
+        self._last_call_detail: str = "no call yet"
+
+    def _record_call(self, ok: bool, detail: str) -> None:
+        self._last_call_ok = ok
+        self._last_call_detail = detail
+
+    def status(self) -> Dict[str, Any]:
+        """Reports whether the AI layer is configured AND actually working."""
+        provider = self.get_active_provider()
+        return {
+            "provider": provider,
+            "enabled": bool(config.is_ai_enabled),
+            "model": config.GEMINI_MODEL,
+            "last_call_ok": self._last_call_ok,
+            "last_call": self._last_call_detail,
+            # Unknown until a call is made, so absence of a failure is not success.
+            "working": bool(self._last_call_ok) if self._last_call_ok is not None else None,
+        }
 
     def _load_json(self, path: str) -> Dict[str, Any]:
         try:
@@ -205,6 +228,7 @@ class GeminiResponder:
                     if resp.status_code in (429, 503, 500, 502):
                         self._gemini_cooldown_until = time.time() + 60.0
                     log.warning("Gemini HTTP %s: %s", resp.status_code, resp.text[:200])
+                    self._record_call(False, f"HTTP {resp.status_code}: {resp.text[:120]}")
                     return "", False, f"gemini_http_{resp.status_code}"
 
                 data = resp.json()
@@ -226,10 +250,12 @@ class GeminiResponder:
                     )
                     return fallback, False, "out_of_context"
 
+                self._record_call(True, "ok")
                 return assistant_text, True, "gemini_rag"
 
         except Exception as e:
             self._gemini_cooldown_until = time.time() + 60.0
+            self._record_call(False, f"{type(e).__name__}: {str(e)[:120]}")
             log.warning("Gemini API call failed (%s): %s", config.GEMINI_MODEL, e)
             fallback = self.qa_data.get("escalation_triggers", {}).get(
                 "fallback_response",

@@ -554,7 +554,8 @@ def health_check():
             "status": "healthy" if healthy else "degraded",
             "answering": answering,
             "outbound_delivery": outbound,
-            "ai_provider": gemini_responder.get_active_provider(),
+            # Not just which provider is configured — whether it last worked.
+            "ai": gemini_responder.status(),
             "reply_latency": latency_monitor.snapshot(),
             "slow_reply_notice_active": config.is_slow_reply_notice_active,
             "retention_days": config.DATA_RETENTION_DAYS,
