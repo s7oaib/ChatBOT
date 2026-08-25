@@ -1923,6 +1923,63 @@ class TestAnswerAccuracy(unittest.TestCase):
             self.assertIsNotNone(tmpl)
 
 
+class TestClarifyBeforeEscalating(unittest.TestCase):
+    """
+    A message too vague to place gets one clarifying question rather than the
+    "I've notified our team" notice, which in that situation was not even true.
+    """
+
+    def _reply(self, uid, msg):
+        return responder.match_and_respond(msg, user_id=uid, channel="whatsapp")
+
+    def test_vague_message_asks_what_they_meant(self):
+        from session_memory import session_memory
+        for msg in ("india", "is it good", "anything else", "what about that one", "ok tell me"):
+            uid = f"vague_{abs(hash(msg))}"
+            session_memory.clear_session(uid, "whatsapp")
+            text, matched, tmpl, _ = self._reply(uid, msg)
+            self.assertEqual(tmpl, "clarify_request", f"{msg!r} -> {tmpl}")
+            self.assertTrue(matched, "A clarifying question is not an escalation")
+            self.assertNotIn("notified our team", text.lower())
+
+    def test_specific_unanswerable_message_still_reaches_a_human(self):
+        """Detail we cannot answer is a real gap — a menu of options would insult it."""
+        from session_memory import session_memory
+        for msg in ("my order is late and wrong", "i need a gst invoice"):
+            uid = f"spec_{abs(hash(msg))}"
+            session_memory.clear_session(uid, "whatsapp")
+            _, matched, tmpl, _ = self._reply(uid, msg)
+            self.assertFalse(matched, f"{msg!r} should still escalate")
+            self.assertNotEqual(tmpl, "clarify_request")
+
+    def test_clarifies_only_once_then_escalates(self):
+        from session_memory import session_memory
+        session_memory.clear_session("twice", "whatsapp")
+        _, _, first, _ = self._reply("twice", "india")
+        self.assertEqual(first, "clarify_request")
+        _, matched, second, _ = self._reply("twice", "blah")
+        self.assertNotEqual(second, "clarify_request", "Asked to clarify twice in one chat")
+        self.assertFalse(matched)
+
+    def test_off_domain_questions_still_escalate(self):
+        """
+        Out-of-syllabus questions name something definite, so they keep going to
+        a human rather than being redirected to a menu of our own options.
+        """
+        from session_memory import session_memory
+        for msg in ("What is the capital of France?", "Do you serve steamed bhapa pitha?"):
+            uid = f"off_{abs(hash(msg))}"
+            session_memory.clear_session(uid, "whatsapp")
+            _, matched, tmpl, _ = self._reply(uid, msg)
+            self.assertFalse(matched, f"{msg!r} should escalate")
+            self.assertNotEqual(tmpl, "clarify_request")
+
+    def test_clarifier_buttons_match_the_options_offered(self):
+        from whatsapp_adapter import whatsapp_adapter
+        buttons = whatsapp_adapter._get_contextual_buttons("clarify_request", True)
+        self.assertEqual(buttons, ["🌸 Sondesh", "🍱 Meals", "🚚 Delivery"])
+
+
 class TestInteractiveMenuFlow(unittest.TestCase):
     """
     A menu question shows the card with a short teaser and invites a choice,

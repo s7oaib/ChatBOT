@@ -70,6 +70,23 @@ ORDER_INTENT_RE = re.compile(
     re.IGNORECASE
 )
 
+# Words that carry no information about what the customer wants. Used to tell a
+# genuinely vague message ("ok tell me") from a short but specific one
+# ("do you serve bhapa pitha") — the first is worth a clarifying question, the
+# second names something real and belongs with a human if we cannot answer it.
+VAGUE_FILLER_WORDS = {
+    "a", "an", "the", "is", "it", "this", "that", "these", "those", "one", "ones",
+    "i", "im", "me", "my", "we", "us", "you", "your", "u", "r", "are", "am", "be",
+    "do", "does", "did", "can", "could", "would", "will", "shall", "should", "may",
+    "what", "whats", "how", "when", "where", "which", "who", "why", "any", "anything",
+    "some", "something", "else", "other", "more", "much", "many", "about", "for",
+    "of", "in", "on", "at", "to", "from", "with", "and", "or", "but", "so", "if",
+    "ok", "okay", "okey", "hmm", "hm", "well", "just", "really", "please", "pls",
+    "tell", "say", "know", "want", "need", "like", "get", "give", "show", "send",
+    "there", "here", "yes", "no", "yeah", "yep", "nope", "sure", "fine", "good",
+    "bad", "nice", "great", "hi", "hello", "hey", "namaste", "thanks", "thank",
+}
+
 # --- Context carry-over for bare follow-ups -------------------------------
 # A customer who just got a product answer often replies with a bare
 # "how much?" or "is it veg?" with no product words at all. Without tracking
@@ -637,6 +654,8 @@ class DeterministicResponder:
         best_template = None
         best_composite_score = -1
         best_score = 0
+        runner_up_template = None
+        runner_up_composite = -1
 
         sorted_templates = sorted(templates, key=lambda t: 1 if t.get("id") in TIER_4_GREETING_INTRO else 0)
 
@@ -811,11 +830,23 @@ class DeterministicResponder:
             composite_score = (score * tier_multiplier) if score >= 4 else 0
 
             if composite_score > best_composite_score:
+                runner_up_composite = best_composite_score
+                runner_up_template = best_template
                 best_composite_score = composite_score
                 best_template = tmpl
                 best_score = score
+            elif composite_score > runner_up_composite:
+                runner_up_composite = composite_score
+                runner_up_template = tmpl
 
         # Require a minimum matching threshold (score >= 4) in hybrid/deterministic mode
+        if best_template is not None:
+            log.debug(
+                "MATCH_SCORE msg=%r best=%s score=%s runner_up=%s",
+                user_message, best_template.get("id"), best_score,
+                runner_up_template.get("id") if runner_up_template else None,
+            )
+
         if best_template and best_score >= 4:
             tmpl_id = best_template.get("id", "")
             facts = session_memory.get_facts(user_id, channel)
@@ -1013,8 +1044,64 @@ class DeterministicResponder:
         except Exception as e:
             log.error("RAG fallback processing error: %s", e)
 
+        # Nothing matched. If the message was simply too vague to place ("india",
+        # "is it good", "anything else"), asking what they meant beats claiming we
+        # notified staff — which also would not have been true. Only once: a
+        # customer who is still unclear after being asked gets a real human.
+        if (
+            _intent == "unknown"
+            and not facts.get("clarify_sent")
+            and self._is_vague_enough_to_clarify(user_message)
+        ):
+            facts["clarify_sent"] = True
+            clarifier = (
+                "Happy to help — I just want to point you the right way 🌸\n\n"
+                "Which of these is closest to what you're after?\n"
+                "• 🌸 Sondesh flavours & prices\n"
+                "• 🍱 This week's Bengali meals\n"
+                "• 🚚 Delivery to your area\n"
+                "• 🛍️ Placing an order\n\n"
+                "Or tell me in a few more words and I'll take it from there."
+            )
+            if intro_greeting_prefix:
+                clarifier = intro_greeting_prefix + clarifier
+            log.info("Asked %s to clarify a vague message instead of escalating.", user_id)
+            session_memory.add_turn(user_id, channel, user_message, clarifier)
+            return clarifier, True, "clarify_request", None
+
         session_memory.add_turn(user_id, channel, user_message, fallback)
         return fallback, False, None, None
+
+    @staticmethod
+    def _is_vague_enough_to_clarify(user_message: str) -> bool:
+        """
+        True only when a message carries almost no content of its own, so asking
+        what they meant is genuinely useful.
+
+        A short message is not the same as a vague one: "Do you serve steamed
+        bhapa pitha?" is brief but perfectly specific, and it names something we
+        could not answer — that is a real gap for a human, not something to
+        answer with a menu of options the customer has to re-read.
+        """
+        if not user_message:
+            return False
+        # Anything naming a concrete problem goes straight to a human.
+        if re.search(
+            r"\b(refund|cancel|complaint|urgent|wrong|missing|late|address|invoice|"
+            r"gst|bill|receipt|custom|bulk|wedding|corporate|allerg\w*)\b",
+            user_message, re.IGNORECASE
+        ):
+            return False
+
+        words = [w.lower() for w in re.findall(r"[a-zA-Zঀ-৿]+", user_message)]
+        if not words:
+            return False
+        substantive = [w for w in words if w not in VAGUE_FILLER_WORDS]
+        # At most one content word means there is genuinely nothing to go on.
+        # Two or more names something definite — "bhapa pitha", "capital france" —
+        # and an out-of-scope or unanswerable specific belongs with a human, per
+        # the out-of-syllabus rule, rather than being redirected to a menu.
+        return len(substantive) <= 1
 
     def _detect_relevant_images(self, user_message: str) -> Optional[Any]:
         """Attaches relevant menu photo cards when user inquires about products or menus in AI-First mode."""
