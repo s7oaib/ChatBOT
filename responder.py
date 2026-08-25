@@ -392,7 +392,11 @@ class DeterministicResponder:
             "book an order", "confirm order", "need to order", "chahiye", "bhejo",
             "order 1", "order 2", "order 3", "order 4", "order 5"
         ])
-        is_general_menu_query = (not has_explicit_order_action) and any(phrase in lowered_text for phrase in [
+        has_quantity_order_signal = bool(
+            re.search(r'\b(order|deliver|send|buy|add|pack)\w*\b', lowered_text)
+            and re.search(r'\b\d+\b', lowered_text)
+        )
+        is_general_menu_query = (not has_explicit_order_action and not has_quantity_order_signal) and any(phrase in lowered_text for phrase in [
             "full menu", "send menu", "price list", "show menu", "what is your menu",
             "how much is sondesh", "sondesh price", "how much sondesh", "sondesh cost", "cost of sondesh", "price of sondesh",
             "tell me about your product", "about your product", "about your products", "what products", "your products", "product", "products",
@@ -507,7 +511,8 @@ class DeterministicResponder:
             "GUARD_collection_differentiation", "GUARD_customization_flavour_mixing",
             "GUARD_halal_ingredients_oil", "GUARD_payment_method",
             "GUARD_allergen_nutfree_glutenfree", "GUARD_pickup_address_hours",
-            "GUARD_shelf_life_storage", "GUARD_staff_names_manager_contact"
+            "GUARD_shelf_life_storage", "GUARD_staff_names_manager_contact",
+            "bento_details"
         }
 
         TIER_2_SPECIFIC_INTENTS = {
