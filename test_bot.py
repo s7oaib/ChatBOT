@@ -1825,6 +1825,114 @@ class TestCamelliaBot(unittest.TestCase):
             self.assertTrue(matched_wa, f"WhatsApp DM should pass for '{q}'")
             self.assertIsNotNone(tmpl_wa)
 
+
+class TestSlowReplyNotice(unittest.TestCase):
+    """
+    The slow-reply notice tells a customer once, when the bot has actually gone
+    slow, that replies are delayed and gives them the manager's direct line.
+    """
+
+    NOTICE_START = "Hi thanks so much for connecting"
+
+    def setUp(self):
+        from monitoring import latency_monitor
+        self.latency_monitor = latency_monitor
+        self._orig_threshold = latency_monitor.slow_threshold_ms
+        self._orig_until = config.SLOW_REPLY_NOTICE_UNTIL
+        self._orig_enabled = config.SLOW_REPLY_NOTICE_ENABLED
+        config.SLOW_REPLY_NOTICE_ENABLED = True
+        config.SLOW_REPLY_NOTICE_UNTIL = ""
+
+    def tearDown(self):
+        self.latency_monitor.slow_threshold_ms = self._orig_threshold
+        self.latency_monitor._samples.clear()
+        self.latency_monitor._last_ms = 0.0
+        config.SLOW_REPLY_NOTICE_UNTIL = self._orig_until
+        config.SLOW_REPLY_NOTICE_ENABLED = self._orig_enabled
+
+    def _force_slow(self):
+        """Make any real reply count as slow, exercising the true timing path."""
+        self.latency_monitor.slow_threshold_ms = 0.0001
+        self.latency_monitor._samples.clear()
+        self.latency_monitor._last_ms = 0.0
+
+    def _force_fast(self):
+        self.latency_monitor.slow_threshold_ms = 10_000_000.0
+        self.latency_monitor._samples.clear()
+        self.latency_monitor._last_ms = 0.0
+
+    def test_slow_reply_sends_notice_once_per_session(self):
+        from session_memory import session_memory
+        self._force_slow()
+        session_memory.clear_session("slow_once_user", "whatsapp")
+
+        first, _, _, _ = responder.match_and_respond("hi", user_id="slow_once_user", channel="whatsapp")
+        self.assertTrue(first.startswith(self.NOTICE_START))
+        # The customer's actual answer must still be delivered below the notice.
+        self.assertGreater(len(first), len(config.SLOW_REPLY_NOTICE_TEXT))
+
+        for follow_up in ["what do you have?", "how much?"]:
+            text, _, _, _ = responder.match_and_respond(follow_up, user_id="slow_once_user", channel="whatsapp")
+            self.assertFalse(
+                text.startswith(self.NOTICE_START),
+                f"Notice repeated on follow-up '{follow_up}'",
+            )
+
+    def test_notice_is_per_session_not_global(self):
+        from session_memory import session_memory
+        self._force_slow()
+        for uid in ("slow_a", "slow_b"):
+            session_memory.clear_session(uid, "whatsapp")
+            text, _, _, _ = responder.match_and_respond("hi", user_id=uid, channel="whatsapp")
+            self.assertTrue(text.startswith(self.NOTICE_START), f"{uid} did not get its own notice")
+
+    def test_fast_reply_sends_no_notice(self):
+        from session_memory import session_memory
+        self._force_fast()
+        session_memory.clear_session("fast_user", "whatsapp")
+        text, _, _, _ = responder.match_and_respond("hi", user_id="fast_user", channel="whatsapp")
+        self.assertFalse(text.startswith(self.NOTICE_START))
+
+    def test_notice_never_fills_a_blocked_reply(self):
+        """An ad-gate-blocked DM must stay empty, not become a notice-only message."""
+        from session_memory import session_memory
+        self._force_slow()
+        session_memory.clear_session("ig_blocked_user", "instagram")
+        with patch.object(config, "BYPASS_AD_GATE", False):
+            text, matched, tmpl, _ = responder.match_and_respond(
+                "hi", user_id="ig_blocked_user", channel="instagram", referral_source=None
+            )
+        self.assertEqual(tmpl, "ad_gate_blocked")
+        self.assertEqual(text, "")
+
+    def test_expired_notice_is_not_sent(self):
+        from session_memory import session_memory
+        self._force_slow()
+        config.SLOW_REPLY_NOTICE_UNTIL = "2020-01-01"
+        self.assertFalse(config.is_slow_reply_notice_active)
+        session_memory.clear_session("expired_user", "whatsapp")
+        text, _, _, _ = responder.match_and_respond("hi", user_id="expired_user", channel="whatsapp")
+        self.assertFalse(text.startswith(self.NOTICE_START))
+
+    def test_future_expiry_keeps_notice_active(self):
+        config.SLOW_REPLY_NOTICE_UNTIL = "2099-01-01"
+        self.assertTrue(config.is_slow_reply_notice_active)
+
+    def test_malformed_expiry_leaves_notice_active(self):
+        """A typo in the date must not silently switch off a notice the client turned on."""
+        config.SLOW_REPLY_NOTICE_UNTIL = "next-tuesday"
+        self.assertTrue(config.is_slow_reply_notice_active)
+
+    def test_disabled_flag_overrides_everything(self):
+        from session_memory import session_memory
+        self._force_slow()
+        config.SLOW_REPLY_NOTICE_ENABLED = False
+        self.assertFalse(config.is_slow_reply_notice_active)
+        session_memory.clear_session("disabled_user", "whatsapp")
+        text, _, _, _ = responder.match_and_respond("hi", user_id="disabled_user", channel="whatsapp")
+        self.assertFalse(text.startswith(self.NOTICE_START))
+
+
 if __name__ == "__main__":
     unittest.main()
 

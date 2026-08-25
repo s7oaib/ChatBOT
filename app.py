@@ -21,7 +21,7 @@ from escalator import escalator
 from sheet_sync import sheet_sync
 from menu_parser import menu_parser
 from session_memory import session_memory
-from monitoring import get_logger, delivery_monitor
+from monitoring import get_logger, delivery_monitor, latency_monitor
 
 log = get_logger("camellia.app")
 
@@ -511,6 +511,8 @@ def health_check():
         content=json.dumps({
             "status": "healthy" if outbound["healthy"] else "degraded",
             "outbound_delivery": outbound,
+            "reply_latency": latency_monitor.snapshot(),
+            "slow_reply_notice_active": config.is_slow_reply_notice_active,
             "retention_days": config.DATA_RETENTION_DAYS,
         }),
         media_type="application/json",

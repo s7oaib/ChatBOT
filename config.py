@@ -54,6 +54,53 @@ class Config:
     # Human Escalation Contact
     HUMAN_ESCALATION_PHONE: str = os.getenv("HUMAN_ESCALATION_PHONE", "+918796551990")
     HUMAN_ESCALATION_EMAIL: str = os.getenv("HUMAN_ESCALATION_EMAIL", "")
+
+    # Slow-reply notice.
+    # When the bot itself becomes slow to answer, the customer is sitting there
+    # watching nothing happen. Rather than let them guess, we say so once per
+    # conversation and hand them the manager's direct line — they can switch to
+    # a human or carry on with the bot, whichever they prefer.
+    SLOW_REPLY_NOTICE_ENABLED: bool = os.getenv("SLOW_REPLY_NOTICE_ENABLED", "true").lower() in ("true", "1", "t", "yes")
+    # A reply slower than this (milliseconds) counts as slow. Parsed defensively:
+    # a blank or malformed value must not take the whole bot down at import time.
+    try:
+        SLOW_REPLY_THRESHOLD_MS: float = float(os.getenv("SLOW_REPLY_THRESHOLD_MS", "").strip() or 3000)
+    except ValueError:
+        SLOW_REPLY_THRESHOLD_MS: float = 3000.0
+    # The notice promises a limited period, so it must be able to expire —
+    # otherwise the bot keeps claiming "for a week" indefinitely. ISO date
+    # (YYYY-MM-DD); once past, the notice stops being sent. Empty = no expiry.
+    SLOW_REPLY_NOTICE_UNTIL: str = os.getenv("SLOW_REPLY_NOTICE_UNTIL", "")
+    # `or` rather than a getenv default: an empty SLOW_REPLY_NOTICE_TEXT= line in
+    # .env would otherwise blank the notice instead of falling back to the copy.
+    SLOW_REPLY_NOTICE_TEXT: str = os.getenv("SLOW_REPLY_NOTICE_TEXT", "").strip() or (
+        "Hi thanks so much for connecting. I will slow in replying to the Instagram "
+        "messages for a week, due to unavoidable circumstances. Request you to connect "
+        "directly with Our Manager of Kitchens, Mr. Guru Dayal Singh (8796551990), on a "
+        "call or WhatsApp . He will help you in the selection & purchase process & also "
+        "and share your invoice. He will be your single point of contact for this order "
+        "and will be happy to assist you with any queries."
+    )
+
+    @property
+    def is_slow_reply_notice_active(self) -> bool:
+        """True while the slow-reply notice is switched on and not past its end date."""
+        if not self.SLOW_REPLY_NOTICE_ENABLED:
+            return False
+        raw_until = (self.SLOW_REPLY_NOTICE_UNTIL or "").strip()
+        if not raw_until:
+            return True
+        try:
+            from datetime import date
+            return date.today() <= date.fromisoformat(raw_until)
+        except ValueError:
+            # A malformed date must not silently disable a notice the client
+            # switched on, so fall back to "active" and complain in the logs.
+            print(
+                f"[config] SLOW_REPLY_NOTICE_UNTIL={raw_until!r} is not a valid "
+                f"YYYY-MM-DD date; ignoring the expiry and keeping the notice active."
+            )
+            return True
     
     # Data Storage
     DB_PATH: str = os.getenv("DB_PATH", str(BASE_DIR / "camellia.db"))

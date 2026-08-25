@@ -98,3 +98,53 @@ class DeliveryHealthMonitor:
 
 
 delivery_monitor = DeliveryHealthMonitor()
+
+
+class ResponseLatencyMonitor:
+    """
+    Tracks how long the bot takes to produce each reply.
+
+    This exists so the bot can notice it has become slow and tell the customer,
+    instead of leaving them watching an empty chat. Two things count as slow:
+    the reply the customer is waiting on right now took too long, or the recent
+    average has drifted above the threshold (a sustained slowdown, e.g. the AI
+    provider degrading, rather than one unlucky request).
+    """
+
+    def __init__(self, slow_threshold_ms: float = 3000.0, window: int = 10):
+        from collections import deque
+
+        self.slow_threshold_ms = slow_threshold_ms
+        self._samples = deque(maxlen=window)
+        self._last_ms = 0.0
+
+    def record(self, elapsed_ms: float) -> None:
+        self._last_ms = elapsed_ms
+        self._samples.append(elapsed_ms)
+        if elapsed_ms >= self.slow_threshold_ms:
+            log.warning(
+                "Slow reply: %.0fms (threshold %.0fms)", elapsed_ms, self.slow_threshold_ms
+            )
+
+    def is_degraded(self) -> bool:
+        """True if the customer is currently experiencing a slow bot."""
+        if self._last_ms >= self.slow_threshold_ms:
+            return True
+        if not self._samples:
+            return False
+        return (sum(self._samples) / len(self._samples)) >= self.slow_threshold_ms
+
+    def snapshot(self) -> dict:
+        avg = (sum(self._samples) / len(self._samples)) if self._samples else 0.0
+        return {
+            "last_reply_ms": round(self._last_ms, 1),
+            "avg_reply_ms": round(avg, 1),
+            "samples": len(self._samples),
+            "slow_threshold_ms": self.slow_threshold_ms,
+            "degraded": self.is_degraded(),
+        }
+
+
+latency_monitor = ResponseLatencyMonitor(
+    slow_threshold_ms=config.SLOW_REPLY_THRESHOLD_MS
+)

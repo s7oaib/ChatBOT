@@ -2,10 +2,11 @@ import difflib
 import json
 import random
 import re
+import time
 from dataclasses import dataclass
 from typing import Dict, Any, Tuple, Optional, List
 from config import config
-from monitoring import get_logger
+from monitoring import get_logger, latency_monitor
 from gemini_responder import gemini_responder
 from session_memory import session_memory
 
@@ -257,7 +258,56 @@ class DeterministicResponder:
 
         return self._generic_fallback(), intent
 
+    def _should_send_slow_notice(self, user_id: str, channel: str, response_text: str, template_id: Optional[str]) -> bool:
+        """
+        Decides whether this reply should carry the slow-reply notice.
+
+        Sent at most once per conversation, and only when the customer actually
+        waited — a fast reply gets no apology, and a blocked/empty reply is never
+        turned into a message that would not otherwise have been sent.
+        """
+        if not config.is_slow_reply_notice_active:
+            return False
+        if template_id == "ad_gate_blocked" or not (response_text or "").strip():
+            return False
+        if not latency_monitor.is_degraded():
+            return False
+        return not session_memory.get_facts(user_id, channel).get("slow_notice_sent")
+
     def match_and_respond(
+        self,
+        user_message: str,
+        user_id: str = None,
+        channel: str = None,
+        referral_source: str = None,
+        referral_ad_id: str = None
+    ) -> Tuple[str, bool, Optional[str], Optional[Any]]:
+        """
+        Matches incoming message against qa_templates.json & menu.json.
+
+        Wraps the matching itself so every reply is timed. When the bot has gone
+        slow, the customer is told once and given the manager's direct line —
+        they can switch to a human or keep talking to the bot.
+        """
+        user_id = user_id or "default_user"
+        channel = channel or "default_channel"
+
+        started = time.perf_counter()
+        try:
+            response_text, was_matched, template_id, image_url = self._resolve_response(
+                user_message, user_id, channel, referral_source, referral_ad_id
+            )
+        finally:
+            latency_monitor.record((time.perf_counter() - started) * 1000.0)
+
+        if self._should_send_slow_notice(user_id, channel, response_text, template_id):
+            session_memory.get_facts(user_id, channel)["slow_notice_sent"] = True
+            log.info("Slow-reply notice sent to %s on %s.", user_id, channel)
+            response_text = f"{config.SLOW_REPLY_NOTICE_TEXT}\n\n{response_text}"
+
+        return response_text, was_matched, template_id, image_url
+
+    def _resolve_response(
         self,
         user_message: str,
         user_id: str = None,
