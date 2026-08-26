@@ -120,7 +120,7 @@
         "what do you serve",
         "what do u serve"
       ],
-      "response": "Here's what we make! 🌸\n\n*Sondesh* — handcrafted Bengali sweets from ₹450. Classic, Rose, Mango and Kesar, plus our signature Nolen Gur and liquid Jolbhora.\n\n*Bengali meals* — fresh lunch & dinner across Delhi NCR, like Aloor Dom, Dhokar Dalna, Bhetki Paturi and Robibarer Mangsho.\n\nWhich sounds good — *Sondesh* or *Meals*? Happy to suggest something if you tell me what you're in the mood for.",
+      "response": "Here's what we make 🌸\n\n*Aamar Mishti* — everyday sondesh, pure dairy milk. Classic, Rose, Mango, Kesar, plus our signature Nolen Gur & liquid Jolbhora. From ₹450.\n\n*Signature Collection* — pure desi A2 cow milk, handcrafted end to end, for gifting & special occasions. From ₹600.\n\n*Bengali Meals* — fresh lunch & dinner across Delhi NCR: Aloor Dom, Dhokar Dalna, Bhetki Paturi, Robibarer Mangsho.\n\nWhich sounds good — *Sondesh* or *Meals*?",
       "escalate": false,
       "note": "Sends 3 cards: Aamar Mishti, Signature Sondesh, and current weekly menu.",
       "source_ref": "client Q&A script > PRODUCTS"
@@ -211,7 +211,7 @@
         "collections",
         "both collections"
       ],
-      "response": "Here's this week's menu! 🌸\n\nHandcrafted Sondesh from ₹450 — our Nolen Gur and liquid Jolbhora are the ones people come back for — plus freshly cooked Bengali meals like Bhetki Paturi and Robibarer Mangsho, made in small batches daily.\n\nWhat would you like to explore — our *Sondesh*, this week's *Meals*, or shall I help you *place an order*?",
+      "response": "Here's what we make 🌸\n\n*Aamar Mishti* — our everyday Sondesh, made fresh in pure dairy milk. From ₹450.\n\n*Signature Collection* — handcrafted end to end in desi A2 cow milk, for gifting & special occasions. From ₹600.\n\n*Bengali Meals* — fresh lunch & dinner across Delhi NCR, cooked daily in small batches.\n\nWhich one would you like to see — *Sondesh*, *Meals*, or shall I help you *place an order*?",
       "escalate": false,
       "note": "Sends 3 cards in sequence: Aamar Mishti, Signature Sondesh, and the current weekly menu.",
       "source_ref": "client Q&A script > GENERAL + ADDITIONAL"
