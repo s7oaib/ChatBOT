@@ -262,7 +262,12 @@ async def handle_instagram_webhook(request: Request):
 
 def send_instagram_reply(recipient_id: str, text: str, image_url=None) -> Dict[str, Any]:
     """Sends text plus zero or more image cards via Meta Graph API to Instagram user."""
-    images = [image_url] if isinstance(image_url, str) else list(image_url or [])
+    # Instagram has no caption field on attachments, so a captioned card is sent
+    # as the image followed by its own text message — same card, detail, card,
+    # detail sequence the customer sees on WhatsApp.
+    captioned = whatsapp_adapter._normalise_images(image_url)
+    images = [url for url, _ in captioned]
+    cards_first = any(caption for _, caption in captioned)
 
     if not config.INSTAGRAM_ACCESS_TOKEN or not config.INSTAGRAM_PAGE_ID:
         safe_text = text[:60].encode("ascii", "backslashreplace").decode("ascii")
@@ -280,16 +285,27 @@ def send_instagram_reply(recipient_id: str, text: str, image_url=None) -> Dict[s
     try:
         with httpx.Client(timeout=10.0) as client:
             last = None
-            if text:
-                last = client.post(url, headers=headers, json={"recipient": {"id": recipient_id}, "message": {"text": text}})
+
+            def send_text(body):
+                nonlocal last
+                last = client.post(url, headers=headers, json={"recipient": {"id": recipient_id}, "message": {"text": body}})
                 last.raise_for_status()
 
-            for img in images:
+            if text and not cards_first:
+                send_text(text)
+
+            for img, caption in captioned:
                 last = client.post(url, headers=headers, json={
                     "recipient": {"id": recipient_id},
                     "message": {"attachment": {"type": "image", "payload": {"url": img, "is_reusable": True}}}
                 })
                 last.raise_for_status()
+                if caption:
+                    send_text(caption)
+
+            # The closing question follows the cards it refers to.
+            if text and cards_first:
+                send_text(text)
 
             delivery_monitor.record_success("instagram")
             return last.json() if last is not None else {"status": "no_content"}

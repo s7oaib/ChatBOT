@@ -120,10 +120,15 @@
         "what do you serve",
         "what do u serve"
       ],
-      "response": "Here's what we make 🌸\n\n*Aamar Mishti* — everyday sondesh, pure dairy milk. Classic, Rose, Mango, Kesar, plus our signature Nolen Gur & liquid Jolbhora. From ₹450.\n\n*Signature Collection* — pure desi A2 cow milk, handcrafted end to end, for gifting & special occasions. From ₹600.\n\n*Bengali Meals* — fresh lunch & dinner across Delhi NCR: Aloor Dom, Dhokar Dalna, Bhetki Paturi, Robibarer Mangsho.\n\nWhich sounds good — *Sondesh* or *Meals*?",
+      "response": "Which sounds good — *Sondesh* or *Meals*? Happy to suggest something if you tell me what you're in the mood for. 🌸",
       "escalate": false,
       "note": "Sends 3 cards: Aamar Mishti, Signature Sondesh, and current weekly menu.",
-      "source_ref": "client Q&A script > PRODUCTS"
+      "source_ref": "client Q&A script > PRODUCTS",
+      "image_captions": [
+        "*Aamar Mishti* — everyday sondesh, pure dairy milk. Classic, Rose, Mango, Kesar, plus our signature Nolen Gur & liquid Jolbhora. From ₹450.",
+        "*Signature Collection* — pure desi A2 cow milk, handcrafted end to end, for gifting & special occasions. From ₹600.",
+        "*Bengali Meals* — fresh lunch & dinner across Delhi NCR: Aloor Dom, Dhokar Dalna, Bhetki Paturi, Robibarer Mangsho."
+      ]
     },
     {
       "id": "product_recommendation",
@@ -211,10 +216,15 @@
         "collections",
         "both collections"
       ],
-      "response": "Here's what we make 🌸\n\n*Aamar Mishti* — our everyday Sondesh, made fresh in pure dairy milk. From ₹450.\n\n*Signature Collection* — handcrafted end to end in desi A2 cow milk, for gifting & special occasions. From ₹600.\n\n*Bengali Meals* — fresh lunch & dinner across Delhi NCR, cooked daily in small batches.\n\nWhich one would you like to see — *Sondesh*, *Meals*, or shall I help you *place an order*?",
+      "response": "Which one would you like to see — *Sondesh*, *Meals*, or shall I help you *place an order*? 🌸",
       "escalate": false,
       "note": "Sends 3 cards in sequence: Aamar Mishti, Signature Sondesh, and the current weekly menu.",
-      "source_ref": "client Q&A script > GENERAL + ADDITIONAL"
+      "source_ref": "client Q&A script > GENERAL + ADDITIONAL",
+      "image_captions": [
+        "*Aamar Mishti* — our everyday Sondesh, made fresh in pure dairy milk. From ₹450.",
+        "*Signature Collection* — handcrafted end to end in desi A2 cow milk, for gifting & special occasions. From ₹600.",
+        "*Bengali Meals* — fresh lunch & dinner across Delhi NCR, cooked daily in small batches."
+      ]
     },
     {
       "id": "order_next_steps",

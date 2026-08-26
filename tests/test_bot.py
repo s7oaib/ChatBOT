@@ -223,14 +223,24 @@ class TestCamelliaBot(unittest.TestCase):
             resp, matched, tmpl_id, img_urls = responder.match_and_respond(query)
             self.assertTrue(matched, f"Query '{query}' should match product_overview")
             self.assertEqual(tmpl_id, "product_overview", f"Query '{query}' should map to product_overview")
-            # The overview is now a short teaser over the photo cards rather than
-            # a full write-up, so it names both ranges and example dishes instead
-            # of spelling out the collection names the cards already carry.
-            self.assertRegex(resp, r"(?i)sondesh")
-            self.assertRegex(resp, r"(?i)meal")
-            self.assertIn("₹450", resp)
             self.assertIsInstance(img_urls, list)
             self.assertEqual(len(img_urls), 3)
+
+            # Each card now carries its own description as a caption, so the
+            # detail the customer reads is spread across the captions rather
+            # than sitting in one block of text. Assert on everything actually
+            # delivered, not just the closing message.
+            delivered = resp + " ".join(
+                img.get("caption", "") for img in img_urls if isinstance(img, dict)
+            )
+            self.assertRegex(delivered, r"(?i)sondesh")
+            self.assertRegex(delivered, r"(?i)meal")
+            self.assertIn("₹450", delivered)
+            # Every card should be paired with a caption, not left unexplained.
+            self.assertTrue(
+                all(isinstance(img, dict) and img.get("caption") for img in img_urls),
+                "Each menu card should arrive with its own description",
+            )
 
     def test_bot_capabilities_queries(self):
         """Assistance inquiries must match bot_capabilities with was_matched=True (zero escalation)."""

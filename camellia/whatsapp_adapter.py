@@ -151,10 +151,33 @@ class WhatsAppAdapter:
         base = config.PUBLIC_BASE_URL.rstrip("/")
         return base + path if base else path
 
+    @staticmethod
+    def _normalise_images(image_url) -> list:
+        """
+        Accepts a URL, a list of URLs, or a list of {"url", "caption"} entries and
+        returns a uniform list of (url, caption) pairs. Plain strings stay
+        supported so templates without captions are unaffected.
+        """
+        raw = [image_url] if isinstance(image_url, (str, dict)) else list(image_url or [])
+        pairs = []
+        for entry in raw:
+            if isinstance(entry, dict):
+                url = entry.get("url")
+                if url:
+                    pairs.append((url, entry.get("caption")))
+            elif entry:
+                pairs.append((entry, None))
+        return pairs
+
     def send_message(self, recipient_phone: str, text_body: str, image_url=None, buttons=None) -> Dict[str, Any]:
-        """Sends a text or interactive button message followed by zero or more image cards via Meta WhatsApp Cloud API."""
-        raw_images = [image_url] if isinstance(image_url, str) else list(image_url or [])
-        images = [self._public_url(img) for img in raw_images]
+        """Sends a text or interactive button message plus zero or more image cards via Meta WhatsApp Cloud API."""
+        pairs = self._normalise_images(image_url)
+        captioned = [(self._public_url(u), c) for u, c in pairs]
+        images = [u for u, _ in captioned]
+        # When cards carry their own descriptions, they lead and the closing
+        # question follows, so each card arrives next to the detail it belongs to
+        # instead of after a wall of text.
+        cards_first = any(c for _, c in captioned)
 
         if config.WHATSAPP_MOCK_MODE:
             # Development / Mock Mode: never construct an outbound HTTP request.
@@ -178,7 +201,36 @@ class WhatsAppAdapter:
             "Content-Type": "application/json"
         }
 
-        payloads = []
+        image_payloads = []
+        undelivered_captions = []
+        for img, caption in captioned:
+            img_url = img
+            if img.startswith("/"):
+                base_url = getattr(config, "PUBLIC_BASE_URL", "").rstrip("/")
+                if base_url:
+                    img_url = f"{base_url}{img}"
+                else:
+                    log.warning("Image URL '%s' is relative but PUBLIC_BASE_URL is not set. Meta API requires an absolute http(s) URL.", img)
+                    # The caption carries the description, so keep it rather than
+                    # letting the detail vanish with the card.
+                    if caption:
+                        undelivered_captions.append(caption)
+                    continue
+            payload = {
+                "messaging_product": "whatsapp",
+                "recipient_type": "individual",
+                "to": recipient_phone,
+                "type": "image",
+                "image": {"link": img_url},
+            }
+            if caption:
+                payload["image"]["caption"] = caption
+            image_payloads.append(payload)
+
+        if undelivered_captions:
+            text_body = "\n\n".join(undelivered_captions + ([text_body] if text_body else []))
+
+        text_payloads = []
         if text_body:
             if buttons and len(buttons) > 0:
                 # Meta Interactive Button Message (Max 3 buttons)
@@ -192,7 +244,7 @@ class WhatsAppAdapter:
                     }
                     for i, title in enumerate(buttons[:3])
                 ]
-                payloads.append({
+                text_payloads.append({
                     "messaging_product": "whatsapp",
                     "recipient_type": "individual",
                     "to": recipient_phone,
@@ -204,7 +256,7 @@ class WhatsAppAdapter:
                     }
                 })
             else:
-                payloads.append({
+                text_payloads.append({
                     "messaging_product": "whatsapp",
                     "recipient_type": "individual",
                     "to": recipient_phone,
@@ -212,22 +264,9 @@ class WhatsAppAdapter:
                     "text": {"preview_url": False, "body": text_body}
                 })
 
-        for img in images:
-            img_url = img
-            if img.startswith("/"):
-                base_url = getattr(config, "PUBLIC_BASE_URL", "").rstrip("/")
-                if base_url:
-                    img_url = f"{base_url}{img}"
-                else:
-                    log.warning("Image URL '%s' is relative but PUBLIC_BASE_URL is not set. Meta API requires an absolute http(s) URL.", img)
-                    continue
-            payloads.append({
-                "messaging_product": "whatsapp",
-                "recipient_type": "individual",
-                "to": recipient_phone,
-                "type": "image",
-                "image": {"link": img_url}
-            })
+        # Captioned cards lead so each one arrives with its own description;
+        # otherwise the original order (text, then cards) is preserved.
+        payloads = (image_payloads + text_payloads) if cards_first else (text_payloads + image_payloads)
 
         try:
             with httpx.Client(timeout=10.0) as client:

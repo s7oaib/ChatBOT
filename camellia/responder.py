@@ -1103,6 +1103,23 @@ class DeterministicResponder:
         # the out-of-syllabus rule, rather than being redirected to a menu.
         return len(substantive) <= 1
 
+    def _with_captions(self, template_id: str, images: List[str]) -> List[Any]:
+        """
+        Pairs each card with its own caption from the template's `image_captions`,
+        positionally. Any card without a caption stays a plain URL, so a template
+        that defines fewer captions than cards still sends every card.
+        """
+        tmpl = next(
+            (t for t in self.qa_data.get("templates", []) if t.get("id") == template_id),
+            {},
+        )
+        captions = tmpl.get("image_captions") or []
+        paired: List[Any] = []
+        for index, url in enumerate(images):
+            caption = captions[index] if index < len(captions) else None
+            paired.append({"url": url, "caption": caption} if caption else url)
+        return paired
+
     def _detect_relevant_images(self, user_message: str) -> Optional[Any]:
         """Attaches relevant menu photo cards when user inquires about products or menus in AI-First mode."""
         lowered = user_message.lower().strip()
@@ -1153,9 +1170,14 @@ class DeterministicResponder:
         formatted_text = default_response
         lowered_msg = (user_message or "").lower().strip()
 
-        # "I want to know more" & Product Overview -> both collection cards + this week's meal menu
+        # "I want to know more" & Product Overview -> both collection cards + this week's meal menu.
+        # Each card carries its own description as a caption so the customer sees
+        # card, detail, card, detail — rather than one block of text followed by a
+        # burst of photos they then have to match up themselves.
         if template_id in ["know_more", "product_overview"]:
-            target_images = [img_aamar_mishti, img_signature_sondesh, current_weekly_img]
+            target_images = self._with_captions(
+                template_id, [img_aamar_mishti, img_signature_sondesh, current_weekly_img]
+            )
 
         # Collection 1 specific queries — send ONLY Collection 1 photo card
         elif template_id in ["aamar_mishti_collection", "nolen_gur_aamar"]:
