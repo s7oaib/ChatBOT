@@ -105,7 +105,11 @@ class RAGFallbackEngine:
             result.retrieved_sources = [f"learned_knowledge#{learned.get('id')}"]
             result.source_chunks = [learned["verified_answer"]]
             result.similarity_score = 1.0
-            result.confidence_score = float(learned.get("confidence") or 1.0)
+            # `or 1.0` would silently upgrade an explicit confidence:0 (staff
+            # marking an entry as not yet trustworthy) to full confidence,
+            # since 0 is falsy. Only a genuinely missing value should default.
+            stored_confidence = learned.get("confidence")
+            result.confidence_score = float(stored_confidence) if stored_confidence is not None else 1.0
             result.proposed_intent = f"learned_{learned.get('id')}"
             result.proposed_response = learned["verified_answer"]
             result.auto_response = learned["verified_answer"]
@@ -192,8 +196,18 @@ class RAGFallbackEngine:
         result.contains_unapproved_facts = self.contains_business_facts(result.proposed_response)
 
         # Only a high-confidence response already present in an approved template
-        # may be sent automatically. Everything else remains human-review material.
-        if result.confidence_score >= HIGH_CONFIDENCE_THRESHOLD and top["source_ref"].startswith("qa_templates.json#"):
+        # may be sent automatically — and only when it does not itself state a
+        # guarded business fact (price, delivery area, allergen info, staff
+        # contact, etc.), since RAG's own word-overlap match to a template is not
+        # the same guarantee as the deterministic matcher's stricter scoring.
+        # contains_unapproved_facts was previously computed and never checked
+        # here, so a template response mentioning a forbidden-fact keyword could
+        # be auto-sent despite the rule stated in this class's own docstring.
+        if (
+            result.confidence_score >= HIGH_CONFIDENCE_THRESHOLD
+            and top["source_ref"].startswith("qa_templates.json#")
+            and not result.contains_unapproved_facts
+        ):
             result.auto_response = result.proposed_response
             result.approval_status = "APPROVED_SOURCE"
 

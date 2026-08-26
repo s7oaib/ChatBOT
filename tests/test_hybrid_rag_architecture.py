@@ -1,7 +1,8 @@
 import os
 import unittest
+from unittest.mock import patch
 from camellia.responder import responder
-from camellia.rag_fallback import rag_fallback_engine
+from camellia.rag_fallback import rag_fallback_engine, RAGFallbackEngine, MEDIUM_CONFIDENCE_THRESHOLD
 from camellia.database import db
 
 class TestHybridRAGArchitecture(unittest.TestCase):
@@ -126,6 +127,82 @@ class TestHybridRAGArchitecture(unittest.TestCase):
         
         self.assertTrue(was_matched)
         self.assertIn("Sushant Lok", text)
+
+    def test_forbidden_facts_block_rag_auto_response(self):
+        """
+        A template response stating a guarded business fact (price, delivery
+        area, allergen info, etc.) must never be auto-sent by RAG, even at high
+        confidence with an approved qa_templates.json source. This was computed
+        as contains_unapproved_facts but never actually checked before setting
+        auto_response, so a matched template mentioning a forbidden-fact keyword
+        could bypass the human-review gate this class documents for itself.
+        """
+        engine = RAGFallbackEngine.__new__(RAGFallbackEngine)
+        engine.qa_data = {
+            "templates": [
+                {
+                    "id": "unsafe_price_test",
+                    "triggers": ["unsafe price test trigger words"],
+                    "response": "That costs ₹999 per box.",
+                }
+            ]
+        }
+        engine.menu_data = {}
+
+        result = engine.retrieve("unsafe price test trigger words")
+
+        self.assertTrue(result.contains_unapproved_facts)
+        self.assertEqual(result.auto_response, "", "A response stating a price must never be auto-sent")
+        # Still worth a human's attention — just not sent automatically.
+        self.assertGreaterEqual(result.confidence_score, MEDIUM_CONFIDENCE_THRESHOLD)
+
+    def test_fact_free_high_confidence_match_can_still_auto_respond(self):
+        """Control for the fix above: a genuinely safe, high-confidence match is unaffected."""
+        engine = RAGFallbackEngine.__new__(RAGFallbackEngine)
+        engine.qa_data = {
+            "templates": [
+                {
+                    "id": "safe_greeting_test",
+                    "triggers": ["safe greeting test trigger words"],
+                    "response": "Thanks so much for reaching out, always happy to help!",
+                }
+            ]
+        }
+        engine.menu_data = {}
+
+        result = engine.retrieve("safe greeting test trigger words")
+
+        self.assertFalse(result.contains_unapproved_facts)
+        self.assertTrue(result.auto_response, "A fact-free high-confidence match should still auto-respond")
+
+    def test_learned_knowledge_zero_confidence_is_not_upgraded(self):
+        """
+        Staff can explicitly set confidence:0 on a learned-knowledge entry via
+        the admin API, meaning "not yet trustworthy." `learned.get('confidence')
+        or 1.0` previously treated that 0 as falsy and silently promoted it to
+        full confidence, auto-sending an answer staff had explicitly flagged.
+        """
+        fake_entry = {
+            "id": 999999,
+            "verified_answer": "Zero-confidence test answer.",
+            "confidence": 0,
+        }
+        with patch("camellia.rag_fallback.db.search_learned_knowledge", return_value=fake_entry):
+            result = rag_fallback_engine.retrieve("some zero confidence test query")
+
+        self.assertEqual(result.confidence_score, 0.0)
+
+    def test_learned_knowledge_missing_confidence_still_defaults_to_full_trust(self):
+        """A genuinely absent confidence value (not an explicit 0) should still default to 1.0."""
+        fake_entry = {
+            "id": 999998,
+            "verified_answer": "No confidence field test answer.",
+        }
+        with patch("camellia.rag_fallback.db.search_learned_knowledge", return_value=fake_entry):
+            result = rag_fallback_engine.retrieve("some missing confidence test query")
+
+        self.assertEqual(result.confidence_score, 1.0)
+
 
 if __name__ == "__main__":
     unittest.main()
