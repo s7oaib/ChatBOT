@@ -13,6 +13,7 @@ from camellia.session_memory import session_memory
 from camellia.order_calculator import order_calculator
 from camellia.rag_fallback import rag_fallback_engine
 from camellia.database import db
+from camellia.trigger_index import trigger_index
 
 log = get_logger("camellia.responder")
 
@@ -667,12 +668,11 @@ class DeterministicResponder:
             
             for trigger in triggers:
                 trigger_lower = trigger.lower().strip()
-                trigger_words = set(re.findall(r'\b\w+\b', trigger_lower))
+                pattern, trigger_words = trigger_index(trigger_lower)
                 t_score = 0
-                
+
                 # Check 1: Exact full word boundary regex match against lowered_text OR cleaned_business_text
-                pattern = r'\b' + re.escape(trigger_lower) + r'\b'
-                if re.search(pattern, lowered_text) or (cleaned_business_text and re.search(pattern, cleaned_business_text)):
+                if pattern.search(lowered_text) or (cleaned_business_text and pattern.search(cleaned_business_text)):
                     t_score = len(trigger_words) * 10 + 10
                 else:
                     # Check 2: Substantive (non-stopword) token intersection

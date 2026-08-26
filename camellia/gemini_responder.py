@@ -1,12 +1,62 @@
 import json
+import re
 import time
 import httpx
+from collections import OrderedDict
 from typing import Tuple, Dict, Any, List, Optional
 from camellia.config import config
 from camellia.database import db
 from camellia.monitoring import get_logger
 
 log = get_logger("camellia.ai_responder")
+
+# Provider failures split into two kinds, and they deserve very different
+# cooldowns.
+#
+# Transient: the provider is up but busy or briefly broken. Worth retrying
+# within the minute.
+TRANSIENT_HTTP_STATUSES = (429, 500, 502, 503)
+TRANSIENT_COOLDOWN_SECONDS = 60.0
+# Configuration: a bad key, a revoked key, or a model name the provider does
+# not serve. Retrying changes nothing — the deployment has to change. These
+# were previously left out of the cooldown entirely, so the provider kept
+# reporting itself available and every single customer message paid a full
+# failed round trip to the API before falling back to the template. Measured
+# at ~145ms per message against a live invalid key.
+CONFIG_ERROR_HTTP_STATUSES = (400, 401, 403, 404)
+CONFIG_ERROR_COOLDOWN_SECONDS = 600.0
+
+
+def _cooldown_for_status(status_code: int) -> float:
+    """Seconds to stop calling a provider after an HTTP failure. 0 = don't."""
+    if status_code in CONFIG_ERROR_HTTP_STATUSES:
+        return CONFIG_ERROR_COOLDOWN_SECONDS
+    if status_code in TRANSIENT_HTTP_STATUSES:
+        return TRANSIENT_COOLDOWN_SECONDS
+    return 0.0
+
+
+# --- Refinement gating -----------------------------------------------------
+# Refinement is cosmetic: it rewords copy a human already approved. It is not
+# worth a network round trip on a reply that states a price or draws a table.
+#
+# Two reasons. Accuracy first — a model asked to reword "₹600 / 250g" can
+# reformat the number, reflow the monospace table, or drop a row, and that
+# lands in front of a paying customer as a wrong price. Speed second — these
+# are the longest templates in the file, so they are the slowest and most
+# expensive ones to send.
+_PRICE_OR_TABLE_RE = re.compile(r'₹|```|\bRs\.?\s*\d|\bINR\b', re.IGNORECASE)
+
+# Repeat traffic on this bot is heavy ("sondesh price", "do you deliver to
+# noida"), and refining the same template for the same question produces the
+# same text. Caching it turns most refinements into a dict lookup instead of a
+# call to the provider.
+_REFINEMENT_CACHE_MAX = 512
+
+
+def _should_refine(template_text: str) -> bool:
+    """False for templates whose exact wording is load-bearing."""
+    return not _PRICE_OR_TABLE_RE.search(template_text or "")
 
 class GeminiResponder:
     """
@@ -30,11 +80,19 @@ class GeminiResponder:
         self._gemini_cooldown_until: float = 0.0
         self._openai_cooldown_until: float = 0.0
         # Outcome of the most recent provider call. Holding a key is not the
-        # same as the key working: an HTTP 400 or 404 fails fast and does not
-        # trip the cooldown, so the provider keeps reporting itself available
-        # while silently refining nothing. This is what health reports on.
+        # same as the key working — a bad key or an unserved model name answers
+        # instantly with an HTTP 400/404 and refines nothing. Those now trip a
+        # long cooldown so the bot stops paying for the round trip, and this is
+        # what /health reports so the failure is visible rather than silent.
         self._last_call_ok: Optional[bool] = None
         self._last_call_detail: str = "no call yet"
+        # (template_id, normalised message, customer context) -> refined text.
+        # The customer context is part of the key on purpose: a refinement can
+        # address the customer by name, so a key without it would serve one
+        # customer's name to the next one asking the same question.
+        self._refinement_cache: "OrderedDict[tuple, str]" = OrderedDict()
+        self._refinement_hits: int = 0
+        self._refinement_misses: int = 0
 
     def _record_call(self, ok: bool, detail: str) -> None:
         self._last_call_ok = ok
@@ -43,6 +101,15 @@ class GeminiResponder:
     def status(self) -> Dict[str, Any]:
         """Reports whether the AI layer is configured AND actually working."""
         provider = self.get_active_provider()
+        now = time.time()
+        paused = {
+            name: round(until - now, 1)
+            for name, until in (
+                ("gemini", self._gemini_cooldown_until),
+                ("openai", self._openai_cooldown_until),
+            )
+            if until > now
+        }
         return {
             "provider": provider,
             "enabled": bool(config.is_ai_enabled),
@@ -51,6 +118,14 @@ class GeminiResponder:
             "last_call": self._last_call_detail,
             # Unknown until a call is made, so absence of a failure is not success.
             "working": bool(self._last_call_ok) if self._last_call_ok is not None else None,
+            # Seconds remaining on each provider's cooldown. A long pause here
+            # means a config error (bad key / wrong model), not load.
+            "paused_seconds": paused,
+            "refinement_cache": {
+                "size": len(self._refinement_cache),
+                "hits": self._refinement_hits,
+                "misses": self._refinement_misses,
+            },
         }
 
     def _load_json(self, path: str) -> Dict[str, Any]:
@@ -62,11 +137,14 @@ class GeminiResponder:
             return {}
 
     def reload_data(self):
-        """Reload JSON context data and reset cooldowns."""
+        """Reload JSON context data, reset cooldowns, drop cached refinements."""
         self.menu_data = self._load_json(self.menu_path)
         self.qa_data = self._load_json(self.qa_path)
         self._gemini_cooldown_until = 0.0
         self._openai_cooldown_until = 0.0
+        # Cached refinements are rewordings of the templates that just changed.
+        # Keeping them would serve the old menu's wording after a menu update.
+        self._refinement_cache.clear()
 
     def get_active_provider(self) -> str:
         """Determines active AI provider: 'gemini', 'openai', or 'none'."""
@@ -176,9 +254,17 @@ class GeminiResponder:
             with httpx.Client(timeout=config.OPENAI_TIMEOUT) as client:
                 resp = client.post(url, json=payload, headers=headers)
                 if resp.status_code != 200:
-                    if resp.status_code in (429, 503, 500, 502):
-                        self._openai_cooldown_until = time.time() + 60.0
+                    cooldown = _cooldown_for_status(resp.status_code)
+                    if cooldown:
+                        self._openai_cooldown_until = time.time() + cooldown
+                        if resp.status_code in CONFIG_ERROR_HTTP_STATUSES:
+                            log.error(
+                                "OpenAI rejected the request as misconfigured (HTTP %s, model %r). "
+                                "Pausing OpenAI calls for %.0fs — check OPENAI_API_KEY and OPENAI_MODEL.",
+                                resp.status_code, config.OPENAI_MODEL, cooldown,
+                            )
                     log.warning("OpenAI HTTP %s: %s", resp.status_code, resp.text[:200])
+                    self._record_call(False, f"HTTP {resp.status_code}: {resp.text[:120]}")
                     return "", False, f"openai_http_{resp.status_code}"
 
                 data = resp.json()
@@ -198,7 +284,7 @@ class GeminiResponder:
                 return assistant_text, True, "openai_rag"
 
         except Exception as e:
-            self._openai_cooldown_until = time.time() + 60.0
+            self._openai_cooldown_until = time.time() + TRANSIENT_COOLDOWN_SECONDS
             log.warning("OpenAI API call failed (%s): %s", config.OPENAI_MODEL, e)
             fallback = self.qa_data.get("escalation_triggers", {}).get(
                 "fallback_response",
@@ -230,8 +316,15 @@ class GeminiResponder:
             with httpx.Client(timeout=timeout) as client:
                 resp = client.post(url, json=payload)
                 if resp.status_code != 200:
-                    if resp.status_code in (429, 503, 500, 502):
-                        self._gemini_cooldown_until = time.time() + 60.0
+                    cooldown = _cooldown_for_status(resp.status_code)
+                    if cooldown:
+                        self._gemini_cooldown_until = time.time() + cooldown
+                        if resp.status_code in CONFIG_ERROR_HTTP_STATUSES:
+                            log.error(
+                                "Gemini rejected the request as misconfigured (HTTP %s, model %r). "
+                                "Pausing Gemini calls for %.0fs — check GEMINI_API_KEY and GEMINI_MODEL.",
+                                resp.status_code, config.GEMINI_MODEL, cooldown,
+                            )
                     log.warning("Gemini HTTP %s: %s", resp.status_code, resp.text[:200])
                     self._record_call(False, f"HTTP {resp.status_code}: {resp.text[:120]}")
                     return "", False, f"gemini_http_{resp.status_code}"
@@ -259,7 +352,7 @@ class GeminiResponder:
                 return assistant_text, True, "gemini_rag"
 
         except Exception as e:
-            self._gemini_cooldown_until = time.time() + 60.0
+            self._gemini_cooldown_until = time.time() + TRANSIENT_COOLDOWN_SECONDS
             self._record_call(False, f"{type(e).__name__}: {str(e)[:120]}")
             log.warning("Gemini API call failed (%s): %s", config.GEMINI_MODEL, e)
             fallback = self.qa_data.get("escalation_triggers", {}).get(
@@ -334,6 +427,25 @@ class GeminiResponder:
         if provider == "none":
             return template_text, False
 
+        # Templates carrying prices or monospace tables are sent as written.
+        if not _should_refine(template_text):
+            return template_text, False
+
+        # Only cache the single-turn form. With history in the prompt the reply
+        # depends on the whole conversation, so a key that ignored it would
+        # return another customer's answer; a key that included it would
+        # essentially never hit. responder.py's hot path passes no history.
+        cache_key = None
+        if not history_turns:
+            normalised = " ".join((user_message or "").lower().split())
+            cache_key = (template_id, normalised, user_context or "")
+            cached = self._refinement_cache.get(cache_key)
+            if cached is not None:
+                self._refinement_cache.move_to_end(cache_key)
+                self._refinement_hits += 1
+                return cached, True
+            self._refinement_misses += 1
+
         # Deliberately without the full knowledge base. Refinement rewords an
         # answer the matcher has already chosen, and that answer is right here in
         # template_text — the rest of the corpus adds nothing to the task. Sending
@@ -365,6 +477,13 @@ class GeminiResponder:
             resp_text, ok, _ = self._query_gemini(prompt_text, is_refinement=True, template_id=template_id)
 
         if ok and resp_text:
+            # Only successful refinements are cached. A failure is transient —
+            # caching the template as if it were a refinement would keep the
+            # bot un-refined long after the provider recovered.
+            if cache_key is not None:
+                self._refinement_cache[cache_key] = resp_text
+                while len(self._refinement_cache) > _REFINEMENT_CACHE_MAX:
+                    self._refinement_cache.popitem(last=False)
             return resp_text, True
 
         return template_text, False

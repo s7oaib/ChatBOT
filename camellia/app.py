@@ -4,7 +4,7 @@ import json
 import os
 import httpx
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Request, Response, Query, Header, HTTPException, File, UploadFile
+from fastapi import FastAPI, Request, Response, Query, Header, HTTPException, File, UploadFile, BackgroundTasks
 from fastapi.responses import PlainTextResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from typing import Dict, Any, Optional
@@ -30,15 +30,27 @@ log = get_logger("camellia.app")
 async def lifespan(app: FastAPI):
     """Enforces database init and the retention window promised on /privacy on startup."""
     db.init_db()
-    if not config.META_APP_SECRET:
-        log.warning(
+    if not config.META_APP_SECRET and not config.REQUIRE_WEBHOOK_SIGNATURE:
+        # CRITICAL rather than WARNING: an unsigned webhook endpoint on a public
+        # domain lets anyone POST fake customer messages, which this bot turns
+        # into real escalation alerts on the manager's phone.
+        log.critical(
             "META_APP_SECRET is not set. Webhook signature verification is DISABLED — "
-            "anyone can POST fake messages. Set it in .env before going live."
+            "anyone who finds the webhook URL can POST fake customer messages and "
+            "trigger real escalation alerts. Set META_APP_SECRET (Meta App Dashboard "
+            "> Settings > Basic > App Secret), then set REQUIRE_WEBHOOK_SIGNATURE=true."
         )
-    if not config.ADMIN_API_KEY:
+    if not (config.ADMIN_API_KEY or config.ADMIN_PIN):
+        # require_admin() fails closed, so this is the admin UI being unusable
+        # rather than being exposed.
         log.warning(
-            "ADMIN_API_KEY is not set. /admin/* endpoints are open to the internet — "
-            "customer conversations and the live menu are publicly readable. Set it in .env."
+            "Neither ADMIN_API_KEY nor ADMIN_PIN is set. /admin/* endpoints will "
+            "refuse every request with 503 — the dashboard cannot be opened."
+        )
+    if not config.WHATSAPP_MOCK_MODE and not (config.WHATSAPP_ACCESS_TOKEN and config.WHATSAPP_PHONE_NUMBER_ID):
+        log.critical(
+            "WhatsApp is in live mode but WHATSAPP_ACCESS_TOKEN / WHATSAPP_PHONE_NUMBER_ID "
+            "are incomplete. Replies will not be delivered."
         )
     try:
         removed = db.purge_expired_data()
@@ -90,6 +102,12 @@ def verify_meta_signature(raw_body: bytes, signature_header: Optional[str]) -> N
     """
     secret = (config.META_APP_SECRET or "").strip()
     if not secret:
+        if config.REQUIRE_WEBHOOK_SIGNATURE:
+            log.error(
+                "Rejected webhook: REQUIRE_WEBHOOK_SIGNATURE is on but META_APP_SECRET "
+                "is not set, so no payload can be verified."
+            )
+            raise HTTPException(status_code=403, detail="Webhook signature verification is required but not configured")
         return
 
     expected = "sha256=" + hmac.new(
@@ -179,9 +197,47 @@ def verify_instagram_webhook(
     log.warning("Instagram webhook verification failed (mode=%s).", hub_mode)
     return Response(content="Forbidden", media_type="text/plain", status_code=403)
 
+def _process_instagram_event(sender_id: str, message_text: str, ad_id: Optional[str]) -> None:
+    """
+    Matches, logs, escalates and replies for one Instagram DM.
+
+    Runs off the webhook request path. Everything in here is blocking — the
+    AI call, sqlite writes, and two outbound Meta calls — and it used to run
+    inside the `async` handler, which meant it blocked the event loop and
+    serialised every concurrent customer behind whoever arrived first. Meta
+    also retries a webhook it believes timed out, so a slow handler earns
+    itself duplicate deliveries of the same message.
+
+    Starlette runs a sync background function in a worker thread, so this both
+    frees the loop and lets several customers be handled at once.
+    """
+    try:
+        response_text, was_matched, template_id, image_url = responder.match_and_respond(
+            message_text, user_id=sender_id, channel="instagram",
+            referral_source="ADS", referral_ad_id=ad_id,
+        )
+
+        db.log_conversation(sender_id, "instagram", message_text, response_text, was_matched, template_id)
+
+        if not was_matched or template_id == "order_next_steps":
+            escalator.handle_escalation(
+                user_id=sender_id,
+                channel="instagram",
+                user_message=message_text,
+                reason="Order Confirmation & Intake Request" if was_matched else "Unmatched Instagram Query / Sensitive Request",
+                context_data={"ad_id": ad_id, "sender_id": sender_id, "template_id": template_id},
+            )
+
+        send_instagram_reply(sender_id, response_text, image_url=image_url)
+    except Exception:
+        # A background task that raises disappears silently, and the customer
+        # is left with no reply and nothing in the logs explaining why.
+        log.exception("Failed to process Instagram message from %s.", sender_id)
+
+
 @app.post("/webhook/instagram")
 @limiter.limit("120/minute")
-async def handle_instagram_webhook(request: Request):
+async def handle_instagram_webhook(request: Request, background_tasks: BackgroundTasks):
     """
     Handles Instagram DM Webhooks.
     Applies Ad-Gate: Responds ONLY to Ad-originated messages (referral.source == 'ADS').
@@ -227,35 +283,13 @@ async def handle_instagram_webhook(request: Request):
                 results.append({"sender_id": sender_id, "action": "ignored_organic_dm"})
                 continue
 
-            # Match Q&A response with session memory
-            referral_src = "ADS" if is_ad_qualified else None
-            response_text, was_matched, template_id, image_url = responder.match_and_respond(
-                message_text, user_id=sender_id, channel="instagram", referral_source=referral_src, referral_ad_id=ad_id
-            )
-            
-            # Log exchange to DB
-            db.log_conversation(sender_id, "instagram", message_text, response_text, was_matched, template_id)
-
-            # If unmatched OR order confirmation, escalate to human contact
-            if not was_matched or template_id == "order_next_steps":
-                escalator.handle_escalation(
-                    user_id=sender_id,
-                    channel="instagram",
-                    user_message=message_text,
-                    reason="Order Confirmation & Intake Request" if was_matched else "Unmatched Instagram Query / Sensitive Request",
-                    context_data={"ad_id": ad_id, "sender_id": sender_id, "template_id": template_id}
-                )
-
-            # Dispatch outbound reply via Meta Graph API
-            send_status = send_instagram_reply(sender_id, response_text, image_url=image_url)
-            
+            # Accepted. The reply itself is built and sent off the request path
+            # so Meta gets its 200 immediately and does not retry this delivery.
+            background_tasks.add_task(_process_instagram_event, sender_id, message_text, ad_id)
             results.append({
                 "sender_id": sender_id,
-                "action": "auto_replied" if was_matched else "escalated",
-                "template_id": template_id,
-                "response_preview": response_text[:60],
-                "image_url": image_url,
-                "send_status": send_status
+                "action": "queued",
+                "ad_id": ad_id,
             })
 
     return {"status": "processed", "results": results}
@@ -331,9 +365,23 @@ def verify_whatsapp_webhook(
     log.warning("WhatsApp webhook verification failed: invalid token.")
     raise HTTPException(status_code=403, detail="Verification token mismatch")
 
+def _process_whatsapp_event(sender_phone: str, message_text: str) -> None:
+    """
+    Handles one WhatsApp message off the webhook request path.
+
+    Same reasoning as the Instagram side: the work is blocking, it used to run
+    inside the `async` handler and stall the event loop for every other
+    customer, and a slow 200 makes Meta redeliver the message.
+    """
+    try:
+        whatsapp_adapter.process_incoming_message(sender_phone, message_text)
+    except Exception:
+        log.exception("Failed to process WhatsApp message from %s.", sender_phone)
+
+
 @app.post("/webhook/whatsapp")
 @limiter.limit("120/minute")
-async def handle_whatsapp_webhook(request: Request):
+async def handle_whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
     """Handles WhatsApp Business Webhook events."""
     raw_body = await request.body()
     verify_meta_signature(raw_body, request.headers.get("X-Hub-Signature-256"))
@@ -347,8 +395,8 @@ async def handle_whatsapp_webhook(request: Request):
         return {"status": "no_message_event"}
 
     sender_phone, msg_id, message_text = parsed
-    result = whatsapp_adapter.process_incoming_message(sender_phone, message_text)
-    return result
+    background_tasks.add_task(_process_whatsapp_event, sender_phone, message_text)
+    return {"status": "queued", "sender_phone": sender_phone, "message_id": msg_id}
 
 # --------------------------------------------------------------------------
 # Legal Pages (required by Meta before an app can go Live, and by the
@@ -554,21 +602,81 @@ def _answering_capability() -> dict:
     }
 
 
+def _delivery_capability() -> dict:
+    """
+    Reports whether a reply would actually reach a customer.
+
+    Mock mode is the failure worth naming here: it never constructs an outbound
+    request, so the bot looks entirely healthy while every customer sits in
+    silence. That is indistinguishable from working unless something says so.
+    """
+    if config.WHATSAPP_MOCK_MODE:
+        # Not counted as unhealthy: mock is the correct and default state for
+        # local development and the test suite, and failing health there would
+        # train everyone to ignore a red health check. It is surfaced as a
+        # warning instead, so an operator looking at a deployed bot can see it.
+        return {
+            "delivering": False,
+            "mode": "mock",
+            "problem": "WHATSAPP_MOCK_MODE is on — replies are logged, never sent to customers.",
+        }
+    missing = [
+        name for name, value in (
+            ("WHATSAPP_ACCESS_TOKEN", config.WHATSAPP_ACCESS_TOKEN),
+            ("WHATSAPP_PHONE_NUMBER_ID", config.WHATSAPP_PHONE_NUMBER_ID),
+        ) if not value
+    ]
+    return {
+        "delivering": not missing,
+        "mode": "live",
+        "problem": f"missing {', '.join(missing)}" if missing else None,
+    }
+
+
+def _webhook_signature_status() -> str:
+    """How webhook payloads are being authenticated, in one word."""
+    if config.META_APP_SECRET:
+        return "enforced"
+    if config.REQUIRE_WEBHOOK_SIGNATURE:
+        return "required_but_unconfigured"
+    return "DISABLED"
+
+
 @app.get("/health")
 def health_check():
     """Deep health check. Point an uptime monitor at this, not at /."""
     outbound = delivery_monitor.snapshot()
     answering = _answering_capability()
+    delivery = _delivery_capability()
+    signature = _webhook_signature_status()
 
-    # A bot that cannot answer is down, whatever else is working.
-    healthy = outbound["healthy"] and answering["ready"]
+    # A bot that cannot answer is down, whatever else is working. Live mode
+    # without credentials is the same kind of failure one step later — it
+    # produces a reply that cannot be delivered.
+    live_but_broken = delivery["mode"] == "live" and not delivery["delivering"]
+    healthy = outbound["healthy"] and answering["ready"] and not live_but_broken
     if not answering["ready"]:
         log.error("Health check failed — bot cannot answer: %s", "; ".join(answering["problems"]))
+    if live_but_broken:
+        log.error("Health check failed — replies cannot be delivered: %s", delivery["problem"])
+
+    # Things that are not outages but that an operator needs to see, because
+    # each of them looks exactly like a working bot from the outside.
+    warnings = []
+    if delivery["mode"] == "mock":
+        warnings.append(delivery["problem"])
+    if signature == "DISABLED":
+        warnings.append("META_APP_SECRET unset — webhook payloads are not verified.")
+    if config.ENABLE_WEB_TESTER:
+        warnings.append("ENABLE_WEB_TESTER is on — /chat is reachable by anyone with the URL.")
 
     return Response(
         content=json.dumps({
             "status": "healthy" if healthy else "degraded",
+            "warnings": warnings,
             "answering": answering,
+            "reply_delivery": delivery,
+            "webhook_signature": signature,
             "outbound_delivery": outbound,
             # Not just which provider is configured — whether it last worked.
             "ai": gemini_responder.status(),
@@ -1316,6 +1424,7 @@ def get_admin_dashboard():
             <button class="tab-btn" onclick="switchTab('tab-stats', this)">📈 Escalations & Self-Healing</button>
             <button class="tab-btn" onclick="switchTab('tab-conversations', this)">💬 Live Conversations</button>
             <button class="tab-btn" onclick="switchTab('tab-knowledge', this)">🧠 Learned Knowledge</button>
+            <button class="tab-btn" onclick="switchTab('tab-candidates', this)">✅ Suggested Answers <span id="candidateBadge" style="display:none; background: var(--danger); color: #fff; border-radius: 10px; padding: 1px 7px; font-size: 0.72rem; margin-left: 4px;"></span></button>
         </div>
 
         <!-- TAB 1: Paste Menu Text -->
@@ -1553,6 +1662,36 @@ def get_admin_dashboard():
             </div>
         </div>
 
+        <!-- TAB 8: Candidate Answers Awaiting Approval -->
+        <div class="panel-card" id="tab-candidates" style="display: none;">
+            <div class="panel-header">
+                <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+                    <div>
+                        <h2>✅ Suggested Answers Awaiting Your Approval</h2>
+                        <p>When a customer asks something the bot has no approved answer for, it drafts one and parks it here. <b>Nothing on this page has been shown to a customer.</b> Approving an answer adds it to the bot's verified knowledge, so the next customer who asks gets it instantly instead of waiting for a human.</p>
+                    </div>
+                    <button class="btn-secondary" onclick="loadCandidates()">🔄 Refresh</button>
+                </div>
+            </div>
+
+            <div style="overflow-x: auto;">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>Customer Asked</th>
+                            <th>Draft Answer — read it before approving</th>
+                            <th>Confidence</th>
+                            <th>Drafted By</th>
+                            <th>Action</th>
+                        </tr>
+                    </thead>
+                    <tbody id="candidatesTableBody">
+                        <tr><td colspan="5" style="text-align: center; color: #888;">Loading suggested answers...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
     </div>
 
     <!-- Teach & Resolve Modal -->
@@ -1585,6 +1724,7 @@ def get_admin_dashboard():
                 document.getElementById('authOverlay').style.display = 'none';
                 loadActiveMenu();
                 loadAnalytics();
+                refreshCandidateBadge();
             } else {
                 document.getElementById('authOverlay').style.display = 'flex';
             }
@@ -1608,6 +1748,7 @@ def get_admin_dashboard():
                     document.getElementById('authOverlay').style.display = 'none';
                     loadActiveMenu();
                     loadAnalytics();
+                    refreshCandidateBadge();
                 } else {
                     const card = document.getElementById('authCard');
                     card.classList.add('shake');
@@ -1650,6 +1791,7 @@ def get_admin_dashboard():
             if (tabId === 'tab-stats') loadAnalytics();
             if (tabId === 'tab-conversations') loadConversations();
             if (tabId === 'tab-knowledge') loadKnowledge();
+            if (tabId === 'tab-candidates') loadCandidates();
         }
 
         // TAB 1: Submit Text
@@ -2061,6 +2203,115 @@ Non-Veg:
                 }
             } catch (err) {
                 tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: red;">Failed to load knowledge base.</td></tr>';
+            }
+        }
+
+        // TAB 8: Candidate answers awaiting approval.
+        //
+        // The bot has always drafted these and saved them as PENDING_APPROVAL,
+        // and the approve/reject API has always existed, but nothing in this
+        // dashboard ever showed them — so the queue only ever grew. Approving
+        // good drafts is what raises the bot's answer rate over time, and it
+        // costs no latency at all: an approved answer is served from the
+        // verified knowledge base, not from a model.
+        async function loadCandidates() {
+            const tbody = document.getElementById('candidatesTableBody');
+            tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: #888;">Loading suggested answers...</td></tr>';
+
+            try {
+                const resp = await fetch('/admin/candidates', { headers: getAuthHeaders() });
+                if (!resp.ok) {
+                    tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: red;">Could not load suggested answers.</td></tr>';
+                    return;
+                }
+                const data = await resp.json();
+                const items = data.candidates || [];
+                updateCandidateBadge(items.length);
+
+                if (!items.length) {
+                    tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: #888;">Nothing waiting. Drafts appear here when a customer asks something the bot cannot yet answer.</td></tr>';
+                    return;
+                }
+
+                let rows = '';
+                items.forEach(c => {
+                    const confidence = Math.round((c.confidence || 0) * 100);
+                    const confColour = confidence >= 85 ? 'var(--success, #2e7d32)' : (confidence >= 60 ? '#b26a00' : 'var(--danger)');
+                    rows += `
+                    <tr>
+                        <td style="max-width: 200px;"><b>${escapeHtml(c.user_message || '—')}</b></td>
+                        <td style="max-width: 340px; white-space: pre-wrap; font-size: 0.82rem;">${escapeHtml(c.response)}</td>
+                        <td style="color: ${confColour}; font-weight: 600;">${confidence}%</td>
+                        <td><span class="badge badge-veg">${escapeHtml(c.created_by || 'bot')}</span></td>
+                        <td style="white-space: nowrap;">
+                            <button class="btn-primary" style="padding: 4px 10px; font-size: 0.75rem;" onclick="approveCandidate(${c.id})">✅ Approve</button>
+                            <button class="btn-secondary" style="padding: 4px 10px; font-size: 0.75rem; color: var(--danger);" onclick="rejectCandidate(${c.id})">✕ Reject</button>
+                        </td>
+                    </tr>`;
+                });
+                tbody.innerHTML = rows;
+            } catch (err) {
+                tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: red;">Failed to load suggested answers.</td></tr>';
+            }
+        }
+
+        function updateCandidateBadge(count) {
+            const badge = document.getElementById('candidateBadge');
+            if (!badge) return;
+            if (count > 0) {
+                badge.textContent = count;
+                badge.style.display = 'inline-block';
+            } else {
+                badge.style.display = 'none';
+            }
+        }
+
+        // Counts the queue without opening the tab, so a pending draft is
+        // visible the moment the dashboard is unlocked rather than only to
+        // someone who already knows to go looking for it.
+        async function refreshCandidateBadge() {
+            try {
+                const resp = await fetch('/admin/candidates', { headers: getAuthHeaders() });
+                if (!resp.ok) return;
+                const data = await resp.json();
+                updateCandidateBadge((data.candidates || []).length);
+            } catch (err) { /* badge is a nicety; never block the dashboard on it */ }
+        }
+
+        async function approveCandidate(id) {
+            if (!confirm('Approve this answer?\n\nIt will be added to the bot\'s verified knowledge and sent to customers who ask this from now on.')) return;
+            try {
+                const resp = await fetch(`/admin/candidates/${id}/approve`, {
+                    method: 'POST',
+                    headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ approved_by: 'admin_dashboard' })
+                });
+                if (resp.ok) {
+                    loadCandidates();
+                } else {
+                    const err = await resp.json().catch(() => ({}));
+                    alert('Could not approve: ' + (err.detail || resp.status));
+                }
+            } catch (err) {
+                alert('Could not approve: ' + err);
+            }
+        }
+
+        async function rejectCandidate(id) {
+            if (!confirm('Reject this draft? It will not be shown to customers and will be removed from this list.')) return;
+            try {
+                const resp = await fetch(`/admin/candidates/${id}/reject`, {
+                    method: 'POST',
+                    headers: getAuthHeaders()
+                });
+                if (resp.ok) {
+                    loadCandidates();
+                } else {
+                    const err = await resp.json().catch(() => ({}));
+                    alert('Could not reject: ' + (err.detail || resp.status));
+                }
+            } catch (err) {
+                alert('Could not reject: ' + err);
             }
         }
 

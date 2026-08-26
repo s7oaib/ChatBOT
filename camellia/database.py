@@ -129,8 +129,50 @@ class Database:
             cursor.execute("INSERT OR IGNORE INTO analytics (key, value) VALUES ('total_messages', 0);")
             cursor.execute("INSERT OR IGNORE INTO analytics (key, value) VALUES ('matched_responses', 0);")
             cursor.execute("INSERT OR IGNORE INTO analytics (key, value) VALUES ('escalations_count', 0);")
-            
+
+            self._create_indexes(cursor)
+
             conn.commit()
+
+    @staticmethod
+    def _create_indexes(cursor) -> None:
+        """
+        Indexes for the columns actually filtered and sorted on.
+
+        Every table here was previously unindexed apart from the implicit
+        primary keys, so each admin query and each retention purge was a full
+        scan. That is invisible on a few hundred rows and gets steadily worse:
+        `conversations` grows by one row per customer message and is the table
+        the dashboard reads most.
+
+        Chosen from the real query shapes in this file rather than added to
+        every column — an index that is never used still has to be written on
+        every insert, and inserts here sit in the customer's reply path.
+        """
+        statements = (
+            # get_conversations() filters on channel and/or user_id, ordered by
+            # id DESC. delete_user_data() and purge_expired_data() filter on
+            # user_id and timestamp respectively.
+            "CREATE INDEX IF NOT EXISTS idx_conversations_user_channel ON conversations(user_id, channel, id DESC);",
+            "CREATE INDEX IF NOT EXISTS idx_conversations_channel_id ON conversations(channel, id DESC);",
+            "CREATE INDEX IF NOT EXISTS idx_conversations_timestamp ON conversations(timestamp);",
+            # get_escalations() filters on status, ordered by id DESC.
+            "CREATE INDEX IF NOT EXISTS idx_escalations_status_id ON escalations(status, id DESC);",
+            "CREATE INDEX IF NOT EXISTS idx_escalations_user ON escalations(user_id);",
+            "CREATE INDEX IF NOT EXISTS idx_escalations_created ON escalations(created_at);",
+            # sessions already has a UNIQUE(user_id, channel) index, which
+            # serves the per-user lookup; this one serves the dashboard's
+            # channel filter with its updated_at ordering and the purge.
+            "CREATE INDEX IF NOT EXISTS idx_sessions_channel_updated ON sessions(channel, updated_at DESC);",
+            "CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at);",
+            # get_pending_candidates() filters on status, ordered by created_at.
+            "CREATE INDEX IF NOT EXISTS idx_candidates_status_created ON candidate_templates(status, created_at DESC);",
+            # get_learned_knowledge() reads the newest N; the primary key
+            # already orders by id, so only the audit log needs help here.
+            "CREATE INDEX IF NOT EXISTS idx_rag_audit_timestamp ON rag_audit_logs(timestamp DESC);",
+        )
+        for statement in statements:
+            cursor.execute(statement)
 
     def set_ad_qualified(self, user_id: str, channel: str, is_ad_qualified: bool = True, ad_id: Optional[str] = None):
         """Mark user session as ad_qualified."""

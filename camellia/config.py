@@ -59,6 +59,16 @@ class Config:
     # Public Domain / ngrok URL for serving images & webhooks
     PUBLIC_BASE_URL: str = os.getenv("PUBLIC_BASE_URL", "")
 
+    # When true, a webhook POST with a missing or wrong signature is rejected
+    # even if META_APP_SECRET is unset — meaning an unconfigured deployment
+    # stops answering rather than accepting forged customer messages.
+    #
+    # Left opt-in rather than defaulted on: turning it on before the secret is
+    # actually set in the live environment would take a running bot off the air.
+    # The intended order is set META_APP_SECRET, confirm /health reports
+    # webhook_signature "enforced", then set this to true.
+    REQUIRE_WEBHOOK_SIGNATURE: bool = os.getenv("REQUIRE_WEBHOOK_SIGNATURE", "false").lower() in ("true", "1", "t", "yes")
+
     # Protects /admin/* endpoints (customer logs & menu overwrite). Unset = open.
     ADMIN_API_KEY: str = os.getenv("ADMIN_API_KEY", "")
     ADMIN_PIN: str = os.getenv("ADMIN_PIN", "")  # Must be explicitly configured via ADMIN_PIN env; unconfigured blocks admin access

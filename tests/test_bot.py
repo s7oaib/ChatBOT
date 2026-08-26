@@ -3,6 +3,7 @@ import json
 import hmac
 import hashlib
 import sqlite3
+import time
 import unittest
 from unittest.mock import patch, MagicMock, PropertyMock
 from fastapi.testclient import TestClient
@@ -378,7 +379,12 @@ class TestCamelliaBot(unittest.TestCase):
         data = res_post.json()
         self.assertEqual(data["results"][0]["action"], "ignored_organic_dm")
 
-        # 3. POST Event - Ad DM (Auto-Replied)
+        # 3. POST Event - Ad DM (accepted and queued)
+        #
+        # The webhook acknowledges the delivery and builds the reply off the
+        # request path, so the response reports the routing decision rather
+        # than the finished reply. What matters is that the customer still gets
+        # answered — asserted below on the background task's actual effects.
         payload_ad = {
             "object": "instagram",
             "entry": [{
@@ -391,11 +397,45 @@ class TestCamelliaBot(unittest.TestCase):
                 }]
             }]
         }
-        with patch("camellia.app.send_instagram_reply"):
+        with patch("camellia.app.send_instagram_reply") as mock_send:
             res_post_ad = self._post_signed("/webhook/instagram", payload_ad)
         self.assertEqual(res_post_ad.status_code, 200)
         data_ad = res_post_ad.json()
-        self.assertEqual(data_ad["results"][0]["action"], "auto_replied")
+        self.assertEqual(data_ad["results"][0]["action"], "queued")
+        self.assertEqual(data_ad["results"][0]["ad_id"], "ad_888")
+
+        # The reply was actually built and dispatched to the customer.
+        mock_send.assert_called_once()
+        self.assertEqual(mock_send.call_args[0][0], "ig_ad_user")
+        self.assertTrue(mock_send.call_args[0][1].strip(), "customer must receive non-empty text")
+
+        # And the exchange reached the conversation log.
+        logged = db.get_conversations(limit=5, user_id="ig_ad_user")
+        self.assertTrue(logged, "the queued message must still be logged")
+
+    def test_instagram_webhook_failure_does_not_break_the_ack(self):
+        """
+        A crash while building the reply is logged, not swallowed silently, and
+        never turns into a non-200 that would make Meta redeliver the message.
+        """
+        payload_ad = {
+            "object": "instagram",
+            "entry": [{
+                "messaging": [{
+                    "sender": {"id": "ig_boom_user"},
+                    "message": {
+                        "text": "sondesh price",
+                        "referral": {"source": "ADS", "ad_id": "ad_boom"}
+                    }
+                }]
+            }]
+        }
+        with patch("camellia.app.responder.match_and_respond", side_effect=RuntimeError("boom")), \
+             patch("camellia.app.log.exception") as mock_log:
+            res = self._post_signed("/webhook/instagram", payload_ad)
+
+        self.assertEqual(res.status_code, 200)
+        mock_log.assert_called_once()
 
     def test_webhook_rejects_unsigned_payload(self):
         """An unsigned POST must be refused whenever META_APP_SECRET is configured."""
@@ -891,30 +931,183 @@ class TestCamelliaBot(unittest.TestCase):
 
     @patch("camellia.gemini_responder.httpx.Client")
     def test_gemini_template_refinement(self, mock_httpx_cls):
-        """Verify Gemini AI refines template response when enabled."""
+        """Verify Gemini AI refines a template that carries no prices or tables."""
         from camellia.responder import responder
         from camellia.gemini_responder import gemini_responder
-        
+
+        refined = "Hello Shoaib! We deliver fresh across Delhi NCR every day."
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = {
-            "candidates": [
-                {
-                    "content": {
-                        "parts": [{"text": "Hello Shoaib! Here are the details for Collection 2 — Signature Collection made from desi A2 cow milk."}]
-                    }
-                }
-            ]
+            "candidates": [{"content": {"parts": [{"text": refined}]}}]
         }
         mock_httpx_cls.return_value.__enter__.return_value.post.return_value = mock_response
 
         gemini_responder._gemini_cooldown_until = 0.0
+        gemini_responder._refinement_cache.clear()
         with patch.object(config, "GEMINI_ENABLED", True), patch.object(config, "GEMINI_API_KEY", "fake_key"):
-            resp, match, tmpl, _ = responder.match_and_respond("collection 2", user_id="test_ai_refine", channel="whatsapp")
+            resp, match, tmpl, _ = responder.match_and_respond(
+                "which areas do you deliver to", user_id="test_ai_refine", channel="whatsapp"
+            )
+            self.assertTrue(match)
+            self.assertIn("Hello Shoaib!", resp)
+
+    @patch("camellia.gemini_responder.httpx.Client")
+    def test_price_table_template_is_never_refined(self, mock_httpx_cls):
+        """
+        A template stating prices or drawing a monospace table is sent exactly as
+        written, without going near the model.
+
+        Refinement is cosmetic — it rewords copy a human already approved. Asked
+        to reword "₹600 / 250g" a model can reformat the number, reflow the
+        table, or drop a row, and that reaches a paying customer as a wrong
+        price. Skipping the call also removes a network round trip from the
+        longest replies the bot sends.
+        """
+        from camellia.responder import responder
+        from camellia.gemini_responder import gemini_responder
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "candidates": [{"content": {"parts": [{"text": "REWORDED — prices mangled"}]}}]
+        }
+        mock_httpx_cls.return_value.__enter__.return_value.post.return_value = mock_response
+
+        gemini_responder._gemini_cooldown_until = 0.0
+        gemini_responder._refinement_cache.clear()
+        with patch.object(config, "GEMINI_ENABLED", True), patch.object(config, "GEMINI_API_KEY", "fake_key"):
+            resp, match, tmpl, _ = responder.match_and_respond(
+                "collection 2", user_id="test_price_no_refine", channel="whatsapp"
+            )
             self.assertTrue(match)
             self.assertEqual(tmpl, "signature_collection")
-            self.assertIn("Hello Shoaib!", resp)
+            self.assertNotIn("REWORDED", resp)
             self.assertIn("Collection 2 — Signature Collection", resp)
+            mock_httpx_cls.return_value.__enter__.return_value.post.assert_not_called()
+
+    @patch("camellia.gemini_responder.httpx.Client")
+    def test_repeat_question_reuses_cached_refinement(self, mock_httpx_cls):
+        """
+        The same question against the same template refines once, then serves
+        from cache — the provider is not called again.
+        """
+        from camellia.gemini_responder import gemini_responder
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "candidates": [{"content": {"parts": [{"text": "Refined once."}]}}]
+        }
+        post = mock_httpx_cls.return_value.__enter__.return_value.post
+        post.return_value = mock_response
+
+        gemini_responder._gemini_cooldown_until = 0.0
+        gemini_responder._refinement_cache.clear()
+        with patch.object(config, "GEMINI_ENABLED", True), patch.object(config, "GEMINI_API_KEY", "fake_key"):
+            first, ok1 = gemini_responder.refine_template_response(
+                "delivery_area", "We deliver across Delhi NCR.", "where do you deliver"
+            )
+            # Same question, different spacing and case — still one call.
+            second, ok2 = gemini_responder.refine_template_response(
+                "delivery_area", "We deliver across Delhi NCR.", "  Where  Do You Deliver  "
+            )
+
+        self.assertTrue(ok1)
+        self.assertTrue(ok2)
+        self.assertEqual(first, "Refined once.")
+        self.assertEqual(second, "Refined once.")
+        self.assertEqual(post.call_count, 1)
+
+    @patch("camellia.gemini_responder.httpx.Client")
+    def test_refinement_cache_does_not_leak_customer_names(self, mock_httpx_cls):
+        """
+        Two customers asking the identical question must not share a cached
+        refinement, because a refinement can address the customer by name.
+        """
+        from camellia.gemini_responder import gemini_responder
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "candidates": [{"content": {"parts": [{"text": "Hi Asha, we deliver across Delhi NCR."}]}}]
+        }
+        post = mock_httpx_cls.return_value.__enter__.return_value.post
+        post.return_value = mock_response
+
+        gemini_responder._gemini_cooldown_until = 0.0
+        gemini_responder._refinement_cache.clear()
+        with patch.object(config, "GEMINI_ENABLED", True), patch.object(config, "GEMINI_API_KEY", "fake_key"):
+            gemini_responder.refine_template_response(
+                "delivery_area", "We deliver across Delhi NCR.", "where do you deliver",
+                user_context="Customer Name: Asha",
+            )
+            gemini_responder.refine_template_response(
+                "delivery_area", "We deliver across Delhi NCR.", "where do you deliver",
+                user_context="Customer Name: Bikram",
+            )
+
+        # A shared key would have served Asha's greeting to Bikram on one call.
+        self.assertEqual(post.call_count, 2)
+
+    @patch("camellia.gemini_responder.httpx.Client")
+    def test_bad_api_key_pauses_provider_instead_of_retrying_forever(self, mock_httpx_cls):
+        """
+        An HTTP 400 (bad key / unserved model) stops the bot calling the
+        provider at all.
+
+        Previously only 429/500/502/503 tripped the cooldown, so a
+        misconfigured key kept reporting itself available and every single
+        customer message paid a full failed round trip before falling back to
+        the template — measured at ~145ms per message against a live invalid
+        key. Retrying a config error changes nothing; the deployment has to.
+        """
+        from camellia.gemini_responder import gemini_responder
+
+        mock_response = MagicMock()
+        mock_response.status_code = 400
+        mock_response.text = '{"error": {"message": "API key not valid."}}'
+        post = mock_httpx_cls.return_value.__enter__.return_value.post
+        post.return_value = mock_response
+
+        gemini_responder._gemini_cooldown_until = 0.0
+        with patch.object(config, "GEMINI_ENABLED", True), \
+             patch.object(config, "GEMINI_API_KEY", "bad_key"), \
+             patch.object(config, "AI_PROVIDER", "gemini"), \
+             patch.object(config, "OPENAI_API_KEY", ""):
+            _, ok, reason = gemini_responder._query_gemini("hello")
+            self.assertFalse(ok)
+            self.assertEqual(reason, "gemini_http_400")
+
+            # The provider is now parked, so nothing calls it again.
+            self.assertEqual(gemini_responder.get_active_provider(), "none")
+            self.assertGreater(gemini_responder._gemini_cooldown_until, time.time() + 60)
+
+            # And /health says so rather than reporting a healthy AI layer.
+            status = gemini_responder.status()
+            self.assertIs(status["working"], False)
+            self.assertIn("gemini", status["paused_seconds"])
+
+        gemini_responder._gemini_cooldown_until = 0.0
+
+    @patch("camellia.gemini_responder.httpx.Client")
+    def test_transient_error_uses_the_short_cooldown(self, mock_httpx_cls):
+        """A 503 is the provider being busy, so it is retried within the minute."""
+        from camellia.gemini_responder import gemini_responder
+
+        mock_response = MagicMock()
+        mock_response.status_code = 503
+        mock_response.text = "overloaded"
+        mock_httpx_cls.return_value.__enter__.return_value.post.return_value = mock_response
+
+        gemini_responder._gemini_cooldown_until = 0.0
+        with patch.object(config, "GEMINI_ENABLED", True), patch.object(config, "GEMINI_API_KEY", "k"):
+            gemini_responder._query_gemini("hello")
+
+        pause = gemini_responder._gemini_cooldown_until - time.time()
+        self.assertGreater(pause, 0)
+        self.assertLessEqual(pause, 60.0)
+        gemini_responder._gemini_cooldown_until = 0.0
 
     def test_how_much_is_sondesh_price_inquiry(self):
         """Verify 'How much is Sondesh?' returns price info template/RAG instead of order receipt draft."""
