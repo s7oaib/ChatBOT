@@ -2285,6 +2285,8 @@ def get_web_chat():
             .chat-code-table code { font-family: inherit; color: inherit; background: transparent; padding: 0; }
             code:not(.chat-code-table code) { background: #f1f5f9; color: #8B1E3F; padding: 2px 5px; border-radius: 4px; font-size: 0.85em; font-family: monospace; }
             .menu-card-img { width: 100%; border-radius: 8px; margin-bottom: 8px; border: 1px solid #ddd; display: block; object-fit: contain; }
+            .menu-card-wrap { margin-bottom: 10px; }
+            .menu-card-caption { margin: 0 0 8px; font-size: 0.92em; }
             .meta-tag { font-size: 0.72rem; color: #6c757d; margin-top: 4px; display: block; }
             .input-area { padding: 12px 16px; background: white; border-top: 1px solid #e9ecef; display: flex; gap: 8px; }
             input[type="text"] { flex: 1; padding: 10px 14px; border: 1px solid #ced4da; border-radius: 24px; outline: none; font-size: 0.95rem; }
@@ -2592,8 +2594,18 @@ def get_web_chat():
                 div.className = 'message ' + className;
                 
                 if (imageUrl) {
-                    const urls = Array.isArray(imageUrl) ? imageUrl : [imageUrl];
-                    urls.forEach(u => {
+                    const entries = Array.isArray(imageUrl) ? imageUrl : [imageUrl];
+                    // Each entry is either a plain URL string, or {url, caption}
+                    // when the template pairs a card with its own description.
+                    entries.forEach(entry => {
+                        const isObj = entry && typeof entry === 'object';
+                        const u = isObj ? entry.url : entry;
+                        const caption = isObj ? entry.caption : null;
+                        if (!u) return;
+
+                        const wrap = document.createElement('div');
+                        wrap.className = 'menu-card-wrap';
+
                         const img = document.createElement('img');
                         img.src = u;
                         img.className = 'menu-card-img';
@@ -2608,7 +2620,16 @@ def get_web_chat():
                         } else {
                             img.alt = 'Camellia Artisanal Menu Card';
                         }
-                        div.appendChild(img);
+                        wrap.appendChild(img);
+
+                        if (caption) {
+                            const capDiv = document.createElement('div');
+                            capDiv.className = 'msg-content menu-card-caption';
+                            capDiv.innerHTML = formatMarkdown(caption);
+                            wrap.appendChild(capDiv);
+                        }
+
+                        div.appendChild(wrap);
                     });
                 }
 
