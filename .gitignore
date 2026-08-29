@@ -32,3 +32,8 @@ scratch/
 simulation_results.json
 
 
+
+# Local-only working files. Kept on disk, deliberately not tracked:
+# a personal working log, and the dev-server config read by local tooling.
+PROJECT_JOURNAL.md
+.claude/

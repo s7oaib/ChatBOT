@@ -59,6 +59,16 @@ class Config:
     # Public Domain / ngrok URL for serving images & webhooks
     PUBLIC_BASE_URL: str = os.getenv("PUBLIC_BASE_URL", "")
 
+    # When true, a webhook POST with a missing or wrong signature is rejected
+    # even if META_APP_SECRET is unset — meaning an unconfigured deployment
+    # stops answering rather than accepting forged customer messages.
+    #
+    # Left opt-in rather than defaulted on: turning it on before the secret is
+    # actually set in the live environment would take a running bot off the air.
+    # The intended order is set META_APP_SECRET, confirm /health reports
+    # webhook_signature "enforced", then set this to true.
+    REQUIRE_WEBHOOK_SIGNATURE: bool = os.getenv("REQUIRE_WEBHOOK_SIGNATURE", "false").lower() in ("true", "1", "t", "yes")
+
     # Protects /admin/* endpoints (customer logs & menu overwrite). Unset = open.
     ADMIN_API_KEY: str = os.getenv("ADMIN_API_KEY", "")
     ADMIN_PIN: str = os.getenv("ADMIN_PIN", "")  # Must be explicitly configured via ADMIN_PIN env; unconfigured blocks admin access
@@ -147,40 +157,33 @@ class Config:
     # Google Sheet CSV URL for Menu Updates (Option A in PRD)
     GOOGLE_SHEET_CSV_URL: str = os.getenv("GOOGLE_SHEET_CSV_URL", "")
 
-    # AI Engine Config (Google Gemini Flash)
-    AI_PROVIDER: str = os.getenv("AI_PROVIDER", "gemini").lower()  # "gemini" (primary), "openai", or "auto"
-
-    # OpenAI API Config (optional fallback)
-    OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
-    OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "o3-mini")
-    OPENAI_REASONING_EFFORT: str = os.getenv("OPENAI_REASONING_EFFORT", "low")  # "low", "medium", "high"
-    OPENAI_TIMEOUT: float = float(os.getenv("OPENAI_TIMEOUT", "15.0"))
-
-    # Gemini Cloud API Config (Google Gemini Flash)
-    GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "") or os.getenv("GOOGLE_API_KEY", "")
-    # Verified against the live models endpoint on 2026-08-26. Avoid the
-    # `-latest` aliases here: they were returning 503 under load, which the
-    # caller waits out before failing, and a pinned model fails fast instead.
-    GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
-    GEMINI_TIMEOUT: float = float(os.getenv("GEMINI_TIMEOUT", "20.0"))
+    # AI Engine Config (Groq — fast inference, OpenAI-compatible chat API)
+    GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
+    GROQ_MODEL: str = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b")
+    GROQ_TIMEOUT: float = float(os.getenv("GROQ_TIMEOUT", "20.0"))
     # Refinement only rewords an answer the bot already has, so the customer
     # must never wait long for it. Kept below SLOW_REPLY_THRESHOLD_MS on
     # purpose: a slow or overloaded provider should be abandoned in favour of
     # the template rather than delay the reply far enough to tell the customer
-    # the business is running slow, which is what a 7-second 503 was doing.
-    GEMINI_REFINE_TIMEOUT: float = float(os.getenv("GEMINI_REFINE_TIMEOUT", "2.5"))
-    GEMINI_ENABLED: bool = os.getenv("GEMINI_ENABLED", "true").lower() in ("true", "1", "t", "yes")
+    # the business is running slow.
+    GROQ_REFINE_TIMEOUT: float = float(os.getenv("GROQ_REFINE_TIMEOUT", "2.5"))
+    GROQ_ENABLED: bool = os.getenv("GROQ_ENABLED", "true").lower() in ("true", "1", "t", "yes")
     AI_FIRST_MODE: bool = os.getenv("AI_FIRST_MODE", "true").lower() in ("true", "1", "t", "yes")
+
+    # Vision OCR only (menu flyer photo parsing) — unrelated to the Groq chat
+    # RAG above. gpt-oss-20b has no vision support, so image parsing keeps
+    # using Gemini/OpenAI vision models if a key is configured for them.
+    GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "") or os.getenv("GOOGLE_API_KEY", "")
+    GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
+    GEMINI_ENABLED: bool = os.getenv("GEMINI_ENABLED", "true").lower() in ("true", "1", "t", "yes")
+    OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
+    OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
     @property
     def is_ai_enabled(self) -> bool:
-        if not self.GEMINI_ENABLED:
+        if not self.GROQ_ENABLED:
             return False
-        if self.AI_PROVIDER == "openai":
-            return bool(self.OPENAI_API_KEY)
-        elif self.AI_PROVIDER == "gemini":
-            return bool(self.GEMINI_API_KEY)
-        return bool(self.GEMINI_API_KEY or self.OPENAI_API_KEY)
+        return bool(self.GROQ_API_KEY)
 
 config = Config()
 

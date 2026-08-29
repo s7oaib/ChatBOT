@@ -8,9 +8,18 @@ services:
     envVars:
       - key: ENABLE_WEB_TESTER
         value: "false"
+      # Must stay false on any deployment that serves real customers. In mock
+      # mode the bot never constructs an outbound request: it accepts webhooks,
+      # matches, logs a reply, and sends nothing, so customers get silence while
+      # the process looks perfectly healthy. This was previously "true" here.
       - key: WHATSAPP_MOCK_MODE
-        value: "true"
+        value: "false"
       - key: BYPASS_AD_GATE
         value: "false"
       - key: PYTHON_VERSION
         value: 3.11.7
+    # Set in the Render dashboard, never committed: META_APP_SECRET,
+    # WHATSAPP_ACCESS_TOKEN, WHATSAPP_PHONE_NUMBER_ID, INSTAGRAM_ACCESS_TOKEN,
+    # ADMIN_API_KEY, ADMIN_PIN, GROQ_API_KEY.
+    # Once META_APP_SECRET is set and /health reports webhook_signature
+    # "enforced", also set REQUIRE_WEBHOOK_SIGNATURE=true.

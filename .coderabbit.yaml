@@ -1,7 +1,6 @@
 # CodeRabbit Configuration File
 # https://docs.coderabbit.ai/getting-started/configure-coderabbit/
 
-version: "2"
 language: "en-US"
 tone_instructions: |
   Focus on production reliability, Python type safety, FastAPI performance, 
@@ -24,15 +23,17 @@ reviews:
     - "!*.png"
     - "!*.svg"
   path_instructions:
-    - path: "app.py"
+    - path: "camellia/app.py"
       instructions: "Check for FastAPI error handling, HMAC-SHA256 signature verification, and admin key protection."
-    - path: "responder.py"
+    - path: "camellia/responder.py"
       instructions: "Ensure exact template matching logic, session memory integration, and image suppression behavior."
-    - path: "whatsapp_adapter.py"
+    - path: "camellia/whatsapp_adapter.py"
       instructions: "Verify Meta Cloud API payload formatting, interactive quick reply buttons, and error delivery tracking."
-    - path: "order_calculator.py"
+    - path: "camellia/order_calculator.py"
       instructions: "Check unit price lookups, itemized receipt formatting, and mathematical correctness."
-    - path: "test_bot.py"
+    - path: "camellia/gemini_responder.py"
+      instructions: "Verify provider cooldown handling, prompt-size budgets, and that AI output never bypasses the approval gate."
+    - path: "tests/test_bot.py"
       instructions: "Verify unit test completeness and ensure mock objects properly simulate external network calls."
 
 chat:

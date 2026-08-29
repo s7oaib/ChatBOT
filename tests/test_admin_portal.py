@@ -305,7 +305,162 @@ def test_refinement_budget_stays_under_the_slow_notice_threshold():
     running slow because an AI provider was overloaded — which is what a
     7-second 503 was doing in production.
     """
-    assert config.GEMINI_REFINE_TIMEOUT * 1000 < config.SLOW_REPLY_THRESHOLD_MS, (
-        f"Refinement may take up to {config.GEMINI_REFINE_TIMEOUT}s while the slow-reply "
+    assert config.GROQ_REFINE_TIMEOUT * 1000 < config.SLOW_REPLY_THRESHOLD_MS, (
+        f"Refinement may take up to {config.GROQ_REFINE_TIMEOUT}s while the slow-reply "
         f"notice fires at {config.SLOW_REPLY_THRESHOLD_MS}ms"
     )
+
+
+# ---------------------------------------------------------------------------
+# Candidate review queue
+#
+# The bot has always drafted answers for questions it could not match and saved
+# them as PENDING_APPROVAL, and the approve/reject API has always existed — but
+# no page in the dashboard ever listed them, so the queue only grew. These pin
+# the review loop end to end, because approving good drafts is what raises the
+# bot's answer rate over time.
+# ---------------------------------------------------------------------------
+
+def test_dashboard_exposes_the_candidate_review_queue():
+    """The approval queue must be reachable from the dashboard, not API-only."""
+    page = client.get("/admin").text
+    assert 'id="tab-candidates"' in page, "no Suggested Answers panel in the dashboard"
+    assert "switchTab('tab-candidates'" in page, "no tab button to reach the panel"
+    assert "async function loadCandidates" in page
+    assert "approveCandidate" in page and "rejectCandidate" in page
+
+
+def test_approving_a_candidate_moves_it_into_verified_knowledge():
+    candidate_id = db_module.db.save_candidate_template(
+        name="opening_hours",
+        response="Our kitchen is open 10:00 AM to 7:30 PM every day.",
+        user_message="what time do you open on sundays",
+        source_refs=["qa_templates.json#hours"],
+        confidence=0.8,
+        created_by="rag_fallback",
+    )
+
+    listed = client.get("/admin/candidates", headers=ADMIN_HEADERS)
+    assert listed.status_code == 200
+    assert any(c["id"] == candidate_id for c in listed.json()["candidates"])
+
+    approved = client.post(
+        f"/admin/candidates/{candidate_id}/approve",
+        headers=ADMIN_HEADERS,
+        json={"approved_by": "admin_dashboard"},
+    )
+    assert approved.status_code == 200
+    assert approved.json()["status"] == "approved"
+
+    # It is now an answer the bot can serve without calling a model at all.
+    knowledge = db_module.db.get_learned_knowledge(limit=200)
+    assert any(
+        k.get("source") == f"approved_candidate#{candidate_id}" for k in knowledge
+    ), "an approved candidate must land in the verified knowledge base"
+
+    # And it leaves the queue, so it cannot be approved twice.
+    again = client.post(
+        f"/admin/candidates/{candidate_id}/approve",
+        headers=ADMIN_HEADERS,
+        json={"approved_by": "admin_dashboard"},
+    )
+    assert again.status_code == 409
+
+
+def test_rejecting_a_candidate_never_reaches_a_customer():
+    candidate_id = db_module.db.save_candidate_template(
+        name="bad_draft",
+        response="We deliver to every city in India.",  # untrue
+        user_message="do you deliver to chennai",
+        source_refs=[],
+        confidence=0.7,
+        created_by="rag_fallback",
+    )
+
+    assert client.post(
+        f"/admin/candidates/{candidate_id}/reject", headers=ADMIN_HEADERS
+    ).status_code == 200
+
+    pending_ids = [c["id"] for c in client.get("/admin/candidates", headers=ADMIN_HEADERS).json()["candidates"]]
+    assert candidate_id not in pending_ids
+
+    knowledge = db_module.db.get_learned_knowledge(limit=200)
+    assert not any(
+        k.get("source") == f"approved_candidate#{candidate_id}" for k in knowledge
+    ), "a rejected draft must never become a verified answer"
+
+
+def test_candidate_queue_requires_admin_auth():
+    """Customer messages are quoted in this queue, so it is not public."""
+    assert client.get("/admin/candidates").status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# Health warnings
+# ---------------------------------------------------------------------------
+
+def test_health_warns_about_silent_failure_modes():
+    """
+    Mock mode and an unverified webhook both look exactly like a working bot
+    from the outside, so health has to name them explicitly.
+    """
+    body = client.get("/health").json()
+    assert "warnings" in body
+    assert "reply_delivery" in body
+    assert "webhook_signature" in body
+
+    with_mock = [w for w in body["warnings"] if "MOCK" in w.upper()]
+    assert with_mock, "mock mode must be surfaced — it means customers get silence"
+    assert body["reply_delivery"]["mode"] == "mock"
+    assert body["reply_delivery"]["delivering"] is False
+
+    # Mock mode is the correct default locally, so it must not fail the check.
+    assert client.get("/health").status_code == 200
+
+
+def test_health_fails_when_live_mode_has_no_credentials():
+    """Live mode without a token produces replies that cannot be delivered."""
+    saved_mock = config.WHATSAPP_MOCK_MODE
+    saved_token = config.WHATSAPP_ACCESS_TOKEN
+    config.WHATSAPP_MOCK_MODE = False
+    config.WHATSAPP_ACCESS_TOKEN = ""
+    try:
+        resp = client.get("/health")
+        assert resp.status_code == 503
+        body = resp.json()
+        assert body["reply_delivery"]["mode"] == "live"
+        assert body["reply_delivery"]["delivering"] is False
+        assert "WHATSAPP_ACCESS_TOKEN" in body["reply_delivery"]["problem"]
+    finally:
+        config.WHATSAPP_MOCK_MODE = saved_mock
+        config.WHATSAPP_ACCESS_TOKEN = saved_token
+
+    assert client.get("/health").status_code == 200
+
+
+def test_webhook_signature_status_is_reported_honestly():
+    saved = config.META_APP_SECRET
+    try:
+        config.META_APP_SECRET = ""
+        assert client.get("/health").json()["webhook_signature"] == "DISABLED"
+        config.META_APP_SECRET = "a_real_secret"
+        assert client.get("/health").json()["webhook_signature"] == "enforced"
+    finally:
+        config.META_APP_SECRET = saved
+
+
+def test_require_webhook_signature_rejects_unsigned_when_unconfigured():
+    """
+    The opt-in that lets an operator fail closed: with no app secret to verify
+    against, a webhook POST is refused rather than trusted.
+    """
+    saved_secret = config.META_APP_SECRET
+    saved_require = config.REQUIRE_WEBHOOK_SIGNATURE
+    config.META_APP_SECRET = ""
+    config.REQUIRE_WEBHOOK_SIGNATURE = True
+    try:
+        resp = client.post("/webhook/instagram", json={"object": "instagram", "entry": []})
+        assert resp.status_code == 403
+    finally:
+        config.META_APP_SECRET = saved_secret
+        config.REQUIRE_WEBHOOK_SIGNATURE = saved_require

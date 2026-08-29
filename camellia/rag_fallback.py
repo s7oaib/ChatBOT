@@ -5,6 +5,7 @@ from typing import Dict, Any, List, Tuple, Optional
 from camellia.config import config
 from camellia.database import db
 from camellia.monitoring import get_logger
+from camellia.trigger_index import trigger_index
 
 log = get_logger("camellia.rag_fallback")
 
@@ -136,12 +137,12 @@ class RAGFallbackEngine:
             best_match_count = 0
             best_trigger_score = 0.0
             for trigger in triggers:
-                t_words = set(re.findall(r'\b\w+\b', trigger.lower())) - RAG_STOP_WORDS
+                trigger_pattern, trigger_words = trigger_index(trigger.lower().strip())
+                t_words = trigger_words - RAG_STOP_WORDS
                 matches = t_words.intersection(user_words)
                 if matches and len(matches) > best_match_count:
                     best_match_count = len(matches)
-                trigger_pattern = r'\b' + re.escape(trigger.lower()) + r'\b'
-                if re.search(trigger_pattern, lowered_text) and t_words:
+                if trigger_pattern.search(lowered_text) and t_words:
                     best_trigger_score = 1.0
                 elif t_words:
                     best_trigger_score = max(best_trigger_score, len(matches) / len(t_words))
