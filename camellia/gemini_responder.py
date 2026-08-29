@@ -23,8 +23,20 @@ TRANSIENT_COOLDOWN_SECONDS = 60.0
 # reporting itself available and every single customer message paid a full
 # failed round trip to the API before falling back to the template. Measured
 # at ~145ms per message against a live invalid key.
-CONFIG_ERROR_HTTP_STATUSES = (400, 401, 403, 404)
+#
+# 413 belongs here too: on a TPM-capped plan (Groq free tier allows only
+# ~6-8k tokens per minute) a prompt that exceeds the limit can never succeed,
+# no matter how many times it is retried. Without the cooldown every unmatched
+# customer message paid a full ~13k-token round trip to a guaranteed 413.
+CONFIG_ERROR_HTTP_STATUSES = (400, 401, 403, 404, 413)
 CONFIG_ERROR_COOLDOWN_SECONDS = 600.0
+
+# Char ceiling for the full-RAG context. Groq's tokenizer ran ~3.07 chars/token
+# over this corpus (41,288 chars → 13,454 tokens, rejected as HTTP 413), so
+# 16,000 chars ≈ 5.2k tokens leaves headroom under even the tightest free-tier
+# per-minute limit (~6k TPM) once the system prompt and customer message are
+# added. Pinned by test_rag_prompt_stays_under_provider_token_budget.
+_RAG_CONTEXT_CHAR_BUDGET = 16000
 
 
 def _cooldown_for_status(status_code: int) -> float:
@@ -149,9 +161,34 @@ class GeminiResponder:
             return "groq"
         return "none"
 
+    @staticmethod
+    def _truncate(text: str, limit: int) -> str:
+        """Collapses whitespace and cuts at a sentence or word boundary."""
+        text = " ".join((text or "").split())
+        if len(text) <= limit:
+            return text
+        cut = text[:limit]
+        for sep in (". ", "! ", "? "):
+            idx = cut.rfind(sep)
+            if idx > limit * 0.5:
+                return cut[: idx + 1].strip()
+        return cut.rsplit(" ", 1)[0].rstrip(",;:") + "…"
+
     def _build_context_string(self) -> str:
-        """Assembles a compact, high-density context string from menu.json and qa_templates.json."""
+        """
+        Assembles a compact, high-density context string from menu.json and qa_templates.json.
+
+        Deliberately truncated: the only consumer of `generate_response`'s output
+        is a PENDING_APPROVAL candidate a human reviews before it ever ships, so
+        the model drafts from summaries rather than the full corpus. The full
+        text of every template plus the complete menu JSON measured ~41k chars
+        (~13.4k tokens), which is over Groq's per-minute token ceiling on
+        free-tier plans — every call returned HTTP 413. The budget below keeps
+        the whole request under ~5k tokens. `tests/test_bot.py` pins this so a
+        growing menu or template set cannot silently push it back over.
+        """
         context_parts = []
+        char_budget = _RAG_CONTEXT_CHAR_BUDGET
 
         # Business Details & Coverage
         context_parts.append("BUSINESS NAME: Camellia Artisanal")
@@ -159,16 +196,18 @@ class GeminiResponder:
         context_parts.append("DELIVERY AREA: Delhi NCR (Delhi, Gurgaon, Noida, Ghaziabad, Faridabad). We do NOT deliver outside Delhi NCR.")
         context_parts.append("ORDER METHOD: Direct message reply or WhatsApp message to our team.")
 
-        # QA Syllabus / Templates
+        # QA Syllabus / Templates — id plus the opening of each response. The
+        # id tells the model which policy it is drafting against; the opening
+        # carries the substance (prices usually lead).
         templates = self.qa_data.get("templates", [])
         if templates:
-            context_parts.append("\n--- FREQUENTLY ASKED QUESTIONS & POLICIES ---")
+            context_parts.append("\n--- FREQUENTLY ASKED QUESTIONS & POLICIES (summarised) ---")
             for tmpl in templates:
                 resp = tmpl.get("response")
                 if not resp:
                     continue
                 title = tmpl.get("id", "").replace("_", " ").title()
-                context_parts.append(f"• {title}: {resp}")
+                context_parts.append(f"• {title}: {self._truncate(resp, 110)}")
 
         # Menu Details
         if self.menu_data:
@@ -179,7 +218,20 @@ class GeminiResponder:
 
             weekly = self.menu_data.get("weekly_menus", [])
             if weekly:
-                context_parts.append(f"Weekly Menus & Bento Combos: {json.dumps(weekly, ensure_ascii=False)}")
+                # Item names and prices only — the full JSON with descriptions
+                # measured 5.8k chars and is the least load-bearing detail for
+                # drafting a candidate answer.
+                for week in weekly:
+                    lines = []
+                    for key in ("vegetarian", "non_vegetarian", "bengali_bento", "combos"):
+                        for itm in week.get(key) or []:
+                            name = itm.get("item") or itm.get("name") or ""
+                            price = itm.get("price_inr", "")
+                            if name:
+                                lines.append(f"{name} ₹{price}")
+                    if lines:
+                        week_name = week.get("week_of", "Current Rotation")
+                        context_parts.append(f"{week_name}: " + "; ".join(lines))
 
             delivery = self.menu_data.get("delivery", {})
             if delivery:
@@ -187,17 +239,30 @@ class GeminiResponder:
 
         # Learned Knowledge & Verified Resolutions from Staff
         try:
-            learned_items = db.get_learned_knowledge(limit=50)
+            learned_items = db.get_learned_knowledge(limit=30)
             if learned_items:
                 context_parts.append("\n--- VERIFIED KNOWLEDGE & POLICIES (LEARNED FROM STAFF) ---")
                 for lk in learned_items:
                     topic = lk.get("topic", "")
-                    ans = lk.get("verified_answer", "")
+                    ans = self._truncate(lk.get("verified_answer", ""), 150)
                     context_parts.append(f"• {topic}: {ans}")
         except Exception as e:
             log.debug("Could not fetch learned knowledge: %s", e)
 
-        return "\n".join(context_parts)
+        context = "\n".join(context_parts)
+
+        # Defensive trim. The per-part budgets above hold for today's data, but
+        # the menu and template files are live-editable — if a future edit
+        # pushes the assembled context over budget, cut it here rather than
+        # guaranteeing an HTTP 413 on every unmatched question again.
+        if len(context) > char_budget:
+            log.error(
+                "RAG context is %d chars, over the %d-char budget (%s). "
+                "Truncating — trim the QA/menu data or raise the budget.",
+                len(context), char_budget, "Groq TPM limit",
+            )
+            context = context[:char_budget]
+        return context
 
     def _query_groq(self, prompt_text: str, is_refinement: bool = False, template_id: str = "") -> Tuple[str, bool, str]:
         """Queries Groq's OpenAI-compatible chat completions endpoint."""

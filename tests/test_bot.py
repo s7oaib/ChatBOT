@@ -1015,6 +1015,76 @@ class TestCamelliaBot(unittest.TestCase):
         self.assertEqual(post.call_count, 1)
 
     @patch("camellia.gemini_responder.httpx.Client")
+    def test_rag_prompt_stays_under_provider_token_budget(self, mock_httpx_cls):
+        """
+        The full-RAG prompt sent for an unmatched question must fit inside the
+        provider's per-minute token ceiling.
+
+        The prompt used to carry the entire knowledge base — 41,288 chars
+        (~13.4k tokens) — which Groq's free-tier token-per-minute limit
+        (~6-8k) rejects with HTTP 413 on every single unmatched question.
+        The context is now summarised and budgeted; this pins the actual
+        request payload (not just the context string) so a bigger menu or
+        template set cannot silently push it back over the ceiling.
+        """
+        from camellia.gemini_responder import gemini_responder
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "choices": [{"message": {"content": "Drafted candidate answer."}}]
+        }
+        post = mock_httpx_cls.return_value.__enter__.return_value.post
+        post.return_value = mock_response
+
+        gemini_responder._groq_cooldown_until = 0.0
+        with patch.object(config, "GROQ_ENABLED", True), patch.object(config, "GROQ_API_KEY", "fake_key"):
+            resp, ok, reason = gemini_responder.generate_response(
+                "Is the Nolen Gur real date palm jaggery or just flavoring?"
+            )
+
+        self.assertTrue(ok)
+        payload = post.call_args.kwargs["json"]
+        sent_prompt = payload["messages"][0]["content"]
+        # Groq's tokenizer measured ~3.07 chars/token over this corpus; using
+        # a conservative 3.0 keeps the estimate honest. 6000 tokens is the
+        # tightest per-minute ceiling observed across Groq free-tier plans.
+        estimated_tokens = len(sent_prompt) / 3.0
+        self.assertLess(
+            estimated_tokens, 6000,
+            f"RAG prompt is {len(sent_prompt)} chars (~{int(estimated_tokens)} tokens) — "
+            "over the provider's free-tier TPM ceiling; it will be rejected with HTTP 413."
+        )
+
+    @patch("camellia.gemini_responder.httpx.Client")
+    def test_oversized_payload_gets_config_error_cooldown(self, mock_httpx_cls):
+        """
+        HTTP 413 must trip the long config-error cooldown, not be retried.
+
+        On a TPM-capped plan an over-limit prompt can never succeed, so without
+        the cooldown every unmatched customer message paid a full round trip to
+        a guaranteed 413 before falling back to the template.
+        """
+        from camellia.gemini_responder import gemini_responder, CONFIG_ERROR_COOLDOWN_SECONDS
+
+        mock_response = MagicMock()
+        mock_response.status_code = 413
+        mock_response.text = '{"error":{"message":"Request too large"}}'
+        mock_httpx_cls.return_value.__enter__.return_value.post.return_value = mock_response
+
+        gemini_responder._groq_cooldown_until = 0.0
+        with patch.object(config, "GROQ_ENABLED", True), patch.object(config, "GROQ_API_KEY", "fake_key"):
+            _resp, ok, reason = gemini_responder._query_groq("test prompt")
+
+        self.assertFalse(ok)
+        self.assertEqual(reason, "groq_http_413")
+        self.assertGreater(gemini_responder._groq_cooldown_until, 0)
+        self.assertAlmostEqual(
+            gemini_responder._groq_cooldown_until - __import__("time").time(),
+            CONFIG_ERROR_COOLDOWN_SECONDS, delta=5,
+        )
+
+    @patch("camellia.gemini_responder.httpx.Client")
     def test_refinement_cache_does_not_leak_customer_names(self, mock_httpx_cls):
         """
         Two customers asking the identical question must not share a cached
