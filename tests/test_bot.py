@@ -40,10 +40,9 @@ class TestCamelliaBot(unittest.TestCase):
     def setUp(self):
         # Ensure Ad-Gate and AI testing are isolated from .env overrides
         config.BYPASS_AD_GATE = False
-        config.GEMINI_ENABLED = False
+        config.GROQ_ENABLED = False
         from camellia.gemini_responder import gemini_responder
-        gemini_responder._gemini_cooldown_until = 0.0
-        gemini_responder._openai_cooldown_until = 0.0
+        gemini_responder._groq_cooldown_until = 0.0
         from camellia.session_memory import session_memory
         session_memory._sessions.clear()
         responder.qa_data = responder._load_json(responder.qa_path)
@@ -203,7 +202,7 @@ class TestCamelliaBot(unittest.TestCase):
 
     def test_responder_unmatched_out_of_syllabus(self):
         """Out-of-syllabus query must escalate without guessing when AI is disabled."""
-        with patch.object(config, "GEMINI_ENABLED", False):
+        with patch.object(config, "GROQ_ENABLED", False):
             response, was_matched, tmpl_id, img_url = responder.match_and_respond("What is the weather forecast in Tokyo today?")
             self.assertFalse(was_matched)
             self.assertIsNone(tmpl_id)
@@ -303,7 +302,7 @@ class TestCamelliaBot(unittest.TestCase):
         self.assertEqual(tmpl3b, "explicit_escalation", "Manager complaint framing must map to explicit_escalation")
 
         # 4. Out-of-context query with AI disabled -> Escalated to deterministic fallback response
-        with patch.object(config, "GEMINI_ENABLED", False):
+        with patch.object(config, "GROQ_ENABLED", False):
             resp4, matched4, tmpl4, _ = responder.match_and_respond("What is the capital of France?")
             self.assertFalse(matched4)
             self.assertIsNone(tmpl4)
@@ -444,53 +443,49 @@ class TestCamelliaBot(unittest.TestCase):
             self.assertEqual(res.status_code, 403)
 
     @patch("httpx.Client.post")
-    def test_gemini_in_context_query(self, mock_post):
-        """Test Gemini RAG responds accurately for in-syllabus queries when deterministic match score is low."""
+    def test_groq_in_context_query(self, mock_post):
+        """Test Groq RAG responds accurately for in-syllabus queries when deterministic match score is low."""
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = {
-            "candidates": [{
-                "content": {
-                    "parts": [{"text": "We offer artisanal Nolen Gur Sondesh made with authentic date palm jaggery delivered fresh across Delhi NCR!"}]
-                }
+            "choices": [{
+                "message": {"content": "We offer artisanal Nolen Gur Sondesh made with authentic date palm jaggery delivered fresh across Delhi NCR!"}
             }]
         }
         mock_post.return_value = mock_response
 
-        with patch.object(config, "GEMINI_ENABLED", True), patch.object(config, "GEMINI_API_KEY", "test_key"):
+        with patch.object(config, "GROQ_ENABLED", True), patch.object(config, "GROQ_API_KEY", "test_key"):
             resp_text, was_matched, tmpl_id, img_url = responder.match_and_respond("Can you provide a historical overview of traditional dairy techniques in ancient India?")
         # Controlled Architecture: Unmatched queries NEVER send raw AI responses to customers; customer gets human escalation fallback while candidate is logged
         self.assertFalse(was_matched)
         self.assertIn("notified our team", resp_text.lower())
 
     @patch("httpx.Client.post")
-    def test_gemini_out_of_context_refusal(self, mock_post):
-        """Test Gemini RAG refuses out-of-syllabus query with OUT_OF_CONTEXT and triggers human escalation."""
+    def test_groq_out_of_context_refusal(self, mock_post):
+        """Test Groq RAG refuses out-of-syllabus query with OUT_OF_CONTEXT and triggers human escalation."""
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = {
-            "candidates": [{
-                "content": {
-                    "parts": [{"text": "OUT_OF_CONTEXT"}]
-                }
+            "choices": [{
+                "message": {"content": "OUT_OF_CONTEXT"}
             }]
         }
         mock_post.return_value = mock_response
 
-        with patch.object(config, "GEMINI_ENABLED", True), patch.object(config, "GEMINI_API_KEY", "test_key"):
+        with patch.object(config, "GROQ_ENABLED", True), patch.object(config, "GROQ_API_KEY", "test_key"):
             resp_text, was_matched, tmpl_id, img_url = responder.match_and_respond("What is the capital of France?")
         self.assertFalse(was_matched)
         self.assertTrue("notified our team" in resp_text.lower() or "connect you with our team" in resp_text.lower())
 
     @patch("httpx.Client.post")
-    def test_gemini_offline_fallback(self, mock_post):
-        """Test graceful fallback to human escalation if Gemini API call fails."""
+    def test_groq_offline_fallback(self, mock_post):
+        """Test graceful fallback to human escalation if Groq API call fails."""
         mock_post.side_effect = Exception("API connection error")
 
-        with patch.object(config, "GEMINI_ENABLED", True), patch.object(config, "GEMINI_API_KEY", "test_key"):
+        with patch.object(config, "GROQ_ENABLED", True), patch.object(config, "GROQ_API_KEY", "test_key"):
             resp_text, was_matched, tmpl_id, img_url = responder.match_and_respond("Can you send a violin player for a wedding?")
         self.assertFalse(was_matched)
-        self.assertTrue(tmpl_id is None or tmpl_id.startswith("gemini_"))
+        self.assertTrue(tmpl_id is None or tmpl_id.startswith("groq_"))
 
     def test_session_memory_fact_extraction(self):
         """Test extraction of customer name in Session Memory."""
@@ -930,8 +925,8 @@ class TestCamelliaBot(unittest.TestCase):
         self.assertEqual(imgs2_menu, ["/images/Signature%20Sondesh.jpeg"])
 
     @patch("camellia.gemini_responder.httpx.Client")
-    def test_gemini_template_refinement(self, mock_httpx_cls):
-        """Verify Gemini AI refines a template that carries no prices or tables."""
+    def test_groq_template_refinement(self, mock_httpx_cls):
+        """Verify Groq AI refines a template that carries no prices or tables."""
         from camellia.responder import responder
         from camellia.gemini_responder import gemini_responder
 
@@ -939,13 +934,13 @@ class TestCamelliaBot(unittest.TestCase):
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = {
-            "candidates": [{"content": {"parts": [{"text": refined}]}}]
+            "choices": [{"message": {"content": refined}}]
         }
         mock_httpx_cls.return_value.__enter__.return_value.post.return_value = mock_response
 
-        gemini_responder._gemini_cooldown_until = 0.0
+        gemini_responder._groq_cooldown_until = 0.0
         gemini_responder._refinement_cache.clear()
-        with patch.object(config, "GEMINI_ENABLED", True), patch.object(config, "GEMINI_API_KEY", "fake_key"):
+        with patch.object(config, "GROQ_ENABLED", True), patch.object(config, "GROQ_API_KEY", "fake_key"):
             resp, match, tmpl, _ = responder.match_and_respond(
                 "which areas do you deliver to", user_id="test_ai_refine", channel="whatsapp"
             )
@@ -970,13 +965,13 @@ class TestCamelliaBot(unittest.TestCase):
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = {
-            "candidates": [{"content": {"parts": [{"text": "REWORDED — prices mangled"}]}}]
+            "choices": [{"message": {"content": "REWORDED — prices mangled"}}]
         }
         mock_httpx_cls.return_value.__enter__.return_value.post.return_value = mock_response
 
-        gemini_responder._gemini_cooldown_until = 0.0
+        gemini_responder._groq_cooldown_until = 0.0
         gemini_responder._refinement_cache.clear()
-        with patch.object(config, "GEMINI_ENABLED", True), patch.object(config, "GEMINI_API_KEY", "fake_key"):
+        with patch.object(config, "GROQ_ENABLED", True), patch.object(config, "GROQ_API_KEY", "fake_key"):
             resp, match, tmpl, _ = responder.match_and_respond(
                 "collection 2", user_id="test_price_no_refine", channel="whatsapp"
             )
@@ -997,14 +992,14 @@ class TestCamelliaBot(unittest.TestCase):
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = {
-            "candidates": [{"content": {"parts": [{"text": "Refined once."}]}}]
+            "choices": [{"message": {"content": "Refined once."}}]
         }
         post = mock_httpx_cls.return_value.__enter__.return_value.post
         post.return_value = mock_response
 
-        gemini_responder._gemini_cooldown_until = 0.0
+        gemini_responder._groq_cooldown_until = 0.0
         gemini_responder._refinement_cache.clear()
-        with patch.object(config, "GEMINI_ENABLED", True), patch.object(config, "GEMINI_API_KEY", "fake_key"):
+        with patch.object(config, "GROQ_ENABLED", True), patch.object(config, "GROQ_API_KEY", "fake_key"):
             first, ok1 = gemini_responder.refine_template_response(
                 "delivery_area", "We deliver across Delhi NCR.", "where do you deliver"
             )
@@ -1030,14 +1025,14 @@ class TestCamelliaBot(unittest.TestCase):
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = {
-            "candidates": [{"content": {"parts": [{"text": "Hi Asha, we deliver across Delhi NCR."}]}}]
+            "choices": [{"message": {"content": "Hi Asha, we deliver across Delhi NCR."}}]
         }
         post = mock_httpx_cls.return_value.__enter__.return_value.post
         post.return_value = mock_response
 
-        gemini_responder._gemini_cooldown_until = 0.0
+        gemini_responder._groq_cooldown_until = 0.0
         gemini_responder._refinement_cache.clear()
-        with patch.object(config, "GEMINI_ENABLED", True), patch.object(config, "GEMINI_API_KEY", "fake_key"):
+        with patch.object(config, "GROQ_ENABLED", True), patch.object(config, "GROQ_API_KEY", "fake_key"):
             gemini_responder.refine_template_response(
                 "delivery_area", "We deliver across Delhi NCR.", "where do you deliver",
                 user_context="Customer Name: Asha",
@@ -1066,29 +1061,27 @@ class TestCamelliaBot(unittest.TestCase):
 
         mock_response = MagicMock()
         mock_response.status_code = 400
-        mock_response.text = '{"error": {"message": "API key not valid."}}'
+        mock_response.text = '{"error": {"message": "Invalid API Key"}}'
         post = mock_httpx_cls.return_value.__enter__.return_value.post
         post.return_value = mock_response
 
-        gemini_responder._gemini_cooldown_until = 0.0
-        with patch.object(config, "GEMINI_ENABLED", True), \
-             patch.object(config, "GEMINI_API_KEY", "bad_key"), \
-             patch.object(config, "AI_PROVIDER", "gemini"), \
-             patch.object(config, "OPENAI_API_KEY", ""):
-            _, ok, reason = gemini_responder._query_gemini("hello")
+        gemini_responder._groq_cooldown_until = 0.0
+        with patch.object(config, "GROQ_ENABLED", True), \
+             patch.object(config, "GROQ_API_KEY", "bad_key"):
+            _, ok, reason = gemini_responder._query_groq("hello")
             self.assertFalse(ok)
-            self.assertEqual(reason, "gemini_http_400")
+            self.assertEqual(reason, "groq_http_400")
 
             # The provider is now parked, so nothing calls it again.
             self.assertEqual(gemini_responder.get_active_provider(), "none")
-            self.assertGreater(gemini_responder._gemini_cooldown_until, time.time() + 60)
+            self.assertGreater(gemini_responder._groq_cooldown_until, time.time() + 60)
 
             # And /health says so rather than reporting a healthy AI layer.
             status = gemini_responder.status()
             self.assertIs(status["working"], False)
-            self.assertIn("gemini", status["paused_seconds"])
+            self.assertIn("groq", status["paused_seconds"])
 
-        gemini_responder._gemini_cooldown_until = 0.0
+        gemini_responder._groq_cooldown_until = 0.0
 
     @patch("camellia.gemini_responder.httpx.Client")
     def test_transient_error_uses_the_short_cooldown(self, mock_httpx_cls):
@@ -1100,14 +1093,14 @@ class TestCamelliaBot(unittest.TestCase):
         mock_response.text = "overloaded"
         mock_httpx_cls.return_value.__enter__.return_value.post.return_value = mock_response
 
-        gemini_responder._gemini_cooldown_until = 0.0
-        with patch.object(config, "GEMINI_ENABLED", True), patch.object(config, "GEMINI_API_KEY", "k"):
-            gemini_responder._query_gemini("hello")
+        gemini_responder._groq_cooldown_until = 0.0
+        with patch.object(config, "GROQ_ENABLED", True), patch.object(config, "GROQ_API_KEY", "k"):
+            gemini_responder._query_groq("hello")
 
-        pause = gemini_responder._gemini_cooldown_until - time.time()
+        pause = gemini_responder._groq_cooldown_until - time.time()
         self.assertGreater(pause, 0)
         self.assertLessEqual(pause, 60.0)
-        gemini_responder._gemini_cooldown_until = 0.0
+        gemini_responder._groq_cooldown_until = 0.0
 
     def test_how_much_is_sondesh_price_inquiry(self):
         """Verify 'How much is Sondesh?' returns price info template/RAG instead of order receipt draft."""
@@ -1463,52 +1456,35 @@ class TestCamelliaBot(unittest.TestCase):
         self.assertTrue(matched2)
 
     def test_gemini_responder_provider_selection(self):
-        """Tests get_active_provider logic for auto, openai, and gemini configurations."""
+        """Tests get_active_provider logic for the Groq configuration."""
         from camellia.gemini_responder import GeminiResponder
 
         gr = GeminiResponder()
-        orig_prov = config.AI_PROVIDER
-        orig_oai = config.OPENAI_API_KEY
-        orig_gem = config.GEMINI_API_KEY
-        orig_en = config.GEMINI_ENABLED
+        orig_key = config.GROQ_API_KEY
+        orig_en = config.GROQ_ENABLED
 
         try:
-            config.GEMINI_ENABLED = True
+            # 1. Enabled with a key present -> groq active
+            config.GROQ_ENABLED = True
+            config.GROQ_API_KEY = "test-groq-key"
+            self.assertEqual(gr.get_active_provider(), "groq")
 
-            # 1. Auto mode with Gemini key present (prioritizes Gemini Flash)
-            config.AI_PROVIDER = "auto"
-            config.OPENAI_API_KEY = "sk-test-openai"
-            config.GEMINI_API_KEY = "test-gemini"
-            self.assertEqual(gr.get_active_provider(), "gemini")
+            # 2. No key -> none
+            config.GROQ_API_KEY = ""
+            self.assertEqual(gr.get_active_provider(), "none")
 
-            # 2. Auto mode with only OpenAI key present
-            config.OPENAI_API_KEY = "sk-test-openai"
-            config.GEMINI_API_KEY = ""
-            self.assertEqual(gr.get_active_provider(), "openai")
-
-            # 3. Explicit openai provider
-            config.AI_PROVIDER = "openai"
-            config.OPENAI_API_KEY = "sk-test-openai"
-            self.assertEqual(gr.get_active_provider(), "openai")
-
-            # 4. Explicit gemini provider
-            config.AI_PROVIDER = "gemini"
-            config.GEMINI_API_KEY = "test-gemini"
-            self.assertEqual(gr.get_active_provider(), "gemini")
-
-            # 5. AI disabled
-            config.GEMINI_ENABLED = False
+            # 3. AI disabled entirely -> none, even with a key
+            config.GROQ_API_KEY = "test-groq-key"
+            config.GROQ_ENABLED = False
             self.assertEqual(gr.get_active_provider(), "none")
 
         finally:
-            config.AI_PROVIDER = orig_prov
-            config.OPENAI_API_KEY = orig_oai
-            config.GEMINI_API_KEY = orig_gem
-            config.GEMINI_ENABLED = orig_en
+            config.GROQ_API_KEY = orig_key
+            config.GROQ_ENABLED = orig_en
 
     @patch("camellia.gemini_responder.httpx.Client")
-    def test_gemini_responder_openai_o3_mini_query(self, mock_httpx_cls):
-        """Tests that querying OpenAI with o3-mini formats payload with max_completion_tokens and reasoning_effort without temperature."""
+    def test_gemini_responder_groq_query(self, mock_httpx_cls):
+        """Tests that querying Groq formats the OpenAI-compatible chat payload correctly."""
         from camellia.gemini_responder import GeminiResponder
 
         mock_resp = MagicMock()
@@ -1526,49 +1502,40 @@ class TestCamelliaBot(unittest.TestCase):
         mock_httpx_cls.return_value.__enter__.return_value.post = mock_post
 
         gr = GeminiResponder()
-        orig_prov = config.AI_PROVIDER
-        orig_oai = config.OPENAI_API_KEY
-        orig_model = config.OPENAI_MODEL
-        orig_effort = config.OPENAI_REASONING_EFFORT
-        orig_en = config.GEMINI_ENABLED
+        orig_key = config.GROQ_API_KEY
+        orig_model = config.GROQ_MODEL
+        orig_en = config.GROQ_ENABLED
 
         try:
-            config.GEMINI_ENABLED = True
-            config.AI_PROVIDER = "openai"
-            config.OPENAI_API_KEY = "sk-mock-key-12345"
-            config.OPENAI_MODEL = "o3-mini"
-            config.OPENAI_REASONING_EFFORT = "low"
+            config.GROQ_ENABLED = True
+            config.GROQ_API_KEY = "gsk-mock-key-12345"
+            config.GROQ_MODEL = "openai/gpt-oss-20b"
 
             ans, grounded, reason = gr.generate_response("Tell me about Nolen Gur Sondesh")
             self.assertTrue(grounded)
-            self.assertEqual(reason, "openai_rag")
+            self.assertEqual(reason, "groq_rag")
             self.assertIn("Nolen Gur Sondesh", ans)
 
-            # Verify the HTTP payload sent to OpenAI
+            # Verify the HTTP payload sent to Groq
             mock_post.assert_called_once()
             called_args, called_kwargs = mock_post.call_args
-            self.assertEqual(called_args[0], "https://api.openai.com/v1/chat/completions")
-            
+            self.assertEqual(called_args[0], "https://api.groq.com/openai/v1/chat/completions")
+
             payload = called_kwargs.get("json", {})
-            self.assertEqual(payload.get("model"), "o3-mini")
-            self.assertEqual(payload.get("max_completion_tokens"), 1024)
-            self.assertEqual(payload.get("reasoning_effort"), "low")
-            self.assertNotIn("temperature", payload)
-            self.assertNotIn("max_tokens", payload)
+            self.assertEqual(payload.get("model"), "openai/gpt-oss-20b")
+            self.assertIn("messages", payload)
 
             headers = called_kwargs.get("headers", {})
-            self.assertEqual(headers.get("Authorization"), "Bearer sk-mock-key-12345")
+            self.assertEqual(headers.get("Authorization"), "Bearer gsk-mock-key-12345")
 
         finally:
-            config.AI_PROVIDER = orig_prov
-            config.OPENAI_API_KEY = orig_oai
-            config.OPENAI_MODEL = orig_model
-            config.OPENAI_REASONING_EFFORT = orig_effort
-            config.GEMINI_ENABLED = orig_en
+            config.GROQ_API_KEY = orig_key
+            config.GROQ_MODEL = orig_model
+            config.GROQ_ENABLED = orig_en
 
     @patch("camellia.gemini_responder.httpx.Client")
-    def test_gemini_responder_openai_out_of_context(self, mock_httpx_cls):
-        """Tests that OUT_OF_CONTEXT from OpenAI is safely caught and triggers escalation fallback."""
+    def test_gemini_responder_groq_out_of_context(self, mock_httpx_cls):
+        """Tests that OUT_OF_CONTEXT from Groq is safely caught and triggers escalation fallback."""
         from camellia.gemini_responder import GeminiResponder
 
         mock_resp = MagicMock()
@@ -1585,14 +1552,12 @@ class TestCamelliaBot(unittest.TestCase):
         mock_httpx_cls.return_value.__enter__.return_value.post.return_value = mock_resp
 
         gr = GeminiResponder()
-        orig_prov = config.AI_PROVIDER
-        orig_oai = config.OPENAI_API_KEY
-        orig_en = config.GEMINI_ENABLED
+        orig_key = config.GROQ_API_KEY
+        orig_en = config.GROQ_ENABLED
 
         try:
-            config.GEMINI_ENABLED = True
-            config.AI_PROVIDER = "openai"
-            config.OPENAI_API_KEY = "sk-mock-key-12345"
+            config.GROQ_ENABLED = True
+            config.GROQ_API_KEY = "gsk-mock-key-12345"
 
             ans, grounded, reason = gr.generate_response("Can you help me write a Python script for machine learning?")
             self.assertFalse(grounded)
@@ -1600,13 +1565,12 @@ class TestCamelliaBot(unittest.TestCase):
             self.assertTrue("team" in ans.lower() or "camellia" in ans.lower())
 
         finally:
-            config.AI_PROVIDER = orig_prov
-            config.OPENAI_API_KEY = orig_oai
-            config.GEMINI_ENABLED = orig_en
+            config.GROQ_API_KEY = orig_key
+            config.GROQ_ENABLED = orig_en
 
     @patch("camellia.gemini_responder.httpx.Client")
-    def test_gemini_responder_refine_template_openai(self, mock_httpx_cls):
-        """Tests template refinement using OpenAI o3-mini."""
+    def test_gemini_responder_refine_template_groq(self, mock_httpx_cls):
+        """Tests template refinement using Groq."""
         from camellia.gemini_responder import GeminiResponder
 
         mock_resp = MagicMock()
@@ -1623,14 +1587,12 @@ class TestCamelliaBot(unittest.TestCase):
         mock_httpx_cls.return_value.__enter__.return_value.post.return_value = mock_resp
 
         gr = GeminiResponder()
-        orig_prov = config.AI_PROVIDER
-        orig_oai = config.OPENAI_API_KEY
-        orig_en = config.GEMINI_ENABLED
+        orig_key = config.GROQ_API_KEY
+        orig_en = config.GROQ_ENABLED
 
         try:
-            config.GEMINI_ENABLED = True
-            config.AI_PROVIDER = "openai"
-            config.OPENAI_API_KEY = "sk-mock-key-12345"
+            config.GROQ_ENABLED = True
+            config.GROQ_API_KEY = "gsk-mock-key-12345"
 
             refined, was_refined = gr.refine_template_response(
                 template_id="sondesh_pricing",
@@ -1643,9 +1605,8 @@ class TestCamelliaBot(unittest.TestCase):
             self.assertIn("₹450", refined)
 
         finally:
-            config.AI_PROVIDER = orig_prov
-            config.OPENAI_API_KEY = orig_oai
-            config.GEMINI_ENABLED = orig_en
+            config.GROQ_API_KEY = orig_key
+            config.GROQ_ENABLED = orig_en
 
     def test_human_simulation_scenarios_and_new_qa(self):
         """Test the real-world edge case scenarios identified by human simulation agents."""

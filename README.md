@@ -6,21 +6,21 @@
 ![Database](https://img.shields.io/badge/SQLite-3.0-lightgrey.svg)
 ![License](https://img.shields.io/badge/License-MIT-yellow.svg)
 
-Production-ready, deterministic customer auto-response engine engineered for **Camellia Artisanal** (Bengal-rooted gourmet sweets & cloud kitchen food brand in Delhi NCR). 
+Production-ready customer auto-response engine for **Camellia Artisanal** (a gourmet sweets & cloud kitchen brand in Delhi NCR).
 
-Built specifically to solve Meta Ad lead conversion bottlenecks, filter non-ad noise, send high-res Menu Photo Cards (`Till Thursday.jpeg`, `From Friday.jpeg`, `Signature Sondesh.jpeg`, `AAMAR MISHTI.jpeg`), and gracefully escalate complex/sensitive customer inquiries to human staff.
+Built to convert Meta Ad leads, filter out organic DM noise, send high-resolution Menu Photo Cards (`Till Thursday.jpeg`, `From Friday.jpeg`, `Signature Sondesh.jpeg`, `AAMAR MISHTI.jpeg`), and route complex or sensitive customer inquiries to human staff.
 
 ---
 
 ## 🚀 Key Business Features & Architecture
 
 ### 1. 🛡️ Instagram Ad-Gate Filter (PRD Requirement #4)
-- **Ad-Originated DMs Only**: Automatically checks Meta Webhook referral data (`messaging[0].referral.source == 'ADS'`).
-- **Zero Hallucination / Zero Noise**: Auto-replies *only* to users coming from paid Instagram Ads.
-- **Organic DM Protection**: Organic DMs (non-ad) are blocked by the Ad-Gate and left in the Inbox for manual human reply.
+- **Ad-Originated DMs Only**: Checks Meta Webhook referral data (`messaging[0].referral.source == 'ADS'`).
+- **Targeted Auto-Replies**: Responds *only* to incoming messages from paid Instagram Ads.
+- **Organic DM Protection**: Organic (non-ad) DMs pass directly to the inbox for manual staff replies.
 
 ### 2. 🖼️ Visual Menu Photo Card Engine
-- Sends high-resolution menu photo cards directly in Instagram DMs and WhatsApp chats instead of long text lists.
+- Delivers high-resolution menu photo cards directly in Instagram DMs and WhatsApp chats instead of long text lists.
 - **Dynamic Weekly Menu Switch**:
   - **Mon – Thu**: Sends `Till Thursday.jpeg` (Mid-week menu card).
   - **Fri – Sun**: Sends `From Friday.jpeg` (Weekend menu card).
@@ -29,25 +29,25 @@ Built specifically to solve Meta Ad lead conversion bottlenecks, filter non-ad n
 
 ### 3. 🎯 100% Deterministic Keyword Q&A (PRD Requirement #5)
 - Uses keyword boundary regex matching against structured Q&A templates (`qa_templates.json`).
-- Prevents AI hallucinations, wrong pricing, or inaccurate delivery promises.
+- Eliminates AI hallucinations, incorrect pricing, and inaccurate delivery estimates.
 - Covers pricing, weekly menu items, dietary preferences (Veg/Non-Veg), delivery areas (Delhi NCR), minimum order rules, and payment methods.
 
 ### 4. 🚨 Human Escalation Pipeline (PRD Requirement #4b)
 - **Out-of-Syllabus Protection**: Unmatched customer queries are never answered with guesses.
-- **Sensitive Trigger Guard**: Queries containing sensitive keywords (`refund`, `complaint`, `cancel order`, `custom order`, `bulk order`, `payment link`) immediately flag human escalation.
-- **Owner Notification**: Logged into `camellia.db` with customer ID, channel, and message snippet, then alerts human staff via SMS/Email.
+- **Sensitive Trigger Guard**: Queries containing sensitive keywords (`refund`, `complaint`, `cancel order`, `custom order`, `bulk order`, `payment link`) immediately trigger human escalation.
+- **Owner Notification**: Logs customer IDs, channels, and message snippets in `camellia.db`, then alerts human staff via SMS/Email.
 
 ### 5. 🔐 Kitchen & Menu Admin Portal (`/admin` / `/admin/dashboard`)
-- **PIN Authentication**: Secure PIN lock for kitchen staff and managers (configured via `ADMIN_PIN` in `.env`; blocks access if unconfigured).
-- **📋 Paste Menu Card Parser**: Paste raw WhatsApp text, flyer notes, or dish lists; regex & Gemini AI automatically extract dish names, descriptions, weights, prices, and categorize into Veg / Non-Veg.
-- **📸 Flyer Photo & Graphic OCR**: Optional drag-and-drop printed menu photos or Instagram flyers; scans items using Gemini Vision when configured (OFF by default, uses client's own key under their billing).
-- **📊 Google Sheets Live Sync**: One-click sync from Google Sheets CSV without touching server files.
-- **🍱 Active Menu Viewer**: Visual inspection of live dishes with instant **Reset to Authentic Bengali Culinary Baseline**.
-- **📈 Analytics & Escalations**: Real-time match rates, total queries, and unresolved human escalation tracking.
+- **PIN Authentication**: Secure PIN access for kitchen staff and managers (configured via `ADMIN_PIN` in `.env`; blocks access if unconfigured).
+- **📋 Paste Menu Card Parser**: Extracts dish names, descriptions, weights, and prices from raw WhatsApp text, flyer notes, or dish lists, automatically categorizing items as Veg or Non-Veg.
+- **📸 Flyer Photo & Graphic OCR**: Scans printed menu photos or Instagram flyers using Gemini Vision when configured (OFF by default, uses client key).
+- **📊 Google Sheets Live Sync**: One-click sync from Google Sheets CSV without server restarts or touching code.
+- **🍱 Active Menu Viewer**: Inspect live menu items visually with an instant **Reset to Authentic Bengali Culinary Baseline**.
+- **📈 Analytics & Escalations**: Tracks real-time match rates, query totals, and unresolved human escalations.
 
 ### 6. 💬 Browser-Based Live Chat Tester (`/chat`)
-- Built-in WhatsApp/Instagram-style web chat interface for live interactive testing in your browser (`http://localhost:8000/chat`).
-- Interactive memory badges, channel switcher, and direct link to Kitchen Admin Portal.
+- Built-in WhatsApp/Instagram-style web chat interface for live testing in your browser (`http://localhost:8000/chat`).
+- Interactive memory badges, channel switcher, and direct link to the Kitchen Admin Portal.
 
 ---
 
@@ -75,7 +75,7 @@ Camellia.artisal/
 │   ├── menu_parser.py           # Text & image menu extraction engine
 │   ├── order_calculator.py      # Order draft parsing & receipt totals
 │   ├── rag_fallback.py          # Controlled retrieval over approved sources
-│   ├── gemini_responder.py      # Optional Gemini refinement / RAG provider
+│   ├── gemini_responder.py      # Optional Groq refinement / RAG provider
 │   ├── session_memory.py        # Customer facts & conversation state
 │   ├── database.py              # SQLite storage (logs, sessions, escalations)
 │   ├── escalator.py             # Human escalation & alert pipeline
@@ -198,7 +198,7 @@ Then open the Web Chat Interface in your browser:
 
 ## 📊 Google Spreadsheet Live Menu Sync (`sheet_sync.py`)
 
-Menu items and pricing can be updated seamlessly via a published Google Sheet CSV without modifying any code or JSON files.
+Menu items and pricing can be updated directly via a published Google Sheet CSV without modifying any code or JSON files.
 
 ### How it works
 

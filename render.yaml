@@ -20,6 +20,6 @@ services:
         value: 3.11.7
     # Set in the Render dashboard, never committed: META_APP_SECRET,
     # WHATSAPP_ACCESS_TOKEN, WHATSAPP_PHONE_NUMBER_ID, INSTAGRAM_ACCESS_TOKEN,
-    # ADMIN_API_KEY, ADMIN_PIN, GEMINI_API_KEY.
+    # ADMIN_API_KEY, ADMIN_PIN, GROQ_API_KEY.
     # Once META_APP_SECRET is set and /health reports webhook_signature
     # "enforced", also set REQUIRE_WEBHOOK_SIGNATURE=true.

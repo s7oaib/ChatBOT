@@ -60,16 +60,13 @@ def _should_refine(template_text: str) -> bool:
 
 class GeminiResponder:
     """
-    Unified Cloud AI RAG & Template Refinement Engine.
-    
-    Supports:
-    - OpenAI Reasoning & Chat Models (o3-mini, o1, gpt-4o, gpt-4o-mini)
-    - Google Gemini Models (gemini-3.5-flash and other currently served models)
-    
-    Provides fast, context-grounded customer support answers based strictly on
-    menu.json + qa_templates.json.
-    Enforces strict refusal ('OUT_OF_CONTEXT') for out-of-syllabus or unlisted queries,
-    triggering human escalation.
+    Groq-backed RAG & Template Refinement Engine.
+
+    Uses Groq's OpenAI-compatible chat completions endpoint (model:
+    openai/gpt-oss-20b by default) for fast, context-grounded customer
+    support answers based strictly on menu.json + qa_templates.json.
+    Enforces strict refusal ('OUT_OF_CONTEXT') for out-of-syllabus or unlisted
+    queries, triggering human escalation.
     """
 
     def __init__(self, menu_path: str = None, qa_path: str = None):
@@ -77,8 +74,7 @@ class GeminiResponder:
         self.qa_path = qa_path or config.QA_TEMPLATES_PATH
         self.menu_data = self._load_json(self.menu_path)
         self.qa_data = self._load_json(self.qa_path)
-        self._gemini_cooldown_until: float = 0.0
-        self._openai_cooldown_until: float = 0.0
+        self._groq_cooldown_until: float = 0.0
         # Outcome of the most recent provider call. Holding a key is not the
         # same as the key working — a bad key or an unserved model name answers
         # instantly with an HTTP 400/404 and refines nothing. Those now trip a
@@ -105,20 +101,19 @@ class GeminiResponder:
         paused = {
             name: round(until - now, 1)
             for name, until in (
-                ("gemini", self._gemini_cooldown_until),
-                ("openai", self._openai_cooldown_until),
+                ("groq", self._groq_cooldown_until),
             )
             if until > now
         }
         return {
             "provider": provider,
             "enabled": bool(config.is_ai_enabled),
-            "model": config.GEMINI_MODEL,
+            "model": config.GROQ_MODEL,
             "last_call_ok": self._last_call_ok,
             "last_call": self._last_call_detail,
             # Unknown until a call is made, so absence of a failure is not success.
             "working": bool(self._last_call_ok) if self._last_call_ok is not None else None,
-            # Seconds remaining on each provider's cooldown. A long pause here
+            # Seconds remaining on the provider's cooldown. A long pause here
             # means a config error (bad key / wrong model), not load.
             "paused_seconds": paused,
             "refinement_cache": {
@@ -140,35 +135,24 @@ class GeminiResponder:
         """Reload JSON context data, reset cooldowns, drop cached refinements."""
         self.menu_data = self._load_json(self.menu_path)
         self.qa_data = self._load_json(self.qa_path)
-        self._gemini_cooldown_until = 0.0
-        self._openai_cooldown_until = 0.0
+        self._groq_cooldown_until = 0.0
         # Cached refinements are rewordings of the templates that just changed.
         # Keeping them would serve the old menu's wording after a menu update.
         self._refinement_cache.clear()
 
     def get_active_provider(self) -> str:
-        """Determines active AI provider: 'gemini', 'openai', or 'none'."""
+        """Determines active AI provider: 'groq' or 'none'."""
         if not config.is_ai_enabled:
             return "none"
         now = time.time()
-        gemini_available = bool(config.GEMINI_API_KEY) and (now > self._gemini_cooldown_until)
-        openai_available = bool(config.OPENAI_API_KEY) and (now > self._openai_cooldown_until)
-
-        if config.AI_PROVIDER == "openai" and openai_available:
-            return "openai"
-        if config.AI_PROVIDER == "gemini" and gemini_available:
-            return "gemini"
-        # Auto / default mode: prioritize Gemini Flash
-        if gemini_available:
-            return "gemini"
-        if openai_available:
-            return "openai"
+        if bool(config.GROQ_API_KEY) and (now > self._groq_cooldown_until):
+            return "groq"
         return "none"
 
     def _build_context_string(self) -> str:
         """Assembles a compact, high-density context string from menu.json and qa_templates.json."""
         context_parts = []
-        
+
         # Business Details & Coverage
         context_parts.append("BUSINESS NAME: Camellia Artisanal")
         context_parts.append("TAGLINE: Bengal-Rooted Artisanal Sweets & Food")
@@ -215,62 +199,51 @@ class GeminiResponder:
 
         return "\n".join(context_parts)
 
-    def _query_openai(self, prompt_text: str, is_refinement: bool = False, template_id: str = "") -> Tuple[str, bool, str]:
-        """
-        Queries OpenAI Chat Completions API with support for reasoning models (o3-mini, o1)
-        and standard models (gpt-4o, gpt-4o-mini).
-        """
-        if not config.OPENAI_API_KEY:
-            return "", False, "openai_no_key"
-
-        model_name = config.OPENAI_MODEL.lower()
-        is_reasoning_model = any(model_name.startswith(prefix) for prefix in ("o1", "o3", "o4"))
-
-        messages = [
-            {"role": "user", "content": prompt_text}
-        ]
+    def _query_groq(self, prompt_text: str, is_refinement: bool = False, template_id: str = "") -> Tuple[str, bool, str]:
+        """Queries Groq's OpenAI-compatible chat completions endpoint."""
+        if not config.GROQ_API_KEY:
+            return "", False, "groq_no_key"
 
         payload: Dict[str, Any] = {
-            "model": config.OPENAI_MODEL,
-            "messages": messages,
+            "model": config.GROQ_MODEL,
+            "messages": [{"role": "user", "content": prompt_text}],
+            "temperature": 0.2 if is_refinement else 0.1,
+            "max_tokens": 1024 if is_refinement else 2048,
         }
-
-        if is_reasoning_model:
-            payload["max_completion_tokens"] = 1024
-            if config.OPENAI_REASONING_EFFORT:
-                payload["reasoning_effort"] = config.OPENAI_REASONING_EFFORT
-        else:
-            payload["max_tokens"] = 1024
-            payload["temperature"] = 0.2 if is_refinement else 0.1
 
         headers = {
-            "Authorization": f"Bearer {config.OPENAI_API_KEY}",
-            "Content-Type": "application/json"
+            "Authorization": f"Bearer {config.GROQ_API_KEY}",
+            "Content-Type": "application/json",
         }
 
-        url = "https://api.openai.com/v1/chat/completions"
+        url = "https://api.groq.com/openai/v1/chat/completions"
+
+        # Refinement is optional polish on an answer we already hold, so it gets
+        # a short budget; answering an unmatched question is the only path worth
+        # making the customer wait for.
+        timeout = config.GROQ_REFINE_TIMEOUT if is_refinement else config.GROQ_TIMEOUT
 
         try:
-            with httpx.Client(timeout=config.OPENAI_TIMEOUT) as client:
+            with httpx.Client(timeout=timeout) as client:
                 resp = client.post(url, json=payload, headers=headers)
                 if resp.status_code != 200:
                     cooldown = _cooldown_for_status(resp.status_code)
                     if cooldown:
-                        self._openai_cooldown_until = time.time() + cooldown
+                        self._groq_cooldown_until = time.time() + cooldown
                         if resp.status_code in CONFIG_ERROR_HTTP_STATUSES:
                             log.error(
-                                "OpenAI rejected the request as misconfigured (HTTP %s, model %r). "
-                                "Pausing OpenAI calls for %.0fs — check OPENAI_API_KEY and OPENAI_MODEL.",
-                                resp.status_code, config.OPENAI_MODEL, cooldown,
+                                "Groq rejected the request as misconfigured (HTTP %s, model %r). "
+                                "Pausing Groq calls for %.0fs — check GROQ_API_KEY and GROQ_MODEL.",
+                                resp.status_code, config.GROQ_MODEL, cooldown,
                             )
-                    log.warning("OpenAI HTTP %s: %s", resp.status_code, resp.text[:200])
+                    log.warning("Groq HTTP %s: %s", resp.status_code, resp.text[:200])
                     self._record_call(False, f"HTTP {resp.status_code}: {resp.text[:120]}")
-                    return "", False, f"openai_http_{resp.status_code}"
+                    return "", False, f"groq_http_{resp.status_code}"
 
                 data = resp.json()
                 choices = data.get("choices", [])
                 if not choices:
-                    return "", False, "openai_no_choices"
+                    return "", False, "groq_no_choices"
 
                 assistant_text = choices[0].get("message", {}).get("content", "").strip()
 
@@ -281,90 +254,23 @@ class GeminiResponder:
                     )
                     return fallback, False, "out_of_context"
 
-                return assistant_text, True, "openai_rag"
-
-        except Exception as e:
-            self._openai_cooldown_until = time.time() + TRANSIENT_COOLDOWN_SECONDS
-            log.warning("OpenAI API call failed (%s): %s", config.OPENAI_MODEL, e)
-            fallback = self.qa_data.get("escalation_triggers", {}).get(
-                "fallback_response",
-                "Thanks for reaching out! Let me connect you with our team — they'll get back to you shortly. 🙏"
-            )
-            return fallback, False, f"openai_exception_{type(e).__name__}"
-
-    def _query_gemini(self, prompt_text: str, is_refinement: bool = False, template_id: str = "") -> Tuple[str, bool, str]:
-        """Queries Google Gemini generateContent REST endpoint."""
-        if not config.GEMINI_API_KEY:
-            return "", False, "gemini_no_key"
-
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{config.GEMINI_MODEL}:generateContent?key={config.GEMINI_API_KEY}"
-
-        payload = {
-            "contents": [{"parts": [{"text": prompt_text}]}],
-            "generationConfig": {
-                "temperature": 0.2 if is_refinement else 0.1,
-                "maxOutputTokens": 2048
-            }
-        }
-
-        # Refinement is optional polish on an answer we already hold, so it gets
-        # a short budget; answering an unmatched question is the only path worth
-        # making the customer wait for.
-        timeout = config.GEMINI_REFINE_TIMEOUT if is_refinement else config.GEMINI_TIMEOUT
-
-        try:
-            with httpx.Client(timeout=timeout) as client:
-                resp = client.post(url, json=payload)
-                if resp.status_code != 200:
-                    cooldown = _cooldown_for_status(resp.status_code)
-                    if cooldown:
-                        self._gemini_cooldown_until = time.time() + cooldown
-                        if resp.status_code in CONFIG_ERROR_HTTP_STATUSES:
-                            log.error(
-                                "Gemini rejected the request as misconfigured (HTTP %s, model %r). "
-                                "Pausing Gemini calls for %.0fs — check GEMINI_API_KEY and GEMINI_MODEL.",
-                                resp.status_code, config.GEMINI_MODEL, cooldown,
-                            )
-                    log.warning("Gemini HTTP %s: %s", resp.status_code, resp.text[:200])
-                    self._record_call(False, f"HTTP {resp.status_code}: {resp.text[:120]}")
-                    return "", False, f"gemini_http_{resp.status_code}"
-
-                data = resp.json()
-                candidates = data.get("candidates", [])
-                if not candidates:
-                    return "", False, "gemini_no_candidates"
-
-                finish_reason = candidates[0].get("finishReason", "")
-                if is_refinement and finish_reason == "MAX_TOKENS":
-                    log.warning("Gemini refinement hit MAX_TOKENS for %s. Falling back to template.", template_id)
-                    return "", False, "gemini_max_tokens"
-
-                assistant_text = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "").strip()
-
-                if "OUT_OF_CONTEXT" in assistant_text.upper() or not assistant_text:
-                    fallback = self.qa_data.get("escalation_triggers", {}).get(
-                        "fallback_response",
-                        "Thanks for reaching out! I can only help with questions about Camellia Artisanal menu, prices, and delivery. Let me connect you with our team. 🙏"
-                    )
-                    return fallback, False, "out_of_context"
-
                 self._record_call(True, "ok")
-                return assistant_text, True, "gemini_rag"
+                return assistant_text, True, "groq_rag"
 
         except Exception as e:
-            self._gemini_cooldown_until = time.time() + TRANSIENT_COOLDOWN_SECONDS
+            self._groq_cooldown_until = time.time() + TRANSIENT_COOLDOWN_SECONDS
             self._record_call(False, f"{type(e).__name__}: {str(e)[:120]}")
-            log.warning("Gemini API call failed (%s): %s", config.GEMINI_MODEL, e)
+            log.warning("Groq API call failed (%s): %s", config.GROQ_MODEL, e)
             fallback = self.qa_data.get("escalation_triggers", {}).get(
                 "fallback_response",
                 "Thanks for reaching out! Let me connect you with our team — they'll get back to you shortly. 🙏"
             )
-            return fallback, False, f"gemini_exception_{type(e).__name__}"
+            return fallback, False, f"groq_exception_{type(e).__name__}"
 
     def generate_response(self, user_message: str, user_context: str = None, history_turns: list = None) -> Tuple[str, bool, str]:
         """
-        Queries the active AI provider (OpenAI o3-mini or Google Gemini) with strict RAG context grounding.
-        
+        Queries Groq with strict RAG context grounding.
+
         Returns:
             (response_text: str, is_context_grounded: bool, reason: str)
         """
@@ -405,10 +311,7 @@ class GeminiResponder:
             history_str = "\n".join([f"{t['role'].capitalize()}: {t['content']}" for t in history_turns[-4:]])
             prompt_text = f"{system_prompt}\n\nRecent Chat History:\n{history_str}\n\nCustomer Message: {user_message}"
 
-        if provider == "openai":
-            return self._query_openai(prompt_text, is_refinement=False)
-        else:
-            return self._query_gemini(prompt_text, is_refinement=False)
+        return self._query_groq(prompt_text, is_refinement=False)
 
     def refine_template_response(
         self,
@@ -419,7 +322,7 @@ class GeminiResponder:
         history_turns: list = None
     ) -> Tuple[str, bool]:
         """
-        Uses active AI provider to think through and format a natural, personalized response
+        Uses Groq to think through and format a natural, personalized response
         based on a matched QA template and active customer context.
         Falls back to template_text if AI is disabled, offline, or times out.
         """
@@ -471,10 +374,7 @@ class GeminiResponder:
             history_str = "\n".join([f"{t['role'].capitalize()}: {t['content']}" for t in history_turns[-4:]])
             prompt_text = f"{system_prompt}\n\nRecent Chat History:\n{history_str}\n\nCustomer Message: {user_message}"
 
-        if provider == "openai":
-            resp_text, ok, _ = self._query_openai(prompt_text, is_refinement=True, template_id=template_id)
-        else:
-            resp_text, ok, _ = self._query_gemini(prompt_text, is_refinement=True, template_id=template_id)
+        resp_text, ok, _ = self._query_groq(prompt_text, is_refinement=True, template_id=template_id)
 
         if ok and resp_text:
             # Only successful refinements are cached. A failure is transient —
