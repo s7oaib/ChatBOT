@@ -981,6 +981,180 @@ class TestCamelliaBot(unittest.TestCase):
             self.assertIn("Collection 2 — Signature Collection", resp)
             mock_httpx_cls.return_value.__enter__.return_value.post.assert_not_called()
 
+    def test_duplicate_reply_is_never_sent_twice_when_ai_is_down(self):
+        """
+        With no AI provider, a follow-up that re-matches its own template must
+        not resend that template verbatim.
+
+        This is the floor under the refinement fix. Refinement rewrites the
+        second reply into a real answer, but it needs the provider, and a
+        config error or a 413 parks the provider for ten minutes. Every
+        follow-up in that window would otherwise repeat the template — question
+        and all — which is the behaviour customers actually complained about.
+        """
+        from camellia.responder import responder
+        from camellia.session_memory import session_memory
+
+        uid = "test_dup_guard"
+        session_memory.clear_session(uid, "whatsapp")
+
+        # GROQ_ENABLED is already False via setUp, so no refinement runs.
+        first, _, tmpl1, _ = responder.match_and_respond(
+            "do you deliver today", user_id=uid, channel="whatsapp"
+        )
+        second, _, tmpl2, _ = responder.match_and_respond(
+            "gurgaon", user_id=uid, channel="whatsapp"
+        )
+
+        self.assertEqual(tmpl1, "delivery_area")
+        self.assertEqual(tmpl2, "delivery_area")
+        self.assertIn("Which area are you in?", first)
+
+        # The repeat must not go out, and the answered question must not be
+        # asked a second time.
+        self.assertNotEqual(first, second)
+        self.assertNotIn("Which area are you in?", second)
+
+    def test_duplicate_guard_does_not_oscillate_back_into_the_template(self):
+        """
+        A third identical message must not bring the template back.
+
+        Comparing against only the previous reply is not enough: by the third
+        turn the template is no longer the last thing said, so the bot would
+        alternate template -> notice -> template and the customer would see the
+        repeat anyway, one turn later.
+        """
+        from camellia.responder import responder
+        from camellia.session_memory import session_memory
+
+        uid = "test_dup_oscillate"
+        session_memory.clear_session(uid, "whatsapp")
+
+        responder.match_and_respond("do you deliver today", user_id=uid, channel="whatsapp")
+        second, _, _, _ = responder.match_and_respond("gurgaon", user_id=uid, channel="whatsapp")
+        third, _, _, _ = responder.match_and_respond("gurgaon", user_id=uid, channel="whatsapp")
+
+        self.assertNotIn("Which area are you in?", second)
+        self.assertNotIn("Which area are you in?", third)
+
+    def test_delivery_template_returns_after_the_topic_changes(self):
+        """
+        The guard must not mute a template forever. Once the conversation has
+        moved on, a fresh delivery question deserves the full answer again.
+        """
+        from camellia.responder import responder
+        from camellia.session_memory import session_memory
+
+        uid = "test_dup_window"
+        session_memory.clear_session(uid, "whatsapp")
+
+        responder.match_and_respond("do you deliver today", user_id=uid, channel="whatsapp")
+        responder.match_and_respond("gurgaon", user_id=uid, channel="whatsapp")
+        responder.match_and_respond("gurgaon", user_id=uid, channel="whatsapp")
+        responder.match_and_respond("who are you", user_id=uid, channel="whatsapp")
+        later, _, tmpl, _ = responder.match_and_respond(
+            "do you deliver to noida", user_id=uid, channel="whatsapp"
+        )
+
+        self.assertEqual(tmpl, "delivery_area")
+        self.assertIn("Delhi NCR", later)
+
+    def test_duplicate_guard_invents_no_delivery_claim(self):
+        """
+        The repeat notice must not assert coverage. Confirming an area would
+        mean guessing whether it is served, and a wrong guess about delivery is
+        exactly what the template architecture exists to prevent.
+        """
+        from camellia.responder import responder
+        from camellia.session_memory import session_memory
+
+        uid = "test_dup_no_claim"
+        session_memory.clear_session(uid, "whatsapp")
+
+        responder.match_and_respond("do you deliver today", user_id=uid, channel="whatsapp")
+        second, _, _, _ = responder.match_and_respond("gurgaon", user_id=uid, channel="whatsapp")
+
+        lowered = second.lower()
+        self.assertNotIn("yes we deliver", lowered)
+        self.assertNotIn("we deliver to gurgaon", lowered)
+        # It should still move the conversation somewhere the bot can act.
+        self.assertIn("anything else", lowered)
+
+    def test_duplicate_guard_leaves_a_genuinely_new_answer_alone(self):
+        """A different template must pass through untouched."""
+        from camellia.responder import responder
+        from camellia.session_memory import session_memory
+
+        uid = "test_dup_passthrough"
+        session_memory.clear_session(uid, "whatsapp")
+
+        first, _, tmpl1, _ = responder.match_and_respond(
+            "do you deliver today", user_id=uid, channel="whatsapp"
+        )
+        second, _, tmpl2, _ = responder.match_and_respond(
+            "who are you", user_id=uid, channel="whatsapp"
+        )
+
+        self.assertNotEqual(tmpl1, tmpl2)
+        self.assertIn("Camellia Artisanal virtual assistant", second)
+
+    @patch("camellia.gemini_responder.httpx.Client")
+    def test_followup_answer_is_refined_against_the_question_it_answers(self, mock_httpx_cls):
+        """
+        A one-word reply answering the bot's own question must be refined with
+        that question in view.
+
+        The bot asks "Which area are you in?"; the customer says "gurgaon";
+        "gurgaon" is itself a delivery_area trigger, so the same template
+        matches again. Refinement is what makes the second reply an answer
+        rather than a repeat — but only if it can see the exchange. It used to
+        be called with no history at all, so the model got the template and the
+        bare word "gurgaon", and could do nothing but restate the template and
+        ask the same question a second time.
+        """
+        from camellia.responder import responder
+        from camellia.gemini_responder import gemini_responder
+        from camellia.session_memory import session_memory
+
+        def _reply(text):
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.json.return_value = {"choices": [{"message": {"content": text}}]}
+            return resp
+
+        post = mock_httpx_cls.return_value.__enter__.return_value.post
+        post.side_effect = [
+            _reply("We deliver across Delhi NCR. Which area are you in?"),
+            _reply("Yes — Gurgaon is covered! We ship from Sushant Arcade."),
+        ]
+
+        uid = "test_followup_context"
+        session_memory.clear_session(uid, "whatsapp")
+        gemini_responder._groq_cooldown_until = 0.0
+        gemini_responder._refinement_cache.clear()
+
+        with patch.object(config, "GROQ_ENABLED", True), patch.object(config, "GROQ_API_KEY", "fake_key"):
+            first, _, tmpl1, _ = responder.match_and_respond(
+                "do you deliver today", user_id=uid, channel="whatsapp"
+            )
+            second, _, tmpl2, _ = responder.match_and_respond(
+                "gurgaon", user_id=uid, channel="whatsapp"
+            )
+
+        # Both turns land on the same template — that is correct matching, and
+        # exactly why the follow-up needs context to not read as a repeat.
+        self.assertEqual(tmpl1, "delivery_area")
+        self.assertEqual(tmpl2, "delivery_area")
+
+        # The follow-up refinement must have carried the prior exchange.
+        second_prompt = post.call_args_list[-1].kwargs["json"]["messages"][0]["content"]
+        self.assertIn("Recent Chat History:", second_prompt)
+        self.assertIn("Which area are you in?", second_prompt)
+        self.assertIn("do you deliver today", second_prompt)
+
+        # And the two replies must not be the same text.
+        self.assertNotEqual(first, second)
+
     @patch("camellia.gemini_responder.httpx.Client")
     def test_repeat_question_reuses_cached_refinement(self, mock_httpx_cls):
         """
@@ -1151,6 +1325,97 @@ class TestCamelliaBot(unittest.TestCase):
             self.assertIs(status["working"], False)
             self.assertIn("groq", status["paused_seconds"])
 
+        gemini_responder._groq_cooldown_until = 0.0
+
+    @patch("camellia.gemini_responder.httpx.Client")
+    def test_rate_limited_call_is_retried_once_instead_of_pausing(self, mock_httpx_cls):
+        """
+        A 429 is a spent minute, not a fault, so one short retry is tried
+        before giving up on the provider.
+
+        Parking Groq for the full 60s on the first 429 dropped every customer
+        in that window back to unrefined templates, even though the next
+        request would usually have succeeded.
+        """
+        from camellia.gemini_responder import gemini_responder
+
+        limited = MagicMock()
+        limited.status_code = 429
+        limited.text = "rate limit reached"
+        limited.headers = {}
+
+        ok = MagicMock()
+        ok.status_code = 200
+        ok.json.return_value = {"choices": [{"message": {"content": "Refined after retry."}}]}
+
+        post = mock_httpx_cls.return_value.__enter__.return_value.post
+        post.side_effect = [limited, ok]
+
+        gemini_responder._groq_cooldown_until = 0.0
+        with patch.object(config, "GROQ_ENABLED", True), patch.object(config, "GROQ_API_KEY", "k"):
+            text, success, reason = gemini_responder._query_groq("hello")
+            # The retry succeeded, so the provider must stay available.
+            self.assertEqual(gemini_responder.get_active_provider(), "groq")
+
+        self.assertTrue(success)
+        self.assertEqual(reason, "groq_rag")
+        self.assertEqual(text, "Refined after retry.")
+        self.assertEqual(post.call_count, 2)
+        self.assertEqual(gemini_responder._groq_cooldown_until, 0.0)
+
+    @patch("camellia.gemini_responder.httpx.Client")
+    def test_retry_never_overruns_the_refinement_budget(self, mock_httpx_cls):
+        """
+        Refinement is capped below the slow-reply threshold on purpose. A retry
+        must fit inside that budget, never extend it — overrunning would tell
+        the customer the business is running slow to save a cosmetic rewrite.
+        """
+        from camellia.gemini_responder import gemini_responder
+
+        limited = MagicMock()
+        limited.status_code = 429
+        limited.text = "rate limit reached"
+        # A hint far larger than the whole refinement budget.
+        limited.headers = {"retry-after": "30"}
+
+        post = mock_httpx_cls.return_value.__enter__.return_value.post
+        post.return_value = limited
+
+        gemini_responder._groq_cooldown_until = 0.0
+        with patch.object(config, "GROQ_ENABLED", True), \
+             patch.object(config, "GROQ_API_KEY", "k"), \
+             patch.object(config, "GROQ_REFINE_TIMEOUT", 2.5):
+            started = time.monotonic()
+            _, success, reason = gemini_responder._query_groq("hello", is_refinement=True)
+            elapsed = time.monotonic() - started
+
+        self.assertFalse(success)
+        self.assertEqual(reason, "groq_http_429")
+        # Waiting out a 30s hint would have blown the budget, so no retry ran.
+        self.assertEqual(post.call_count, 1)
+        self.assertLess(elapsed, config.SLOW_REPLY_THRESHOLD_MS / 1000)
+        gemini_responder._groq_cooldown_until = 0.0
+
+    @patch("camellia.gemini_responder.httpx.Client")
+    def test_misconfigured_call_is_never_retried(self, mock_httpx_cls):
+        """A bad key cannot be fixed by trying again, so it must not be."""
+        from camellia.gemini_responder import gemini_responder
+
+        bad = MagicMock()
+        bad.status_code = 401
+        bad.text = "invalid api key"
+        bad.headers = {}
+
+        post = mock_httpx_cls.return_value.__enter__.return_value.post
+        post.return_value = bad
+
+        gemini_responder._groq_cooldown_until = 0.0
+        with patch.object(config, "GROQ_ENABLED", True), patch.object(config, "GROQ_API_KEY", "bad"):
+            _, success, reason = gemini_responder._query_groq("hello")
+
+        self.assertFalse(success)
+        self.assertEqual(reason, "groq_http_401")
+        self.assertEqual(post.call_count, 1)
         gemini_responder._groq_cooldown_until = 0.0
 
     @patch("camellia.gemini_responder.httpx.Client")
