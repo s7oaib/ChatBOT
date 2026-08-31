@@ -40,6 +40,37 @@ CONFIG_ERROR_COOLDOWN_SECONDS = 600.0
 _RAG_CONTEXT_CHAR_BUDGET = 16000
 
 
+# A 429 on the free tier is a burst, not a fault: the minute's token budget is
+# spent and the next minute is fine. Parking the provider for the full 60s on
+# the first one drops every customer in that window back to unrefined
+# templates. A rejection is also cheap — the server refuses immediately rather
+# than holding the connection — so one short retry usually lands.
+#
+# The retry must never widen the reply budget. Refinement is capped below
+# SLOW_REPLY_THRESHOLD_MS on purpose, so overrunning it would tell customers
+# the business is running slow to save a cosmetic rewording. Every retry is
+# therefore checked against the deadline of the attempt it belongs to, and
+# skipped when there is not enough left for a real second try.
+_RETRY_BACKOFF_SECONDS = 0.25
+_MIN_RETRY_ATTEMPT_SECONDS = 0.4
+
+
+def _retry_after_seconds(resp: Any) -> Optional[float]:
+    """The provider's own Retry-After hint, when it sends a usable one."""
+    try:
+        raw = resp.headers.get("retry-after")
+    except Exception:
+        return None
+    if not raw:
+        return None
+    try:
+        return max(0.0, float(raw))
+    except (TypeError, ValueError):
+        # Retry-After may also be an HTTP date; no cheap parse, so ignore it
+        # and fall back to the fixed backoff.
+        return None
+
+
 def _cooldown_for_status(status_code: int) -> float:
     """Seconds to stop calling a provider after an HTTP failure. 0 = don't."""
     if status_code in CONFIG_ERROR_HTTP_STATUSES:
@@ -299,10 +330,33 @@ class GeminiResponder:
         # making the customer wait for.
         timeout = config.GROQ_REFINE_TIMEOUT if is_refinement else config.GROQ_TIMEOUT
 
+        deadline = time.monotonic() + timeout
+
         try:
             with httpx.Client(timeout=timeout) as client:
-                resp = client.post(url, json=payload, headers=headers)
-                if resp.status_code != 200:
+                while True:
+                    resp = client.post(url, json=payload, headers=headers)
+                    if resp.status_code == 200:
+                        break
+
+                    # One retry, and only for a transient refusal that leaves
+                    # room inside this call's own budget.
+                    if resp.status_code in TRANSIENT_HTTP_STATUSES:
+                        backoff = _retry_after_seconds(resp) or _RETRY_BACKOFF_SECONDS
+                        remaining = deadline - time.monotonic()
+                        if remaining > backoff + _MIN_RETRY_ATTEMPT_SECONDS:
+                            log.info(
+                                "Groq HTTP %s — retrying once in %.2fs (%.2fs of budget left).",
+                                resp.status_code, backoff, remaining,
+                            )
+                            time.sleep(backoff)
+                            # Whatever is left is all the second attempt gets,
+                            # so a slow retry cannot push past the deadline.
+                            client.timeout = httpx.Timeout(max(0.1, deadline - time.monotonic()))
+                            resp = client.post(url, json=payload, headers=headers)
+                            if resp.status_code == 200:
+                                break
+
                     cooldown = _cooldown_for_status(resp.status_code)
                     if cooldown:
                         self._groq_cooldown_until = time.time() + cooldown

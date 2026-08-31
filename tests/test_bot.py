@@ -1328,6 +1328,97 @@ class TestCamelliaBot(unittest.TestCase):
         gemini_responder._groq_cooldown_until = 0.0
 
     @patch("camellia.gemini_responder.httpx.Client")
+    def test_rate_limited_call_is_retried_once_instead_of_pausing(self, mock_httpx_cls):
+        """
+        A 429 is a spent minute, not a fault, so one short retry is tried
+        before giving up on the provider.
+
+        Parking Groq for the full 60s on the first 429 dropped every customer
+        in that window back to unrefined templates, even though the next
+        request would usually have succeeded.
+        """
+        from camellia.gemini_responder import gemini_responder
+
+        limited = MagicMock()
+        limited.status_code = 429
+        limited.text = "rate limit reached"
+        limited.headers = {}
+
+        ok = MagicMock()
+        ok.status_code = 200
+        ok.json.return_value = {"choices": [{"message": {"content": "Refined after retry."}}]}
+
+        post = mock_httpx_cls.return_value.__enter__.return_value.post
+        post.side_effect = [limited, ok]
+
+        gemini_responder._groq_cooldown_until = 0.0
+        with patch.object(config, "GROQ_ENABLED", True), patch.object(config, "GROQ_API_KEY", "k"):
+            text, success, reason = gemini_responder._query_groq("hello")
+            # The retry succeeded, so the provider must stay available.
+            self.assertEqual(gemini_responder.get_active_provider(), "groq")
+
+        self.assertTrue(success)
+        self.assertEqual(reason, "groq_rag")
+        self.assertEqual(text, "Refined after retry.")
+        self.assertEqual(post.call_count, 2)
+        self.assertEqual(gemini_responder._groq_cooldown_until, 0.0)
+
+    @patch("camellia.gemini_responder.httpx.Client")
+    def test_retry_never_overruns_the_refinement_budget(self, mock_httpx_cls):
+        """
+        Refinement is capped below the slow-reply threshold on purpose. A retry
+        must fit inside that budget, never extend it — overrunning would tell
+        the customer the business is running slow to save a cosmetic rewrite.
+        """
+        from camellia.gemini_responder import gemini_responder
+
+        limited = MagicMock()
+        limited.status_code = 429
+        limited.text = "rate limit reached"
+        # A hint far larger than the whole refinement budget.
+        limited.headers = {"retry-after": "30"}
+
+        post = mock_httpx_cls.return_value.__enter__.return_value.post
+        post.return_value = limited
+
+        gemini_responder._groq_cooldown_until = 0.0
+        with patch.object(config, "GROQ_ENABLED", True), \
+             patch.object(config, "GROQ_API_KEY", "k"), \
+             patch.object(config, "GROQ_REFINE_TIMEOUT", 2.5):
+            started = time.monotonic()
+            _, success, reason = gemini_responder._query_groq("hello", is_refinement=True)
+            elapsed = time.monotonic() - started
+
+        self.assertFalse(success)
+        self.assertEqual(reason, "groq_http_429")
+        # Waiting out a 30s hint would have blown the budget, so no retry ran.
+        self.assertEqual(post.call_count, 1)
+        self.assertLess(elapsed, config.SLOW_REPLY_THRESHOLD_MS / 1000)
+        gemini_responder._groq_cooldown_until = 0.0
+
+    @patch("camellia.gemini_responder.httpx.Client")
+    def test_misconfigured_call_is_never_retried(self, mock_httpx_cls):
+        """A bad key cannot be fixed by trying again, so it must not be."""
+        from camellia.gemini_responder import gemini_responder
+
+        bad = MagicMock()
+        bad.status_code = 401
+        bad.text = "invalid api key"
+        bad.headers = {}
+
+        post = mock_httpx_cls.return_value.__enter__.return_value.post
+        post.return_value = bad
+
+        gemini_responder._groq_cooldown_until = 0.0
+        with patch.object(config, "GROQ_ENABLED", True), patch.object(config, "GROQ_API_KEY", "bad"):
+            _, success, reason = gemini_responder._query_groq("hello")
+
+        self.assertFalse(success)
+        self.assertEqual(reason, "groq_http_401")
+        self.assertEqual(post.call_count, 1)
+        gemini_responder._groq_cooldown_until = 0.0
+
+    @patch("camellia.gemini_responder.httpx.Client")
     def test_transient_error_uses_the_short_cooldown(self, mock_httpx_cls):
         """A 503 is the provider being busy, so it is retried within the minute."""
         from camellia.gemini_responder import gemini_responder
