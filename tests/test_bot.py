@@ -2422,6 +2422,97 @@ class TestAnswerAccuracy(unittest.TestCase):
             self.assertIsNotNone(tmpl)
 
 
+class TestCompoundAndAreaAwareReplies(unittest.TestCase):
+    """
+    One message can carry two asks ("menu for today and do you deliver to
+    sector 90 gurgaon") and delivery questions arrive with the area already
+    named. The matcher still answers one template — a general multi-intent
+    resolver is deliberately unbuilt until the COMPOUND_INTENT_CANDIDATE log
+    shows real traffic — but the gaps measured in real conversations are
+    closed: menu phrasings route to the menu, and a named area gets a
+    confirmation instead of "Which area are you in?".
+    """
+
+    def _respond(self, message, user_id="test_compound"):
+        with patch.object(config, "GROQ_ENABLED", False):
+            return responder.match_and_respond(message, user_id=user_id, channel="whatsapp")
+
+    def test_menu_for_today_reaches_menu_template(self):
+        """'menu for today' scored 0 on every trigger and lost to 'get it today'
+        on delivery_time — the menu ask vanished from the reply entirely."""
+        for msg in ("can i get a menu for today", "menu for today", "today's menu"):
+            text, matched, tmpl, images = self._respond(msg, user_id="test_menu_today")
+            self.assertTrue(matched, f"{msg!r} did not match")
+            self.assertEqual(tmpl, "know_more", f"{msg!r} routed to {tmpl}")
+            self.assertIsNotNone(images)
+            urls = " ".join(
+                (i["url"] if isinstance(i, dict) else i) for i in (images or [])
+            )
+            self.assertIn(".jpeg", urls)
+
+    def test_delivery_today_keeps_the_designed_area_flow(self):
+        """'do you deliver today' deliberately stays on delivery_area — the
+        designed two-turn flow asks which area, then confirms the follow-up
+        ('gurgaon') against it. Pinned here so nobody 'fixes' it into a
+        timing answer and breaks the flow the duplicate-reply tests rely on."""
+        text, _matched, tmpl, _img = self._respond(
+            "do you deliver today", user_id="test_deliver_today"
+        )
+        self.assertEqual(tmpl, "delivery_area")
+        self.assertIn("Which area are you in?", text)
+
+    def test_named_sector_gets_confirmed_not_reasked(self):
+        text, matched, tmpl, _img = self._respond(
+            "do you deliver to sector 90 gurgaon", user_id="test_sector90"
+        )
+        self.assertTrue(matched)
+        self.assertEqual(tmpl, "delivery_area")
+        self.assertIn("Sector 90, Gurgaon", text)
+        self.assertIn("Delhi NCR delivery zone", text)
+        self.assertNotIn("Which area are you in?", text)
+
+    def test_named_city_gets_confirmed_not_reasked(self):
+        text, matched, tmpl, _img = self._respond(
+            "do you deliver to noida", user_id="test_noida"
+        )
+        self.assertEqual(tmpl, "delivery_area")
+        self.assertIn("Noida", text)
+        self.assertNotIn("Which area are you in?", text)
+
+    def test_unnamed_area_still_asks_the_question(self):
+        text, matched, tmpl, _img = self._respond(
+            "which areas do you deliver to", user_id="test_no_area"
+        )
+        self.assertEqual(tmpl, "delivery_area")
+        self.assertIn("Which area are you in?", text)
+
+    def test_compound_message_answers_delivery_and_attaches_menu_card(self):
+        msg = "hi can i get a menu for today and do you deliver to sector 90 gurgaon"
+        text, matched, tmpl, images = self._respond(msg, user_id="test_compound_full")
+        self.assertTrue(matched)
+        self.assertEqual(tmpl, "delivery_area")
+        self.assertIn("Sector 90, Gurgaon", text)
+        self.assertNotIn("Which area are you in?", text)
+        # The menu half is honoured with the current weekly card instead of
+        # being dropped silently.
+        self.assertIsNotNone(images)
+        self.assertIn(".jpeg", str(images))
+        self.assertIn("menu card", text)
+
+    def test_compound_intent_tripwire_logs_evidence(self):
+        """The tripwire must record compound messages with a meaningful
+        runner-up — that log is the evidence that would justify (or veto)
+        building a full multi-intent resolver."""
+        import logging as logging_mod
+        msg = "hi can i get a menu for today and do you deliver to sector 90 gurgaon"
+        with self.assertLogs("camellia.responder", level=logging_mod.INFO) as captured:
+            self._respond(msg, user_id="test_tripwire")
+        compound_lines = [line for line in captured.output if "COMPOUND_INTENT_CANDIDATE" in line]
+        self.assertTrue(compound_lines, f"no tripwire log among: {captured.output}")
+        self.assertIn("delivery_area", compound_lines[0])
+        self.assertIn("know_more", compound_lines[0])
+
+
 class TestClarifyBeforeEscalating(unittest.TestCase):
     """
     A message too vague to place gets one clarifying question rather than the

@@ -897,6 +897,13 @@ class DeterministicResponder:
                     score += 80
                 elif tmpl_id == "how_to_order" and re.search(r'\b(how to order|how do i order|how can i order|how to place an order|how do i place an order|i want to place an order|how to buy)\b', lowered_text):
                     score += 80
+                # "menu for today" must resolve to the menu, not delivery_time.
+                # Its trigger "get it today" leaves "today" as the only
+                # substantive word, which the matcher's short-message rule
+                # happily scores — and the Tier-2 multiplier outranks the
+                # Tier-3 menu template on "today" alone.
+                elif tmpl_id == "know_more" and re.search(r'\bmenu\b', lowered_text) and re.search(r"\b(today|today's|todays)\b", lowered_text):
+                    score += 200
 
             # Calculate Tier Multiplier
             if tmpl_id in TIER_1_GUARDS:
@@ -926,6 +933,29 @@ class DeterministicResponder:
                 "MATCH_SCORE msg=%r best=%s score=%s runner_up=%s",
                 user_message, best_template.get("id"), best_score,
                 runner_up_template.get("id") if runner_up_template else None,
+            )
+
+        # Compound-intent tripwire. One message can ask two different things
+        # ("menu for today and do you deliver to sector 90") and only the
+        # winning template gets answered today. A full multi-intent resolver
+        # is not justified yet — 925 logged messages contained zero cross-topic
+        # compounds — so gather the evidence first: log whenever a
+        # compound-patterned message left a meaningful runner-up behind. If
+        # real traffic starts filling the logs, build the clause-splitting
+        # resolver; if the log stays quiet, the complexity stays unbuilt.
+        if (
+            runner_up_template is not None
+            and runner_up_composite >= 400
+            and best_template is not None
+            and runner_up_template.get("id") != best_template.get("id")
+            and re.search(r'\b(and|also)\b|\?.*\?', lowered_text, re.IGNORECASE)
+        ):
+            log.info(
+                "COMPOUND_INTENT_CANDIDATE msg=%r answered=%s runner_up=%s (score %s)",
+                user_message,
+                best_template.get("id"),
+                runner_up_template.get("id"),
+                runner_up_composite,
             )
 
         if best_template and best_score >= 4:
@@ -1430,6 +1460,46 @@ class DeterministicResponder:
                     formatted_text = "\n".join(lines)
                 else:
                     formatted_text = default_response
+
+        elif template_id == "delivery_area":
+            # The customer may name their area in the same breath ("do you
+            # deliver to sector 90 gurgaon"). Asking "Which area are you in?"
+            # right after they told us reads badly, so swap the closing
+            # question for a confirmation of the area they named.
+            #
+            # Only on a message that actually asked: the bare follow-up
+            # "gurgaon" that answers our own area question is handled by the
+            # duplicate-reply guard, which deliberately asserts nothing about
+            # coverage — see test_duplicate_guard_invents_no_delivery_claim.
+            asked_about_delivery = re.search(
+                r'\b(deliver|delivery|courier|ship|shipping)\b', lowered_msg
+            )
+            area_match = re.search(r'\bsector\s*\d+[a-z]?\b', lowered_msg)
+            city_match = next(
+                (c for c in ("gurgaon", "gurugram", "delhi", "noida", "ghaziabad", "faridabad") if c in lowered_msg),
+                None,
+            )
+            if asked_about_delivery and (area_match or city_match):
+                if area_match:
+                    area = area_match.group(0).title()
+                    if city_match:
+                        area = f"{area}, {city_match.title()}"
+                    confirmation = f"Yes — {area} is well within our Delhi NCR delivery zone 🌸"
+                else:
+                    confirmation = f"Yes — we deliver right across {city_match.title()} 🌸"
+                formatted_text = default_response.replace("Which area are you in?", confirmation)
+
+            # Menu + delivery asked in one message ("can i get a menu for
+            # today and do you deliver to sector 90 gurgaon"): the matcher
+            # answers one template, so attach the menu card the other half
+            # asked for. Narrow by design — a general multi-intent composer
+            # stays unbuilt until the COMPOUND_INTENT_CANDIDATE log shows
+            # real traffic justifying it.
+            if "menu" in lowered_msg:
+                target_images = [current_weekly_img]
+                formatted_text = formatted_text.rstrip() + (
+                    "\n\nAnd here's this week's menu card — dishes change every week! 🍱"
+                )
 
         elif template_id == "recall_order_flavour":
             session = session_memory.get_session(user_id or "default_user", channel or "default_channel")
