@@ -1,3 +1,4 @@
+import hashlib
 import json
 import re
 import time
@@ -64,6 +65,16 @@ _PRICE_OR_TABLE_RE = re.compile(r'₹|```|\bRs\.?\s*\d|\bINR\b', re.IGNORECASE)
 # same text. Caching it turns most refinements into a dict lookup instead of a
 # call to the provider.
 _REFINEMENT_CACHE_MAX = 512
+
+# How much of the conversation the refiner is shown. Without it the model
+# cannot tell an answer from a fresh question: the bot asks "Which area are you
+# in?", the customer replies "gurgaon", that re-matches delivery_area, and the
+# model — seeing only the template and the word "gurgaon" — restates the
+# template verbatim and asks the same question a second time. Four turns is
+# enough to cover the ask/answer pair that causes this, and the per-line cut
+# keeps a long menu reply from crowding out the rest under Groq's TPM ceiling.
+_HISTORY_TURNS_IN_PROMPT = 4
+_HISTORY_LINE_CHARS = 300
 
 
 def _should_refine(template_text: str) -> bool:
@@ -399,20 +410,35 @@ class GeminiResponder:
         if not _should_refine(template_text):
             return template_text, False
 
-        # Only cache the single-turn form. With history in the prompt the reply
-        # depends on the whole conversation, so a key that ignored it would
-        # return another customer's answer; a key that included it would
-        # essentially never hit. responder.py's hot path passes no history.
-        cache_key = None
-        if not history_turns:
-            normalised = " ".join((user_message or "").lower().split())
-            cache_key = (template_id, normalised, user_context or "")
-            cached = self._refinement_cache.get(cache_key)
-            if cached is not None:
-                self._refinement_cache.move_to_end(cache_key)
-                self._refinement_hits += 1
-                return cached, True
-            self._refinement_misses += 1
+        # The conversation so far, exactly as the prompt will carry it. Built
+        # before the cache key because the key hashes this same string: the
+        # reply depends on what was already said, so two customers may share a
+        # cached refinement only when their recent history matches too.
+        history_str = ""
+        if history_turns:
+            history_str = "\n".join(
+                f"{t.get('role', '').capitalize()}: {self._truncate(t.get('content', ''), _HISTORY_LINE_CHARS)}"
+                for t in history_turns[-_HISTORY_TURNS_IN_PROMPT:]
+            )
+
+        # Caching survives the move to history-aware refinement because most
+        # customers walk the same funnel ("do you deliver" -> "gurgaon"), so the
+        # history string repeats across them. Hashing keeps the key small.
+        # The customer context stays in the key on its own: a refinement can
+        # address the customer by name, and a key without it would serve one
+        # customer's name to the next one asking the same question.
+        history_digest = (
+            hashlib.blake2s(history_str.encode("utf-8"), digest_size=8).hexdigest()
+            if history_str else ""
+        )
+        normalised = " ".join((user_message or "").lower().split())
+        cache_key = (template_id, normalised, user_context or "", history_digest)
+        cached = self._refinement_cache.get(cache_key)
+        if cached is not None:
+            self._refinement_cache.move_to_end(cache_key)
+            self._refinement_hits += 1
+            return cached, True
+        self._refinement_misses += 1
 
         # Deliberately without the full knowledge base. Refinement rewords an
         # answer the matcher has already chosen, and that answer is right here in
@@ -430,13 +456,17 @@ class GeminiResponder:
             "Reply warmly and naturally to the customer's message using ONLY the matched template above. "
             "Do not add facts, prices or claims that are not in it. "
             "Preserve all structured monospace code-block tables (``` +---+---+ ```) exactly as provided in the template for crystal-clear readability on WhatsApp and mobile screens. "
-            "Keep prices and details accurate, address the customer by name if known, and keep formatting clear and concise.\n"
+            "Keep prices and details accurate, address the customer by name if known, and keep formatting clear and concise.\n\n"
+            "ANSWER THE CURRENT TURN:\n"
+            "- Read the chat history and reply to what the customer just said, not to the template's topic in general.\n"
+            "- If your previous reply asked a question and this message answers it, acknowledge their answer directly and never ask that question again.\n"
+            "- Never repeat a reply you have already sent. When the template's facts still apply, give only the part that answers this message, and say it more briefly the second time.\n"
+            "- Then move the conversation forward with the natural next step.\n"
             f"{user_ctx_block}"
         )
 
         prompt_text = f"{system_prompt}\n\nCustomer Message: {user_message}"
-        if history_turns:
-            history_str = "\n".join([f"{t['role'].capitalize()}: {t['content']}" for t in history_turns[-4:]])
+        if history_str:
             prompt_text = f"{system_prompt}\n\nRecent Chat History:\n{history_str}\n\nCustomer Message: {user_message}"
 
         resp_text, ok, _ = self._query_groq(prompt_text, is_refinement=True, template_id=template_id)
@@ -445,10 +475,9 @@ class GeminiResponder:
             # Only successful refinements are cached. A failure is transient —
             # caching the template as if it were a refinement would keep the
             # bot un-refined long after the provider recovered.
-            if cache_key is not None:
-                self._refinement_cache[cache_key] = resp_text
-                while len(self._refinement_cache) > _REFINEMENT_CACHE_MAX:
-                    self._refinement_cache.popitem(last=False)
+            self._refinement_cache[cache_key] = resp_text
+            while len(self._refinement_cache) > _REFINEMENT_CACHE_MAX:
+                self._refinement_cache.popitem(last=False)
             return resp_text, True
 
         return template_text, False

@@ -17,6 +17,75 @@ from camellia.trigger_index import trigger_index
 
 log = get_logger("camellia.responder")
 
+# --- Repeat-reply guard ----------------------------------------------------
+# A one-word answer to the bot's own closing question usually re-matches the
+# template that asked it: the bot asks "Which area are you in?", the customer
+# says "gurgaon", and "gurgaon" is itself a delivery_area trigger. Refinement
+# normally rewrites the second reply into an actual answer, but it needs the
+# provider — and on a config error or a 413 the provider is parked for ten
+# minutes, during which every follow-up resends the template verbatim, question
+# and all. This guard is the deterministic floor under that: it costs nothing,
+# needs no network, and holds while the AI layer is down.
+#
+# It deliberately asserts no facts. Confirming "yes, we deliver to Gurgaon"
+# would need to know the area is covered, and a wrong guess about coverage is
+# exactly the kind of error the whole template architecture exists to prevent.
+# So the repeat is replaced with an acknowledgement that points back at what
+# was already said, plus the menu of next steps the bot can actually action.
+_DUPLICATE_REPLY_NOTICE = (
+    "Got it — thanks! I've shared those details just above. 🌸\n\n"
+    "Anything else I can help with — *Sondesh* prices, this week's *Meals* menu, "
+    "or *placing an order*?"
+)
+
+
+def _normalise_reply(text: str) -> str:
+    """Whitespace- and case-insensitive form used to spot an exact repeat."""
+    return " ".join((text or "").split()).lower()
+
+
+# The guard has to stay narrow. A customer working through several areas —
+# "deliver to Dwarka?", "Indirapuram?", "CR Park?" — asks a genuinely new
+# question each time and deserves the coverage answer each time, even though
+# the template behind it never changes. Answering those with "I've shared that
+# above" is a worse bug than the one being fixed. So the guard fires only on
+# the shape that actually caused it: the bot asked something, and the customer
+# sent a short reply that answers rather than asks.
+_QUESTION_OPENER_RE = re.compile(
+    r'^(do|does|did|is|are|was|were|can|could|will|would|should|shall|have|has|'
+    r'what|where|when|why|how|which|who|any)\b',
+    re.IGNORECASE,
+)
+_SHORT_ANSWER_MAX_WORDS = 3
+
+
+def _bot_asked_a_question(reply: str) -> bool:
+    """True when the bot's own last reply ended by asking something."""
+    return (reply or "").rstrip().endswith("?")
+
+
+def _looks_like_a_short_answer(message: str) -> bool:
+    """True for a brief reply that answers rather than asks — 'gurgaon'."""
+    text = " ".join((message or "").split())
+    if not text or text.endswith("?") or _QUESTION_OPENER_RE.match(text):
+        return False
+    return len(text.split()) <= _SHORT_ANSWER_MAX_WORDS
+
+
+# Comparing against only the previous reply is not enough: it lets the bot
+# oscillate template -> notice -> template as a customer repeats themselves,
+# because by the third turn the template is no longer the *last* thing said.
+# Three replies covers that without muting a template the customer legitimately
+# asks for again much later in the conversation.
+_DUPLICATE_LOOKBACK_REPLIES = 3
+
+
+def _recent_bot_replies(user_id: str, channel: str, limit: int = _DUPLICATE_LOOKBACK_REPLIES) -> List[str]:
+    """The bot's most recent replies, newest first."""
+    turns = session_memory.get_session(user_id, channel).get("turns", [])
+    replies = [t.get("content", "") for t in reversed(turns) if t.get("role") == "assistant"]
+    return replies[:limit]
+
 # Conversational intents used to branch the unmatched / escalation reply.
 # A single generic "we've notified our team" notice is wrong for a customer who
 # is only saying thanks, is complaining, or is trying to hand us a large order.
@@ -201,6 +270,18 @@ class DeterministicResponder:
     def reload_templates(self):
         """Alias for reload_data."""
         self.reload_data()
+
+    def _has_response_bank(self, template_id: str) -> bool:
+        """
+        True for templates that rotate between several approved wordings.
+
+        Those already vary themselves, so the repeat guard must leave them
+        alone rather than swap an approved greeting for its notice.
+        """
+        for tmpl in self.qa_data.get("templates", []):
+            if tmpl.get("id") == template_id:
+                return bool(tmpl.get("responses"))
+        return False
 
     def check_explicit_escalation_triggers(self, text: str) -> Optional[str]:
         """Checks if text contains explicit escalation keywords."""
@@ -950,7 +1031,14 @@ class DeterministicResponder:
             if tmpl_id != "greeting" and config.is_ai_enabled and gemini_responder.get_active_provider() != "none":
                 try:
                     user_ctx = f"Customer Name: {facts.get('name', 'Unknown')}"
-                    refined_text, is_refined = gemini_responder.refine_template_response(tmpl_id, response_text, user_message, user_context=user_ctx)
+                    # The turns so far, without this message — add_turn runs
+                    # below, after the reply is built. Refinement needs them:
+                    # a bare "gurgaon" answering "Which area are you in?"
+                    # re-matches delivery_area, and a refiner that cannot see
+                    # the question it is answering just restates the template
+                    # and asks again.
+                    history_turns = session_memory.get_session(user_id, channel).get("turns", [])
+                    refined_text, is_refined = gemini_responder.refine_template_response(tmpl_id, response_text, user_message, user_context=user_ctx, history_turns=history_turns)
                     if is_refined and refined_text:
                         response_text = refined_text
                 except Exception as e:
@@ -965,6 +1053,25 @@ class DeterministicResponder:
 
             if tmpl_id in TOPIC_MAP:
                 facts["last_topic"] = TOPIC_MAP[tmpl_id]
+
+            # Last line of defence against sending the customer the identical
+            # reply twice. Reached only when refinement did not already vary the
+            # wording — because the AI layer is paused, or because it returned
+            # the template unchanged. The images go too: re-sending the same
+            # menu cards under a "shared above" note would contradict it.
+            # Templates carrying a rotating `responses` bank (greeting) vary
+            # themselves from copy the client approved; substituting the notice
+            # would take a reply out of that bank.
+            recent_replies = _recent_bot_replies(user_id, channel)
+            if (
+                not self._has_response_bank(tmpl_id)
+                and _looks_like_a_short_answer(user_message)
+                and _bot_asked_a_question(recent_replies[0] if recent_replies else "")
+                and _normalise_reply(response_text) in {_normalise_reply(r) for r in recent_replies}
+            ):
+                log.info("Suppressed a duplicate %s reply for %s", tmpl_id, channel)
+                response_text = _DUPLICATE_REPLY_NOTICE
+                image_url = None
 
             session_memory.add_turn(user_id, channel, user_message, response_text)
             return response_text, True, tmpl_id, image_url
