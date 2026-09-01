@@ -2885,6 +2885,83 @@ class TestInstagramMenuCards(unittest.TestCase):
         self.assertIn("Which would you like?", joined)
 
 
+class TestGoogleSheetMenuSync(unittest.TestCase):
+    """
+    The Google Sheet is the menu's durable source of truth.
+
+    The container filesystem does not persist, so a menu edited through /admin
+    lasts only until the next deploy. Re-pulling the sheet at boot is what makes
+    a price the client typed survive a restart.
+    """
+
+    def test_menu_is_pulled_from_the_sheet_on_startup(self):
+        from camellia.app import app as fastapi_app
+
+        with patch.object(config, "GOOGLE_SHEET_CSV_URL", "https://docs.google.com/x/pub?output=csv"), \
+             patch("camellia.app.sheet_sync.sync_from_csv_url") as mock_sync, \
+             patch("camellia.app.db.purge_expired_data", return_value={}):
+            mock_sync.return_value = {"status": "success", "updated_items_count": 4}
+            with TestClient(fastapi_app):
+                pass
+
+        mock_sync.assert_called_once()
+
+    def test_startup_survives_an_unreachable_sheet(self):
+        """
+        A sheet that is offline, renamed, or unshared must leave the bot
+        answering from the menu baked into the image — never refusing to boot.
+        """
+        from camellia.app import app as fastapi_app
+
+        with patch.object(config, "GOOGLE_SHEET_CSV_URL", "https://docs.google.com/x/pub?output=csv"), \
+             patch("camellia.app.sheet_sync.sync_from_csv_url", side_effect=RuntimeError("sheet is down")), \
+             patch("camellia.app.db.purge_expired_data", return_value={}):
+            with TestClient(fastapi_app) as client:
+                # The bot is up and still answering from the seed menu.
+                self.assertEqual(client.get("/health").status_code, 200)
+
+    def test_no_sheet_configured_means_no_sync_attempt(self):
+        from camellia.app import app as fastapi_app
+
+        with patch.object(config, "GOOGLE_SHEET_CSV_URL", ""), \
+             patch("camellia.app.sheet_sync.sync_from_csv_url") as mock_sync, \
+             patch("camellia.app.db.purge_expired_data", return_value={}):
+            with TestClient(fastapi_app):
+                pass
+
+        mock_sync.assert_not_called()
+
+    def test_sync_button_uses_the_configured_sheet(self):
+        """
+        Pressing Sync with a sheet configured must fetch that sheet. It used to
+        fall through to a local disk reload, which reported success while the
+        price changed in the sheet never reached a customer.
+        """
+        from camellia.app import app as fastapi_app
+
+        client = TestClient(fastapi_app)
+        with patch.object(config, "GOOGLE_SHEET_CSV_URL", "https://docs.google.com/x/pub?output=csv"), \
+             patch.object(config, "ADMIN_PIN", "1234"), \
+             patch("camellia.app.sheet_sync.sync_from_csv_url") as mock_remote, \
+             patch("camellia.app.sheet_sync.sync_local_reload") as mock_local:
+            mock_remote.return_value = {"status": "success", "updated_items_count": 3}
+            resp = client.post("/admin/sync-menu", headers={"X-Admin-Pin": "1234"})
+
+        self.assertEqual(resp.status_code, 200)
+        mock_remote.assert_called_once()
+        mock_local.assert_not_called()
+
+    def test_only_google_hosted_sheets_are_fetched(self):
+        """The CSV URL is attacker-influencable input, so it must stay SSRF-safe."""
+        from camellia.sheet_sync import is_safe_csv_url
+
+        self.assertTrue(is_safe_csv_url("https://docs.google.com/spreadsheets/d/e/x/pub?output=csv"))
+        self.assertFalse(is_safe_csv_url("http://docs.google.com/x"))          # not https
+        self.assertFalse(is_safe_csv_url("https://evil.example.com/x.csv"))    # wrong host
+        self.assertFalse(is_safe_csv_url("https://docs.google.com.evil.com/x"))  # suffix trick
+        self.assertFalse(is_safe_csv_url("https://169.254.169.254/latest/meta-data/"))  # metadata
+
+
 if __name__ == "__main__":
     unittest.main()
 

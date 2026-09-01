@@ -1,3 +1,4 @@
+import asyncio
 import hmac
 import hashlib
 import json
@@ -63,7 +64,33 @@ async def lifespan(app: FastAPI):
             )
     except Exception:
         log.exception("Retention purge failed on startup.")
-    
+
+    # The container filesystem does not persist, so a menu edited through /admin
+    # survives only until the next deploy, when menu.json reverts to the copy
+    # baked into the image. Re-pulling at boot makes the Google Sheet the
+    # durable source of truth: whatever the client last put in the sheet is what
+    # customers are quoted, no matter how often the service restarts.
+    #
+    # Deliberately non-fatal. An unreachable or malformed sheet must leave the
+    # bot answering from the seed menu rather than refusing to start.
+    if config.GOOGLE_SHEET_CSV_URL:
+        try:
+            result = await asyncio.to_thread(sheet_sync.sync_from_csv_url)
+            if result.get("status") == "success":
+                log.info(
+                    "Menu synced from Google Sheet on startup (%s rows).",
+                    result.get("updated_items_count"),
+                )
+            else:
+                log.warning(
+                    "Startup menu sync did not apply, serving the menu baked into "
+                    "the image instead: %s", result,
+                )
+        except Exception:
+            log.exception(
+                "Startup menu sync failed; serving the menu baked into the image."
+            )
+
     yield
 
 limiter = Limiter(key_func=get_remote_address, default_limits=["300/minute"])
@@ -1120,6 +1147,12 @@ def sync_menu(request: Request, csv_url: Optional[str] = None, x_admin_key: Opti
     require_admin(x_admin_key, x_admin_pin)
     if csv_url:
         result = sheet_sync.sync_from_csv_url(csv_url)
+    elif config.GOOGLE_SHEET_CSV_URL:
+        # Without this the configured sheet was ignored unless the caller
+        # happened to pass the URL again by hand: pressing Sync in the dashboard
+        # only re-read the same menu.json from disk and reported success, so a
+        # price changed in the sheet never reached a customer.
+        result = sheet_sync.sync_from_csv_url()
     else:
         result = sheet_sync.sync_local_reload()
     return result

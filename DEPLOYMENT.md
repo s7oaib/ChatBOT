@@ -25,6 +25,52 @@ only signal is the `warnings` array and the fields below it.
 | `BYPASS_AD_GATE` | `true` | `false` restores PRD #4: only ad-originated Instagram DMs (`referral.source == "ADS"`) get a reply and organic ones are left for a human. With it `true` the bot answers everyone, including complaints — the escalation triggers in `data/qa_templates.json` are then the only thing routing those to a human. |
 | `ENABLE_WEB_TESTER` | leave unset | Defaults off. Setting it `true` exposes `/chat` to anyone with the URL, and that tester writes real conversation rows and fires real escalation alerts at the manager's phone. |
 
+## Menu updates — the Google Sheet is the source of truth
+
+The container filesystem does not persist. A menu edited through `/admin` is
+written to `/app/data/menu.json` **inside the container** and is gone on the
+next deploy, when the copy baked into the image comes back. No volume is
+mounted there, and mounting one would hide the seed `menu.json` and
+`qa_templates.json` the bot needs to start.
+
+So the durable path is a published Google Sheet, which the bot re-pulls on
+every boot. Whatever the client last saved in the sheet is what customers are
+quoted, however often the service restarts.
+
+### Setting it up
+
+1. Create a Google Sheet with **exactly these column headers** in row 1:
+
+   | Item | Description | Price_INR | Quantity | Category |
+   |---|---|---|---|---|
+   | Kosha Mangsho | Slow-cooked mutton | 520 | 300g | Non-Veg |
+   | Shukto | Mixed vegetable classic | 280 | 250g | Veg |
+
+   `Price_INR` must be a plain number — no `₹`, no commas, or the row is
+   skipped with a warning. Any `Category` containing "non" is treated as
+   non-vegetarian; everything else is vegetarian.
+
+2. **File → Share → Publish to web** → choose the sheet → format
+   **Comma-separated values (.csv)** → **Publish**. Copy the generated URL.
+   This must be the *published* CSV link, not the normal `/edit` address — a
+   sharing link returns HTML and the sync will reject it.
+
+3. Set `GOOGLE_SHEET_CSV_URL` in Railway to that URL and redeploy.
+
+Only HTTPS URLs on Google domains are fetched; anything else is refused, so the
+setting cannot be pointed at an internal address.
+
+### Using it
+
+- **On every deploy** the sheet is pulled automatically. A sheet that is
+  offline or malformed is logged and skipped — the bot still starts and answers
+  from the menu in the image.
+- **Immediately after editing the sheet**, press **Sync** in `/admin`
+  (`POST /admin/sync-menu`) to pull it without waiting for a redeploy.
+
+The sync replaces the items in the most recent `weekly_menus` block. Sondesh
+collections and prices live in `collections` and are not touched by it.
+
 ## Secrets — set in the dashboard, never committed
 
 `META_APP_SECRET`, `META_VERIFY_TOKEN`, `WHATSAPP_ACCESS_TOKEN`,
