@@ -19,6 +19,11 @@ Built to convert Meta Ad leads, filter out organic DM noise, send high-resolutio
 - **Targeted Auto-Replies**: Responds *only* to incoming messages from paid Instagram Ads.
 - **Organic DM Protection**: Organic (non-ad) DMs pass directly to the inbox for manual staff replies.
 
+> **The live deployment runs with the gate bypassed** (`BYPASS_AD_GATE=true`),
+> so the bot currently answers every Instagram DM, organic ones included. The
+> behaviour described above is what `BYPASS_AD_GATE=false` restores. See
+> [DEPLOYMENT.md](DEPLOYMENT.md).
+
 ### 2. 🖼️ Visual Menu Photo Card Engine
 - Delivers high-resolution menu photo cards directly in Instagram DMs and WhatsApp chats instead of long text lists.
 - **Dynamic Weekly Menu Switch**:
@@ -92,7 +97,7 @@ Camellia.artisal/
 │   ├── validate_schemas.py      # menu.json / qa_templates.json validator
 │   ├── simulate_bot.py          # Interactive CLI simulator
 │   └── generate_pdf.py          # Menu PDF generator
-├── Dockerfile, docker-compose.yml, render.yaml, railway.json, Procfile
+├── Dockerfile, docker-compose.yml, railway.json, Procfile, DEPLOYMENT.md
 ├── requirements.txt             # Dependencies list
 └── LICENSE                      # MIT License
 ```

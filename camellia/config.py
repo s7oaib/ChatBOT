@@ -73,9 +73,16 @@ class Config:
     ADMIN_API_KEY: str = os.getenv("ADMIN_API_KEY", "")
     ADMIN_PIN: str = os.getenv("ADMIN_PIN", "")  # Must be explicitly configured via ADMIN_PIN env; unconfigured blocks admin access
 
-    # The browser chat tester writes real rows and fires real escalation alerts,
-    # so it can be explicitly disabled in production with ENABLE_WEB_TESTER=false.
-    ENABLE_WEB_TESTER: bool = os.getenv("ENABLE_WEB_TESTER", "true").lower() in ("true", "1", "t", "yes")
+    # The browser chat tester writes real conversation rows and fires real
+    # escalation alerts at the manager's phone, so it defaults OFF and has to be
+    # switched on deliberately for local work.
+    #
+    # It used to default ON, which meant a deployment got a publicly reachable
+    # /chat unless someone remembered to disable it. render.yaml set it false,
+    # but the live service runs on Railway, which never reads that file — so
+    # production ran with the tester open and only /health's warning said so.
+    # A control that protects real customers must fail closed.
+    ENABLE_WEB_TESTER: bool = os.getenv("ENABLE_WEB_TESTER", "false").lower() in ("true", "1", "t", "yes")
 
     # When true, auto-replies to all DMs regardless of ad referral (bypasses PRD #4 Ad-Gate)
     BYPASS_AD_GATE: bool = os.getenv("BYPASS_AD_GATE", "false").lower() in ("true", "1", "t", "yes")
