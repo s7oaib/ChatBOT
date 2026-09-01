@@ -590,3 +590,70 @@ def test_require_webhook_signature_rejects_unsigned_when_unconfigured():
     finally:
         config.META_APP_SECRET = saved_secret
         config.REQUIRE_WEBHOOK_SIGNATURE = saved_require
+
+
+def test_menu_photo_ocr_uses_the_groq_key_the_bot_already_has():
+    """
+    Menu photo OCR must not require a second provider account.
+
+    The chat model has no vision, so this path used to demand GEMINI_API_KEY or
+    OPENAI_API_KEY and otherwise accepted the upload and silently extracted
+    nothing. Groq serves multimodal models on the same key and endpoint the bot
+    already uses for replies.
+    """
+    from camellia.menu_parser import menu_parser
+
+    captured = {}
+
+    class _Resp:
+        status_code = 200
+        def json(self):
+            return {"choices": [{"message": {"content": json.dumps({
+                "vegetarian": [{"item": "Shukto", "description": "", "price_inr": 280, "quantity": "250g"}],
+                "non_vegetarian": [],
+            })}}]}
+
+    class _Client:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def post(self, url, headers=None, json=None):
+            captured["url"] = url
+            captured["model"] = json["model"]
+            captured["auth"] = headers["Authorization"]
+            captured["content"] = json["messages"][0]["content"]
+            return _Resp()
+
+    from camellia import menu_parser as mp_module
+    with open(config.MENU_JSON_PATH, "r", encoding="utf-8") as f:
+        original = f.read()
+    try:
+        with mock.patch.object(config, "GROQ_API_KEY", "gsk-test"), \
+             mock.patch.object(config, "GROQ_ENABLED", True), \
+             mock.patch.object(config, "GEMINI_API_KEY", ""), \
+             mock.patch.object(config, "OPENAI_API_KEY", ""), \
+             mock.patch.object(mp_module.httpx, "Client", lambda *a, **k: _Client()):
+            result = menu_parser.parse_image_and_update_menu(b"\xff\xd8\xff-fake-jpeg", "image/jpeg")
+    finally:
+        with open(config.MENU_JSON_PATH, "w", encoding="utf-8") as f:
+            f.write(original)
+        responder.reload_templates()
+
+    assert result.get("status") == "success", result
+    assert captured["url"] == "https://api.groq.com/openai/v1/chat/completions"
+    assert captured["auth"] == "Bearer gsk-test"
+    # The image must travel as a base64 data URI, not a URL Meta-style host.
+    image_part = [c for c in captured["content"] if c["type"] == "image_url"][0]
+    assert image_part["image_url"]["url"].startswith("data:image/jpeg;base64,")
+
+
+def test_no_vision_key_names_groq_first_in_its_guidance():
+    """The cheapest fix is the key the operator already has, so say that."""
+    from camellia.menu_parser import menu_parser
+
+    with mock.patch.object(config, "GROQ_API_KEY", ""), \
+         mock.patch.object(config, "GEMINI_API_KEY", ""), \
+         mock.patch.object(config, "OPENAI_API_KEY", ""):
+        result = menu_parser.parse_image_and_update_menu(b"fake", "image/jpeg")
+
+    assert result["status"] == "warning"
+    assert "GROQ_API_KEY" in result["message"]

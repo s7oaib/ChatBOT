@@ -237,7 +237,14 @@ class MenuParser:
         if not image_bytes:
             return {"status": "failed", "reason": "No image data received."}
 
-        # Try Gemini Vision First
+        # Groq first: the bot already holds this key for its replies, so photo
+        # OCR needs no second provider account.
+        if config.GROQ_ENABLED and config.GROQ_API_KEY:
+            res = self._parse_image_with_groq(image_bytes, mime_type)
+            if res.get("status") == "success":
+                return res
+
+        # Try Gemini Vision next
         if config.GEMINI_ENABLED and config.GEMINI_API_KEY:
             res = self._parse_image_with_gemini(image_bytes, mime_type)
             if res.get("status") == "success":
@@ -253,7 +260,7 @@ class MenuParser:
         return {
             "status": "warning",
             "reason": "AI Vision API not configured for live image OCR.",
-            "message": "Image received successfully. Configure GEMINI_API_KEY or OPENAI_API_KEY for live visual OCR extraction."
+            "message": "Image received successfully. Set GROQ_API_KEY (the same key the bot already uses for replies) for live visual OCR extraction, or GEMINI_API_KEY / OPENAI_API_KEY."
         }
 
     def _parse_image_with_gemini(self, image_bytes: bytes, mime_type: str) -> Dict[str, Any]:
@@ -318,6 +325,58 @@ class MenuParser:
         except Exception as e:
             log.error("Failed Gemini vision parsing: %s", e)
             return {"status": "error", "error": str(e)}
+
+    def _parse_image_with_groq(self, image_bytes: bytes, mime_type: str) -> Dict[str, Any]:
+        """
+        Uses a Groq multimodal model to read a menu photo.
+
+        Tried before the others because it reuses GROQ_API_KEY, which the bot
+        already needs for its replies — so menu photo OCR costs no second
+        provider account. Groq's chat model has no vision, but its multimodal
+        models take images on the same OpenAI-compatible endpoint.
+        """
+        b64_image = base64.b64encode(image_bytes).decode("utf-8")
+        data_uri = f"data:{mime_type};base64,{b64_image}"
+        url = "https://api.groq.com/openai/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {config.GROQ_API_KEY}",
+            "Content-Type": "application/json",
+        }
+        prompt = (
+            "You are an expert OCR and data extraction AI for Camellia Artisanal.\n"
+            "Extract all vegetarian dishes, non-vegetarian dishes, bento boxes, and sweets into valid JSON.\n"
+            "Schema: {\"vegetarian\": [{\"item\": str, \"description\": str, \"price_inr\": int, \"quantity\": str}], \"non_vegetarian\": [...], \"bengali_bento\": [...], \"norom_pak_sondesh\": [...]}\n"
+            "Return strict JSON."
+        )
+        payload = {
+            "model": config.GROQ_VISION_MODEL,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": data_uri}},
+                    ],
+                }
+            ],
+            "temperature": 0.1,
+            "response_format": {"type": "json_object"},
+        }
+        try:
+            with httpx.Client(timeout=30.0) as client:
+                resp = client.post(url, headers=headers, json=payload)
+                if resp.status_code == 200:
+                    content = resp.json()["choices"][0]["message"]["content"]
+                    data = json.loads(content)
+                    return self._apply_extracted_data_to_menu(data)
+                log.warning(
+                    "Groq vision HTTP %s (model %r): %s",
+                    resp.status_code, config.GROQ_VISION_MODEL, resp.text[:200],
+                )
+        except Exception as e:
+            log.error("Groq vision parsing failed: %s", e)
+            return {"status": "error", "error": str(e)}
+        return {"status": "failed", "reason": "Groq vision parsing did not return items."}
 
     def _parse_image_with_openai(self, image_bytes: bytes, mime_type: str) -> Dict[str, Any]:
         """Uses OpenAI Vision API (GPT-4o) to convert menu card photos into structured JSON."""
