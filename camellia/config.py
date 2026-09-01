@@ -26,6 +26,33 @@ load_dotenv(BASE_DIR / ".env", override=True)
 from camellia.bootstrap import STARTUP_ACTIONS  # noqa: E402
 
 
+def _env_secret(env_var: str) -> str:
+    """
+    Reads a credential, tolerating the way hosting dashboards store values.
+
+    A `.env` file has quoting rules and python-dotenv applies them, so
+    ADMIN_PIN="1234" yields 1234. A dashboard variable has no such rules: the
+    value is taken literally, so the same entry yields `"1234"` including the
+    quotes. The credential then never matches what anyone types, and the
+    failure is indistinguishable from a wrong PIN — the portal simply refuses a
+    password that is correct.
+
+    Surrounding matching quotes are stripped, and the substitution is logged so
+    it is visible rather than magic. A credential that genuinely begins and ends
+    with the same quote character cannot be expressed this way; use the API key
+    instead.
+    """
+    raw = (os.getenv(env_var) or "").strip()
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in ("'", '"'):
+        print(
+            f"[config] {env_var} is wrapped in {raw[0]} quotes and they have been "
+            f"removed. Dashboard variables are stored literally — remove the quotes "
+            f"there so the value is unambiguous."
+        )
+        return raw[1:-1].strip()
+    return raw
+
+
 def _resolve_path(env_var: str, default: Path, must_exist: bool = False) -> str:
     """
     Resolves a configured path against the repo root rather than the working
@@ -76,8 +103,8 @@ class Config:
     REQUIRE_WEBHOOK_SIGNATURE: bool = os.getenv("REQUIRE_WEBHOOK_SIGNATURE", "false").lower() in ("true", "1", "t", "yes")
 
     # Protects /admin/* endpoints (customer logs & menu overwrite). Unset = open.
-    ADMIN_API_KEY: str = os.getenv("ADMIN_API_KEY", "")
-    ADMIN_PIN: str = os.getenv("ADMIN_PIN", "")  # Must be explicitly configured via ADMIN_PIN env; unconfigured blocks admin access
+    ADMIN_API_KEY: str = _env_secret("ADMIN_API_KEY")
+    ADMIN_PIN: str = _env_secret("ADMIN_PIN")  # Must be explicitly configured via ADMIN_PIN env; unconfigured blocks admin access
 
     # The browser chat tester writes real conversation rows and fires real
     # escalation alerts at the manager's phone, so it defaults OFF and has to be

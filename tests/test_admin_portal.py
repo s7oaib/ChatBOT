@@ -1,6 +1,7 @@
 import os
 import json
 import pytest
+from unittest import mock
 from fastapi.testclient import TestClient
 
 from camellia.config import config
@@ -320,6 +321,35 @@ def test_refinement_budget_stays_under_the_slow_notice_threshold():
 # the review loop end to end, because approving good drafts is what raises the
 # bot's answer rate over time.
 # ---------------------------------------------------------------------------
+
+def test_a_quoted_dashboard_credential_still_works():
+    """
+    Hosting dashboards store variables literally, so ADMIN_PIN="1234" entered
+    there yields the value with its quotes attached. python-dotenv strips them
+    for .env files, so the same entry behaves differently in the two places and
+    the portal refuses a PIN the operator believes is correct.
+    """
+    from camellia.config import _env_secret
+
+    # Both quote styles, since a dashboard preserves whichever was typed.
+    with mock.patch.dict(os.environ, {"ADMIN_PIN": '"4821"'}):
+        assert _env_secret("ADMIN_PIN") == "4821"
+    with mock.patch.dict(os.environ, {"ADMIN_PIN": "'a-long-admin-key'"}):
+        assert _env_secret("ADMIN_PIN") == "a-long-admin-key"
+
+    # A quote on one side only is part of the value, not a wrapper.
+    with mock.patch.dict(os.environ, {"ADMIN_PIN": '"4821'}):
+        assert _env_secret("ADMIN_PIN") == '"4821'
+
+
+def test_an_unquoted_credential_is_untouched():
+    from camellia.config import _env_secret
+
+    with mock.patch.dict(os.environ, {"ADMIN_PIN": " 4821 "}):
+        assert _env_secret("ADMIN_PIN") == "4821"
+    with mock.patch.dict(os.environ, {}, clear=True):
+        assert _env_secret("ADMIN_PIN") == ""
+
 
 def test_pin_box_never_truncates_the_credential():
     """

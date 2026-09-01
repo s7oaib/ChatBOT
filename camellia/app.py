@@ -56,6 +56,19 @@ async def lifespan(app: FastAPI):
             "Neither ADMIN_API_KEY nor ADMIN_PIN is set. /admin/* endpoints will "
             "refuse every request with 503 — the dashboard cannot be opened."
         )
+    else:
+        # A rejected login is otherwise unfalsifiable from the outside: the
+        # portal says "Incorrect PIN" whether the value is wrong, quoted, or
+        # carries a character that did not survive being pasted. Lengths are
+        # enough to spot every one of those and are only visible in the
+        # deployment's own logs — never on /health, which is public.
+        log.info(
+            "Admin credentials configured: ADMIN_PIN %s, ADMIN_API_KEY %s. "
+            "If a correct-looking value is refused, compare these lengths with "
+            "what you are typing.",
+            f"{len(config.ADMIN_PIN)} characters" if config.ADMIN_PIN else "not set",
+            f"{len(config.ADMIN_API_KEY)} characters" if config.ADMIN_API_KEY else "not set",
+        )
     if not config.WHATSAPP_MOCK_MODE and not (config.WHATSAPP_ACCESS_TOKEN and config.WHATSAPP_PHONE_NUMBER_ID):
         log.critical(
             "WhatsApp is in live mode but WHATSAPP_ACCESS_TOKEN / WHATSAPP_PHONE_NUMBER_ID "
