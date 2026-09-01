@@ -2761,6 +2761,130 @@ class TestSlowReplyNotice(unittest.TestCase):
         self.assertFalse(text.startswith(self.NOTICE_START))
 
 
+class TestInstagramMenuCards(unittest.TestCase):
+    """
+    Menu cards reaching Instagram DMs.
+
+    Cards are stored as relative paths and Meta fetches them by URL, so they
+    have to be made absolute before being sent. Instagram was skipping that
+    conversion — the WhatsApp adapter always did it — and the failure was
+    silent in two different ways depending on whether the template captioned
+    its cards.
+    """
+
+    def setUp(self):
+        from camellia.app import send_instagram_reply
+        self.send = send_instagram_reply
+
+    def test_relative_card_is_made_absolute_before_sending(self):
+        from camellia import app as app_module
+
+        posted = []
+
+        class _Resp:
+            status_code = 200
+            def raise_for_status(self): pass
+            def json(self): return {"ok": True}
+
+        class _Client:
+            def __enter__(self_inner): return self_inner
+            def __exit__(self_inner, *a): return False
+            def post(self_inner, url, headers=None, json=None):
+                posted.append(json)
+                return _Resp()
+
+        with patch.object(config, "INSTAGRAM_ACCESS_TOKEN", "tok"), \
+             patch.object(config, "PUBLIC_BASE_URL", "https://bot.example.com"), \
+             patch.object(app_module.httpx, "Client", lambda *a, **k: _Client()):
+            self.send("ig_user_1", "here is the menu", [{"url": "/images/AAMAR.jpeg", "caption": "Aamar Mishti"}])
+
+        attachments = [
+            p["message"]["attachment"]["payload"]["url"]
+            for p in posted if "attachment" in p.get("message", {})
+        ]
+        self.assertEqual(attachments, ["https://bot.example.com/images/AAMAR.jpeg"])
+
+    def test_captioned_cards_do_not_swallow_the_reply_when_meta_rejects_them(self):
+        """
+        'show me the menu' returned nothing at all.
+
+        Its template captions its cards, so the cards are sent before the text.
+        A rejected card raised, the exception aborted the send, and the text
+        the bot had already composed never left the building.
+        """
+        from camellia import app as app_module
+
+        sent_texts = []
+
+        class _OkResp:
+            status_code = 200
+            def raise_for_status(self): pass
+            def json(self): return {"ok": True}
+
+        class _Client:
+            def __enter__(self_inner): return self_inner
+            def __exit__(self_inner, *a): return False
+            def post(self_inner, url, headers=None, json=None):
+                if "attachment" in json.get("message", {}):
+                    raise RuntimeError("Meta rejected the image")
+                sent_texts.append(json["message"]["text"])
+                return _OkResp()
+
+        with patch.object(config, "INSTAGRAM_ACCESS_TOKEN", "tok"), \
+             patch.object(config, "PUBLIC_BASE_URL", "https://bot.example.com"), \
+             patch.object(app_module.httpx, "Client", lambda *a, **k: _Client()):
+            self.send(
+                "ig_user_1",
+                "Which would you like?",
+                [{"url": "/images/AAMAR.jpeg", "caption": "Aamar Mishti — from 450."}],
+            )
+
+        # The customer must still receive the answer and the card's detail.
+        self.assertIn("Which would you like?", sent_texts)
+        self.assertTrue(any("Aamar Mishti" in t for t in sent_texts))
+
+    def test_cards_are_skipped_but_captions_survive_without_a_public_base_url(self):
+        """
+        With PUBLIC_BASE_URL unset a card can never be fetched, so it is not
+        sent to a guaranteed rejection — but its description still reaches the
+        customer as text rather than vanishing with the card.
+        """
+        from camellia import app as app_module
+
+        sent_texts = []
+        attachments = []
+
+        class _Resp:
+            status_code = 200
+            def raise_for_status(self): pass
+            def json(self): return {"ok": True}
+
+        class _Client:
+            def __enter__(self_inner): return self_inner
+            def __exit__(self_inner, *a): return False
+            def post(self_inner, url, headers=None, json=None):
+                msg = json.get("message", {})
+                if "attachment" in msg:
+                    attachments.append(msg["attachment"])
+                else:
+                    sent_texts.append(msg["text"])
+                return _Resp()
+
+        with patch.object(config, "INSTAGRAM_ACCESS_TOKEN", "tok"), \
+             patch.object(config, "PUBLIC_BASE_URL", ""), \
+             patch.object(app_module.httpx, "Client", lambda *a, **k: _Client()):
+            self.send(
+                "ig_user_1",
+                "Which would you like?",
+                [{"url": "/images/AAMAR.jpeg", "caption": "Aamar Mishti — from 450."}],
+            )
+
+        self.assertEqual(attachments, [], "a relative card cannot be fetched by Meta")
+        joined = " ".join(sent_texts)
+        self.assertIn("Aamar Mishti", joined)
+        self.assertIn("Which would you like?", joined)
+
+
 if __name__ == "__main__":
     unittest.main()
 

@@ -26,6 +26,10 @@ services:
         value: "true"
       - key: PYTHON_VERSION
         value: 3.11.7
+    # PUBLIC_BASE_URL must also be set in the dashboard to this service's own
+    # https URL. Menu cards are stored as relative paths and Meta fetches them
+    # by URL, so without it every card is dropped and customers get text-only
+    # replies with no menu photos.
     # Set in the Render dashboard, never committed: META_APP_SECRET,
     # WHATSAPP_ACCESS_TOKEN, WHATSAPP_PHONE_NUMBER_ID, INSTAGRAM_ACCESS_TOKEN,
     # ADMIN_API_KEY, ADMIN_PIN, GROQ_API_KEY.

@@ -303,7 +303,33 @@ def send_instagram_reply(recipient_id: str, text: str, image_url=None) -> Dict[s
     # Instagram has no caption field on attachments, so a captioned card is sent
     # as the image followed by its own text message — same card, detail, card,
     # detail sequence the customer sees on WhatsApp.
-    captioned = whatsapp_adapter._normalise_images(image_url)
+    # Meta fetches a card by URL, so it has to be absolute. This path used to
+    # hand it the raw template value — "/images/AAMAR%20MISHTI.jpeg" — which
+    # Meta cannot resolve, so the attachment POST failed and took the whole
+    # reply down with it: "show me the menu" (captioned cards, sent first)
+    # returned nothing at all, and "sondesh price" (uncaptioned, text first)
+    # arrived as text with no menu. The WhatsApp adapter always did this
+    # conversion; only Instagram was missing it.
+    pairs = whatsapp_adapter._normalise_images(image_url)
+    captioned = []
+    undelivered_captions = []
+    for img, caption in pairs:
+        public = whatsapp_adapter._public_url(img)
+        if not public.startswith(("http://", "https://")):
+            log.warning(
+                "Instagram card '%s' is relative and PUBLIC_BASE_URL is unset, so Meta "
+                "cannot fetch it. Sending the caption as text instead.", img,
+            )
+            # The caption carries the description, so keep it rather than
+            # letting the detail vanish with the card.
+            if caption:
+                undelivered_captions.append(caption)
+            continue
+        captioned.append((public, caption))
+
+    if undelivered_captions:
+        text = "\n\n".join(undelivered_captions + ([text] if text else []))
+
     images = [url for url, _ in captioned]
     cards_first = any(caption for _, caption in captioned)
 
@@ -338,11 +364,20 @@ def send_instagram_reply(recipient_id: str, text: str, image_url=None) -> Dict[s
                 send_text(text)
 
             for img, caption in captioned:
-                last = client.post(url, headers=headers, json={
-                    "recipient": {"id": recipient_id},
-                    "message": {"attachment": {"type": "image", "payload": {"url": img, "is_reusable": True}}}
-                })
-                last.raise_for_status()
+                # A rejected card must not cost the customer the whole reply.
+                # Meta refuses images for reasons outside our control — an
+                # unreachable host, an unsupported format, a size limit — and
+                # letting that raise meant the customer got silence instead of
+                # the answer we already had.
+                try:
+                    resp = client.post(url, headers=headers, json={
+                        "recipient": {"id": recipient_id},
+                        "message": {"attachment": {"type": "image", "payload": {"url": img, "is_reusable": True}}}
+                    })
+                    resp.raise_for_status()
+                    last = resp
+                except Exception as img_error:
+                    log.warning("Instagram rejected image card %s: %s", img, img_error)
                 if caption:
                     send_text(caption)
 
