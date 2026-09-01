@@ -19,6 +19,12 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
 load_dotenv(BASE_DIR / ".env", override=True)
 
+# Must come after the environment is loaded and before the paths below are
+# resolved: a volume starts empty, and `_resolve_path(must_exist=True)` would
+# quietly fall back to the image's own copy if the seeded file were not already
+# in place. `camellia.app` logs what this did once logging exists.
+from camellia.bootstrap import STARTUP_ACTIONS  # noqa: E402
+
 
 def _resolve_path(env_var: str, default: Path, must_exist: bool = False) -> str:
     """

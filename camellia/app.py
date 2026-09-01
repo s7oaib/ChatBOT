@@ -13,7 +13,10 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
-from camellia.config import config
+# Imported through config, never directly: `camellia.config` loads .env before
+# it triggers the bootstrap, and importing the bootstrap first would run it
+# against a pre-.env environment and seed the wrong paths.
+from camellia.config import config, STARTUP_ACTIONS
 from camellia.database import db
 from camellia.ad_gate import ad_gate
 from camellia.responder import responder
@@ -30,6 +33,11 @@ log = get_logger("camellia.app")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Enforces database init and the retention window promised on /privacy on startup."""
+    # Seeding ran during import, before any path was resolved, so this is the
+    # first moment it can be reported.
+    for action in STARTUP_ACTIONS:
+        log.info("Storage bootstrap: %s", action)
+
     db.init_db()
     if not config.META_APP_SECRET and not config.REQUIRE_WEBHOOK_SIGNATURE:
         # CRITICAL rather than WARNING: an unsigned webhook endpoint on a public

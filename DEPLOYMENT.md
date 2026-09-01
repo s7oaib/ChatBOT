@@ -25,6 +25,43 @@ only signal is the `warnings` array and the fields below it.
 | `BYPASS_AD_GATE` | `true` | `false` restores PRD #4: only ad-originated Instagram DMs (`referral.source == "ADS"`) get a reply and organic ones are left for a human. With it `true` the bot answers everyone, including complaints — the escalation triggers in `data/qa_templates.json` are then the only thing routing those to a human. |
 | `ENABLE_WEB_TESTER` | leave unset | Defaults off. Setting it `true` exposes `/chat` to anyone with the URL, and that tester writes real conversation rows and fires real escalation alerts at the manager's phone. |
 
+## Persistent storage (required)
+
+Without a volume, **everything the bot writes is erased on every deploy** — the
+database (conversations, escalations, approved candidate answers), a menu
+pasted into `/admin`, and any template approved from the review queue. The
+service looks perfectly healthy throughout, which is why `/health` now reports
+a `storage` block and warns when the database sits somewhere a deploy will
+wipe.
+
+### Setting it up on Railway
+
+1. **Settings → Volumes → Add volume**, mount path `/app/var`.
+2. Add these variables and redeploy:
+
+   ```
+   DB_PATH=/app/var/camellia.db
+   MENU_JSON_PATH=/app/var/menu.json
+   QA_TEMPLATES_PATH=/app/var/qa_templates.json
+   ```
+
+The mount path must **not** be `/app/data`. A volume there would hide the seed
+`menu.json` and `qa_templates.json` that ship inside the image, and the bot
+would start with nothing to say.
+
+A fresh volume is empty, so on first boot the bot copies those seed files onto
+it (`camellia/bootstrap.py`) and logs `Storage bootstrap: seeded …`. It seeds
+only files that are missing, so edits made afterwards are never overwritten by
+a later restart. If the volume is unavailable or read-only, the failure is
+logged and the bot falls back to the copies in the image — degraded, but still
+answering.
+
+Confirm it worked in `/health`:
+
+```json
+"storage": { "database": { "path": "/app/var/camellia.db", "expected_durable": true } }
+```
+
 ## Menu updates — the Google Sheet is the source of truth
 
 The container filesystem does not persist. A menu edited through `/admin` is

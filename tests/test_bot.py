@@ -2,6 +2,7 @@ import os
 import json
 import hmac
 import hashlib
+import inspect
 import sqlite3
 import time
 import unittest
@@ -2883,6 +2884,98 @@ class TestInstagramMenuCards(unittest.TestCase):
         joined = " ".join(sent_texts)
         self.assertIn("Aamar Mishti", joined)
         self.assertIn("Which would you like?", joined)
+
+
+class TestWritableStorageBootstrap(unittest.TestCase):
+    """
+    Seeding a mounted volume on first boot.
+
+    Pointing the runtime paths at a volume is not enough on its own: a fresh
+    mount is empty, so the bot would start with no menu and no templates and
+    answer every customer with the fallback. The copies baked into the image
+    have to be placed there once — and never again, or the first restart would
+    overwrite whatever the client had edited.
+    """
+
+    def setUp(self):
+        import tempfile, shutil
+        from camellia import bootstrap
+        self.bootstrap = bootstrap
+        self.vol = tempfile.mkdtemp(prefix="camvol_")
+        self.addCleanup(shutil.rmtree, self.vol, ignore_errors=True)
+
+    def _run(self, **env):
+        with patch.dict(os.environ, env, clear=False):
+            return self.bootstrap.prepare_writable_storage()
+
+    def test_empty_volume_is_seeded_so_the_bot_has_something_to_say(self):
+        menu = os.path.join(self.vol, "menu.json")
+        qa = os.path.join(self.vol, "qa_templates.json")
+
+        self._run(MENU_JSON_PATH=menu, QA_TEMPLATES_PATH=qa)
+
+        self.assertTrue(os.path.exists(menu))
+        self.assertTrue(os.path.exists(qa))
+        with open(qa, encoding="utf-8") as f:
+            self.assertGreater(len(json.load(f).get("templates", [])), 10)
+
+    def test_an_edited_menu_is_never_overwritten_by_the_seed(self):
+        """
+        The whole point of the volume. If seeding reran on every boot, the
+        client's edited prices would silently revert on the next restart —
+        exactly the bug the volume exists to fix.
+        """
+        menu = os.path.join(self.vol, "menu.json")
+        with open(menu, "w", encoding="utf-8") as f:
+            json.dump({"collections": {"edited_by_the_client": True}}, f)
+
+        actions = self._run(MENU_JSON_PATH=menu)
+
+        with open(menu, encoding="utf-8") as f:
+            self.assertEqual(json.load(f), {"collections": {"edited_by_the_client": True}})
+        self.assertFalse(any("seeded MENU_JSON_PATH" in a for a in actions))
+
+    def test_the_database_directory_is_created_before_sqlite_needs_it(self):
+        db_path = os.path.join(self.vol, "nested", "camellia.db")
+
+        self._run(DB_PATH=db_path)
+
+        self.assertTrue(os.path.isdir(os.path.dirname(db_path)))
+
+    def test_default_paths_are_left_alone(self):
+        """Without an override the bot already reads the image's own copy."""
+        with patch.dict(os.environ, {}, clear=True):
+            actions = self.bootstrap.prepare_writable_storage()
+        self.assertEqual(actions, [])
+
+    def test_a_broken_volume_is_reported_but_never_raises(self):
+        """
+        A read-only or missing mount must not take the bot down. Config falls
+        back to the image's copy, so the result is a bot that still answers.
+        """
+        target = os.path.join(self.vol, "menu.json")
+        with patch("camellia.bootstrap.shutil.copyfile", side_effect=OSError("read-only file system")):
+            actions = self._run(MENU_JSON_PATH=target)
+
+        self.assertTrue(any("could not seed" in a for a in actions))
+        self.assertFalse(os.path.exists(target))
+
+    def test_bootstrap_runs_before_config_resolves_paths(self):
+        """
+        Ordering contract. Config resolves these paths in its class body and
+        falls back to the image's copy when the configured path is missing, so
+        seeding after that point would leave the process reading the seed while
+        believing it was on the volume.
+        """
+        import camellia.config as config_module
+
+        source = inspect.getsource(config_module)
+        seeded_at = source.index("from camellia.bootstrap import")
+        resolved_at = source.index('_resolve_path("MENU_JSON_PATH"')
+        self.assertLess(
+            seeded_at, resolved_at,
+            "camellia.config must trigger the bootstrap before it resolves runtime paths",
+        )
 
 
 class TestStorageDurabilityReporting(unittest.TestCase):
