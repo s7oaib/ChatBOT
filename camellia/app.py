@@ -1512,7 +1512,12 @@ def get_admin_dashboard():
             <p>Protected access for Camellia Artisanal kitchen managers & staff.</p>
             
             <div class="pin-input-wrap">
-                <input type="password" id="pinInput" class="pin-input" maxlength="8" placeholder="•••••" autofocus onkeydown="if(event.key==='Enter') verifyPin()">
+                <!-- No maxlength: the browser truncates silently, so a PIN or
+                     API key longer than the cap was cut down before it was ever
+                     sent and came back "Incorrect PIN" while being correct.
+                     This box also accepts ADMIN_API_KEY, which is far longer
+                     than any PIN. -->
+                <input type="password" id="pinInput" class="pin-input" placeholder="•••••" autofocus onkeydown="if(event.key==='Enter') verifyPin()">
             </div>
             
             <button class="auth-btn" onclick="verifyPin()">
@@ -1892,7 +1897,16 @@ def get_admin_dashboard():
                     const card = document.getElementById('authCard');
                     card.classList.add('shake');
                     setTimeout(() => card.classList.remove('shake'), 400);
-                    alert('Incorrect PIN. Please enter your configured admin PIN or admin key.');
+                    // Every failure used to read "Incorrect PIN", which sent
+                    // people hunting for a wrong password when the real cause
+                    // was the rate limit or an unconfigured server.
+                    if (resp.status === 429) {
+                        alert('Too many attempts. The server allows 10 per minute — wait a minute and try again.');
+                    } else if (resp.status === 503) {
+                        alert('No ADMIN_PIN or ADMIN_API_KEY is configured on the server, so the portal cannot be opened. Set one in the deployment environment and redeploy.');
+                    } else {
+                        alert('Incorrect PIN. Please enter your configured admin PIN or admin key.');
+                    }
                 }
             } catch (err) {
                 alert('Connection error verifying PIN.');

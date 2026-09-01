@@ -321,6 +321,34 @@ def test_refinement_budget_stays_under_the_slow_notice_threshold():
 # bot's answer rate over time.
 # ---------------------------------------------------------------------------
 
+def test_pin_box_never_truncates_the_credential():
+    """
+    The login box must not cap what can be typed into it.
+
+    It carried maxlength="8", so the browser silently cut a longer credential
+    down before sending it. The backend then compared the truncated value and
+    answered "Incorrect PIN" for a PIN that was correct — and ADMIN_API_KEY,
+    which this same box accepts, is far longer than eight characters and could
+    never have been entered at all.
+    """
+    page = client.get("/admin").text
+    pin_input = page[page.index('id="pinInput"') - 200: page.index('id="pinInput"') + 200]
+    assert "maxlength" not in pin_input, (
+        "a maxlength on the PIN box silently truncates the credential before it is sent"
+    )
+
+
+def test_login_distinguishes_rate_limiting_from_a_wrong_pin():
+    """
+    A rate-limited or unconfigured server must not be reported as a wrong
+    password — that sends people hunting for a credential that was never the
+    problem.
+    """
+    page = client.get("/admin").text
+    assert "resp.status === 429" in page
+    assert "resp.status === 503" in page
+
+
 def test_dashboard_exposes_the_candidate_review_queue():
     """The approval queue must be reachable from the dashboard, not API-only."""
     page = client.get("/admin").text
