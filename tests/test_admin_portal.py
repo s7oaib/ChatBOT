@@ -1,5 +1,6 @@
 import os
 import json
+import re
 import pytest
 from unittest import mock
 from fastapi.testclient import TestClient
@@ -349,6 +350,73 @@ def test_an_unquoted_credential_is_untouched():
         assert _env_secret("ADMIN_PIN") == "4821"
     with mock.patch.dict(os.environ, {}, clear=True):
         assert _env_secret("ADMIN_PIN") == ""
+
+
+def test_dashboard_javascript_string_literals_are_not_broken_by_python():
+    """
+    The dashboard is a Python string containing JavaScript, so Python eats the
+    backslashes before a browser sees them: a JS "\\n" arrives as a real newline
+    and "\\'" as a bare quote. Either one terminates a JS string literal early,
+    and a single occurrence makes the entire <script> fail to parse — so every
+    function in the dashboard, verifyPin included, is never defined and the
+    Unlock button does nothing at all, with no error shown to the user.
+
+    This is invisible to any test that only greps the HTML for text, which is
+    why it survived: the markup looked perfectly correct.
+    """
+    import inspect
+    from camellia import app as app_module
+
+    # The fix, pinned at its source: a raw string hands every backslash to the
+    # browser untouched.
+    source = inspect.getsource(app_module)
+    assert 'html_content = r"""<!DOCTYPE html>' in source, (
+        "the dashboard HTML must be a raw string, or Python consumes the "
+        "backslashes in its JavaScript before the browser ever sees them"
+    )
+
+    # And the consequence, checked in what is actually served: these arrive as
+    # the two-character escapes JavaScript needs, not as an expanded newline
+    # and a bare quote that close the string early.
+    page = client.get("/admin").text
+    assert r"Approve this answer?\n\n" in page
+    assert r"the bot\'s verified knowledge" in page
+
+    # The literal must open and close on one line. It previously ran off the
+    # end of its line, and that alone stopped the whole script parsing, so no
+    # dashboard function was ever defined.
+    opening = page.index("confirm('Approve this answer?")
+    line = page[opening:page.index("\n", opening)]
+    assert line.rstrip().endswith("return;"), (
+        f"the confirm() literal does not close on its own line: {line[:120]!r}"
+    )
+
+
+def test_blocked_browser_storage_cannot_prevent_login():
+    """
+    Storage is a convenience, never part of authentication.
+
+    sessionStorage throws when site data is blocked, in private browsing, and
+    inside in-app browsers. The read was at top-level script scope, so one
+    SecurityError aborted the whole script and verifyPin was never defined —
+    the Unlock button did nothing, with no message. The write then ran before
+    the overlay was hidden, so a failure there reported a correct PIN as a
+    connection error and left the portal locked.
+    """
+    page = client.get("/admin").text
+
+    assert "function safeStorageGet" in page
+    assert "function safeStorageSet" in page
+    # No bare sessionStorage call may remain outside the wrappers.
+    body = page.replace("try { return sessionStorage.getItem(key)", "") \
+               .replace("try { sessionStorage.setItem(key, value)", "") \
+               .replace("try { sessionStorage.removeItem(key)", "")
+    assert "sessionStorage." not in body, "a bare sessionStorage call can abort the script"
+
+    # The unlock must happen before the PIN is persisted.
+    unlock = page.index("authOverlay').style.display = 'none'")
+    persist = page.index("safeStorageSet('camellia_admin_pin'")
+    assert unlock < persist, "the portal must unlock before it tries to remember the PIN"
 
 
 def test_pin_box_never_truncates_the_credential():

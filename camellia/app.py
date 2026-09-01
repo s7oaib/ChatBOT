@@ -1295,7 +1295,15 @@ def get_admin_dashboard():
     - 🍱 Active Menu Viewer & Baseline Reset
     - 📈 Bot Performance & Escalations
     """
-    html_content = """<!DOCTYPE html>
+    # Raw on purpose. This block is 1300 lines of HTML and JavaScript, and in a
+    # normal Python string every backslash in it is eaten before the browser
+    # sees it: a JS "\n" became a real newline and "\'" became a bare quote,
+    # each of which terminated a JavaScript string literal early. One such line
+    # was enough to make the whole <script> fail to parse, so every function in
+    # the dashboard — verifyPin included — was never defined and the Unlock
+    # button silently did nothing. Raw keeps escapes intact for JavaScript, and
+    # nothing here relies on Python expanding them.
+    html_content = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -1872,7 +1880,25 @@ def get_admin_dashboard():
     </div>
 
     <script>
-        let currentAdminKey = sessionStorage.getItem('camellia_admin_pin') || '';
+        // Remembering the PIN between page loads is a convenience, never part
+        // of authentication — so no storage failure may stand between a valid
+        // PIN and the portal. Every one of these throws when site data is
+        // blocked, in private browsing, and inside in-app browsers such as
+        // Instagram's. The read below used to be bare and at top-level scope,
+        // where a single SecurityError aborted the whole script: verifyPin was
+        // then never defined and the Unlock button did nothing at all, with no
+        // message to explain it.
+        function safeStorageGet(key) {
+            try { return sessionStorage.getItem(key) || ''; } catch (e) { return ''; }
+        }
+        function safeStorageSet(key, value) {
+            try { sessionStorage.setItem(key, value); } catch (e) { /* not fatal */ }
+        }
+        function safeStorageRemove(key) {
+            try { sessionStorage.removeItem(key); } catch (e) { /* not fatal */ }
+        }
+
+        let currentAdminKey = safeStorageGet('camellia_admin_pin');
         let selectedFile = null;
 
         // On Load: check if authenticated
@@ -1900,9 +1926,13 @@ def get_admin_dashboard():
                 });
 
                 if (resp.ok) {
+                    // Unlock first. Persisting the PIN is optional, and doing
+                    // it first meant a storage failure threw before the overlay
+                    // was hidden — the outer catch then reported a correct PIN
+                    // as "Connection error" and the portal stayed locked.
                     currentAdminKey = pin;
-                    sessionStorage.setItem('camellia_admin_pin', pin);
                     document.getElementById('authOverlay').style.display = 'none';
+                    safeStorageSet('camellia_admin_pin', pin);
                     loadActiveMenu();
                     loadAnalytics();
                     refreshCandidateBadge();
@@ -1922,12 +1952,16 @@ def get_admin_dashboard():
                     }
                 }
             } catch (err) {
-                alert('Connection error verifying PIN.');
+                // Naming the error matters: this branch also catches faults
+                // that have nothing to do with the network, and calling all of
+                // them "Connection error" hid a browser-side failure behind a
+                // server-side explanation.
+                alert('Could not verify the PIN: ' + (err && err.message ? err.message : err));
             }
         }
 
         function lockPortal() {
-            sessionStorage.removeItem('camellia_admin_pin');
+            safeStorageRemove('camellia_admin_pin');
             currentAdminKey = '';
             document.getElementById('pinInput').value = '';
             document.getElementById('authOverlay').style.display = 'flex';
