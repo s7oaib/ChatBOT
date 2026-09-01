@@ -237,22 +237,7 @@ def _process_instagram_event(sender_id: str, message_text: str, ad_id: Optional[
 
 @app.post("/webhook/instagram")
 @limiter.limit("120/minute")
-async def handle_instagram_webhook(request: Request, background_tasks: BackgroundTasks):
-    """
-    Handles Instagram DM Webhooks.
-    Applies Ad-Gate: Responds ONLY to Ad-originated messages (referral.source == 'ADS').
-    """
-    raw_body = await request.body()
-    verify_meta_signature(raw_body, request.headers.get("X-Hub-Signature-256"))
-    try:
-        payload = json.loads(raw_body or b"{}")
-    except json.JSONDecodeError:
-        log.warning("Received malformed JSON on Instagram webhook — ignoring.")
-        return {"status": "ignored", "reason": "malformed_json"}
-    
-    if payload.get("object") not in ("instagram", "page"):
-        return {"status": "ignored", "reason": f"Not an instagram or page object (got {payload.get('object')})"}
-
+def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks) -> dict:
     log.info("Instagram Webhook Raw Payload:\n%s", json.dumps(payload, indent=2))
 
     results = []
@@ -293,6 +278,27 @@ async def handle_instagram_webhook(request: Request, background_tasks: Backgroun
             })
 
     return {"status": "processed", "results": results}
+
+
+@app.post("/webhook/instagram")
+@limiter.limit("120/minute")
+async def handle_instagram_webhook(request: Request, background_tasks: BackgroundTasks):
+    """
+    Handles Instagram DM Webhooks.
+    Applies Ad-Gate: Responds ONLY to Ad-originated messages (referral.source == 'ADS').
+    """
+    raw_body = await request.body()
+    verify_meta_signature(raw_body, request.headers.get("X-Hub-Signature-256"))
+    try:
+        payload = json.loads(raw_body or b"{}")
+    except json.JSONDecodeError:
+        log.warning("Received malformed JSON on Instagram webhook — ignoring.")
+        return {"status": "ignored", "reason": "malformed_json"}
+    
+    if payload.get("object") not in ("instagram", "page"):
+        return {"status": "ignored", "reason": f"Not an instagram or page object (got {payload.get('object')})"}
+
+    return _dispatch_instagram_payload(payload, background_tasks)
 
 def send_instagram_reply(recipient_id: str, text: str, image_url=None) -> Dict[str, Any]:
     """Sends text plus zero or more image cards via Meta Graph API to Instagram user."""
@@ -395,6 +401,9 @@ async def handle_whatsapp_webhook(request: Request, background_tasks: Background
     except json.JSONDecodeError:
         log.warning("Received malformed JSON on WhatsApp webhook — ignoring.")
         return {"status": "ignored", "reason": "malformed_json"}
+    if payload.get("object") in ("instagram", "page"):
+        return _dispatch_instagram_payload(payload, background_tasks)
+
     parsed = whatsapp_adapter.parse_webhook_message(payload)
     if not parsed:
         return {"status": "no_message_event"}
