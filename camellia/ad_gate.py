@@ -52,7 +52,12 @@ class AdGate:
     Per PRD Requirement #4:
     - Auto-replies MUST only engage for ad-originated inquiries (referral.source == "ADS").
     - Non-ad organic DMs are strictly IGNORED by the bot (left for manual human handling).
-    - Optional BYPASS_AD_GATE=true setting in .env auto-replies to all DMs for testing/development.
+
+    BYPASS_AD_GATE=true answers every DM instead. This is no longer only a
+    development switch — production runs with it on, because the client wants
+    the bot answering organic DMs too. With it on, nothing here filters a
+    complaint or a personal message away from the bot, so the escalation
+    triggers in qa_templates.json are what route those to a human.
     """
 
     @staticmethod

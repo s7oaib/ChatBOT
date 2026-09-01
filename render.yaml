@@ -14,8 +14,16 @@ services:
       # the process looks perfectly healthy. This was previously "true" here.
       - key: WHATSAPP_MOCK_MODE
         value: "false"
+      # Auto-reply to every Instagram DM, not just ad-originated ones.
+      #
+      # The Ad-Gate (PRD #4) exists so organic DMs are left in the inbox for a
+      # human. The client wants the bot answering everyone, so it is bypassed
+      # here. The consequence is real: every organic DM now gets a bot reply
+      # first, including complaints and one-off personal messages, so the
+      # escalation triggers in qa_templates.json are the only thing routing
+      # those to a human. Set back to "false" to return to ad-only replies.
       - key: BYPASS_AD_GATE
-        value: "false"
+        value: "true"
       - key: PYTHON_VERSION
         value: 3.11.7
     # Set in the Render dashboard, never committed: META_APP_SECRET,
