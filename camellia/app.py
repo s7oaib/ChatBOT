@@ -235,8 +235,6 @@ def _process_instagram_event(sender_id: str, message_text: str, ad_id: Optional[
         log.exception("Failed to process Instagram message from %s.", sender_id)
 
 
-@app.post("/webhook/instagram")
-@limiter.limit("120/minute")
 def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks) -> dict:
     log.info("Instagram Webhook Raw Payload:\n%s", json.dumps(payload, indent=2))
 
