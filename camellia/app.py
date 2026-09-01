@@ -303,16 +303,21 @@ def send_instagram_reply(recipient_id: str, text: str, image_url=None) -> Dict[s
     images = [url for url, _ in captioned]
     cards_first = any(caption for _, caption in captioned)
 
-    if not config.INSTAGRAM_ACCESS_TOKEN or not config.INSTAGRAM_PAGE_ID:
+    if not config.INSTAGRAM_ACCESS_TOKEN:
         safe_text = text[:60].encode("ascii", "backslashreplace").decode("ascii")
         msg_type = f"IMAGE x{len(images)} ({', '.join(images)})" if images else "TEXT"
         log.info("[MOCK IG OUTBOUND] [%s] To: %s | Message: %s...", msg_type, recipient_id, safe_text)
         return {"mock": True, "status": "sent", "recipient": recipient_id, "type": msg_type}
 
-    page_id = config.INSTAGRAM_PAGE_ID or "me"
-    url = f"https://graph.facebook.com/{config.WHATSAPP_API_VERSION}/{page_id}/messages"
+    token = config.INSTAGRAM_ACCESS_TOKEN.strip()
+    if token.startswith("IGAA"):
+        url = f"https://graph.instagram.com/{config.WHATSAPP_API_VERSION}/me/messages"
+    else:
+        page_id = config.INSTAGRAM_PAGE_ID or "me"
+        url = f"https://graph.facebook.com/{config.WHATSAPP_API_VERSION}/{page_id}/messages"
+
     headers = {
-        "Authorization": f"Bearer {config.INSTAGRAM_ACCESS_TOKEN}",
+        "Authorization": f"Bearer {token}",
         "Content-Type": "application/json"
     }
 
