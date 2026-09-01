@@ -250,8 +250,8 @@ async def handle_instagram_webhook(request: Request, background_tasks: Backgroun
         log.warning("Received malformed JSON on Instagram webhook — ignoring.")
         return {"status": "ignored", "reason": "malformed_json"}
     
-    if payload.get("object") != "instagram":
-        return {"status": "ignored", "reason": "Not an instagram object"}
+    if payload.get("object") not in ("instagram", "page"):
+        return {"status": "ignored", "reason": f"Not an instagram or page object (got {payload.get('object')})"}
 
     log.info("Instagram Webhook Raw Payload:\n%s", json.dumps(payload, indent=2))
 
