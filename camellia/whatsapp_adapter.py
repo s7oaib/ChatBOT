@@ -57,9 +57,13 @@ class WhatsAppAdapter:
             (sender_phone: str, message_id: str, message_text: str) or None
         """
         try:
-            entry = payload.get("entry", [])[0]
-            changes = entry.get("changes", [])[0]
-            value = changes.get("value", {})
+            entries = payload.get("entry", [])
+            if not entries:
+                return None
+            changes = entries[0].get("changes", [])
+            if not changes:
+                return None
+            value = changes[0].get("value", {})
             messages = value.get("messages", [])
             if not messages:
                 return None
