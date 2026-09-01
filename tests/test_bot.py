@@ -2885,6 +2885,55 @@ class TestInstagramMenuCards(unittest.TestCase):
         self.assertIn("Which would you like?", joined)
 
 
+class TestStorageDurabilityReporting(unittest.TestCase):
+    """
+    Whether data survives a deploy must be visible from outside.
+
+    A container filesystem is wiped on every deploy, so an unmounted database
+    silently loses every conversation, escalation and approved template each
+    time the service restarts — and the bot looks perfectly healthy either way.
+    """
+
+    def test_health_warns_when_the_database_cannot_survive_a_deploy(self):
+        client = TestClient(app)
+        with patch.object(config, "DB_PATH", "/app/camellia.db"):
+            body = client.get("/health").json()
+
+        self.assertFalse(body["storage"]["database"]["expected_durable"])
+        self.assertTrue(
+            any("lost on every deploy" in w for w in body["warnings"]),
+            "an ephemeral database must be called out, not left to be discovered",
+        )
+
+    def test_a_mounted_database_is_reported_as_durable(self):
+        client = TestClient(app)
+        with patch.object(config, "DB_PATH", "/app/var/camellia.db"):
+            body = client.get("/health").json()
+
+        self.assertTrue(body["storage"]["database"]["expected_durable"])
+        self.assertFalse(any("lost on every deploy" in w for w in body["warnings"]))
+
+    def test_an_ephemeral_menu_is_forgiven_when_a_sheet_reseeds_it(self):
+        """The menu has a durable source that is not the filesystem."""
+        client = TestClient(app)
+        with patch.object(config, "MENU_JSON_PATH", "/app/data/menu.json"), \
+             patch.object(config, "DB_PATH", "/app/var/camellia.db"), \
+             patch.object(config, "GOOGLE_SHEET_CSV_URL", "https://docs.google.com/x/pub?output=csv"):
+            body = client.get("/health").json()
+
+        self.assertTrue(body["storage"]["menu_reseeded_from_google_sheet_on_boot"])
+        self.assertFalse(any("Menu is at" in w for w in body["warnings"]))
+
+    def test_an_ephemeral_menu_with_no_sheet_is_flagged(self):
+        client = TestClient(app)
+        with patch.object(config, "MENU_JSON_PATH", "/app/data/menu.json"), \
+             patch.object(config, "DB_PATH", "/app/var/camellia.db"), \
+             patch.object(config, "GOOGLE_SHEET_CSV_URL", ""):
+            body = client.get("/health").json()
+
+        self.assertTrue(any("Menu is at" in w for w in body["warnings"]))
+
+
 class TestGoogleSheetMenuSync(unittest.TestCase):
     """
     The Google Sheet is the menu's durable source of truth.

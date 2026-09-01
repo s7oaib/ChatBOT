@@ -676,6 +676,44 @@ def _answering_capability() -> dict:
     }
 
 
+def _storage_durability() -> dict:
+    """
+    Reports where the database and menu live, and whether that survives a deploy.
+
+    This was invisible from outside, which made a destructive question
+    unanswerable without dashboard access: a container filesystem is wiped on
+    every deploy, so an unmounted database silently loses every conversation,
+    escalation and approved template each time the service restarts. The bot
+    looks perfectly healthy either way.
+
+    A path is treated as durable only if it sits under a mount point kept
+    outside the image (/app/var by convention here, see docker-compose.yml).
+    That is a strong hint, not proof — the volume still has to be attached in
+    the host's dashboard.
+    """
+    durable_prefixes = ("/app/var", "/var/lib/camellia", "/data", "/mnt")
+
+    def _placement(path: str) -> dict:
+        # Compared as configured rather than through os.path.abspath, which is
+        # platform-dependent: on Windows it rewrites "/app/var/x" to
+        # "C:\app\var\x" and no deployment path would ever match.
+        normalised = (path or "").replace("\\", "/")
+        return {
+            "path": normalised,
+            "expected_durable": normalised.startswith(durable_prefixes),
+        }
+
+    database = _placement(config.DB_PATH)
+    menu = _placement(config.MENU_JSON_PATH)
+    return {
+        "database": database,
+        "menu": menu,
+        # The menu has a durable source that is not the filesystem, so an
+        # ephemeral path for it is only a problem when no sheet is configured.
+        "menu_reseeded_from_google_sheet_on_boot": bool(config.GOOGLE_SHEET_CSV_URL),
+    }
+
+
 def _delivery_capability() -> dict:
     """
     Reports whether a reply would actually reach a customer.
@@ -723,6 +761,7 @@ def health_check():
     answering = _answering_capability()
     delivery = _delivery_capability()
     signature = _webhook_signature_status()
+    storage = _storage_durability()
 
     # A bot that cannot answer is down, whatever else is working. Live mode
     # without credentials is the same kind of failure one step later — it
@@ -743,12 +782,24 @@ def health_check():
         warnings.append("META_APP_SECRET unset — webhook payloads are not verified.")
     if config.ENABLE_WEB_TESTER:
         warnings.append("ENABLE_WEB_TESTER is on — /chat is reachable by anyone with the URL.")
+    if not storage["database"]["expected_durable"]:
+        warnings.append(
+            f"Database is at {storage['database']['path']}, which is inside the "
+            "container — conversations, escalations and approved templates are "
+            "lost on every deploy unless a volume is mounted there."
+        )
+    if not storage["menu"]["expected_durable"] and not storage["menu_reseeded_from_google_sheet_on_boot"]:
+        warnings.append(
+            f"Menu is at {storage['menu']['path']} with no GOOGLE_SHEET_CSV_URL set — "
+            "menu edits are lost on every deploy."
+        )
 
     return Response(
         content=json.dumps({
             "status": "healthy" if healthy else "degraded",
             "warnings": warnings,
             "answering": answering,
+            "storage": storage,
             "reply_delivery": delivery,
             "webhook_signature": signature,
             "outbound_delivery": outbound,
