@@ -2987,6 +2987,14 @@ class TestStorageDurabilityReporting(unittest.TestCase):
     time the service restarts — and the bot looks perfectly healthy either way.
     """
 
+    # The database and menu warnings both end in "lost on every deploy", so
+    # these match on the opening instead. A substring shared by two warnings
+    # made the database assertions pass or fail on whether the *menu* happened
+    # to be durable in that environment — green locally, red in CI, neither
+    # telling the truth about the database.
+    def _database_warnings(self, warnings):
+        return [w for w in warnings if w.startswith("Database is at")]
+
     def test_health_warns_when_the_database_cannot_survive_a_deploy(self):
         client = TestClient(app)
         with patch.object(config, "DB_PATH", "/app/camellia.db"):
@@ -2994,7 +3002,7 @@ class TestStorageDurabilityReporting(unittest.TestCase):
 
         self.assertFalse(body["storage"]["database"]["expected_durable"])
         self.assertTrue(
-            any("lost on every deploy" in w for w in body["warnings"]),
+            self._database_warnings(body["warnings"]),
             "an ephemeral database must be called out, not left to be discovered",
         )
 
@@ -3004,7 +3012,7 @@ class TestStorageDurabilityReporting(unittest.TestCase):
             body = client.get("/health").json()
 
         self.assertTrue(body["storage"]["database"]["expected_durable"])
-        self.assertFalse(any("lost on every deploy" in w for w in body["warnings"]))
+        self.assertEqual(self._database_warnings(body["warnings"]), [])
 
     def test_an_ephemeral_menu_is_forgiven_when_a_sheet_reseeds_it(self):
         """The menu has a durable source that is not the filesystem."""
