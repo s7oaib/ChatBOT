@@ -777,3 +777,176 @@ def test_no_upload_falls_back_to_the_baked_in_weekly_image():
     images = reply.json().get("image_url") or []
     urls = [i["url"] if isinstance(i, dict) else i for i in images]
     assert any("Till%20Thursday" in u or "From%20Friday" in u for u in urls)
+
+
+def test_photo_and_text_agree_on_the_date_after_an_upload():
+    """
+    Core regression. Uploading a flyer used to update the dish text but never
+    the printed date, so a customer could see this week's dishes in text next
+    to last week's date on the photo caption. The date read off the flyer must
+    now land on both surfaces from the same upload.
+    """
+    from camellia import weekly_flyer
+
+    class _GroqResp:
+        status_code = 200
+        def json(self):
+            return {"choices": [{"message": {"content": json.dumps({
+                "vegetarian": [{"item": "Shukto", "description": "", "price_inr": 280, "quantity": "250g"}],
+                "non_vegetarian": [],
+                "week_of": "28th August - 3rd September, 2026",
+                "service_window": "Friday Lunch - Thursday Dinner",
+            })}}]}
+
+    class _Client:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def post(self, url, headers=None, json=None):
+            return _GroqResp()
+
+    from camellia import menu_parser as mp_module
+    with open(config.MENU_JSON_PATH, "r", encoding="utf-8") as f:
+        original = f.read()
+    try:
+        with mock.patch.object(config, "GROQ_API_KEY", "gsk-test"), \
+             mock.patch.object(config, "GROQ_ENABLED", True), \
+             mock.patch.object(mp_module.httpx, "Client", lambda *a, **k: _Client()):
+            resp = client.post(
+                "/admin/menu/upload-image",
+                files={"file": ("flyer.jpg", b"\xff\xd8\xff-fake-jpeg", "image/jpeg")},
+                headers=ADMIN_HEADERS,
+            )
+        assert resp.status_code == 200
+        assert resp.json().get("week_of") == "28th August - 3rd September, 2026"
+
+        # Surface 1: the flyer photo's own caption.
+        state = weekly_flyer.get()
+        assert "28th August - 3rd September, 2026" in state["caption"]
+
+        # Surface 2: the customer-facing weekly menu text, driven from
+        # menu.json — must show the same date the photo now claims.
+        reply = client.post(
+            "/api/test-chat",
+            json={"message": "veg menu", "user_id": "date_regress_user", "channel": "whatsapp"},
+        )
+        assert "28th August - 3rd September, 2026" in reply.json().get("response", "")
+    finally:
+        weekly_flyer.clear()
+        with open(config.MENU_JSON_PATH, "w", encoding="utf-8") as f:
+            f.write(original)
+        responder.reload_templates()
+
+
+def test_a_bad_ocr_pass_never_blanks_out_a_correct_date():
+    """
+    Extraction returning no date must not erase a date a previous upload got
+    right — no date shown beats a wrong one, but losing a right one to a
+    misread is worse than either.
+    """
+    from camellia import weekly_flyer
+
+    def _groq_response(week_of):
+        class _Resp:
+            status_code = 200
+            def json(self):
+                return {"choices": [{"message": {"content": json.dumps({
+                    "vegetarian": [{"item": "Shukto", "description": "", "price_inr": 280, "quantity": "250g"}],
+                    "non_vegetarian": [],
+                    "week_of": week_of,
+                })}}]}
+        return _Resp()
+
+    from camellia import menu_parser as mp_module
+    with open(config.MENU_JSON_PATH, "r", encoding="utf-8") as f:
+        original = f.read()
+    try:
+        with mock.patch.object(config, "GROQ_API_KEY", "gsk-test"), \
+             mock.patch.object(config, "GROQ_ENABLED", True):
+
+            class _ClientWithDate:
+                def __enter__(self): return self
+                def __exit__(self, *a): return False
+                def post(self, url, headers=None, json=None):
+                    return _groq_response("28th August - 3rd September, 2026")
+
+            with mock.patch.object(mp_module.httpx, "Client", lambda *a, **k: _ClientWithDate()):
+                first = client.post(
+                    "/admin/menu/upload-image",
+                    files={"file": ("flyer.jpg", b"\xff\xd8\xff-1", "image/jpeg")},
+                    headers=ADMIN_HEADERS,
+                )
+            assert first.json().get("week_of") == "28th August - 3rd September, 2026"
+
+            class _ClientNoDate:
+                def __enter__(self): return self
+                def __exit__(self, *a): return False
+                def post(self, url, headers=None, json=None):
+                    return _groq_response(None)
+
+            with mock.patch.object(mp_module.httpx, "Client", lambda *a, **k: _ClientNoDate()):
+                second = client.post(
+                    "/admin/menu/upload-image",
+                    files={"file": ("flyer.jpg", b"\xff\xd8\xff-2", "image/jpeg")},
+                    headers=ADMIN_HEADERS,
+                )
+            # The previous date must survive a second upload that could not read one.
+            assert second.json().get("week_of") == "28th August - 3rd September, 2026"
+            state = weekly_flyer.get()
+            assert state["caption"] != "" and "None" not in state["caption"]
+    finally:
+        weekly_flyer.clear()
+        with open(config.MENU_JSON_PATH, "w", encoding="utf-8") as f:
+            f.write(original)
+        responder.reload_templates()
+
+
+def test_a_second_upload_with_a_new_date_replaces_the_old_one_everywhere():
+    """A week later, a fresh upload must fully replace the previous date, not merge with it."""
+    from camellia import weekly_flyer
+
+    def _groq_response(week_of):
+        class _Resp:
+            status_code = 200
+            def json(self):
+                return {"choices": [{"message": {"content": json.dumps({
+                    "vegetarian": [{"item": "Shukto", "description": "", "price_inr": 280, "quantity": "250g"}],
+                    "non_vegetarian": [],
+                    "week_of": week_of,
+                })}}]}
+        return _Resp()
+
+    from camellia import menu_parser as mp_module
+    with open(config.MENU_JSON_PATH, "r", encoding="utf-8") as f:
+        original = f.read()
+    try:
+        with mock.patch.object(config, "GROQ_API_KEY", "gsk-test"), \
+             mock.patch.object(config, "GROQ_ENABLED", True):
+            for week_of in ("28th August - 3rd September, 2026", "4th September - 10th September, 2026"):
+                class _Client:
+                    def __enter__(self): return self
+                    def __exit__(self, *a): return False
+                    def post(self, url, headers=None, json=None, _w=week_of):
+                        return _groq_response(_w)
+                with mock.patch.object(mp_module.httpx, "Client", lambda *a, **k: _Client()):
+                    client.post(
+                        "/admin/menu/upload-image",
+                        files={"file": ("flyer.jpg", b"\xff\xd8\xff", "image/jpeg")},
+                        headers=ADMIN_HEADERS,
+                    )
+
+        state = weekly_flyer.get()
+        assert "4th September - 10th September, 2026" in state["caption"]
+        assert "28th August" not in state["caption"]
+
+        reply = client.post(
+            "/api/test-chat",
+            json={"message": "veg menu", "user_id": "date_replace_user", "channel": "whatsapp"},
+        )
+        text = reply.json().get("response", "")
+        assert "4th September - 10th September, 2026" in text
+        assert "28th August" not in text
+    finally:
+        weekly_flyer.clear()
+        with open(config.MENU_JSON_PATH, "w", encoding="utf-8") as f:
+            f.write(original)
+        responder.reload_templates()

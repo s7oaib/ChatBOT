@@ -177,7 +177,12 @@ class MenuParser:
         prompt = (
             "You are an expert OCR and data extraction AI for Camellia Artisanal.\n"
             "Extract all vegetarian dishes, non-vegetarian dishes, bento boxes, and sweets into valid JSON.\n"
-            "Schema: {\"vegetarian\": [{\"item\": str, \"description\": str, \"price_inr\": int, \"quantity\": str}], \"non_vegetarian\": [...], \"bengali_bento\": [...], \"norom_pak_sondesh\": [...]}\n"
+            "Also read the date range printed on the flyer, if there is one (for example "
+            "\"28th August - 3rd September, 2026\" or \"19, 20, 21 June\"), and the service "
+            "window if one is printed separately (for example \"Friday Lunch - Thursday Dinner\").\n"
+            "Schema: {\"vegetarian\": [{\"item\": str, \"description\": str, \"price_inr\": int, \"quantity\": str}], \"non_vegetarian\": [...], \"bengali_bento\": [...], \"norom_pak_sondesh\": [...], \"week_of\": str or null, \"service_window\": str or null}\n"
+            "week_of and service_window must be null if the flyer does not clearly print one — "
+            "never guess or invent a date.\n"
             "Return strict JSON."
         )
         payload = {
@@ -237,6 +242,17 @@ class MenuParser:
             if sondesh_items:
                 current_week["norom_pak_sondesh"] = sondesh_items
 
+            # Only overwrite when a date was actually read off the flyer. A
+            # bad OCR pass returning null must never blank out a date that was
+            # correct from a previous upload — no date shown beats a wrong one,
+            # but losing a right one to a misread is worse than either.
+            week_of = (data.get("week_of") or "").strip()
+            if week_of:
+                current_week["week_of"] = week_of
+            service_window = (data.get("service_window") or "").strip()
+            if service_window:
+                current_week["service_window"] = service_window
+
             with open(menu_path, "w", encoding="utf-8") as f:
                 json.dump(menu_data, f, indent=2, ensure_ascii=False)
 
@@ -248,7 +264,13 @@ class MenuParser:
                 "non_vegetarian_count": len(nonveg_items),
                 "bengali_bento_count": len(bento_items),
                 "parsed": data,
-                "message": f"Successfully extracted {total} items from menu image ({len(veg_items)} veg, {len(nonveg_items)} non-veg) and updated menu.json."
+                "message": f"Successfully extracted {total} items from menu image ({len(veg_items)} veg, {len(nonveg_items)} non-veg) and updated menu.json.",
+                # Whatever is now in effect for this week, whether this upload
+                # supplied it or it was already there — the caller (the /admin
+                # upload endpoint) needs this to caption the flyer photo, even
+                # on an upload where the model could not read a date itself.
+                "week_of": current_week.get("week_of"),
+                "service_window": current_week.get("service_window"),
             }
         return {"status": "failed", "reason": "weekly_menus not found in menu.json"}
 

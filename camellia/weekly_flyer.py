@@ -56,7 +56,12 @@ def _state_path() -> str:
     return os.path.join(uploads_dir(), "weekly_flyer.json")
 
 
-def save(image_bytes: bytes, mime_type: str) -> Dict[str, Any]:
+def save(
+    image_bytes: bytes,
+    mime_type: str,
+    week_of: Optional[str] = None,
+    service_window: Optional[str] = None,
+) -> Dict[str, Any]:
     """
     Persists an uploaded photo as the current weekly menu card.
 
@@ -64,6 +69,12 @@ def save(image_bytes: bytes, mime_type: str) -> Dict[str, Any]:
     menu, and keeping old uploads around risks an outdated one being served by
     a stale reference. The filename does not change between uploads, so no
     caching layer can be left pointing at a photo that no longer exists.
+
+    week_of, when the vision OCR could read one off the flyer, is folded into
+    the caption so the date customers see updates in lockstep with the photo
+    instead of the two silently drifting apart. It stays out of the caption
+    entirely when absent — a blank date slot reads as broken, so this falls
+    back to the same generic rotation used before dates were extracted at all.
     """
     ext = _EXT_BY_MIME.get((mime_type or "").lower(), "jpeg")
     directory = uploads_dir()
@@ -73,9 +84,16 @@ def save(image_bytes: bytes, mime_type: str) -> Dict[str, Any]:
     with open(os.path.join(directory, filename), "wb") as f:
         f.write(image_bytes)
 
+    week_of = (week_of or "").strip()
+    caption = (
+        f"*This Week's Menu* ({week_of}) — freshly cooked in small batches, updated just for you! 🌸"
+        if week_of else random.choice(CAPTIONS)
+    )
     state = {
         "url": f"/uploads/{filename}",
-        "caption": random.choice(CAPTIONS),
+        "caption": caption,
+        "week_of": week_of or None,
+        "service_window": (service_window or "").strip() or None,
         "uploaded_at": time.time(),
     }
     try:

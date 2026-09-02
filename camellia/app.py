@@ -874,7 +874,10 @@ def get_active_menu(x_admin_key: Optional[str] = Header(None), x_admin_pin: Opti
     try:
         with open(config.MENU_JSON_PATH, "r", encoding="utf-8") as f:
             data = json.load(f)
-        return {"status": "success", "menu": data}
+        # Surfaced so the dashboard can show staff which week is actually
+        # live, since the flyer photo and the dish text are now two separate
+        # things that both have to agree with what was last uploaded.
+        return {"status": "success", "menu": data, "weekly_flyer": weekly_flyer.get()}
     except Exception as e:
         log.error("Failed to read menu.json: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
@@ -932,7 +935,11 @@ async def upload_menu_image(
     # a customer asking today should see today's flyer, not last month's.
     if result.get("status") == "success":
         try:
-            weekly_flyer.save(image_bytes, mime_type)
+            weekly_flyer.save(
+                image_bytes, mime_type,
+                week_of=result.get("week_of"),
+                service_window=result.get("service_window"),
+            )
         except Exception as e:
             log.warning("Menu text updated, but the flyer photo itself could not be saved: %s", e)
 
@@ -1643,6 +1650,7 @@ def get_admin_dashboard():
             <div class="panel-header">
                 <h2>📸 Drag-and-Drop Menu Image Flyer (Photo OCR)</h2>
                 <p>Upload a photo of your printed menu card, packaging flyer, or Instagram story. The image is read and the dishes hot-reload into the live bot.</p>
+                <p id="activeFlyerWeek" style="font-size: 0.85rem; color: #555; margin-top: 4px;"></p>
             </div>
 
             <div class="drop-zone" id="dropZone" onclick="document.getElementById('fileInput').click()">
@@ -2253,6 +2261,20 @@ Non-Veg:
                 if (!resp.ok) throw new Error('Auth error or failed to load');
                 const data = await resp.json();
                 const menu = data.menu;
+
+                // The flyer photo and the dish text are now two separate
+                // things that both have to agree with the last upload, so
+                // show staff which week is actually live rather than leaving
+                // them to guess from the photo alone.
+                const flyerWeekOf = data.weekly_flyer && data.weekly_flyer.week_of;
+                const menuWeekOf = (menu.weekly_menus && menu.weekly_menus.length > 0)
+                    ? menu.weekly_menus[menu.weekly_menus.length - 1].week_of
+                    : null;
+                const activeFlyerWeekEl = document.getElementById('activeFlyerWeek');
+                if (activeFlyerWeekEl) {
+                    const weekLabel = flyerWeekOf || menuWeekOf;
+                    activeFlyerWeekEl.innerText = weekLabel ? `📅 Active menu: ${weekLabel}` : '';
+                }
 
                 let html = '';
                 let totalCount = 0;

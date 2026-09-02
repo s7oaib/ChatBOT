@@ -1407,13 +1407,14 @@ class DeterministicResponder:
         elif template_id in ["weekly_menu_veg", "weekly_menu_nonveg", "combo_bento"]:
             target_images = current_weekly_img
             weekly_menus = self.menu_data.get("weekly_menus", [])
-            # Select appropriate rotation based on day of week if multiple rotations exist
-            if today_weekday in [4, 5, 6] and len(weekly_menus) > 1:
-                current_week = weekly_menus[-1]
-            elif weekly_menus:
-                current_week = weekly_menus[0]
-            else:
-                current_week = {}
+            # The last entry is "current" everywhere else that touches this
+            # array — every write path (photo upload, pasted text, Sheet sync,
+            # the admin dashboard's own JS) treats weekly_menus[-1] as the live
+            # week. This was the one place still picking weekly_menus[0] on
+            # Monday-Thursday, so an uploaded menu's dishes and date reached
+            # customers only on Fri/Sat/Sun — four days out of seven, an
+            # upload silently had no effect on what this reply showed.
+            current_week = weekly_menus[-1] if weekly_menus else {}
 
             week_name = current_week.get("week_of", "Current Rotation")
             service_window = current_week.get("service_window", "Friday Lunch – Thursday Dinner")
