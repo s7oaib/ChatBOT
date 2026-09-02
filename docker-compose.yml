@@ -39,12 +39,15 @@ services:
       - BUSINESS_LEGAL_NAME=${BUSINESS_LEGAL_NAME:-Camellia Artisanal}
       - PRIVACY_CONTACT_EMAIL=${PRIVACY_CONTACT_EMAIL:-owner@camelliaartisanal.com}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
-      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
-      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-3.5-flash}
+      - GROQ_API_KEY=${GROQ_API_KEY:-}
+      - GROQ_MODEL=${GROQ_MODEL:-openai/gpt-oss-20b}
+      # Menu photo OCR. The chat model above cannot see; this one can, on the
+      # same key. https://console.groq.com/docs/vision
+      - GROQ_VISION_MODEL=${GROQ_VISION_MODEL:-qwen/qwen3.6-27b}
       # Optional polish only — kept under SLOW_REPLY_THRESHOLD_MS so a slow
       # provider is abandoned rather than delaying the customer's reply.
-      - GEMINI_REFINE_TIMEOUT=${GEMINI_REFINE_TIMEOUT:-2.5}
-      - GEMINI_ENABLED=${GEMINI_ENABLED:-true}
+      - GROQ_REFINE_TIMEOUT=${GROQ_REFINE_TIMEOUT:-2.5}
+      - GROQ_ENABLED=${GROQ_ENABLED:-true}
       # Tells a customer once, when replies have gone slow, to contact the
       # Kitchen Manager directly. The copy promises a limited period, so
       # SLOW_REPLY_NOTICE_UNTIL (YYYY-MM-DD) must be set when switching it on.

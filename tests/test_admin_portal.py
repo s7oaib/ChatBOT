@@ -596,8 +596,8 @@ def test_menu_photo_ocr_uses_the_groq_key_the_bot_already_has():
     """
     Menu photo OCR must not require a second provider account.
 
-    The chat model has no vision, so this path used to demand GEMINI_API_KEY or
-    OPENAI_API_KEY and otherwise accepted the upload and silently extracted
+    The chat model has no vision, so this path used to demand a second
+    provider's key and otherwise accepted the upload and silently extracted
     nothing. Groq serves multimodal models on the same key and endpoint the bot
     already uses for replies.
     """
@@ -629,8 +629,6 @@ def test_menu_photo_ocr_uses_the_groq_key_the_bot_already_has():
     try:
         with mock.patch.object(config, "GROQ_API_KEY", "gsk-test"), \
              mock.patch.object(config, "GROQ_ENABLED", True), \
-             mock.patch.object(config, "GEMINI_API_KEY", ""), \
-             mock.patch.object(config, "OPENAI_API_KEY", ""), \
              mock.patch.object(mp_module.httpx, "Client", lambda *a, **k: _Client()):
             result = menu_parser.parse_image_and_update_menu(b"\xff\xd8\xff-fake-jpeg", "image/jpeg")
     finally:
@@ -650,9 +648,7 @@ def test_no_vision_key_names_groq_first_in_its_guidance():
     """The cheapest fix is the key the operator already has, so say that."""
     from camellia.menu_parser import menu_parser
 
-    with mock.patch.object(config, "GROQ_API_KEY", ""), \
-         mock.patch.object(config, "GEMINI_API_KEY", ""), \
-         mock.patch.object(config, "OPENAI_API_KEY", ""):
+    with mock.patch.object(config, "GROQ_API_KEY", ""):
         result = menu_parser.parse_image_and_update_menu(b"fake", "image/jpeg")
 
     assert result["status"] == "warning"

@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Dict, Any, Tuple, Optional, List
 from camellia.config import config
 from camellia.monitoring import get_logger, latency_monitor
-from camellia.gemini_responder import gemini_responder
+from camellia.ai_responder import ai_responder
 from camellia.session_memory import session_memory
 
 from camellia.order_calculator import order_calculator
@@ -244,7 +244,7 @@ class DeterministicResponder:
     """
     Hybrid Auto-Responder Engine for Camellia Artisanal.
     Combines 100% deterministic regex boundary matching, menu photo cards,
-    conversational session memory, and Google Gemini Flash AI RAG fallback.
+    conversational session memory, and a Groq-backed RAG fallback.
     """
 
     def __init__(self, qa_path: str = None, menu_path: str = None):
@@ -265,7 +265,7 @@ class DeterministicResponder:
         """Reload JSON files to support live menu updates."""
         self.qa_data = self._load_json(self.qa_path)
         self.menu_data = self._load_json(self.menu_path)
-        gemini_responder.reload_data()
+        ai_responder.reload_data()
 
     def reload_templates(self):
         """Alias for reload_data."""
@@ -432,7 +432,7 @@ class DeterministicResponder:
     ) -> Tuple[str, bool, Optional[str], Optional[Any]]:
         """
         Matches incoming message against qa_templates.json & menu.json.
-        Updates session memory and falls back to Gemini Flash RAG.
+        Updates session memory and falls back to Groq RAG.
 
         Returns:
             (response_text: str, was_matched: bool, template_id: Optional[str], image_url: str | List[str] | None)
@@ -1058,7 +1058,7 @@ class DeterministicResponder:
             elif tmpl_id == "sondesh_crosssell_savoury":
                 facts["sondesh_crosssell_sent"] = True
 
-            if tmpl_id != "greeting" and config.is_ai_enabled and gemini_responder.get_active_provider() != "none":
+            if tmpl_id != "greeting" and config.is_ai_enabled and ai_responder.get_active_provider() != "none":
                 try:
                     user_ctx = f"Customer Name: {facts.get('name', 'Unknown')}"
                     # The turns so far, without this message — add_turn runs
@@ -1068,7 +1068,7 @@ class DeterministicResponder:
                     # the question it is answering just restates the template
                     # and asks again.
                     history_turns = session_memory.get_session(user_id, channel).get("turns", [])
-                    refined_text, is_refined = gemini_responder.refine_template_response(tmpl_id, response_text, user_message, user_context=user_ctx, history_turns=history_turns)
+                    refined_text, is_refined = ai_responder.refine_template_response(tmpl_id, response_text, user_message, user_context=user_ctx, history_turns=history_turns)
                     if is_refined and refined_text:
                         response_text = refined_text
                 except Exception as e:
@@ -1106,7 +1106,7 @@ class DeterministicResponder:
             session_memory.add_turn(user_id, channel, user_message, response_text)
             return response_text, True, tmpl_id, image_url
 
-        # Check Active AI Provider (Gemini / OpenAI RAG) when enabled
+        # Check the active AI provider (Groq RAG) when enabled
         fallback, _intent = self.build_handover_response(user_message)
         if intro_greeting_prefix:
             fallback = intro_greeting_prefix + fallback
@@ -1142,10 +1142,10 @@ class DeterministicResponder:
             log.error("RAG retrieval error: %s", e)
 
         # Generative providers may suggest candidate answers for review only.
-        if config.is_ai_enabled and gemini_responder.get_active_provider() != "none":
+        if config.is_ai_enabled and ai_responder.get_active_provider() != "none":
             try:
                 user_ctx = f"Customer Name: {facts.get('name', 'Unknown')}"
-                ai_resp, ok, reason = gemini_responder.generate_response(user_message, user_context=user_ctx)
+                ai_resp, ok, reason = ai_responder.generate_response(user_message, user_context=user_ctx)
                 if ok and ai_resp:
                     # Controlled Architecture: Save AI generated response as candidate template for admin review (PENDING_APPROVAL).
                     # DO NOT return AI generated text directly to the customer.
@@ -1154,12 +1154,12 @@ class DeterministicResponder:
                             name="gemini_rag_candidate",
                             response=ai_resp,
                             user_message=user_message,
-                            source_refs=["gemini_responder"],
+                            source_refs=["ai_responder"],
                             confidence=0.85,
-                            created_by="gemini_responder"
+                            created_by="ai_responder"
                         )
                     except Exception as ce:
-                        log.warning("Could not save Gemini candidate template: %s", ce)
+                        log.warning("Could not save the Groq candidate template: %s", ce)
             except Exception as e:
                 log.warning("AI RAG generation failed: %s", e)
 

@@ -20,7 +20,7 @@ from camellia.config import config, STARTUP_ACTIONS
 from camellia.database import db
 from camellia.ad_gate import ad_gate
 from camellia.responder import responder
-from camellia.gemini_responder import gemini_responder
+from camellia.ai_responder import ai_responder
 from camellia.whatsapp_adapter import whatsapp_adapter
 from camellia.escalator import escalator
 from camellia.sheet_sync import sheet_sync
@@ -825,7 +825,7 @@ def health_check():
             "webhook_signature": signature,
             "outbound_delivery": outbound,
             # Not just which provider is configured — whether it last worked.
-            "ai": gemini_responder.status(),
+            "ai": ai_responder.status(),
             "reply_latency": latency_monitor.snapshot(),
             "slow_reply_notice_active": config.is_slow_reply_notice_active,
             "retention_days": config.DATA_RETENTION_DAYS,
@@ -881,7 +881,7 @@ async def upload_menu_image(
 ):
     """
     Multimodal Menu Ingestion:
-    Uploads a photo of a printed menu flyer or Instagram graphic, extracts dishes and prices with Gemini Vision,
+    Uploads a photo of a printed menu flyer or Instagram graphic, extracts dishes and prices with a Groq vision model,
     and updates menu.json with hot reload.
     """
     require_admin(x_admin_key, x_admin_pin)
@@ -1290,7 +1290,7 @@ def get_admin_dashboard():
     Features:
     - PIN Authentication (Configured ADMIN_PIN or ADMIN_API_KEY from environment)
     - 📋 Paste Menu Card Text Parser
-    - 📸 Drag-and-Drop Image Flyer Upload with Gemini Vision OCR
+    - 📸 Drag-and-Drop Image Flyer Upload with Groq Vision OCR
     - 📊 Google Sheets Live Sync
     - 🍱 Active Menu Viewer & Baseline Reset
     - 📈 Bot Performance & Escalations
@@ -1570,7 +1570,7 @@ def get_admin_dashboard():
     <div class="status-bar">
         <div class="status-items">
             <span class="status-pill"><span class="dot green"></span> Server: <b>Online</b></span>
-            <span class="status-pill"><span class="dot gold"></span> Gemini Vision OCR: <b>Ready</b></span>
+            <span class="status-pill"><span class="dot gold"></span> Photo OCR: <b>Ready</b></span>
             <span class="status-pill">Active Menu Items: <b id="activeCountBadge">Loading...</b></span>
         </div>
         <div>
@@ -1618,8 +1618,8 @@ def get_admin_dashboard():
         <!-- TAB 2: Image Flyer Upload (Vision OCR) -->
         <div id="tab-image" class="panel-card" style="display: none;">
             <div class="panel-header">
-                <h2>📸 Drag-and-Drop Menu Image Flyer (Gemini Vision OCR)</h2>
-                <p>Upload a photo of your printed menu card, packaging flyer, or Instagram story. Gemini Vision reads the image and hot-reloads dishes into the live bot.</p>
+                <h2>📸 Drag-and-Drop Menu Image Flyer (Photo OCR)</h2>
+                <p>Upload a photo of your printed menu card, packaging flyer, or Instagram story. The image is read and the dishes hot-reload into the live bot.</p>
             </div>
 
             <div class="drop-zone" id="dropZone" onclick="document.getElementById('fileInput').click()">
@@ -1639,7 +1639,7 @@ def get_admin_dashboard():
             </div>
 
             <div class="action-bar">
-                <button class="btn-primary" id="uploadImageBtn" onclick="submitMenuImage()">🔍 Scan Flyer with Gemini Vision OCR</button>
+                <button class="btn-primary" id="uploadImageBtn" onclick="submitMenuImage()">🔍 Scan Flyer &amp; Update Menu</button>
                 <button class="btn-secondary" onclick="testSampleFlyer()">🧪 Test Sample Menu Flyer (1-Click Test)</button>
             </div>
 
@@ -2092,7 +2092,7 @@ Non-Veg:
 
             resBox.style.display = 'block';
             resBox.className = 'result-box info';
-            resBox.innerHTML = '🔍 <b>Scanning flyer image with Gemini Vision OCR...</b> Please wait.';
+            resBox.innerHTML = '🔍 <b>Scanning flyer image...</b> Please wait.';
 
             const formData = new FormData();
             formData.append('file', selectedFile);

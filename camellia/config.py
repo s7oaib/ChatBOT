@@ -216,15 +216,6 @@ class Config:
     GROQ_VISION_MODEL: str = os.getenv("GROQ_VISION_MODEL", "qwen/qwen3.6-27b")
     AI_FIRST_MODE: bool = os.getenv("AI_FIRST_MODE", "true").lower() in ("true", "1", "t", "yes")
 
-    # Vision OCR only (menu flyer photo parsing) — unrelated to the Groq chat
-    # RAG above. gpt-oss-20b has no vision support, so image parsing keeps
-    # using Gemini/OpenAI vision models if a key is configured for them.
-    GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "") or os.getenv("GOOGLE_API_KEY", "")
-    GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
-    GEMINI_ENABLED: bool = os.getenv("GEMINI_ENABLED", "true").lower() in ("true", "1", "t", "yes")
-    OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
-    OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-
     @property
     def is_ai_enabled(self) -> bool:
         if not self.GROQ_ENABLED:

@@ -45,7 +45,7 @@ Built to convert Meta Ad leads, filter out organic DM noise, send high-resolutio
 ### 5. 🔐 Kitchen & Menu Admin Portal (`/admin` / `/admin/dashboard`)
 - **PIN Authentication**: Secure PIN access for kitchen staff and managers (configured via `ADMIN_PIN` in `.env`; blocks access if unconfigured).
 - **📋 Paste Menu Card Parser**: Extracts dish names, descriptions, weights, and prices from raw WhatsApp text, flyer notes, or dish lists, automatically categorizing items as Veg or Non-Veg.
-- **📸 Flyer Photo & Graphic OCR**: Scans printed menu photos or Instagram flyers using Gemini Vision when configured (OFF by default, uses client key).
+- **📸 Flyer Photo & Graphic OCR**: Scans printed menu photos or Instagram flyers with a Groq vision model, using the same key the bot already needs for replies.
 - **📊 Google Sheets Live Sync**: One-click sync from Google Sheets CSV without server restarts or touching code.
 - **🍱 Active Menu Viewer**: Inspect live menu items visually with an instant **Reset to Authentic Bengali Culinary Baseline**.
 - **📈 Analytics & Escalations**: Tracks real-time match rates, query totals, and unresolved human escalations.
@@ -60,7 +60,7 @@ Built to convert Meta Ad leads, filter out organic DM noise, send high-resolutio
 
 - **Backend Framework**: Python 3.11+, FastAPI, Uvicorn
 - **Deterministic Matcher & Parser**: Python Regex & Rule-Based Matchers ($0 Operating Cost)
-- **Optional Multimodal AI / OCR**: Google Gemini Vision (OFF by default; uses client's own key under their own billing)
+- **AI Replies & Multimodal OCR**: Groq (uses the client's own key under their own account)
 - **HTTP Client**: `httpx` (Async Meta Graph API & WhatsApp Cloud API calls)
 - **Database**: SQLite3 (`camellia.db`)
 - **API Standards**: Meta Graph API v19.0 (Instagram Messaging API & WhatsApp Business Cloud API)
@@ -80,7 +80,7 @@ Camellia.artisal/
 │   ├── menu_parser.py           # Text & image menu extraction engine
 │   ├── order_calculator.py      # Order draft parsing & receipt totals
 │   ├── rag_fallback.py          # Controlled retrieval over approved sources
-│   ├── gemini_responder.py      # Optional Groq refinement / RAG provider
+│   ├── ai_responder.py          # Groq refinement / RAG provider
 │   ├── session_memory.py        # Customer facts & conversation state
 │   ├── database.py              # SQLite storage (logs, sessions, escalations)
 │   ├── escalator.py             # Human escalation & alert pipeline

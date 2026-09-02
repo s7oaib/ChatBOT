@@ -112,7 +112,7 @@ def _should_refine(template_text: str) -> bool:
     """False for templates whose exact wording is load-bearing."""
     return not _PRICE_OR_TABLE_RE.search(template_text or "")
 
-class GeminiResponder:
+class AIResponder:
     """
     Groq-backed RAG & Template Refinement Engine.
 
@@ -536,5 +536,4 @@ class GeminiResponder:
 
         return template_text, False
 
-gemini_responder = GeminiResponder()
-ai_responder = gemini_responder
+ai_responder = AIResponder()

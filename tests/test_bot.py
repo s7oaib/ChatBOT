@@ -42,8 +42,8 @@ class TestCamelliaBot(unittest.TestCase):
         # Ensure Ad-Gate and AI testing are isolated from .env overrides
         config.BYPASS_AD_GATE = False
         config.GROQ_ENABLED = False
-        from camellia.gemini_responder import gemini_responder
-        gemini_responder._groq_cooldown_until = 0.0
+        from camellia.ai_responder import ai_responder
+        ai_responder._groq_cooldown_until = 0.0
         from camellia.session_memory import session_memory
         session_memory._sessions.clear()
         responder.qa_data = responder._load_json(responder.qa_path)
@@ -925,11 +925,11 @@ class TestCamelliaBot(unittest.TestCase):
         self.assertEqual(tmpl2_menu, "signature_collection")
         self.assertEqual(imgs2_menu, ["/images/Signature%20Sondesh.jpeg"])
 
-    @patch("camellia.gemini_responder.httpx.Client")
+    @patch("camellia.ai_responder.httpx.Client")
     def test_groq_template_refinement(self, mock_httpx_cls):
         """Verify Groq AI refines a template that carries no prices or tables."""
         from camellia.responder import responder
-        from camellia.gemini_responder import gemini_responder
+        from camellia.ai_responder import ai_responder
 
         refined = "Hello Shoaib! We deliver fresh across Delhi NCR every day."
         mock_response = MagicMock()
@@ -939,8 +939,8 @@ class TestCamelliaBot(unittest.TestCase):
         }
         mock_httpx_cls.return_value.__enter__.return_value.post.return_value = mock_response
 
-        gemini_responder._groq_cooldown_until = 0.0
-        gemini_responder._refinement_cache.clear()
+        ai_responder._groq_cooldown_until = 0.0
+        ai_responder._refinement_cache.clear()
         with patch.object(config, "GROQ_ENABLED", True), patch.object(config, "GROQ_API_KEY", "fake_key"):
             resp, match, tmpl, _ = responder.match_and_respond(
                 "which areas do you deliver to", user_id="test_ai_refine", channel="whatsapp"
@@ -948,7 +948,7 @@ class TestCamelliaBot(unittest.TestCase):
             self.assertTrue(match)
             self.assertIn("Hello Shoaib!", resp)
 
-    @patch("camellia.gemini_responder.httpx.Client")
+    @patch("camellia.ai_responder.httpx.Client")
     def test_price_table_template_is_never_refined(self, mock_httpx_cls):
         """
         A template stating prices or drawing a monospace table is sent exactly as
@@ -961,7 +961,7 @@ class TestCamelliaBot(unittest.TestCase):
         longest replies the bot sends.
         """
         from camellia.responder import responder
-        from camellia.gemini_responder import gemini_responder
+        from camellia.ai_responder import ai_responder
 
         mock_response = MagicMock()
         mock_response.status_code = 200
@@ -970,8 +970,8 @@ class TestCamelliaBot(unittest.TestCase):
         }
         mock_httpx_cls.return_value.__enter__.return_value.post.return_value = mock_response
 
-        gemini_responder._groq_cooldown_until = 0.0
-        gemini_responder._refinement_cache.clear()
+        ai_responder._groq_cooldown_until = 0.0
+        ai_responder._refinement_cache.clear()
         with patch.object(config, "GROQ_ENABLED", True), patch.object(config, "GROQ_API_KEY", "fake_key"):
             resp, match, tmpl, _ = responder.match_and_respond(
                 "collection 2", user_id="test_price_no_refine", channel="whatsapp"
@@ -1099,7 +1099,7 @@ class TestCamelliaBot(unittest.TestCase):
         self.assertNotEqual(tmpl1, tmpl2)
         self.assertIn("Camellia Artisanal virtual assistant", second)
 
-    @patch("camellia.gemini_responder.httpx.Client")
+    @patch("camellia.ai_responder.httpx.Client")
     def test_followup_answer_is_refined_against_the_question_it_answers(self, mock_httpx_cls):
         """
         A one-word reply answering the bot's own question must be refined with
@@ -1114,7 +1114,7 @@ class TestCamelliaBot(unittest.TestCase):
         ask the same question a second time.
         """
         from camellia.responder import responder
-        from camellia.gemini_responder import gemini_responder
+        from camellia.ai_responder import ai_responder
         from camellia.session_memory import session_memory
 
         def _reply(text):
@@ -1131,8 +1131,8 @@ class TestCamelliaBot(unittest.TestCase):
 
         uid = "test_followup_context"
         session_memory.clear_session(uid, "whatsapp")
-        gemini_responder._groq_cooldown_until = 0.0
-        gemini_responder._refinement_cache.clear()
+        ai_responder._groq_cooldown_until = 0.0
+        ai_responder._refinement_cache.clear()
 
         with patch.object(config, "GROQ_ENABLED", True), patch.object(config, "GROQ_API_KEY", "fake_key"):
             first, _, tmpl1, _ = responder.match_and_respond(
@@ -1156,13 +1156,13 @@ class TestCamelliaBot(unittest.TestCase):
         # And the two replies must not be the same text.
         self.assertNotEqual(first, second)
 
-    @patch("camellia.gemini_responder.httpx.Client")
+    @patch("camellia.ai_responder.httpx.Client")
     def test_repeat_question_reuses_cached_refinement(self, mock_httpx_cls):
         """
         The same question against the same template refines once, then serves
         from cache — the provider is not called again.
         """
-        from camellia.gemini_responder import gemini_responder
+        from camellia.ai_responder import ai_responder
 
         mock_response = MagicMock()
         mock_response.status_code = 200
@@ -1172,14 +1172,14 @@ class TestCamelliaBot(unittest.TestCase):
         post = mock_httpx_cls.return_value.__enter__.return_value.post
         post.return_value = mock_response
 
-        gemini_responder._groq_cooldown_until = 0.0
-        gemini_responder._refinement_cache.clear()
+        ai_responder._groq_cooldown_until = 0.0
+        ai_responder._refinement_cache.clear()
         with patch.object(config, "GROQ_ENABLED", True), patch.object(config, "GROQ_API_KEY", "fake_key"):
-            first, ok1 = gemini_responder.refine_template_response(
+            first, ok1 = ai_responder.refine_template_response(
                 "delivery_area", "We deliver across Delhi NCR.", "where do you deliver"
             )
             # Same question, different spacing and case — still one call.
-            second, ok2 = gemini_responder.refine_template_response(
+            second, ok2 = ai_responder.refine_template_response(
                 "delivery_area", "We deliver across Delhi NCR.", "  Where  Do You Deliver  "
             )
 
@@ -1189,7 +1189,7 @@ class TestCamelliaBot(unittest.TestCase):
         self.assertEqual(second, "Refined once.")
         self.assertEqual(post.call_count, 1)
 
-    @patch("camellia.gemini_responder.httpx.Client")
+    @patch("camellia.ai_responder.httpx.Client")
     def test_rag_prompt_stays_under_provider_token_budget(self, mock_httpx_cls):
         """
         The full-RAG prompt sent for an unmatched question must fit inside the
@@ -1202,7 +1202,7 @@ class TestCamelliaBot(unittest.TestCase):
         request payload (not just the context string) so a bigger menu or
         template set cannot silently push it back over the ceiling.
         """
-        from camellia.gemini_responder import gemini_responder
+        from camellia.ai_responder import ai_responder
 
         mock_response = MagicMock()
         mock_response.status_code = 200
@@ -1212,9 +1212,9 @@ class TestCamelliaBot(unittest.TestCase):
         post = mock_httpx_cls.return_value.__enter__.return_value.post
         post.return_value = mock_response
 
-        gemini_responder._groq_cooldown_until = 0.0
+        ai_responder._groq_cooldown_until = 0.0
         with patch.object(config, "GROQ_ENABLED", True), patch.object(config, "GROQ_API_KEY", "fake_key"):
-            resp, ok, reason = gemini_responder.generate_response(
+            resp, ok, reason = ai_responder.generate_response(
                 "Is the Nolen Gur real date palm jaggery or just flavoring?"
             )
 
@@ -1231,7 +1231,7 @@ class TestCamelliaBot(unittest.TestCase):
             "over the provider's free-tier TPM ceiling; it will be rejected with HTTP 413."
         )
 
-    @patch("camellia.gemini_responder.httpx.Client")
+    @patch("camellia.ai_responder.httpx.Client")
     def test_oversized_payload_gets_config_error_cooldown(self, mock_httpx_cls):
         """
         HTTP 413 must trip the long config-error cooldown, not be retried.
@@ -1240,32 +1240,32 @@ class TestCamelliaBot(unittest.TestCase):
         the cooldown every unmatched customer message paid a full round trip to
         a guaranteed 413 before falling back to the template.
         """
-        from camellia.gemini_responder import gemini_responder, CONFIG_ERROR_COOLDOWN_SECONDS
+        from camellia.ai_responder import ai_responder, CONFIG_ERROR_COOLDOWN_SECONDS
 
         mock_response = MagicMock()
         mock_response.status_code = 413
         mock_response.text = '{"error":{"message":"Request too large"}}'
         mock_httpx_cls.return_value.__enter__.return_value.post.return_value = mock_response
 
-        gemini_responder._groq_cooldown_until = 0.0
+        ai_responder._groq_cooldown_until = 0.0
         with patch.object(config, "GROQ_ENABLED", True), patch.object(config, "GROQ_API_KEY", "fake_key"):
-            _resp, ok, reason = gemini_responder._query_groq("test prompt")
+            _resp, ok, reason = ai_responder._query_groq("test prompt")
 
         self.assertFalse(ok)
         self.assertEqual(reason, "groq_http_413")
-        self.assertGreater(gemini_responder._groq_cooldown_until, 0)
+        self.assertGreater(ai_responder._groq_cooldown_until, 0)
         self.assertAlmostEqual(
-            gemini_responder._groq_cooldown_until - __import__("time").time(),
+            ai_responder._groq_cooldown_until - __import__("time").time(),
             CONFIG_ERROR_COOLDOWN_SECONDS, delta=5,
         )
 
-    @patch("camellia.gemini_responder.httpx.Client")
+    @patch("camellia.ai_responder.httpx.Client")
     def test_refinement_cache_does_not_leak_customer_names(self, mock_httpx_cls):
         """
         Two customers asking the identical question must not share a cached
         refinement, because a refinement can address the customer by name.
         """
-        from camellia.gemini_responder import gemini_responder
+        from camellia.ai_responder import ai_responder
 
         mock_response = MagicMock()
         mock_response.status_code = 200
@@ -1275,14 +1275,14 @@ class TestCamelliaBot(unittest.TestCase):
         post = mock_httpx_cls.return_value.__enter__.return_value.post
         post.return_value = mock_response
 
-        gemini_responder._groq_cooldown_until = 0.0
-        gemini_responder._refinement_cache.clear()
+        ai_responder._groq_cooldown_until = 0.0
+        ai_responder._refinement_cache.clear()
         with patch.object(config, "GROQ_ENABLED", True), patch.object(config, "GROQ_API_KEY", "fake_key"):
-            gemini_responder.refine_template_response(
+            ai_responder.refine_template_response(
                 "delivery_area", "We deliver across Delhi NCR.", "where do you deliver",
                 user_context="Customer Name: Asha",
             )
-            gemini_responder.refine_template_response(
+            ai_responder.refine_template_response(
                 "delivery_area", "We deliver across Delhi NCR.", "where do you deliver",
                 user_context="Customer Name: Bikram",
             )
@@ -1290,7 +1290,7 @@ class TestCamelliaBot(unittest.TestCase):
         # A shared key would have served Asha's greeting to Bikram on one call.
         self.assertEqual(post.call_count, 2)
 
-    @patch("camellia.gemini_responder.httpx.Client")
+    @patch("camellia.ai_responder.httpx.Client")
     def test_bad_api_key_pauses_provider_instead_of_retrying_forever(self, mock_httpx_cls):
         """
         An HTTP 400 (bad key / unserved model) stops the bot calling the
@@ -1302,7 +1302,7 @@ class TestCamelliaBot(unittest.TestCase):
         the template — measured at ~145ms per message against a live invalid
         key. Retrying a config error changes nothing; the deployment has to.
         """
-        from camellia.gemini_responder import gemini_responder
+        from camellia.ai_responder import ai_responder
 
         mock_response = MagicMock()
         mock_response.status_code = 400
@@ -1310,25 +1310,25 @@ class TestCamelliaBot(unittest.TestCase):
         post = mock_httpx_cls.return_value.__enter__.return_value.post
         post.return_value = mock_response
 
-        gemini_responder._groq_cooldown_until = 0.0
+        ai_responder._groq_cooldown_until = 0.0
         with patch.object(config, "GROQ_ENABLED", True), \
              patch.object(config, "GROQ_API_KEY", "bad_key"):
-            _, ok, reason = gemini_responder._query_groq("hello")
+            _, ok, reason = ai_responder._query_groq("hello")
             self.assertFalse(ok)
             self.assertEqual(reason, "groq_http_400")
 
             # The provider is now parked, so nothing calls it again.
-            self.assertEqual(gemini_responder.get_active_provider(), "none")
-            self.assertGreater(gemini_responder._groq_cooldown_until, time.time() + 60)
+            self.assertEqual(ai_responder.get_active_provider(), "none")
+            self.assertGreater(ai_responder._groq_cooldown_until, time.time() + 60)
 
             # And /health says so rather than reporting a healthy AI layer.
-            status = gemini_responder.status()
+            status = ai_responder.status()
             self.assertIs(status["working"], False)
             self.assertIn("groq", status["paused_seconds"])
 
-        gemini_responder._groq_cooldown_until = 0.0
+        ai_responder._groq_cooldown_until = 0.0
 
-    @patch("camellia.gemini_responder.httpx.Client")
+    @patch("camellia.ai_responder.httpx.Client")
     def test_rate_limited_call_is_retried_once_instead_of_pausing(self, mock_httpx_cls):
         """
         A 429 is a spent minute, not a fault, so one short retry is tried
@@ -1338,7 +1338,7 @@ class TestCamelliaBot(unittest.TestCase):
         in that window back to unrefined templates, even though the next
         request would usually have succeeded.
         """
-        from camellia.gemini_responder import gemini_responder
+        from camellia.ai_responder import ai_responder
 
         limited = MagicMock()
         limited.status_code = 429
@@ -1352,26 +1352,26 @@ class TestCamelliaBot(unittest.TestCase):
         post = mock_httpx_cls.return_value.__enter__.return_value.post
         post.side_effect = [limited, ok]
 
-        gemini_responder._groq_cooldown_until = 0.0
+        ai_responder._groq_cooldown_until = 0.0
         with patch.object(config, "GROQ_ENABLED", True), patch.object(config, "GROQ_API_KEY", "k"):
-            text, success, reason = gemini_responder._query_groq("hello")
+            text, success, reason = ai_responder._query_groq("hello")
             # The retry succeeded, so the provider must stay available.
-            self.assertEqual(gemini_responder.get_active_provider(), "groq")
+            self.assertEqual(ai_responder.get_active_provider(), "groq")
 
         self.assertTrue(success)
         self.assertEqual(reason, "groq_rag")
         self.assertEqual(text, "Refined after retry.")
         self.assertEqual(post.call_count, 2)
-        self.assertEqual(gemini_responder._groq_cooldown_until, 0.0)
+        self.assertEqual(ai_responder._groq_cooldown_until, 0.0)
 
-    @patch("camellia.gemini_responder.httpx.Client")
+    @patch("camellia.ai_responder.httpx.Client")
     def test_retry_never_overruns_the_refinement_budget(self, mock_httpx_cls):
         """
         Refinement is capped below the slow-reply threshold on purpose. A retry
         must fit inside that budget, never extend it — overrunning would tell
         the customer the business is running slow to save a cosmetic rewrite.
         """
-        from camellia.gemini_responder import gemini_responder
+        from camellia.ai_responder import ai_responder
 
         limited = MagicMock()
         limited.status_code = 429
@@ -1382,12 +1382,12 @@ class TestCamelliaBot(unittest.TestCase):
         post = mock_httpx_cls.return_value.__enter__.return_value.post
         post.return_value = limited
 
-        gemini_responder._groq_cooldown_until = 0.0
+        ai_responder._groq_cooldown_until = 0.0
         with patch.object(config, "GROQ_ENABLED", True), \
              patch.object(config, "GROQ_API_KEY", "k"), \
              patch.object(config, "GROQ_REFINE_TIMEOUT", 2.5):
             started = time.monotonic()
-            _, success, reason = gemini_responder._query_groq("hello", is_refinement=True)
+            _, success, reason = ai_responder._query_groq("hello", is_refinement=True)
             elapsed = time.monotonic() - started
 
         self.assertFalse(success)
@@ -1395,12 +1395,12 @@ class TestCamelliaBot(unittest.TestCase):
         # Waiting out a 30s hint would have blown the budget, so no retry ran.
         self.assertEqual(post.call_count, 1)
         self.assertLess(elapsed, config.SLOW_REPLY_THRESHOLD_MS / 1000)
-        gemini_responder._groq_cooldown_until = 0.0
+        ai_responder._groq_cooldown_until = 0.0
 
-    @patch("camellia.gemini_responder.httpx.Client")
+    @patch("camellia.ai_responder.httpx.Client")
     def test_misconfigured_call_is_never_retried(self, mock_httpx_cls):
         """A bad key cannot be fixed by trying again, so it must not be."""
-        from camellia.gemini_responder import gemini_responder
+        from camellia.ai_responder import ai_responder
 
         bad = MagicMock()
         bad.status_code = 401
@@ -1410,33 +1410,33 @@ class TestCamelliaBot(unittest.TestCase):
         post = mock_httpx_cls.return_value.__enter__.return_value.post
         post.return_value = bad
 
-        gemini_responder._groq_cooldown_until = 0.0
+        ai_responder._groq_cooldown_until = 0.0
         with patch.object(config, "GROQ_ENABLED", True), patch.object(config, "GROQ_API_KEY", "bad"):
-            _, success, reason = gemini_responder._query_groq("hello")
+            _, success, reason = ai_responder._query_groq("hello")
 
         self.assertFalse(success)
         self.assertEqual(reason, "groq_http_401")
         self.assertEqual(post.call_count, 1)
-        gemini_responder._groq_cooldown_until = 0.0
+        ai_responder._groq_cooldown_until = 0.0
 
-    @patch("camellia.gemini_responder.httpx.Client")
+    @patch("camellia.ai_responder.httpx.Client")
     def test_transient_error_uses_the_short_cooldown(self, mock_httpx_cls):
         """A 503 is the provider being busy, so it is retried within the minute."""
-        from camellia.gemini_responder import gemini_responder
+        from camellia.ai_responder import ai_responder
 
         mock_response = MagicMock()
         mock_response.status_code = 503
         mock_response.text = "overloaded"
         mock_httpx_cls.return_value.__enter__.return_value.post.return_value = mock_response
 
-        gemini_responder._groq_cooldown_until = 0.0
+        ai_responder._groq_cooldown_until = 0.0
         with patch.object(config, "GROQ_ENABLED", True), patch.object(config, "GROQ_API_KEY", "k"):
-            gemini_responder._query_groq("hello")
+            ai_responder._query_groq("hello")
 
-        pause = gemini_responder._groq_cooldown_until - time.time()
+        pause = ai_responder._groq_cooldown_until - time.time()
         self.assertGreater(pause, 0)
         self.assertLessEqual(pause, 60.0)
-        gemini_responder._groq_cooldown_until = 0.0
+        ai_responder._groq_cooldown_until = 0.0
 
     def test_how_much_is_sondesh_price_inquiry(self):
         """Verify 'How much is Sondesh?' returns price info template/RAG instead of order receipt draft."""
@@ -1791,11 +1791,11 @@ class TestCamelliaBot(unittest.TestCase):
         resp2, matched2, tmpl_id2, _ = responder.match_and_respond("how much is sandesh?", user_id="test_fuzzy_u2", channel="test")
         self.assertTrue(matched2)
 
-    def test_gemini_responder_provider_selection(self):
+    def test_ai_responder_provider_selection(self):
         """Tests get_active_provider logic for the Groq configuration."""
-        from camellia.gemini_responder import GeminiResponder
+        from camellia.ai_responder import AIResponder
 
-        gr = GeminiResponder()
+        gr = AIResponder()
         orig_key = config.GROQ_API_KEY
         orig_en = config.GROQ_ENABLED
 
@@ -1818,10 +1818,10 @@ class TestCamelliaBot(unittest.TestCase):
             config.GROQ_API_KEY = orig_key
             config.GROQ_ENABLED = orig_en
 
-    @patch("camellia.gemini_responder.httpx.Client")
-    def test_gemini_responder_groq_query(self, mock_httpx_cls):
+    @patch("camellia.ai_responder.httpx.Client")
+    def test_ai_responder_groq_query(self, mock_httpx_cls):
         """Tests that querying Groq formats the OpenAI-compatible chat payload correctly."""
-        from camellia.gemini_responder import GeminiResponder
+        from camellia.ai_responder import AIResponder
 
         mock_resp = MagicMock()
         mock_resp.status_code = 200
@@ -1837,7 +1837,7 @@ class TestCamelliaBot(unittest.TestCase):
         mock_post = MagicMock(return_value=mock_resp)
         mock_httpx_cls.return_value.__enter__.return_value.post = mock_post
 
-        gr = GeminiResponder()
+        gr = AIResponder()
         orig_key = config.GROQ_API_KEY
         orig_model = config.GROQ_MODEL
         orig_en = config.GROQ_ENABLED
@@ -1869,10 +1869,10 @@ class TestCamelliaBot(unittest.TestCase):
             config.GROQ_MODEL = orig_model
             config.GROQ_ENABLED = orig_en
 
-    @patch("camellia.gemini_responder.httpx.Client")
-    def test_gemini_responder_groq_out_of_context(self, mock_httpx_cls):
+    @patch("camellia.ai_responder.httpx.Client")
+    def test_ai_responder_groq_out_of_context(self, mock_httpx_cls):
         """Tests that OUT_OF_CONTEXT from Groq is safely caught and triggers escalation fallback."""
-        from camellia.gemini_responder import GeminiResponder
+        from camellia.ai_responder import AIResponder
 
         mock_resp = MagicMock()
         mock_resp.status_code = 200
@@ -1887,7 +1887,7 @@ class TestCamelliaBot(unittest.TestCase):
         }
         mock_httpx_cls.return_value.__enter__.return_value.post.return_value = mock_resp
 
-        gr = GeminiResponder()
+        gr = AIResponder()
         orig_key = config.GROQ_API_KEY
         orig_en = config.GROQ_ENABLED
 
@@ -1904,10 +1904,10 @@ class TestCamelliaBot(unittest.TestCase):
             config.GROQ_API_KEY = orig_key
             config.GROQ_ENABLED = orig_en
 
-    @patch("camellia.gemini_responder.httpx.Client")
-    def test_gemini_responder_refine_template_groq(self, mock_httpx_cls):
+    @patch("camellia.ai_responder.httpx.Client")
+    def test_ai_responder_refine_template_groq(self, mock_httpx_cls):
         """Tests template refinement using Groq."""
-        from camellia.gemini_responder import GeminiResponder
+        from camellia.ai_responder import AIResponder
 
         mock_resp = MagicMock()
         mock_resp.status_code = 200
@@ -1922,7 +1922,7 @@ class TestCamelliaBot(unittest.TestCase):
         }
         mock_httpx_cls.return_value.__enter__.return_value.post.return_value = mock_resp
 
-        gr = GeminiResponder()
+        gr = AIResponder()
         orig_key = config.GROQ_API_KEY
         orig_en = config.GROQ_ENABLED
 
