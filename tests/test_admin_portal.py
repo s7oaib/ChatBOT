@@ -1145,3 +1145,29 @@ def test_the_shipped_menu_carries_no_expired_weeks():
         weekly = json.load(f)["weekly_menus"]
     stale = [w.get("week_of") for w in weekly[:-1] if is_expired(w.get("week_of"))]
     assert not stale, f"expired weekly menus still shipped in menu.json: {stale}"
+
+
+def test_only_a_real_date_reaches_the_flyer_caption():
+    """
+    Found by uploading the client's actual flyer: the seed placeholder is the
+    literal string "Current Week (Friday Lunch - Thursday Dinner)", and putting
+    it where a date belongs produced "*This Week's Menu* (Current Week (Friday
+    Lunch - Thursday Dinner))" — nested brackets, and still no date. A label
+    that does not parse as a date is not one.
+    """
+    from camellia import weekly_flyer
+
+    try:
+        placeholder = weekly_flyer.save(
+            b"fake", "image/jpeg", week_of="Current Week (Friday Lunch - Thursday Dinner)"
+        )
+        assert placeholder["caption"] in weekly_flyer.CAPTIONS
+        assert "((" not in placeholder["caption"]
+        assert "Current Week" not in placeholder["caption"]
+
+        dated = weekly_flyer.save(
+            b"fake", "image/jpeg", week_of="28TH AUGUST - 3RD SEPTEMBER, 2026"
+        )
+        assert "28TH AUGUST - 3RD SEPTEMBER, 2026" in dated["caption"]
+    finally:
+        weekly_flyer.clear()

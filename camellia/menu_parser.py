@@ -174,16 +174,27 @@ class MenuParser:
             "Authorization": f"Bearer {config.GROQ_API_KEY}",
             "Content-Type": "application/json",
         }
+        # Every key is named on its own line, and the date is asked for first
+        # and read first. Against the client's real flyer, a version that
+        # described the schema as one dense line with the date mentioned
+        # mid-paragraph returned only {"vegetarian": [...]} — the model
+        # answered the part of the task it noticed and silently dropped the
+        # rest, including a date printed in large type across the header.
         prompt = (
-            "You are an expert OCR and data extraction AI for Camellia Artisanal.\n"
-            "Extract all vegetarian dishes, non-vegetarian dishes, bento boxes, and sweets into valid JSON.\n"
-            "Also read the date range printed on the flyer, if there is one (for example "
-            "\"28th August - 3rd September, 2026\" or \"19, 20, 21 June\"), and the service "
-            "window if one is printed separately (for example \"Friday Lunch - Thursday Dinner\").\n"
-            "Schema: {\"vegetarian\": [{\"item\": str, \"description\": str, \"price_inr\": int, \"quantity\": str}], \"non_vegetarian\": [...], \"bengali_bento\": [...], \"norom_pak_sondesh\": [...], \"week_of\": str or null, \"service_window\": str or null}\n"
-            "week_of and service_window must be null if the flyer does not clearly print one — "
-            "never guess or invent a date.\n"
-            "Return strict JSON."
+            "You are an OCR data extraction AI reading a printed food menu flyer.\n\n"
+            "Return ONE JSON object containing ALL SIX of these keys, every time:\n"
+            '  "week_of"            - the date range printed near the top of the flyer, copied verbatim\n'
+            '                         (e.g. "28th August - 3rd September, 2026" or "19, 20, 21 June").\n'
+            "                         Use null ONLY if no date is printed anywhere. Never invent one.\n"
+            '  "service_window"     - e.g. "Friday Lunch - Thursday Dinner", or null if not printed.\n'
+            '  "vegetarian"         - list of vegetarian dishes.\n'
+            '  "non_vegetarian"     - list of non-vegetarian dishes.\n'
+            '  "bengali_bento"      - list of bento/combo boxes, or [].\n'
+            '  "norom_pak_sondesh"  - list of sweets/sondesh, or [].\n\n'
+            'Every dish is {"item": str, "description": str, "price_inr": int, "quantity": str}.\n'
+            "price_inr must be a plain number with no currency symbol.\n\n"
+            "Read the flyer header FIRST and fill in week_of before extracting any dishes.\n"
+            "Return strict JSON with all six keys present."
         )
         payload = {
             "model": config.GROQ_VISION_MODEL,

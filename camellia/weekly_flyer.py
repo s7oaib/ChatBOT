@@ -17,6 +17,7 @@ from typing import Any, Dict, Optional
 
 from camellia.config import config
 from camellia.monitoring import get_logger
+from camellia import menu_dates
 
 log = get_logger("camellia.weekly_flyer")
 
@@ -84,10 +85,16 @@ def save(
     with open(os.path.join(directory, filename), "wb") as f:
         f.write(image_bytes)
 
+    # Only a genuinely readable date goes in the caption. The seed placeholder
+    # is the literal string "Current Week (Friday Lunch - Thursday Dinner)",
+    # which rendered as "*This Week's Menu* (Current Week (Friday Lunch -
+    # Thursday Dinner))" — nested brackets and no date. If it does not parse as
+    # a date it is not one, and the generic caption reads better than a label.
     week_of = (week_of or "").strip()
+    has_real_date = menu_dates.parse_week_end_date(week_of) is not None
     caption = (
         f"*This Week's Menu* ({week_of}) — freshly cooked in small batches, updated just for you! 🌸"
-        if week_of else random.choice(CAPTIONS)
+        if has_real_date else random.choice(CAPTIONS)
     )
     state = {
         "url": f"/uploads/{filename}",
