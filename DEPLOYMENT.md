@@ -108,6 +108,20 @@ setting cannot be pointed at an internal address.
 The sync replaces the items in the most recent `weekly_menus` block. Sondesh
 collections and prices live in `collections` and are not touched by it.
 
+### Uploaded flyer photos
+
+Uploading a photo in `/admin` (Drag-and-Drop Menu Image Flyer) saves the photo
+itself, not just the text OCR extracted from it — "show me the menu" then
+sends that actual image instead of one of the two fixed pictures in the repo.
+It is stored under `uploads/` next to `menu.json`, so it lands on the same
+volume automatically with no extra configuration. **Reset to Baseline** also
+clears it, reverting to the built-in Till Thursday / From Friday rotation.
+
+The caption sent with it is deliberately generic — no prices, no dish names —
+because the OCR extraction has not been reviewed by a human at that point, and
+a wrong price reaching a customer is worse than no price. The accurate menu
+still goes out as text, built from `menu.json`'s structured items.
+
 ## Secrets — set in the dashboard, never committed
 
 `META_APP_SECRET`, `META_VERIFY_TOKEN`, `WHATSAPP_ACCESS_TOKEN`,

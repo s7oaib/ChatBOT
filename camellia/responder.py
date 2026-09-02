@@ -14,6 +14,7 @@ from camellia.order_calculator import order_calculator
 from camellia.rag_fallback import rag_fallback_engine
 from camellia.database import db
 from camellia.trigger_index import trigger_index
+from camellia import weekly_flyer
 
 log = get_logger("camellia.responder")
 
@@ -1257,11 +1258,29 @@ class DeterministicResponder:
             paired.append({"url": url, "caption": caption} if caption else url)
         return paired
 
+    @staticmethod
+    def _current_weekly_image(today_weekday: int) -> Tuple[str, Optional[str]]:
+        """
+        The weekly menu card to send, and a caption override when it is the
+        operator's own upload rather than one of the two fixed images shipped
+        with the repo.
+
+        An uploaded flyer takes priority over the day-of-week Till Thursday /
+        From Friday rotation, because it is more current by definition — the
+        operator posted it precisely to reflect what changed. The rotation is
+        the fallback for a deployment where nothing has been uploaded yet.
+        """
+        uploaded = weekly_flyer.get()
+        if uploaded:
+            return uploaded["url"], uploaded.get("caption")
+        img_till_thursday = "/images/Till%20Thursday.jpeg"
+        img_from_friday = "/images/From%20Friday.jpeg"
+        fallback = img_from_friday if today_weekday in [4, 5, 6] else img_till_thursday
+        return fallback, None
+
     def _detect_relevant_images(self, user_message: str) -> Optional[Any]:
         """Attaches relevant menu photo cards when user inquires about products or menus in AI-First mode."""
         lowered = user_message.lower().strip()
-        img_till_thursday = "/images/Till%20Thursday.jpeg"
-        img_from_friday = "/images/From%20Friday.jpeg"
         img_signature_sondesh = "/images/Signature%20Sondesh.jpeg"
         img_aamar_mishti = "/images/AAMAR%20MISHTI.jpeg"
 
@@ -1271,7 +1290,7 @@ class DeterministicResponder:
         except Exception:
             ist = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
         today_weekday = datetime.datetime.now(tz=ist).weekday()
-        current_weekly_img = img_from_friday if today_weekday in [4, 5, 6] else img_till_thursday
+        current_weekly_img, _ = self._current_weekly_image(today_weekday)
 
         if any(w in lowered for w in ["collection 1", "collection1", "1st collection", "first collection", "aamar mishti", "col 1", "option 1"]):
             return [img_aamar_mishti]
@@ -1289,8 +1308,6 @@ class DeterministicResponder:
         self, template_id: str, default_response: str, user_id: str = None, channel: str = None, user_message: str = ""
     ) -> Tuple[str, Optional[Any]]:
         """Attaches the exact photo card(s) a template should send alongside its text whenever requested."""
-        img_till_thursday = "/images/Till%20Thursday.jpeg"
-        img_from_friday = "/images/From%20Friday.jpeg"
         img_signature_sondesh = "/images/Signature%20Sondesh.jpeg"
         img_aamar_mishti = "/images/AAMAR%20MISHTI.jpeg"
 
@@ -1301,7 +1318,7 @@ class DeterministicResponder:
             # zoneinfo available Python 3.9+; fallback to fixed +5:30 offset
             ist = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
         today_weekday = datetime.datetime.now(tz=ist).weekday()  # 0=Mon … 6=Sun
-        current_weekly_img = img_from_friday if today_weekday in [4, 5, 6] else img_till_thursday
+        current_weekly_img, weekly_caption_override = self._current_weekly_image(today_weekday)
 
         target_images = None
         formatted_text = default_response
@@ -1315,6 +1332,13 @@ class DeterministicResponder:
             target_images = self._with_captions(
                 template_id, [img_aamar_mishti, img_signature_sondesh, current_weekly_img]
             )
+            # An uploaded flyer replaces the qa_templates.json caption for just
+            # this one card. That caption ("fresh lunch & dinner across Delhi
+            # NCR...") describes the fixed fallback image; once a real photo is
+            # in play the caption should say so, in the same no-prices,
+            # no-dish-names style rather than repeating what the fallback said.
+            if weekly_caption_override:
+                target_images[-1] = {"url": current_weekly_img, "caption": weekly_caption_override}
 
         # Collection 1 specific queries — send ONLY Collection 1 photo card
         elif template_id in ["aamar_mishti_collection", "nolen_gur_aamar"]:

@@ -25,6 +25,7 @@ from camellia.whatsapp_adapter import whatsapp_adapter
 from camellia.escalator import escalator
 from camellia.sheet_sync import sheet_sync
 from camellia.menu_parser import menu_parser
+from camellia import weekly_flyer
 from camellia.session_memory import session_memory
 from camellia.monitoring import get_logger, delivery_monitor, latency_monitor
 
@@ -140,6 +141,13 @@ async def add_security_headers(request: Request, call_next):
 # This module lives in camellia/, so images/ sits one level up at the repo root.
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 app.mount("/images", StaticFiles(directory=os.path.join(BASE_DIR, "images")), name="images")
+
+# Serves the operator's uploaded weekly flyer photo. Unlike images/ above, this
+# directory lives on the durable volume (see camellia/weekly_flyer.py), so it
+# has to be created before StaticFiles can mount it — a fresh volume does not
+# have it yet, and StaticFiles raises if the directory is missing at mount time.
+os.makedirs(weekly_flyer.uploads_dir(), exist_ok=True)
+app.mount("/uploads", StaticFiles(directory=weekly_flyer.uploads_dir()), name="uploads")
 
 def verify_meta_signature(raw_body: bytes, signature_header: Optional[str]) -> None:
     """
@@ -917,12 +925,27 @@ async def upload_menu_image(
         raise HTTPException(status_code=400, detail="No image file or base64 data provided.")
 
     result = menu_parser.parse_image_and_update_menu(image_bytes, mime_type)
+
+    # The parser writes the extracted text into menu.json but discards the
+    # photo itself. Saved here, on success only, so "show me the menu" sends
+    # this actual upload instead of one of the two fixed images in the repo —
+    # a customer asking today should see today's flyer, not last month's.
+    if result.get("status") == "success":
+        try:
+            weekly_flyer.save(image_bytes, mime_type)
+        except Exception as e:
+            log.warning("Menu text updated, but the flyer photo itself could not be saved: %s", e)
+
     return result
 
 @app.post("/admin/menu/reset-defaults")
 def reset_menu_defaults(x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
     """Resets weekly menu dishes to default Bengal-rooted culinary baseline and reloads."""
     require_admin(x_admin_key, x_admin_pin)
+    # A photo uploaded earlier must not survive a reset that claims to restore
+    # the baseline — otherwise the dish text resets while the card still shows
+    # last week's flyer, and "Reset to Baseline" would not mean what it says.
+    weekly_flyer.clear()
     default_veg = [
         {"item": "Chholar Daal", "description": "Authentic Bengali gram dal with coconut chips", "price_inr": 250, "quantity": "250g"},
         {"item": "Dhokar Dalna", "description": "Lentil cakes in rich ginger-cumin gravy", "price_inr": 300, "quantity": "250g"},

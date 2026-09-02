@@ -31,6 +31,12 @@ test_camellia.db
 scratch/
 simulation_results.json
 
+# Uploaded weekly flyer photos. Written next to menu.json (see
+# camellia/weekly_flyer.py) so they land on the mounted volume in production;
+# locally that resolves under data/, and a photo an operator tests with here
+# does not belong in the repo.
+data/uploads/
+
 
 
 # Local-only working files. Kept on disk, deliberately not tracked:

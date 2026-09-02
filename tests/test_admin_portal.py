@@ -653,3 +653,127 @@ def test_no_vision_key_names_groq_first_in_its_guidance():
 
     assert result["status"] == "warning"
     assert "GROQ_API_KEY" in result["message"]
+
+
+def test_uploaded_flyer_photo_becomes_the_weekly_menu_card():
+    """
+    "show me the menu" must send the photo that was actually uploaded, not
+    the fixed Till Thursday / From Friday image baked into the repo.
+
+    The vision OCR path extracted text into menu.json but discarded the photo
+    itself, so a customer asking "show me the menu" the day after a flyer
+    upload still saw last month's picture with this week's dish list in the
+    caption below it — a menu that agreed with itself in text but not image.
+    """
+    from camellia import weekly_flyer
+
+    class _GroqResp:
+        status_code = 200
+        def json(self):
+            return {"choices": [{"message": {"content": json.dumps({
+                "vegetarian": [{"item": "Shukto", "description": "", "price_inr": 280, "quantity": "250g"}],
+                "non_vegetarian": [],
+            })}}]}
+
+    class _Client:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def post(self, url, headers=None, json=None):
+            return _GroqResp()
+
+    from camellia import menu_parser as mp_module
+    with open(config.MENU_JSON_PATH, "r", encoding="utf-8") as f:
+        original = f.read()
+    try:
+        with mock.patch.object(config, "GROQ_API_KEY", "gsk-test"), \
+             mock.patch.object(config, "GROQ_ENABLED", True), \
+             mock.patch.object(mp_module.httpx, "Client", lambda *a, **k: _Client()):
+            resp = client.post(
+                "/admin/menu/upload-image",
+                files={"file": ("flyer.jpg", b"\xff\xd8\xff-fake-jpeg", "image/jpeg")},
+                headers=ADMIN_HEADERS,
+            )
+        assert resp.status_code == 200
+        assert resp.json().get("status") == "success"
+
+        # The photo itself, not just the extracted text, must be recorded.
+        state = weekly_flyer.get()
+        assert state is not None, "the uploaded photo was not saved"
+        assert state["url"].startswith("/uploads/")
+
+        # And it must be servable — an operator cannot tell from the JSON
+        # response alone whether the mount actually works.
+        served = client.get(state["url"])
+        assert served.status_code == 200
+        assert served.content == b"\xff\xd8\xff-fake-jpeg"
+
+        # "show me the menu" must use it in place of the fixed weekly image.
+        reply = client.post(
+            "/api/test-chat",
+            json={"message": "show me the menu", "user_id": "flyer_test_user", "channel": "whatsapp"},
+        )
+        images = reply.json().get("image_url") or []
+        urls = [i["url"] if isinstance(i, dict) else i for i in images]
+        assert state["url"] in urls
+        assert "Till%20Thursday" not in urls and "From%20Friday" not in " ".join(urls)
+    finally:
+        weekly_flyer.clear()
+        with open(config.MENU_JSON_PATH, "w", encoding="utf-8") as f:
+            f.write(original)
+        responder.reload_templates()
+
+
+def test_uploaded_flyer_caption_names_no_prices_or_dishes():
+    """
+    The caption sent with the uploaded flyer must stay generic.
+
+    The vision extraction has not been reviewed by a human at the point this
+    caption goes out, and a wrong price or dish name reaching a customer is
+    worse than a generic line. The accurate list is sent separately as text,
+    built straight from menu.json rather than repeated here.
+    """
+    from camellia import weekly_flyer
+
+    for _ in range(20):
+        state = weekly_flyer.save(b"fake-photo-bytes", "image/jpeg")
+        caption = state["caption"].lower()
+        assert "₹" not in caption
+        assert not re.search(r"\d", caption), f"caption should name no prices: {caption!r}"
+    weekly_flyer.clear()
+
+
+def test_reset_to_baseline_also_clears_the_uploaded_flyer():
+    """
+    Reset to Baseline resets the dish text; it must reset the photo too, or
+    the button lies about what it does — dishes back to default, card still
+    showing whatever was last uploaded.
+    """
+    from camellia import weekly_flyer
+
+    weekly_flyer.save(b"fake-photo-bytes", "image/jpeg")
+    assert weekly_flyer.get() is not None
+
+    with open(config.MENU_JSON_PATH, "r", encoding="utf-8") as f:
+        original = f.read()
+    try:
+        resp = client.post("/admin/menu/reset-defaults", headers=ADMIN_HEADERS)
+        assert resp.status_code == 200
+        assert weekly_flyer.get() is None, "reset must clear the uploaded flyer, not just the dish list"
+    finally:
+        with open(config.MENU_JSON_PATH, "w", encoding="utf-8") as f:
+            f.write(original)
+        responder.reload_templates()
+
+
+def test_no_upload_falls_back_to_the_baked_in_weekly_image():
+    """A deployment where nothing has ever been uploaded keeps working."""
+    from camellia import weekly_flyer
+
+    weekly_flyer.clear()
+    reply = client.post(
+        "/api/test-chat",
+        json={"message": "show me the menu", "user_id": "no_flyer_user", "channel": "whatsapp"},
+    )
+    images = reply.json().get("image_url") or []
+    urls = [i["url"] if isinstance(i, dict) else i for i in images]
+    assert any("Till%20Thursday" in u or "From%20Friday" in u for u in urls)
