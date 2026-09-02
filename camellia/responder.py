@@ -15,6 +15,7 @@ from camellia.rag_fallback import rag_fallback_engine
 from camellia.database import db
 from camellia.trigger_index import trigger_index
 from camellia import weekly_flyer
+from camellia import menu_dates
 
 log = get_logger("camellia.responder")
 
@@ -33,6 +34,19 @@ log = get_logger("camellia.responder")
 # exactly the kind of error the whole template architecture exists to prevent.
 # So the repeat is replaced with an acknowledgement that points back at what
 # was already said, plus the menu of next steps the bot can actually action.
+# Sent instead of the weekly menu once its printed dates have passed and no
+# new flyer has been uploaded yet. Deliberately carries no dishes, no prices
+# and no photo: last week's prices are the ones a customer would order
+# against, and a wrong price is a real cost to the kitchen. Points at the
+# Sondesh collections, which are a separate, undated range and still correct.
+_WEEKLY_MENU_BEING_UPDATED = (
+    "🌸 Our kitchen is finalising this week's menu right now — I'd rather not "
+    "send you last week's by mistake.\n\n"
+    "It'll be ready shortly! In the meantime, say *Sondesh* to see our sweet "
+    "collections, or message our team on +91 87965 51990 and they'll confirm "
+    "this week's dishes for you directly."
+)
+
 _DUPLICATE_REPLY_NOTICE = (
     "Got it — thanks! I've shared those details just above. 🌸\n\n"
     "Anything else I can help with — *Sondesh* prices, this week's *Meals* menu, "
@@ -1258,8 +1272,25 @@ class DeterministicResponder:
             paired.append({"url": url, "caption": caption} if caption else url)
         return paired
 
-    @staticmethod
-    def _current_weekly_image(today_weekday: int) -> Tuple[str, Optional[str]]:
+    def _current_week(self) -> Dict[str, Any]:
+        """
+        The live weekly menu block — always the last entry, matching every
+        write path (photo upload, pasted text, Sheet sync, the dashboard).
+        """
+        weekly_menus = self.menu_data.get("weekly_menus", [])
+        return weekly_menus[-1] if weekly_menus else {}
+
+    def _weekly_menu_expired(self) -> bool:
+        """
+        True once the printed date range on the live menu has passed.
+
+        Nothing dated has been uploaded yet on a fresh deployment, and
+        undated text never expires, so this stays False until a real flyer
+        with a readable date range goes stale.
+        """
+        return menu_dates.is_expired(self._current_week().get("week_of"))
+
+    def _current_weekly_image(self, today_weekday: int) -> Tuple[Optional[str], Optional[str]]:
         """
         The weekly menu card to send, and a caption override when it is the
         operator's own upload rather than one of the two fixed images shipped
@@ -1269,7 +1300,14 @@ class DeterministicResponder:
         From Friday rotation, because it is more current by definition — the
         operator posted it precisely to reflect what changed. The rotation is
         the fallback for a deployment where nothing has been uploaded yet.
+
+        Returns no card at all once the menu's printed dates have passed. The
+        static fallback is not a substitute there: it is a picture of a menu
+        too, and sending any dish photo for a week that has ended is the exact
+        thing expiry exists to prevent.
         """
+        if self._weekly_menu_expired():
+            return None, None
         uploaded = weekly_flyer.get()
         if uploaded:
             return uploaded["url"], uploaded.get("caption")
@@ -1297,7 +1335,9 @@ class DeterministicResponder:
         elif any(w in lowered for w in ["collection 2", "collection2", "2nd collection", "second collection", "signature", "desi a2", "col 2", "option 2", "mahua"]):
             return [img_signature_sondesh]
         elif any(w in lowered for w in ["product", "all products", "what do you have", "what do you sell", "overview", "know more", "full menu", "both collections", "difference", "custom", "customize", "customise", "assorted", "mix"]):
-            return [img_aamar_mishti, img_signature_sondesh, current_weekly_img]
+            # The Sondesh cards are undated and always valid; only the weekly
+            # card drops out when its week has ended.
+            return [i for i in [img_aamar_mishti, img_signature_sondesh, current_weekly_img] if i]
         elif any(w in lowered for w in ["sondesh", "mishti", "sweet", "sweets", "kanchagolla", "jolbhora", "nolen gur", "250g", "500g", "1kg", "rose", "classic", "mango", "kesar", "price"]):
             return [img_aamar_mishti, img_signature_sondesh]
         elif any(w in lowered for w in ["menu", "veg", "non veg", "non-veg", "bento", "combo", "meal", "meals", "lunch", "dinner", "halal", "oil", "ghee", "savoury"]):
@@ -1329,9 +1369,11 @@ class DeterministicResponder:
         # card, detail, card, detail — rather than one block of text followed by a
         # burst of photos they then have to match up themselves.
         if template_id in ["know_more", "product_overview"]:
-            target_images = self._with_captions(
-                template_id, [img_aamar_mishti, img_signature_sondesh, current_weekly_img]
-            )
+            # The two Sondesh cards are undated and stay; only the weekly card
+            # drops out once its week has ended, so a customer browsing still
+            # sees the sweets rather than nothing at all.
+            cards = [i for i in [img_aamar_mishti, img_signature_sondesh, current_weekly_img] if i]
+            target_images = self._with_captions(template_id, cards)
             # An uploaded flyer replaces the qa_templates.json caption for just
             # this one card. That caption ("fresh lunch & dinner across Delhi
             # NCR...") describes the fixed fallback image; once a real photo is
@@ -1405,8 +1447,13 @@ class DeterministicResponder:
 
         # Weekly menu & bento photo card queries
         elif template_id in ["weekly_menu_veg", "weekly_menu_nonveg", "combo_bento"]:
+            # Once the printed week has passed, the dishes and prices below are
+            # last week's. A customer would order against them, so say the menu
+            # is being updated instead of sending anything stale.
+            if self._weekly_menu_expired():
+                return _WEEKLY_MENU_BEING_UPDATED, None
+
             target_images = current_weekly_img
-            weekly_menus = self.menu_data.get("weekly_menus", [])
             # The last entry is "current" everywhere else that touches this
             # array — every write path (photo upload, pasted text, Sheet sync,
             # the admin dashboard's own JS) treats weekly_menus[-1] as the live
@@ -1414,7 +1461,7 @@ class DeterministicResponder:
             # Monday-Thursday, so an uploaded menu's dishes and date reached
             # customers only on Fri/Sat/Sun — four days out of seven, an
             # upload silently had no effect on what this reply showed.
-            current_week = weekly_menus[-1] if weekly_menus else {}
+            current_week = self._current_week()
 
             week_name = current_week.get("week_of", "Current Rotation")
             service_window = current_week.get("service_window", "Friday Lunch – Thursday Dinner")

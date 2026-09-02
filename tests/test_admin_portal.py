@@ -950,3 +950,198 @@ def test_a_second_upload_with_a_new_date_replaces_the_old_one_everywhere():
         with open(config.MENU_JSON_PATH, "w", encoding="utf-8") as f:
             f.write(original)
         responder.reload_templates()
+
+
+# ---------------------------------------------------------------------------
+# Weekly menu expiry
+#
+# The client's flyers print the week they cover. Once that week has passed the
+# dishes and prices on them are last week's, and a customer would order against
+# them — so an expired menu must not reach anyone, and the slot it occupied
+# must be free for the next upload.
+# ---------------------------------------------------------------------------
+
+def _set_current_week(week_of):
+    """Rewrites the live week's printed date and hot-reloads the responder."""
+    with open(config.MENU_JSON_PATH, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    data["weekly_menus"][-1]["week_of"] = week_of
+    with open(config.MENU_JSON_PATH, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+    responder.reload_data()
+
+
+def test_printed_date_ranges_are_read_off_the_real_flyer_formats():
+    """The formats the client's own printed flyers actually use."""
+    from datetime import date
+    from camellia.menu_dates import parse_week_end_date, is_expired
+
+    today = date(2026, 9, 2)
+    assert parse_week_end_date("24th July - 30th July, 2026", today=today) == date(2026, 7, 30)
+    assert parse_week_end_date("28TH AUGUST - 3RD SEPTEMBER, 2026", today=today) == date(2026, 9, 3)
+    # No year printed at all — assumed to be the current one.
+    assert parse_week_end_date("19, 20, 21 JUNE", today=today) == date(2026, 6, 21)
+
+    # The final day still counts as current: this menu is live all through the 3rd.
+    assert is_expired("28th August - 3rd September, 2026", today=date(2026, 9, 3)) is False
+    assert is_expired("28th August - 3rd September, 2026", today=date(2026, 9, 4)) is True
+
+
+def test_unreadable_dates_never_expire_a_good_menu():
+    """
+    A parse failure must not hide a perfectly good menu from every customer —
+    that is a far worse outcome than showing one slightly too long.
+    """
+    from camellia.menu_dates import is_expired, parse_week_end_date
+
+    for text in ("Current Week (Friday Lunch - Thursday Dinner)",
+                 "Friday Lunch - Thursday Dinner", "Current Rotation", "", None):
+        assert parse_week_end_date(text) is None
+        assert is_expired(text) is False
+
+    # A day the month does not have means the read was wrong, not a real date.
+    assert parse_week_end_date("31st September 2026") is None
+
+
+def test_expired_menu_is_never_shown_to_a_customer():
+    """No stale dishes, no stale prices, no stale photo."""
+    with open(config.MENU_JSON_PATH, "r", encoding="utf-8") as f:
+        original = f.read()
+    try:
+        _set_current_week("19, 20, 21 JUNE")  # long past
+
+        reply = client.post(
+            "/api/test-chat",
+            json={"message": "veg menu", "user_id": "expired_user", "channel": "whatsapp"},
+        ).json()
+
+        text = reply.get("response", "")
+        assert "finalising this week" in text
+        assert "₹" not in text, "an expired menu must not quote prices a customer could order against"
+        assert not (reply.get("image_url") or []), "an expired menu must not send a photo"
+    finally:
+        with open(config.MENU_JSON_PATH, "w", encoding="utf-8") as f:
+            f.write(original)
+        responder.reload_templates()
+
+
+def test_expired_weekly_menu_does_not_hide_the_sondesh_collections():
+    """
+    Sondesh is a separate, undated range and stays correct. Browsing must still
+    show it — only the weekly card drops out.
+    """
+    with open(config.MENU_JSON_PATH, "r", encoding="utf-8") as f:
+        original = f.read()
+    try:
+        _set_current_week("19, 20, 21 JUNE")
+
+        reply = client.post(
+            "/api/test-chat",
+            json={"message": "show me the menu", "user_id": "expired_browse", "channel": "whatsapp"},
+        ).json()
+        urls = [i["url"] if isinstance(i, dict) else i for i in (reply.get("image_url") or [])]
+
+        assert any("AAMAR" in u for u in urls)
+        assert any("Signature" in u for u in urls)
+        assert not any("Thursday" in u or "Friday" in u or "/uploads/" in u for u in urls)
+    finally:
+        with open(config.MENU_JSON_PATH, "w", encoding="utf-8") as f:
+            f.write(original)
+        responder.reload_templates()
+
+
+def test_a_new_upload_takes_over_the_expired_menu_slot():
+    """
+    Uploading this week's flyer must bring the menu straight back to life in
+    the same slot — expiry frees the place, the upload fills it.
+    """
+    from camellia import weekly_flyer
+
+    class _Resp:
+        status_code = 200
+        def json(self):
+            return {"choices": [{"message": {"content": json.dumps({
+                "vegetarian": [{"item": "Shukto", "description": "", "price_inr": 300, "quantity": "250g"}],
+                "non_vegetarian": [],
+                "week_of": "4th September - 10th September, 2026",
+            })}}]}
+
+    class _Client:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def post(self, url, headers=None, json=None): return _Resp()
+
+    from camellia import menu_parser as mp_module
+    with open(config.MENU_JSON_PATH, "r", encoding="utf-8") as f:
+        original = f.read()
+    try:
+        _set_current_week("19, 20, 21 JUNE")
+        stale = client.post(
+            "/api/test-chat",
+            json={"message": "veg menu", "user_id": "slot_user_a", "channel": "whatsapp"},
+        ).json()
+        assert "finalising this week" in stale.get("response", "")
+
+        with mock.patch.object(config, "GROQ_API_KEY", "gsk-test"), \
+             mock.patch.object(config, "GROQ_ENABLED", True), \
+             mock.patch.object(mp_module.httpx, "Client", lambda *a, **k: _Client()):
+            up = client.post(
+                "/admin/menu/upload-image",
+                files={"file": ("flyer.jpg", b"\xff\xd8\xff-fake", "image/jpeg")},
+                headers=ADMIN_HEADERS,
+            )
+        assert up.status_code == 200
+
+        # Same slot, now live again with the new week's dishes and date.
+        with open(config.MENU_JSON_PATH, "r", encoding="utf-8") as f:
+            assert len(json.load(f)["weekly_menus"]) == 1, "uploads must reuse the slot, not append"
+
+        fresh = client.post(
+            "/api/test-chat",
+            json={"message": "veg menu", "user_id": "slot_user_b", "channel": "whatsapp"},
+        ).json()
+        assert "4th September - 10th September, 2026" in fresh.get("response", "")
+        assert "finalising this week" not in fresh.get("response", "")
+    finally:
+        weekly_flyer.clear()
+        with open(config.MENU_JSON_PATH, "w", encoding="utf-8") as f:
+            f.write(original)
+        responder.reload_templates()
+
+
+def test_expired_weeks_are_pruned_but_the_newest_always_survives():
+    """
+    Startup cleanup reaches menu.json on the volume, where the stale entries
+    already live. It must never empty the array — the newest entry is the slot
+    the next upload writes into, even when that entry has itself expired.
+    """
+    from camellia.menu_dates import prune_expired_weeks
+
+    kept, removed = prune_expired_weeks([
+        {"week_of": "24th July - 30th July, 2026"},
+        {"week_of": "19, 20, 21 JUNE"},
+        {"week_of": "4th September - 10th September, 2026"},
+    ])
+    assert [w["week_of"] for w in kept] == ["4th September - 10th September, 2026"]
+    assert len(removed) == 2
+
+    # Every entry expired: the newest still survives as the upload slot.
+    kept, removed = prune_expired_weeks([
+        {"week_of": "24th July - 30th July, 2026"},
+        {"week_of": "19, 20, 21 JUNE"},
+    ])
+    assert [w["week_of"] for w in kept] == ["19, 20, 21 JUNE"]
+
+    # A single entry is never removed, whatever its date.
+    kept, removed = prune_expired_weeks([{"week_of": "24th July - 30th July, 2026"}])
+    assert len(kept) == 1 and removed == []
+
+
+def test_the_shipped_menu_carries_no_expired_weeks():
+    """The outdated July menu is gone from the seed data and must stay gone."""
+    from camellia.menu_dates import is_expired
+
+    with open(config.MENU_JSON_PATH, "r", encoding="utf-8") as f:
+        weekly = json.load(f)["weekly_menus"]
+    stale = [w.get("week_of") for w in weekly[:-1] if is_expired(w.get("week_of"))]
+    assert not stale, f"expired weekly menus still shipped in menu.json: {stale}"

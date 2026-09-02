@@ -26,10 +26,43 @@ from camellia.escalator import escalator
 from camellia.sheet_sync import sheet_sync
 from camellia.menu_parser import menu_parser
 from camellia import weekly_flyer
+from camellia import menu_dates
 from camellia.session_memory import session_memory
 from camellia.monitoring import get_logger, delivery_monitor, latency_monitor
 
 log = get_logger("camellia.app")
+
+
+def _prune_expired_weekly_menus() -> None:
+    """
+    Drops weekly menus whose printed dates have passed.
+
+    Runs at startup rather than only on upload because the stale entries are
+    already sitting in menu.json on the volume, where no code change can reach
+    them — the file outlives every deploy by design. The newest entry is never
+    removed even when expired: it is the slot the next upload writes into, and
+    an expired newest week is handled at reply time by telling the customer the
+    menu is being updated.
+
+    Non-fatal by construction. A menu file that cannot be read or written must
+    leave the bot answering from whatever it already has rather than refusing
+    to start.
+    """
+    try:
+        with open(config.MENU_JSON_PATH, "r", encoding="utf-8") as f:
+            menu_data = json.load(f)
+        weekly = menu_data.get("weekly_menus") or []
+        kept, removed = menu_dates.prune_expired_weeks(weekly)
+        if not removed:
+            return
+        menu_data["weekly_menus"] = kept
+        with open(config.MENU_JSON_PATH, "w", encoding="utf-8") as f:
+            json.dump(menu_data, f, indent=2, ensure_ascii=False)
+        responder.reload_data()
+        log.info("Removed %s expired weekly menu(s): %s", len(removed), ", ".join(removed))
+    except Exception:
+        log.exception("Could not prune expired weekly menus; leaving menu.json untouched.")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -38,6 +71,8 @@ async def lifespan(app: FastAPI):
     # first moment it can be reported.
     for action in STARTUP_ACTIONS:
         log.info("Storage bootstrap: %s", action)
+
+    _prune_expired_weekly_menus()
 
     db.init_db()
     if not config.META_APP_SECRET and not config.REQUIRE_WEBHOOK_SIGNATURE:
