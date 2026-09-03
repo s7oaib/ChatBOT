@@ -1703,10 +1703,16 @@ class TestCamelliaBot(unittest.TestCase):
         """Greeting replies rotate randomly without leaving the approved response bank."""
         from camellia.session_memory import session_memory
 
+        from camellia.responder import _strip_flower_emoji
+
         user_id = "greeting_variation_user"
         channel = "whatsapp"
         session_memory.clear_session(user_id, channel)
-        approved = responder.qa_data["templates"][0]["responses"]
+        greeting = next(t for t in responder.qa_data["templates"] if t["id"] == "greeting")
+        # Customer-visible text has the flower emoji stripped on the way out
+        # (responder._strip_flower_emoji), so the bank has to be compared in
+        # the same form — 4 of the 10 approved greetings carry it.
+        approved = [_strip_flower_emoji(r) for r in greeting["responses"]]
 
         replies = []
         for message in ["HI", "Hi", "hi", "HELLO", "Hey", "hello"]:
