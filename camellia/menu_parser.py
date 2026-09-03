@@ -1,9 +1,10 @@
+import io
 import re
 import json
 import time
 import base64
 import httpx
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 from camellia.config import config
 from camellia.monitoring import get_logger
 from camellia.sheet_sync import sheet_sync
@@ -67,6 +68,65 @@ def _is_retryable_vision_failure(status_code: int, body: str) -> bool:
     if status_code == 400:
         return "json_validate_failed" in (body or "")
     return False
+
+
+# A flyer straight off a phone is a few hundred KB, and base64 of that is
+# roughly 5000 of the 8000 tokens a minute the free tier allows — most of the
+# budget spent on resolution the model does not need to read printed text.
+# Shrinking it first is what stops quota failures happening at all, rather
+# than retrying around them.
+#
+# 1024px on the long edge keeps menu text comfortably legible; below that,
+# prices start to smear on a densely printed flyer.
+_VISION_MAX_EDGE_PX = 1024
+_VISION_JPEG_QUALITY = 85
+
+
+def _downscale_for_vision(image_bytes: bytes, mime_type: str) -> Tuple[bytes, str]:
+    """
+    A smaller copy of the flyer for the vision model.
+
+    Only ever used for the model call — the photo customers are sent is saved
+    from the original bytes at full quality, because that one is looked at by
+    people rather than parsed by a model.
+
+    Falls back to the original on any problem, including Pillow being absent.
+    A failure to shrink an image must never fail an upload that would
+    otherwise have worked.
+    """
+    try:
+        from PIL import Image, ImageOps
+    except ImportError:
+        log.warning("Pillow is not installed; sending the flyer at full size.")
+        return image_bytes, mime_type
+
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as img:
+            # Phones record orientation in EXIF rather than rotating pixels, so
+            # a flyer shot in portrait can reach the model on its side. The
+            # model reads it far worse that way, and the operator sees an
+            # extraction failure with no clue why.
+            img = ImageOps.exif_transpose(img)
+            img = img.convert("RGB")
+            if max(img.size) > _VISION_MAX_EDGE_PX:
+                img.thumbnail((_VISION_MAX_EDGE_PX, _VISION_MAX_EDGE_PX), Image.LANCZOS)
+            buffer = io.BytesIO()
+            img.save(buffer, format="JPEG", quality=_VISION_JPEG_QUALITY, optimize=True)
+        shrunk = buffer.getvalue()
+    except Exception as e:
+        log.warning("Could not downscale the flyer, sending it as uploaded: %s", e)
+        return image_bytes, mime_type
+
+    if len(shrunk) >= len(image_bytes):
+        # Already small, or re-encoding gained nothing. Sending the original
+        # avoids a pointless extra generation of JPEG loss.
+        return image_bytes, mime_type
+
+    log.info(
+        "Flyer downscaled for the vision model: %.0fKB -> %.0fKB",
+        len(image_bytes) / 1024, len(shrunk) / 1024,
+    )
+    return shrunk, "image/jpeg"
 
 
 def _vision_backoff_seconds(resp: Any, status_code: int) -> float:
@@ -282,6 +342,7 @@ class MenuParser:
         provider account. Groq's chat model has no vision, but its multimodal
         models take images on the same OpenAI-compatible endpoint.
         """
+        image_bytes, mime_type = _downscale_for_vision(image_bytes, mime_type)
         b64_image = base64.b64encode(image_bytes).decode("utf-8")
         data_uri = f"data:{mime_type};base64,{b64_image}"
         url = "https://api.groq.com/openai/v1/chat/completions"
