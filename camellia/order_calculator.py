@@ -1,6 +1,14 @@
+import json
+import os
 import re
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
+
+from camellia.config import config
+from camellia.monitoring import get_logger
 from camellia.slang_normalizer import normalize_slang
+from camellia import menu_dates
+
+log = get_logger("camellia.order_calculator")
 
 PRICING_TABLE = {
     "aamar_mishti": {
@@ -70,15 +78,154 @@ MEAL_PRICING_TABLE = {
     "aamra chatni": { "name": "Aamra Chatni (100g)", "price": 100 },
 }
 
+# MEAL_PRICING_TABLE above is the standing catalogue: bentos, combos and the
+# dishes that recur week after week. It cannot cover the weekly rotation — a
+# dish that first appears on the flyer the operator uploaded this morning has
+# no entry here, so the bot would quote its price in the menu text and then
+# refuse to put it in an order.
+#
+# The uploaded week is therefore read straight from menu.json and layered on
+# top. It wins on price where both know a dish: menu.json is what the customer
+# was just shown, and quoting one number while charging another is the failure
+# this whole layer exists to avoid.
+_weekly_cache: Dict[str, Any] = {"mtime": None, "table": {}}
+
+
+def _menu_key(name: str) -> str:
+    """
+    A dish name reduced to what a customer is likely to type.
+
+    Bengali transliterations vary in the doubled vowels ("daal"/"dal",
+    "polao"/"pulao"), so those are folded together rather than left to chance.
+    """
+    key = re.sub(r"\s+", " ", (name or "").strip().lower())
+    key = key.replace("daal", "dal").replace("pulao", "polao").replace("polau", "polao")
+    return key
+
+
+def _match_keys(name: str) -> List[str]:
+    """
+    The phrasings a customer might actually type for one menu line.
+
+    Flyer lines carry qualifiers the customer will not repeat — "Chanar Kofta
+    / Dalna", "Mangsho (Mutton Kosha)" — so the full line is matched first and
+    the halves and the un-parenthesised stem are offered as aliases. Without
+    these the dish is only orderable by typing the slash.
+    """
+    primary = _menu_key(name)
+    keys = [primary]
+    stem = _menu_key(re.sub(r"\([^)]*\)", " ", name))
+    inside = [_menu_key(m) for m in re.findall(r"\(([^)]*)\)", name)]
+    parts = [_menu_key(p) for p in re.split(r"[/,]", stem)]
+    for candidate in [stem] + parts + inside:
+        # Two characters or fewer is noise, not a dish name.
+        if len(candidate) > 2 and candidate not in keys:
+            keys.append(candidate)
+    return keys
+
+
+def weekly_meal_entries() -> Dict[str, Dict[str, Any]]:
+    """
+    Orderable dishes from the live weekly menu, keyed by what to match on.
+
+    Returns nothing once the week's printed dates have passed: an expired menu
+    must not be orderable for the same reason its prices are not quoted.
+    Re-read whenever menu.json changes on disk, so an upload takes effect
+    without a restart.
+    """
+    path = config.MENU_JSON_PATH
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        return {}
+    if _weekly_cache["mtime"] == mtime:
+        return _weekly_cache["table"]
+
+    table: Dict[str, Dict[str, Any]] = {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            weeks = json.load(f).get("weekly_menus") or []
+        if weeks:
+            current = weeks[-1]
+            if not menu_dates.is_expired(current.get("week_of")):
+                for section in ("vegetarian", "non_vegetarian"):
+                    for item in current.get(section) or []:
+                        name = (item.get("item") or "").strip()
+                        price = item.get("price_inr")
+                        if not name or not isinstance(price, (int, float)):
+                            continue
+                        qty = (item.get("quantity") or "").strip()
+                        entry = {
+                            "name": f"{name} ({qty})" if qty else name,
+                            "price": int(price),
+                        }
+                        for key in _match_keys(name):
+                            # The dish's own name always wins; the shorter
+                            # aliases only fill keys nothing has claimed, so a
+                            # generic word like "mangsho" cannot displace a
+                            # more specific standing entry.
+                            if key == _menu_key(name) or key not in table:
+                                table[key] = entry
+    except Exception as e:
+        # A malformed menu.json must not take ordering down with it; the
+        # standing catalogue still answers.
+        log.warning("Could not read weekly dishes for ordering: %s", e)
+        table = {}
+
+    _weekly_cache["mtime"] = mtime
+    _weekly_cache["table"] = table
+    return table
+
+
+def meal_table() -> Dict[str, Dict[str, Any]]:
+    """The standing catalogue with this week's uploaded dishes layered over it."""
+    return {**MEAL_PRICING_TABLE, **weekly_meal_entries()}
+
+
 class OrderCalculator:
     """Parses order intent from chat text and generates itemized price breakdowns."""
 
+    def _build_meal_item(self, meal_info: Dict[str, Any], text_lower: str) -> Dict[str, Any]:
+        qty = 1
+        qty_match = re.search(r'\b(\d+)\s*(?:box|boxes|pack|packs|portion|portions|plate|plates)?\b', text_lower)
+        if qty_match and qty_match.group(1):
+            try:
+                parsed_q = int(qty_match.group(1))
+                if 1 <= parsed_q <= 50:
+                    qty = parsed_q
+            except ValueError:
+                qty = 1
+        unit_price = meal_info["price"]
+        return {
+            "type": "meal",
+            "collection": "weekly_menu",
+            "flavour": meal_info["name"],
+            "size": "Portion",
+            "quantity": qty,
+            "unit_price": unit_price,
+            "total_price": unit_price * qty,
+        }
+
     def _parse_single_clause(self, clause_text: str, default_collection: str = "aamar_mishti") -> Optional[Dict[str, Any]]:
+        # This week's dishes are matched against what the customer actually
+        # typed, before slang normalisation. The normaliser rewrites Bengali
+        # dish words into the standing catalogue's vocabulary ("mangsho" ->
+        # "mutton curry"), which would otherwise shadow the very dish on the
+        # flyer the customer was just shown — and charge the catalogue's price
+        # for it. The uploaded menu is the more current of the two, so it gets
+        # first refusal on the raw wording.
+        raw_lower = _menu_key((clause_text or "").lower())
+        weekly = weekly_meal_entries()
+        for meal_key in sorted(weekly, key=len, reverse=True):
+            if re.search(r'\b' + re.escape(meal_key) + r'\b', raw_lower):
+                return self._build_meal_item(weekly[meal_key], raw_lower)
+
         norm_clause = normalize_slang(clause_text)
         text_lower = norm_clause.lower()
 
         # Check for Meal / Bento / Curry order first (sorted by length descending to match 'non veg bento' before 'veg bento')
-        for meal_key, meal_info in sorted(MEAL_PRICING_TABLE.items(), key=lambda x: len(x[0]), reverse=True):
+        text_lower = _menu_key(text_lower)
+        for meal_key, meal_info in sorted(meal_table().items(), key=lambda x: len(x[0]), reverse=True):
             if re.search(r'\b' + re.escape(meal_key) + r'\b', text_lower):
                 qty = 1
                 qty_match = re.search(r'\b(\d+)\s*(?:box|boxes|pack|packs|portion|portions|plate|plates)?\b', text_lower)
