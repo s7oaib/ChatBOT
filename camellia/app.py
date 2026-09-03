@@ -1042,18 +1042,43 @@ async def upload_menu_image(
     result = menu_parser.parse_image_and_update_menu(image_bytes, mime_type)
 
     # The parser writes the extracted text into menu.json but discards the
-    # photo itself. Saved here, on success only, so "show me the menu" sends
-    # this actual upload instead of one of the two fixed images in the repo —
-    # a customer asking today should see today's flyer, not last month's.
-    if result.get("status") == "success":
-        try:
-            weekly_flyer.save(
-                image_bytes, mime_type,
-                week_of=result.get("week_of"),
-                service_window=result.get("service_window"),
-            )
-        except Exception as e:
-            log.warning("Menu text updated, but the flyer photo itself could not be saved: %s", e)
+    # photo itself, so the photo is saved here — "show me the menu" sends this
+    # actual upload instead of one of the two fixed images in the repo.
+    #
+    # Saved whether or not extraction succeeded. The vision model fails on
+    # perfectly good flyers (a malformed-JSON completion is enough), and
+    # gating the photo on that meant one bad model run made the whole upload
+    # do nothing at all: the operator posted this week's menu, got a "failed"
+    # toast, and customers kept seeing last week's. The photo is the thing
+    # customers actually read; the extracted text is what powers dish prices
+    # and ordering. Losing the second is a degraded menu, losing the first is
+    # no menu, so they are no longer tied together.
+    #
+    # week_of only comes along when extraction produced one. An unreadable
+    # date means a generic caption rather than a wrong one, and an undated
+    # flyer never expires — deliberately, since hiding a good menu is worse
+    # than showing one a few days longer (see camellia/menu_dates.py).
+    flyer_saved = False
+    try:
+        weekly_flyer.save(
+            image_bytes, mime_type,
+            week_of=result.get("week_of"),
+            service_window=result.get("service_window"),
+        )
+        flyer_saved = True
+    except Exception as e:
+        log.warning("Could not save the uploaded flyer photo: %s", e)
+
+    # The operator has to be able to tell the two halves apart, or a "failed"
+    # result reads as "nothing happened" when the photo did in fact go live.
+    result["flyer_saved"] = flyer_saved
+    if flyer_saved and result.get("status") != "success":
+        result["flyer_notice"] = (
+            "The menu photo is live and customers will now be sent it. "
+            "The dish text could not be read off this image, so item prices "
+            "still come from the previous menu — re-upload a clearer photo, "
+            "or edit the dishes by hand, to update those too."
+        )
 
     return result
 
@@ -2256,6 +2281,15 @@ Non-Veg:
                 } else if (data.status === 'warning') {
                     resBox.className = 'result-box info';
                     resBox.innerHTML = `ℹ️ <b>Test Upload Received:</b> ${data.message}`;
+                } else if (data.flyer_saved) {
+                    // The photo went live even though the text could not be
+                    // read. Saying only "OCR failed" here would send the
+                    // operator off to re-upload a menu that is already
+                    // circulating, so lead with what did work.
+                    resBox.className = 'result-box info';
+                    resBox.innerHTML = `📸 <b>Menu photo is live.</b><br>${data.flyer_notice || ''}`
+                        + `<br><small>Reader detail: ${data.detail || data.error || data.reason || 'could not extract dishes'}</small>`;
+                    loadActiveMenu();
                 } else {
                     resBox.className = 'result-box error';
                     resBox.innerHTML = `⚠️ <b>Image OCR Failed:</b> ${data.detail || data.error || data.reason || 'Could not extract dishes.'}`;

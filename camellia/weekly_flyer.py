@@ -216,6 +216,37 @@ def save(
     return state
 
 
+# How long an undated flyer is treated as current. The printed date is the
+# authority whenever it can be read; this is the fallback for a flyer whose
+# date the vision model could not make out, which since the upload/OCR split
+# reaches customers rather than being discarded. One week matches the kitchen's
+# own cycle: long enough that this week's upload stays live all week, short
+# enough that a forgotten one stops being shown.
+UNDATED_FLYER_LIFETIME_DAYS = 7
+
+
+def is_current(state: Optional[Dict[str, Any]], now: Optional[float] = None) -> bool:
+    """
+    Whether an uploaded flyer should still be sent to customers.
+
+    A readable printed date decides it outright. Without one, the upload time
+    stands in — the operator posted it when it was current, so it is current
+    for a week from then. Judged on the flyer's own date rather than
+    menu.json's, because the two now move independently: a failed text
+    extraction leaves menu.json on last week while the photo is this week's,
+    and letting the stale one veto the fresh one would put the operator back
+    where an upload appeared to do nothing at all.
+    """
+    if not state:
+        return False
+    week_of = state.get("week_of")
+    if menu_dates.parse_week_end_date(week_of) is not None:
+        return not menu_dates.is_expired(week_of)
+    now = time.time() if now is None else now
+    uploaded_at = float(state.get("uploaded_at") or 0)
+    return (now - uploaded_at) <= UNDATED_FLYER_LIFETIME_DAYS * 86400
+
+
 def get() -> Optional[Dict[str, Any]]:
     """
     The uploaded flyer's URL and caption, or None if nothing was ever uploaded

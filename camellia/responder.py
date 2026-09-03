@@ -1432,11 +1432,19 @@ class DeterministicResponder:
         too, and sending any dish photo for a week that has ended is the exact
         thing expiry exists to prevent.
         """
-        if self._weekly_menu_expired():
-            return None, None
+        # An uploaded flyer is judged on its own printed date (or, when that
+        # could not be read, on when it was uploaded). menu.json's week no
+        # longer gets a veto here: since the photo is saved even when text
+        # extraction fails, the two can legitimately disagree, and letting a
+        # stale text date suppress this week's photo is exactly the "upload
+        # did nothing" failure the split exists to prevent.
         uploaded = weekly_flyer.get()
         if uploaded:
+            if not weekly_flyer.is_current(uploaded):
+                return None, None
             return uploaded["url"], uploaded.get("caption")
+        if self._weekly_menu_expired():
+            return None, None
         img_till_thursday = "/images/Till%20Thursday.jpeg"
         img_from_friday = "/images/From%20Friday.jpeg"
         fallback = img_from_friday if today_weekday in [4, 5, 6] else img_till_thursday
