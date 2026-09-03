@@ -981,7 +981,15 @@ def get_active_menu(x_admin_key: Optional[str] = Header(None), x_admin_pin: Opti
         # Surfaced so the dashboard can show staff which week is actually
         # live, since the flyer photo and the dish text are now two separate
         # things that both have to agree with what was last uploaded.
-        return {"status": "success", "menu": data, "weekly_flyer": weekly_flyer.get()}
+        return {
+            "status": "success",
+            "menu": data,
+            "weekly_flyer": weekly_flyer.get(),
+            # Superseded flyers, newest first, already pruned to the two-week
+            # window. Shown in the dashboard so the kitchen can see what a
+            # customer asking for "last week's menu" would be sent.
+            "flyer_archive": weekly_flyer.list_archive(),
+        }
     except Exception as e:
         log.error("Failed to read menu.json: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
@@ -1755,6 +1763,7 @@ def get_admin_dashboard():
                 <h2>📸 Drag-and-Drop Menu Image Flyer (Photo OCR)</h2>
                 <p>Upload a photo of your printed menu card, packaging flyer, or Instagram story. The image is read and the dishes hot-reload into the live bot.</p>
                 <p id="activeFlyerWeek" style="font-size: 0.85rem; color: #555; margin-top: 4px;"></p>
+                <div id="flyerArchive" style="margin-top: 10px;"></div>
             </div>
 
             <div class="drop-zone" id="dropZone" onclick="document.getElementById('fileInput').click()">
@@ -2374,6 +2383,32 @@ Non-Veg:
                 const menuWeekOf = (menu.weekly_menus && menu.weekly_menus.length > 0)
                     ? menu.weekly_menus[menu.weekly_menus.length - 1].week_of
                     : null;
+                // Superseded flyers, still reachable by a customer asking for
+                // "previous menus" until they age out of the two-week window.
+                const archiveEl = document.getElementById('flyerArchive');
+                if (archiveEl) {
+                    const archive = data.flyer_archive || [];
+                    if (archive.length === 0) {
+                        archiveEl.innerHTML = '';
+                    } else {
+                        let a = '<p style="font-size: 0.8rem; color: #777; margin-bottom: 6px;">'
+                              + '🗂️ Previous menus (kept 2 weeks, customers can ask for these):</p>'
+                              + '<div style="display: flex; gap: 10px; flex-wrap: wrap;">';
+                        archive.forEach(function (entry) {
+                            const label = entry.week_of || 'undated';
+                            a += '<div style="text-align: center; font-size: 0.7rem; color: #555;">'
+                               + '<a href="' + entry.url + '" target="_blank" rel="noopener">'
+                               + '<img src="' + entry.url + '" alt="Menu ' + label + '" '
+                               + 'style="width: 84px; height: 84px; object-fit: cover; '
+                               + 'border-radius: 6px; border: 1px solid #ddd;"></a>'
+                               + '<div style="margin-top: 3px; max-width: 84px;">' + label + '</div>'
+                               + '</div>';
+                        });
+                        a += '</div>';
+                        archiveEl.innerHTML = a;
+                    }
+                }
+
                 const activeFlyerWeekEl = document.getElementById('activeFlyerWeek');
                 if (activeFlyerWeekEl) {
                     const weekLabel = flyerWeekOf || menuWeekOf;

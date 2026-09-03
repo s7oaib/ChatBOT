@@ -814,6 +814,7 @@ class DeterministicResponder:
             "packaging", "contact_social", "how_to_order", "freshness_ingredients",
             "order_status_tracking", "jolbhora_talgash_details", "sugar_free_options",
             "recall_order_flavour", "savoury_food_intro", "bento_details",
+            "previous_menus",
             "subscription_details", "subscription_booking_steps", "alacarte_prebooking_steps",
             "sondesh_dispatch_time", "savoury_crosssell_sondesh", "sondesh_crosssell_savoury",
             "savoury_best_time_to_book", "savoury_delivery_time", "kolkata_expansion_info",
@@ -969,6 +970,14 @@ class DeterministicResponder:
                     score += 100
                 elif tmpl_id == "subscription_details" and re.search(r'\b(subscription|subscriptions|meal plan|everyday meal|meal subscription|5 meals package|5 meals)\b', lowered_text):
                     score += 80
+                # "this week's menu" shares most of its words with "last
+                # week's menu", so trigger overlap alone would hand a
+                # request for the CURRENT menu to the archive. A present-tense
+                # marker rules previous_menus out before anything else scores it.
+                elif tmpl_id == "previous_menus" and re.search(r"\b(this\s+week|current|today|tonight|now|latest|new)\b", lowered_text):
+                    score -= 500
+                elif tmpl_id == "previous_menus" and re.search(r"\b(previous|last\s+week'?s?|old|past|earlier|archived?)\b", lowered_text) and re.search(r"\bmenus?\b", lowered_text):
+                    score += 160
                 elif tmpl_id == "bento_details" and re.search(r'\b(bento|bengali bento|bento box|bento details|bento tiers|bento prices|bento pricing|bento meal|bintow)\b', lowered_text):
                     score += 80
                 elif tmpl_id == "savoury_food_intro" and re.search(r'\b(lunch menu|dinner options|savoury food|bengali meals|lunch options|dinner menu|savoury menu|bengali lunch|bengali dinner|3 ways to order|savoury dishes|savoury ordering)\b', lowered_text):
@@ -1154,7 +1163,7 @@ class DeterministicResponder:
             elif tmpl_id == "sondesh_crosssell_savoury":
                 facts["sondesh_crosssell_sent"] = True
 
-            if tmpl_id not in {"greeting", "sondesh_price_detailed"} and config.is_ai_enabled and ai_responder.get_active_provider() != "none":
+            if tmpl_id not in {"greeting", "sondesh_price_detailed", "previous_menus"} and config.is_ai_enabled and ai_responder.get_active_provider() != "none":
                 try:
                     user_ctx = f"Customer Name: {facts.get('name', 'Unknown')}"
                     # The turns so far, without this message — add_turn runs
@@ -1169,6 +1178,37 @@ class DeterministicResponder:
                         response_text = refined_text
                 except Exception as e:
                     log.warning("AI template refinement failed: %s", e)
+
+            # Appended AFTER refinement on purpose. The refinement cache is
+            # keyed by the customer's wording, so a suffix added before it
+            # gets baked into that cache and replayed on a later ask whose
+            # archive is empty - offering menus that are no longer there.
+            #
+            # A customer who just got this week's menu is the one most likely
+            # to want the previous one ("what was that dish last week?"), so
+            # the offer goes here rather than sitting undiscoverable behind a
+            # phrase nobody guesses. Only when an archive actually exists, and
+            # once per session — the same restraint as the cross-sell nudges.
+            # previous_menus is excluded from refinement above: its text is
+            # generated from the live archive, not template copy, so refining
+            # it rewords real state — and the refinement cache is keyed by the
+            # customer's words, so the same question later replays an earlier
+            # answer with the photo cards stripped off.
+            menu_templates = {
+                "know_more", "product_overview", "weekly_menu_veg", "weekly_menu_nonveg",
+            }
+            if tmpl_id in menu_templates and not facts.get("previous_menus_offered"):
+                try:
+                    if weekly_flyer.list_archive():
+                        facts["previous_menus_offered"] = True
+                        response_text = response_text.rstrip() + (
+                            "\n\n_Want an earlier week? Say *Previous menus* — "
+                            "we keep the last two._"
+                        )
+                except Exception as e:
+                    # Never let an archive read cost the customer their menu.
+                    log.warning("Could not check flyer archive for nudge: %s", e)
+
 
             if intro_greeting_prefix and not response_text.startswith("Nice to meet you"):
                 if response_text.startswith("Hi! "):
@@ -1454,6 +1494,32 @@ class DeterministicResponder:
         # Each card carries its own description as a caption so the customer sees
         # card, detail, card, detail — rather than one block of text followed by a
         # burst of photos they then have to match up themselves.
+        if template_id == "previous_menus":
+            archived = weekly_flyer.list_archive()
+            if not archived:
+                # Never imply an archive exists when it does not — a customer
+                # told "here are the past menus" and shown nothing assumes the
+                # bot is broken. Point at the live menu instead.
+                return (
+                    "I don't have any earlier menus on hand right now — we keep the "
+                    "last two weeks. Say *Menu* and I'll send this week's! \U0001F338",
+                    None,
+                )
+            cards = []
+            for entry in archived:
+                week = entry.get("week_of")
+                cards.append({
+                    "url": entry["url"],
+                    "caption": (f"*Menu — {week}*" if week else "*An earlier menu*"),
+                })
+            plural = "menu" if len(cards) == 1 else "menus"
+            return (
+                f"Here {'is' if len(cards) == 1 else 'are'} the {plural} from the past "
+                f"two weeks. \U0001F338\n\nThese weeks have finished — say *Menu* for "
+                f"what we're cooking now.",
+                cards,
+            )
+
         if template_id in ["know_more", "product_overview"]:
             # The two Sondesh cards are undated and stay; only the weekly card
             # drops out once its week has ended, so a customer browsing still

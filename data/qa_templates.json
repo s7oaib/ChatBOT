@@ -1377,6 +1377,29 @@
       "source_ref": "client Q&A script > savoury food ordering"
     },
     {
+      "id": "previous_menus",
+      "triggers": [
+        "previous menu",
+        "previous menus",
+        "previous week menu",
+        "last week menu",
+        "last week's menu",
+        "last weeks menu",
+        "old menu",
+        "old menus",
+        "past menu",
+        "past menus",
+        "earlier menu",
+        "menu archive",
+        "show previous menus",
+        "show me the previous menu",
+        "do you have last week's menu"
+      ],
+      "response": "Here are the menus from the past couple of weeks. 🌸",
+      "escalate": false,
+      "source_ref": "client request 2026-09-04 > keep 2 weeks of menus browsable"
+    },
+    {
       "id": "subscription_details",
       "client_confirmed_date": "2026-08-21",
       "triggers": [

@@ -29,6 +29,7 @@ class SessionMemoryManager:
                     "awaiting_subscription_booking": False,
                     "savoury_crosssell_sent": False,
                     "sondesh_crosssell_sent": False,
+                    "previous_menus_offered": False,
                     "slow_notice_sent": False,
                     "awaiting_menu_choice": False,
                     "awaiting_area_confirmation": False,
