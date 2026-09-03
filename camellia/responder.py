@@ -1147,7 +1147,7 @@ class DeterministicResponder:
                 "aamar_mishti_details", "signature_sondesh_details",
                 "jolbhora_talgash_details", "shelf_life_storage"
             }
-            if tmpl_id in sondesh_templates and tmpl_id != "sondesh_price_detailed" and not facts.get("sondesh_crosssell_sent"):
+            if tmpl_id in sondesh_templates and not facts.get("sondesh_crosssell_sent"):
                 facts["sondesh_crosssell_sent"] = True
                 crosssell_nudge = "\n\n*P.S.* We also cook fresh Bengali meals for Delhi NCR — say *Meals* for this week's menu."
                 response_text = response_text.rstrip() + crosssell_nudge

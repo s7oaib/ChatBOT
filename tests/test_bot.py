@@ -307,7 +307,13 @@ class TestCamelliaBot(unittest.TestCase):
             resp4, matched4, tmpl4, _ = responder.match_and_respond("What is the capital of France?")
             self.assertFalse(matched4)
             self.assertIsNone(tmpl4)
-            expected_fallback = responder.qa_data.get("escalation_triggers", {}).get("fallback_response")
+            # Customer-visible text has the flower emoji stripped on the way
+            # out (responder._strip_flower_emoji), so the approved source
+            # string has to be compared in that same form.
+            from camellia.responder import _strip_flower_emoji
+            expected_fallback = _strip_flower_emoji(
+                responder.qa_data.get("escalation_triggers", {}).get("fallback_response")
+            )
             self.assertEqual(resp4, expected_fallback, "Deterministic fallback message must match exact fallback_response text")
 
     def test_whatsapp_adapter_flow(self):

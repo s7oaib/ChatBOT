@@ -376,7 +376,7 @@
         "starting price",
         "starts from"
       ],
-      "response": "Hi kindly find the full menu card with price. All prices mentioned in the menu include GST. Delivery charges are at actuals. We cook freshly prepared Bengali food in small batches, in 2 formats: 1. À LA CARTE... 2. BENGALI BENTO... If this is your first Camellia meal and the menu feels unfamiliar, I'll be happy to help you choose!",
+      "response": "Our Sondesh boxes start at ₹450 for a 250g box of 9 pieces 🌸\n\n• *Aamar Mishti* — everyday sondesh in pure dairy milk, partially mechanised, made in-house\n  250g ₹450–₹750 | 500g ₹800–₹1,400 | 1kg ₹1,500–₹2,500\n\n• *Signature Collection* — pure desi A2 cow milk, handcrafted end to end, for gifting & occasions\n  250g ₹600–₹900 | 500g ₹1,100–₹1,600 | 1kg ₹2,000–₹2,900\n\nAn all-women team makes every box from scratch, with small-batch artisanal dairy — never general retail sourcing. Porter delivery is on actuals from Sushant Lok, Gurgaon.\n\nWhich collection would you like — or shall I send the full flavour list?",
       "escalate": false,
       "source_ref": "client Q&A script > savoury food ordering"
     },
