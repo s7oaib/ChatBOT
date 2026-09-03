@@ -1008,7 +1008,10 @@ class TestCamelliaBot(unittest.TestCase):
         )
 
         self.assertEqual(tmpl1, "delivery_area")
-        self.assertEqual(tmpl2, "delivery_area")
+        # Since 040cee0 the answer is recognised as an answer and confirmed
+        # against the serviceable list, rather than re-matching delivery_area
+        # and being caught by the duplicate guard.
+        self.assertEqual(tmpl2, "delivery_area_confirmation")
         self.assertIn("Which area are you in?", first)
 
         # The repeat must not go out, and the answered question must not be
@@ -1060,26 +1063,41 @@ class TestCamelliaBot(unittest.TestCase):
         self.assertEqual(tmpl, "delivery_area")
         self.assertIn("Delhi NCR", later)
 
-    def test_duplicate_guard_invents_no_delivery_claim(self):
+    def test_delivery_claim_is_never_invented_for_an_unlisted_area(self):
         """
-        The repeat notice must not assert coverage. Confirming an area would
-        mean guessing whether it is served, and a wrong guess about delivery is
-        exactly what the template architecture exists to prevent.
+        A delivery promise may only come from the hardcoded serviceable list,
+        never from a guess about an unrecognised place name.
+
+        This used to be enforced by refusing to confirm *any* area. Since
+        040cee0 a listed area is confirmed outright — that is a lookup against
+        NCR_SERVICEABLE_AREAS, not a guess — so the property that still has to
+        hold is the fail-closed half: an area the bot cannot positively
+        identify as NCR gets the approved out-of-area reply and no promise.
         """
         from camellia.responder import responder
         from camellia.session_memory import session_memory
 
-        uid = "test_dup_no_claim"
+        # A listed area is confirmed, and the confirmation names that area.
+        uid = "test_area_listed"
         session_memory.clear_session(uid, "whatsapp")
-
         responder.match_and_respond("do you deliver today", user_id=uid, channel="whatsapp")
-        second, _, _, _ = responder.match_and_respond("gurgaon", user_id=uid, channel="whatsapp")
+        listed, _, tmpl_listed, _ = responder.match_and_respond(
+            "gurgaon", user_id=uid, channel="whatsapp"
+        )
+        self.assertEqual(tmpl_listed, "delivery_area_confirmation")
+        self.assertIn("we deliver to gurgaon", listed.lower())
 
-        lowered = second.lower()
-        self.assertNotIn("yes we deliver", lowered)
-        self.assertNotIn("we deliver to gurgaon", lowered)
-        # It should still move the conversation somewhere the bot can act.
-        self.assertIn("anything else", lowered)
+        # An unlisted area must never draw a delivery claim.
+        for area in ("Mumbai", "Bijapur"):
+            uid = f"test_area_unlisted_{area.lower()}"
+            session_memory.clear_session(uid, "whatsapp")
+            responder.match_and_respond("do you deliver today", user_id=uid, channel="whatsapp")
+            second, _, tmpl, _ = responder.match_and_respond(area, user_id=uid, channel="whatsapp")
+
+            lowered = second.lower()
+            self.assertEqual(tmpl, "delivery_out_of_area", f"{area} escaped the fail-closed path")
+            self.assertNotIn("yes we deliver", lowered)
+            self.assertNotIn(f"we deliver to {area.lower()}", lowered)
 
     def test_duplicate_guard_leaves_a_genuinely_new_answer_alone(self):
         """A different template must pass through untouched."""
@@ -1105,13 +1123,21 @@ class TestCamelliaBot(unittest.TestCase):
         A one-word reply answering the bot's own question must be refined with
         that question in view.
 
-        The bot asks "Which area are you in?"; the customer says "gurgaon";
+        The bot asks about the delivery area; the customer says "gurgaon";
         "gurgaon" is itself a delivery_area trigger, so the same template
         matches again. Refinement is what makes the second reply an answer
         rather than a repeat — but only if it can see the exchange. It used to
         be called with no history at all, so the model got the template and the
         bare word "gurgaon", and could do nothing but restate the template and
         ask the same question a second time.
+
+        The first mocked reply deliberately does NOT contain the literal
+        "Which area are you in?". `responder.py` sets
+        `awaiting_area_confirmation` by testing for that exact substring in the
+        *refined* text, so a reworded question — the normal result of
+        refinement — leaves the flag unset and the follow-up re-matches
+        delivery_area. That is the path this test covers, and it is the path
+        where history actually matters.
         """
         from camellia.responder import responder
         from camellia.ai_responder import ai_responder
@@ -1125,7 +1151,7 @@ class TestCamelliaBot(unittest.TestCase):
 
         post = mock_httpx_cls.return_value.__enter__.return_value.post
         post.side_effect = [
-            _reply("We deliver across Delhi NCR. Which area are you in?"),
+            _reply("We deliver right across Delhi NCR — whereabouts are you?"),
             _reply("Yes — Gurgaon is covered! We ship from Sushant Arcade."),
         ]
 
@@ -1150,7 +1176,7 @@ class TestCamelliaBot(unittest.TestCase):
         # The follow-up refinement must have carried the prior exchange.
         second_prompt = post.call_args_list[-1].kwargs["json"]["messages"][0]["content"]
         self.assertIn("Recent Chat History:", second_prompt)
-        self.assertIn("Which area are you in?", second_prompt)
+        self.assertIn("whereabouts are you?", second_prompt)
         self.assertIn("do you deliver today", second_prompt)
 
         # And the two replies must not be the same text.
