@@ -6,7 +6,7 @@ from camellia.session_memory import session_memory
 from camellia.whatsapp_adapter import whatsapp_adapter
 
 
-def test_delivery_area_followup_consumes_session_flag():
+def test_delivery_area_followup_confirms_a_serviceable_area_and_keeps_area_flow_active():
     user_id = "client_delivery_followup"
     session_memory.clear_session(user_id, "whatsapp")
 
@@ -21,7 +21,38 @@ def test_delivery_area_followup_consumes_session_flag():
         "from Sushant Lok, Gurgaon."
     )
     assert reply[2] == "delivery_area_confirmation"
-    assert session_memory.get_facts(user_id, "whatsapp")["awaiting_area_confirmation"] is False
+    assert session_memory.get_facts(user_id, "whatsapp")["awaiting_area_confirmation"] is True
+
+
+def test_delivery_area_flow_confirms_two_serviceable_localities_in_a_row():
+    user_id = "client_two_delivery_areas"
+    session_memory.clear_session(user_id, "whatsapp")
+
+    responder.match_and_respond("Where do you deliver?", user_id=user_id, channel="whatsapp")
+    chatra_marg = responder.match_and_respond("Chatra Marg", user_id=user_id, channel="whatsapp")
+    lajpat_nagar = responder.match_and_respond("Lajpat Nagar", user_id=user_id, channel="whatsapp")
+
+    assert chatra_marg[0] == (
+        "Yes, we deliver to Chatra Marg — courier charges on actuals from Sushant Lok, Gurgaon."
+    )
+    assert lajpat_nagar[0] == (
+        "Yes, we deliver to Lajpat Nagar — courier charges on actuals from Sushant Lok, Gurgaon."
+    )
+    assert chatra_marg[2] == lajpat_nagar[2] == "delivery_area_confirmation"
+    assert session_memory.get_facts(user_id, "whatsapp")["awaiting_area_confirmation"] is True
+
+
+def test_delivery_area_flow_fails_closed_for_mumbai_and_bijapur():
+    for area in ("Mumbai", "Bijapur"):
+        user_id = f"client_out_of_area_{area.lower()}"
+        session_memory.clear_session(user_id, "whatsapp")
+        responder.match_and_respond("Where do you deliver?", user_id=user_id, channel="whatsapp")
+
+        reply = responder.match_and_respond(area, user_id=user_id, channel="whatsapp")
+        assert reply[2] == "delivery_out_of_area"
+        assert "unable to ship our sondesh outside Delhi NCR" in reply[0]
+        assert "Yes, we deliver" not in reply[0]
+        assert session_memory.get_facts(user_id, "whatsapp")["awaiting_area_confirmation"] is False
 
 
 def test_delivery_area_flag_does_not_consume_a_new_business_question():

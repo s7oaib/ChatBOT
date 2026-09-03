@@ -84,6 +84,22 @@ _QUESTION_OPENER_RE = re.compile(
 )
 _SHORT_ANSWER_MAX_WORDS = 3
 
+# Confirming delivery is a business promise, so this is intentionally an
+# allowlist. Unknown localities fail closed to the approved out-of-area reply;
+# they are never guessed from an LLM or a broad geographic heuristic.
+NCR_SERVICEABLE_AREAS = (
+    "delhi", "new delhi", "gurgaon", "gurugram", "noida", "greater noida",
+    "ghaziabad", "faridabad", "dwarka", "indirapuram", "cr park",
+    "chittaranjan park", "lajpat nagar", "chatra marg", "chhatra marg",
+    "north campus", "delhi university", "du campus", "karol bagh",
+    "saket", "vasant kunj", "hauz khas", "greater kailash", "gk",
+    "kalkaji", "malviya nagar", "rohini", "pitampura", "mayur vihar",
+    "janakpuri", "rajouri garden", "paschim vihar", "nehru place",
+    "connaught place", "chanakyapuri", "civil lines", "model town",
+    "ashok vihar", "burari", "shalimar bagh", "vikaspuri", "cybercity",
+    "cyber hub", "sector 45", "sector 62",
+)
+
 
 def _bot_asked_a_question(reply: str) -> bool:
     """True when the bot's own last reply ended by asking something."""
@@ -110,6 +126,12 @@ def _looks_like_an_area_answer(message: str) -> bool:
         "price", "menu", "sondesh", "mishti", "order", "refund", "complaint",
         "delivery", "deliver", "courier", "shipping", "hours", "time",
     ))
+
+
+def _is_serviceable_ncr_area(message: str) -> bool:
+    """True only when a customer-provided location is on the NCR allowlist."""
+    lowered = " ".join((message or "").lower().split())
+    return any(area in lowered for area in NCR_SERVICEABLE_AREAS)
 
 
 # Comparing against only the previous reply is not enough: it lets the bot
@@ -525,15 +547,35 @@ class DeterministicResponder:
         # question is an answer to that question, even when it contains words
         # such as "Delhi" that would otherwise match delivery_area again.
         if facts.get("awaiting_area_confirmation"):
-            facts["awaiting_area_confirmation"] = False
             if _looks_like_an_area_answer(user_message):
                 area = " ".join(user_message.split())
-                response_text = (
-                    f"Yes, we deliver to {area} — courier charges on actuals "
-                    "from Sushant Lok, Gurgaon."
-                )
+                if _is_serviceable_ncr_area(area):
+                    # Keep the question active for a customer comparing two
+                    # localities in succession (for example Chatra Marg, then
+                    # Lajpat Nagar).
+                    facts["awaiting_area_confirmation"] = True
+                    response_text = (
+                        f"Yes, we deliver to {area} — courier charges on actuals "
+                        "from Sushant Lok, Gurgaon."
+                    )
+                    template_id = "delivery_area_confirmation"
+                else:
+                    # A location we cannot positively identify as NCR must not
+                    # receive a delivery promise. Reuse the client-approved
+                    # outside-Delhi-NCR message and close the area flow.
+                    facts["awaiting_area_confirmation"] = False
+                    out_of_area = next(
+                        (template for template in self.qa_data.get("templates", [])
+                         if template.get("id") == "delivery_out_of_area"),
+                        {},
+                    )
+                    response_text = out_of_area.get("response") or self._generic_fallback()
+                    template_id = "delivery_out_of_area"
                 session_memory.add_turn(user_id, channel, user_message, response_text)
-                return response_text, True, "delivery_area_confirmation", None
+                return response_text, True, template_id, None
+            # A new substantive message ends the area-comparison flow and is
+            # processed by the usual matcher below.
+            facts["awaiting_area_confirmation"] = False
 
         # Check if user just provided their name
         intro_greeting_prefix = ""
