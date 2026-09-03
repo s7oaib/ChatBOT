@@ -1,5 +1,6 @@
 import re
 import json
+import time
 import base64
 import httpx
 from typing import Dict, Any, List, Optional
@@ -13,6 +14,120 @@ NON_VEG_KEYWORDS = [
     "mutton", "chicken", "fish", "egg", "non-veg", "non veg", "prawn", 
     "mangsho", "kosha", "cutlet", "kalia", "chingri", "machh", "biryani", "bhetki", "paturi"
 ]
+
+# A menu upload is one deliberate action by the operator, not a per-message
+# hot path, so it can afford to try again — unlike the reply path, where a
+# retry is paid for by a customer waiting. That difference is why these
+# numbers are far more generous than ai_responder's.
+#
+# The failure this exists for is Groq's own JSON mode giving up:
+#   400 {"code": "json_validate_failed", "failed_generation": ""}
+# It is transient. The same flyer, byte for byte, failed once and parsed on
+# the next attempt — which is exactly why the single-shot version made an
+# upload look like a broken feature roughly one time in three.
+_VISION_MAX_ATTEMPTS = 3
+_VISION_RETRY_BACKOFF_SECONDS = 1.5
+# A ceiling is needed — a truncated completion is invalid JSON, which looks
+# identical to the model failing the schema — but it must stay small.
+#
+# Groq bills max_tokens as *reserved* budget against the per-minute limit, not
+# as what the reply actually costs. The free tier allows 8000 TPM and a flyer
+# photo is already ~5000 of those, so an over-generous reservation turns a
+# request that would have succeeded into a guaranteed 429. A first pass at
+# this used 4096 and made uploads fail that had previously worked. An
+# extracted menu of a dozen dishes with descriptions runs well under 2000.
+_VISION_MAX_TOKENS = 2048
+_VISION_TIMEOUT_SECONDS = 60.0
+
+# A 429 here is the per-minute token window being spent, not a fault, and it
+# refills on a clock rather than immediately. Retrying 1.5s later just spends
+# another attempt on the same exhausted minute, so quota failures wait longer
+# and honour the provider's own hint when it sends one. Capped because the
+# operator is holding an open HTTP request while this runs — better to hand
+# back a clear "try again in a minute" than to hang the admin page.
+_VISION_QUOTA_BACKOFF_SECONDS = 8.0
+_VISION_MAX_BACKOFF_SECONDS = 20.0
+
+# Retrying a bad key or a model the account cannot serve changes nothing.
+_VISION_FATAL_STATUSES = (401, 403, 404)
+
+
+def _is_retryable_vision_failure(status_code: int, body: str) -> bool:
+    """
+    Whether another attempt at the same image could plausibly succeed.
+
+    400 is normally a configuration error, but Groq returns it for
+    json_validate_failed too — the model simply produced something that did
+    not parse. That one is worth retrying; a malformed request is not.
+    """
+    if status_code in _VISION_FATAL_STATUSES:
+        return False
+    if status_code in (429, 500, 502, 503, 520, 522, 524):
+        return True
+    if status_code == 400:
+        return "json_validate_failed" in (body or "")
+    return False
+
+
+def _vision_backoff_seconds(resp: Any, status_code: int) -> float:
+    """How long to wait before the next attempt, honouring Retry-After."""
+    hint = None
+    try:
+        raw = resp.headers.get("retry-after") if resp is not None else None
+        if raw:
+            hint = float(raw)
+    except (AttributeError, TypeError, ValueError):
+        hint = None
+    if hint is None:
+        hint = _VISION_QUOTA_BACKOFF_SECONDS if status_code == 429 else _VISION_RETRY_BACKOFF_SECONDS
+    return max(0.0, min(hint, _VISION_MAX_BACKOFF_SECONDS))
+
+
+def _extract_json_object(content: str) -> Optional[Dict[str, Any]]:
+    """
+    The first complete JSON object in a model reply.
+
+    Used for the last attempt, which asks without response_format. Models that
+    trip strict JSON mode will still usually emit a perfectly good object
+    wrapped in prose or a ```json fence, and throwing that away because of the
+    wrapper would fail an upload we can actually read.
+    """
+    if not content:
+        return None
+    text = content.strip()
+    fenced = re.search(r"```(?:json)?\s*(.+?)```", text, re.DOTALL)
+    if fenced:
+        text = fenced.group(1).strip()
+    start = text.find("{")
+    if start == -1:
+        return None
+    # Walk to the matching brace rather than regexing: descriptions routinely
+    # contain braces-free prose but the object itself nests.
+    depth = 0
+    in_string = False
+    escaped = False
+    for i, ch in enumerate(text[start:], start):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(text[start:i + 1])
+                except json.JSONDecodeError:
+                    return None
+    return None
+
 
 class MenuParser:
     """
@@ -210,21 +325,76 @@ class MenuParser:
             "temperature": 0.1,
             "response_format": {"type": "json_object"},
         }
-        try:
-            with httpx.Client(timeout=30.0) as client:
-                resp = client.post(url, headers=headers, json=payload)
+        payload["max_tokens"] = _VISION_MAX_TOKENS
+
+        last_reason = "Groq vision parsing did not return items."
+        for attempt in range(1, _VISION_MAX_ATTEMPTS + 1):
+            # The final attempt drops strict JSON mode and parses the object
+            # out of whatever comes back. When the model keeps tripping the
+            # schema validator it is usually still producing readable JSON,
+            # just wrapped — and an upload that can be read should not fail.
+            lenient = attempt == _VISION_MAX_ATTEMPTS
+            backoff = _VISION_RETRY_BACKOFF_SECONDS
+            if lenient:
+                payload.pop("response_format", None)
+            try:
+                with httpx.Client(timeout=_VISION_TIMEOUT_SECONDS) as client:
+                    resp = client.post(url, headers=headers, json=payload)
+
                 if resp.status_code == 200:
                     content = resp.json()["choices"][0]["message"]["content"]
-                    data = json.loads(content)
-                    return self._apply_extracted_data_to_menu(data)
+                    data = _extract_json_object(content)
+                    if data is None:
+                        last_reason = "Vision model returned no readable JSON."
+                        backoff = _VISION_RETRY_BACKOFF_SECONDS
+                        log.warning(
+                            "Groq vision attempt %d/%d returned unparseable content.",
+                            attempt, _VISION_MAX_ATTEMPTS,
+                        )
+                    else:
+                        if attempt > 1:
+                            log.info(
+                                "Groq vision succeeded on attempt %d/%d%s.",
+                                attempt, _VISION_MAX_ATTEMPTS,
+                                " (without strict JSON mode)" if lenient else "",
+                            )
+                        return self._apply_extracted_data_to_menu(data)
+                else:
+                    body = resp.text or ""
+                    # Say which of the two it was. "Could not read the flyer"
+                    # sends the operator hunting for a clearer photo; a spent
+                    # token quota just needs a minute, and the photo they
+                    # uploaded is already live either way.
+                    last_reason = (
+                        "The vision model's per-minute quota is spent. The menu photo is "
+                        "live; try the dish extraction again in a minute."
+                        if resp.status_code == 429
+                        else f"Vision model HTTP {resp.status_code}."
+                    )
+                    log.warning(
+                        "Groq vision HTTP %s on attempt %d/%d (model %r): %s",
+                        resp.status_code, attempt, _VISION_MAX_ATTEMPTS,
+                        config.GROQ_VISION_MODEL, body[:200],
+                    )
+                    if not _is_retryable_vision_failure(resp.status_code, body):
+                        return {"status": "failed", "reason": last_reason}
+                    backoff = _vision_backoff_seconds(resp, resp.status_code)
+            except Exception as e:
+                last_reason = str(e)
+                backoff = _VISION_RETRY_BACKOFF_SECONDS
                 log.warning(
-                    "Groq vision HTTP %s (model %r): %s",
-                    resp.status_code, config.GROQ_VISION_MODEL, resp.text[:200],
+                    "Groq vision attempt %d/%d failed: %s",
+                    attempt, _VISION_MAX_ATTEMPTS, e,
                 )
-        except Exception as e:
-            log.error("Groq vision parsing failed: %s", e)
-            return {"status": "error", "error": str(e)}
-        return {"status": "failed", "reason": "Groq vision parsing did not return items."}
+
+            if attempt < _VISION_MAX_ATTEMPTS:
+                time.sleep(backoff)
+
+        log.error(
+            "Groq vision gave up after %d attempts: %s",
+            _VISION_MAX_ATTEMPTS, last_reason,
+        )
+        return {"status": "failed", "reason": last_reason}
 
 
     def _apply_extracted_data_to_menu(self, data: Dict[str, Any]) -> Dict[str, Any]:
