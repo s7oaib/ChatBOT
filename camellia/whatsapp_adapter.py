@@ -175,13 +175,22 @@ class WhatsAppAdapter:
 
     def send_message(self, recipient_phone: str, text_body: str, image_url=None, buttons=None) -> Dict[str, Any]:
         """Sends a text or interactive button message plus zero or more image cards via Meta WhatsApp Cloud API."""
+        text_body = (text_body or "").replace("🌸", "")
+        buttons = [str(button).replace("🌸", "") for button in (buttons or [])]
         pairs = self._normalise_images(image_url)
-        captioned = [(self._public_url(u), c) for u, c in pairs]
+        captioned = [(self._public_url(u), (c or "").replace("🌸", "")) for u, c in pairs]
         images = [u for u, _ in captioned]
         # When cards carry their own descriptions, they lead and the closing
         # question follows, so each card arrives next to the detail it belongs to
         # instead of after a wall of text.
-        cards_first = any(c for _, c in captioned)
+        # Captioned browse cards traditionally lead the text, but the price
+        # flow is explicitly text -> Aamar note/card -> Signature note/card.
+        # The responder marks that flow on its first card without changing the
+        # public image-pair shape used by the rest of the adapter.
+        text_first = isinstance(image_url, list) and any(
+            isinstance(entry, dict) and entry.get("text_first") for entry in image_url
+        )
+        cards_first = any(c for _, c in captioned) and not text_first
 
         if config.WHATSAPP_MOCK_MODE:
             # Development / Mock Mode: never construct an outbound HTTP request.

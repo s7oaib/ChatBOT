@@ -3,6 +3,7 @@ import hmac
 import hashlib
 import json
 import os
+import re
 import httpx
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, Response, Query, Header, HTTPException, File, UploadFile, BackgroundTasks
@@ -31,6 +32,15 @@ from camellia.session_memory import session_memory
 from camellia.monitoring import get_logger, delivery_monitor, latency_monitor
 
 log = get_logger("camellia.app")
+
+_INSTAGRAM_CONTACT_REQUEST = "Could you share your WhatsApp number so our team can reach you directly?"
+_INDIAN_MOBILE_RE = re.compile(r"(?<!\d)(?:\+?91[\s-]*)?([6-9]\d{9})(?!\d)")
+
+
+def _extract_whatsapp_number(text: str) -> Optional[str]:
+    """Return a normalized Indian WhatsApp number from an Instagram reply."""
+    match = _INDIAN_MOBILE_RE.search(text or "")
+    return f"+91{match.group(1)}" if match else None
 
 
 def _prune_expired_weekly_menus() -> None:
@@ -303,21 +313,80 @@ def _process_instagram_event(sender_id: str, message_text: str, ad_id: Optional[
     frees the loop and lets several customers be handled at once.
     """
     try:
+        facts = session_memory.get_facts(sender_id, "instagram")
+        awaiting_contact = facts.get("awaiting_instagram_contact", False)
+        supplied_contact = _extract_whatsapp_number(message_text)
+
+        if awaiting_contact and not supplied_contact:
+            response_text = _INSTAGRAM_CONTACT_REQUEST
+            db.log_conversation(sender_id, "instagram", message_text, response_text, True, "instagram_contact_required")
+            send_instagram_reply(sender_id, response_text)
+            return
+
+        if awaiting_contact and supplied_contact:
+            pending = facts.get("pending_instagram_escalation") or {}
+            facts["awaiting_instagram_contact"] = False
+            facts["pending_instagram_escalation"] = None
+            response_text = pending.get("response_text") or _INSTAGRAM_CONTACT_REQUEST
+            was_matched = pending.get("was_matched", False)
+            template_id = pending.get("template_id")
+            user_message_for_escalation = pending.get("user_message", message_text)
+            reason = pending.get("reason", "Unmatched Instagram Query / Sensitive Request")
+            session_memory.add_turn(sender_id, "instagram", message_text, response_text)
+            escalator.handle_escalation(
+                user_id=sender_id,
+                channel="instagram",
+                user_message=user_message_for_escalation,
+                reason=reason,
+                context_data={
+                    "ad_id": ad_id,
+                    "sender_id": sender_id,
+                    "template_id": template_id,
+                    "customer_whatsapp_number": supplied_contact,
+                },
+            )
+            db.log_conversation(sender_id, "instagram", message_text, response_text, was_matched, template_id)
+            send_instagram_reply(sender_id, response_text)
+            return
+
         response_text, was_matched, template_id, image_url = responder.match_and_respond(
             message_text, user_id=sender_id, channel="instagram",
             referral_source="ADS", referral_ad_id=ad_id,
         )
 
-        db.log_conversation(sender_id, "instagram", message_text, response_text, was_matched, template_id)
+        needs_escalation = awaiting_contact or not was_matched or template_id == "order_next_steps"
+        if needs_escalation and not supplied_contact and not awaiting_contact:
+            facts["awaiting_instagram_contact"] = True
+            facts["pending_instagram_escalation"] = {
+                "response_text": response_text,
+                "was_matched": was_matched,
+                "template_id": template_id,
+                "user_message": message_text,
+                "reason": "Order Confirmation & Intake Request" if was_matched else "Unmatched Instagram Query / Sensitive Request",
+            }
+            response_text = _INSTAGRAM_CONTACT_REQUEST
+            session_memory.add_turn(sender_id, "instagram", message_text, response_text)
+            db.log_conversation(sender_id, "instagram", message_text, response_text, True, "instagram_contact_required")
+            send_instagram_reply(sender_id, response_text)
+            return
 
-        if not was_matched or template_id == "order_next_steps":
+        if needs_escalation:
+            facts["awaiting_instagram_contact"] = False
+            facts["pending_instagram_escalation"] = None
             escalator.handle_escalation(
                 user_id=sender_id,
                 channel="instagram",
                 user_message=message_text,
                 reason="Order Confirmation & Intake Request" if was_matched else "Unmatched Instagram Query / Sensitive Request",
-                context_data={"ad_id": ad_id, "sender_id": sender_id, "template_id": template_id},
+                context_data={
+                    "ad_id": ad_id,
+                    "sender_id": sender_id,
+                    "template_id": template_id,
+                    **({"customer_whatsapp_number": supplied_contact} if supplied_contact else {}),
+                },
             )
+
+        db.log_conversation(sender_id, "instagram", message_text, response_text, was_matched, template_id)
 
         send_instagram_reply(sender_id, response_text, image_url=image_url)
     except Exception:

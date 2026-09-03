@@ -54,6 +54,17 @@ _DUPLICATE_REPLY_NOTICE = (
 )
 
 
+def _strip_flower_emoji(value):
+    """Remove the flower emoji from customer-visible text and card captions."""
+    if isinstance(value, str):
+        return value.replace("🌸", "")
+    if isinstance(value, list):
+        return [_strip_flower_emoji(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _strip_flower_emoji(item) for key, item in value.items()}
+    return value
+
+
 def _normalise_reply(text: str) -> str:
     """Whitespace- and case-insensitive form used to spot an exact repeat."""
     return " ".join((text or "").split()).lower()
@@ -85,6 +96,20 @@ def _looks_like_a_short_answer(message: str) -> bool:
     if not text or text.endswith("?") or _QUESTION_OPENER_RE.match(text):
         return False
     return len(text.split()) <= _SHORT_ANSWER_MAX_WORDS
+
+
+def _looks_like_an_area_answer(message: str) -> bool:
+    """True for a short location reply, not a new product or delivery question."""
+    text = " ".join((message or "").split())
+    lowered = text.lower()
+    if not text or text.endswith("?") or _QUESTION_OPENER_RE.match(text):
+        return False
+    if len(text.split()) > 12:
+        return False
+    return not any(word in lowered for word in (
+        "price", "menu", "sondesh", "mishti", "order", "refund", "complaint",
+        "delivery", "deliver", "courier", "shipping", "hours", "time",
+    ))
 
 
 # Comparing against only the previous reply is not enough: it lets the bot
@@ -435,7 +460,7 @@ class DeterministicResponder:
             log.info("Slow-reply notice sent to %s on %s.", user_id, channel)
             response_text = f"{config.SLOW_REPLY_NOTICE_TEXT}\n\n{response_text}"
 
-        return response_text, was_matched, template_id, image_url
+        return _strip_flower_emoji(response_text), was_matched, template_id, _strip_flower_emoji(image_url)
 
     def _resolve_response(
         self,
@@ -495,6 +520,20 @@ class DeterministicResponder:
 
         # 1. Update & Extract Session Memory Facts (Name, Order Draft)
         facts = session_memory.extract_and_update_facts(user_id, channel, user_message)
+
+        # A location sent immediately after the delivery template's area
+        # question is an answer to that question, even when it contains words
+        # such as "Delhi" that would otherwise match delivery_area again.
+        if facts.get("awaiting_area_confirmation"):
+            facts["awaiting_area_confirmation"] = False
+            if _looks_like_an_area_answer(user_message):
+                area = " ".join(user_message.split())
+                response_text = (
+                    f"Yes, we deliver to {area} — courier charges on actuals "
+                    "from Sushant Lok, Gurgaon."
+                )
+                session_memory.add_turn(user_id, channel, user_message, response_text)
+                return response_text, True, "delivery_area_confirmation", None
 
         # Check if user just provided their name
         intro_greeting_prefix = ""
@@ -1066,14 +1105,14 @@ class DeterministicResponder:
                 "aamar_mishti_details", "signature_sondesh_details",
                 "jolbhora_talgash_details", "shelf_life_storage"
             }
-            if tmpl_id in sondesh_templates and not facts.get("sondesh_crosssell_sent"):
+            if tmpl_id in sondesh_templates and tmpl_id != "sondesh_price_detailed" and not facts.get("sondesh_crosssell_sent"):
                 facts["sondesh_crosssell_sent"] = True
                 crosssell_nudge = "\n\n*P.S.* We also cook fresh Bengali meals for Delhi NCR — say *Meals* for this week's menu."
                 response_text = response_text.rstrip() + crosssell_nudge
             elif tmpl_id == "sondesh_crosssell_savoury":
                 facts["sondesh_crosssell_sent"] = True
 
-            if tmpl_id != "greeting" and config.is_ai_enabled and ai_responder.get_active_provider() != "none":
+            if tmpl_id not in {"greeting", "sondesh_price_detailed"} and config.is_ai_enabled and ai_responder.get_active_provider() != "none":
                 try:
                     user_ctx = f"Customer Name: {facts.get('name', 'Unknown')}"
                     # The turns so far, without this message — add_turn runs
@@ -1095,6 +1134,9 @@ class DeterministicResponder:
                 elif response_text.startswith("Hello! "):
                     response_text = response_text[7:]
                 response_text = intro_greeting_prefix + response_text
+
+            if tmpl_id == "delivery_area":
+                facts["awaiting_area_confirmation"] = "Which area are you in?" in response_text
 
             if tmpl_id in TOPIC_MAP:
                 facts["last_topic"] = TOPIC_MAP[tmpl_id]
@@ -1118,6 +1160,8 @@ class DeterministicResponder:
                 response_text = _DUPLICATE_REPLY_NOTICE
                 image_url = None
 
+            response_text = _strip_flower_emoji(response_text)
+            image_url = _strip_flower_emoji(image_url)
             session_memory.add_turn(user_id, channel, user_message, response_text)
             return response_text, True, tmpl_id, image_url
 
@@ -1440,6 +1484,21 @@ class DeterministicResponder:
             else:
                 target_images = [img_aamar_mishti, img_signature_sondesh]
 
+            if template_id == "sondesh_price_detailed":
+                # The client-approved price reply is text first, followed by
+                # each collection note and its matching menu card.
+                target_images = [
+                    {
+                        "url": img_aamar_mishti,
+                        "caption": "Aamar Mishti — our everyday Sondesh, made fresh in pure dairy milk",
+                        "text_first": True,
+                    },
+                    {
+                        "url": img_signature_sondesh,
+                        "caption": "Signature Collection — handcrafted end to end in desi A2 cow milk, for gifting & special occasions.",
+                    },
+                ]
+
         # Savoury food intro & Sondesh->Savoury cross-sell — attach current weekly menu image card alongside text
         elif template_id in ["savoury_food_intro", "sondesh_crosssell_savoury"]:
             target_images = current_weekly_img
@@ -1551,7 +1610,25 @@ class DeterministicResponder:
                 (c for c in ("gurgaon", "gurugram", "delhi", "noida", "ghaziabad", "faridabad") if c in lowered_msg),
                 None,
             )
-            if asked_about_delivery and (area_match or city_match):
+            previous_reply = _recent_bot_replies(user_id, channel, limit=1)
+            is_area_followup = (
+                not asked_about_delivery
+                and not (user_message or "").strip().endswith("?")
+                and len((user_message or "").split()) <= 8
+                and not _QUESTION_OPENER_RE.match((user_message or "").strip())
+                and _bot_asked_a_question(previous_reply[0] if previous_reply else "")
+            )
+            if is_area_followup and _looks_like_an_area_answer(user_message):
+                # A short location is the answer to the bot's preceding
+                # "Which area are you in?" prompt, not a new request for the
+                # delivery template. Delhi University North Campus is within
+                # the configured Delhi NCR service area.
+                area = " ".join(user_message.split())
+                formatted_text = (
+                    f"Yes, we deliver to {area} — courier charges on actuals "
+                    "from Sushant Lok, Gurgaon."
+                )
+            elif asked_about_delivery and (area_match or city_match):
                 if area_match:
                     area = area_match.group(0).title()
                     if city_match:

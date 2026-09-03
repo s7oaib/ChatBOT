@@ -17,16 +17,7 @@
         "good evening"
       ],
       "responses": [
-        "Hi! 👋 Welcome to Camellia Artisanal — Bengal-rooted, artisanal food. What can we help you discover today?",
-        "Hello from Camellia 🌸 Are you in the mood for Sondesh, a Bengali meal, or a little menu browsing?",
-        "Hey there from Camellia Artisanal! Our chhana is fresh, our flavours are thoughtful, and our menu is ready when you are. 😊",
-        "Namaste from Camellia Artisanal! 🌸 Shall we explore artisanal Sondesh or this week's Bengali bento menu?",
-        "Hi! You’ve reached Camellia Artisanal — where Bengal meets small-batch craft. What are you curious about?",
-        "Hello! A warm Camellia Artisanal welcome to you. Would you like prices, flavours, or this week's menu?",
-        "Hey from Camellia Artisanal! 🌸 Freshly made Bengali goodness is on the other side of your next question — what shall we look at?",
-        "Hi there from Camellia Artisanal! Sondesh, savoury meals, delivery details — point me toward what you’re craving.",
-        "Hello hello from Camellia Artisanal! 😊 Are we talking mishti today, or should I show you the weekly Bengali menu?",
-        "Hey from Camellia Artisanal 🌸 What would make your day sweeter — a flavour guide or the menu?"
+        "Hi! 👋 Welcome to Camellia Artisanal — Bengal-rooted, artisanal food. What can we help you discover today?"
       ],
       "escalate": false
     },
@@ -376,7 +367,7 @@
         "starting price",
         "starts from"
       ],
-      "response": "Our Sondesh boxes start at ₹450 for a 250g box of 9 pieces 🌸\n\n• *Aamar Mishti* — everyday sondesh in pure dairy milk, partially mechanised, made in-house\n  250g ₹450–₹750 | 500g ₹800–₹1,400 | 1kg ₹1,500–₹2,500\n\n• *Signature Collection* — pure desi A2 cow milk, handcrafted end to end, for gifting & occasions\n  250g ₹600–₹900 | 500g ₹1,100–₹1,600 | 1kg ₹2,000–₹2,900\n\nAn all-women team makes every box from scratch, with small-batch artisanal dairy — never general retail sourcing. Porter delivery is on actuals from Sushant Lok, Gurgaon.\n\nWhich collection would you like — or shall I send the full flavour list?",
+      "response": "Hi kindly find the full menu card with price. All prices mentioned in the menu include GST. Delivery charges are at actuals. We cook freshly prepared Bengali food in small batches, in 2 formats: 1. À LA CARTE... 2. BENGALI BENTO... If this is your first Camellia meal and the menu feels unfamiliar, I'll be happy to help you choose!",
       "escalate": false,
       "source_ref": "client Q&A script > savoury food ordering"
     },
