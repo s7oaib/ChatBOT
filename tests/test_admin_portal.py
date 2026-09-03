@@ -10,6 +10,47 @@ import camellia.database as db_module
 from camellia.app import app
 from camellia.responder import responder
 
+
+def _ordinal(day: int) -> str:
+    """'3' -> '3rd', matching how the client's flyers print their dates."""
+    if 11 <= day % 100 <= 13:
+        return f"{day}th"
+    return f"{day}{ {1: 'st', 2: 'nd', 3: 'rd'}.get(day % 10, 'th') }"
+
+
+def _week_label(start_offset: int, end_offset: int) -> str:
+    """
+    A flyer-style "week_of" positioned relative to today, e.g.
+    "28th August - 3rd September, 2026".
+
+    These tests drive the real upload path, where menu_dates.is_expired
+    compares the printed end date against today in IST. A hardcoded week is
+    therefore a time bomb: it passes until that week ends and fails every run
+    after. The dates are built relative to today_ist() — the same clock the
+    production check uses — so "this week" stays this week.
+    """
+    from datetime import timedelta
+
+    from camellia.menu_dates import today_ist
+
+    today = today_ist()
+    start = today + timedelta(days=start_offset)
+    end = today + timedelta(days=end_offset)
+    return (
+        f"{_ordinal(start.day)} {start.strftime('%B')} - "
+        f"{_ordinal(end.day)} {end.strftime('%B')}, {end.year}"
+    )
+
+
+def _current_week() -> str:
+    """A week that is live today: started 2 days ago, ends in 4."""
+    return _week_label(-2, 4)
+
+
+def _next_week() -> str:
+    """The week after _current_week(), so it is newer and also unexpired."""
+    return _week_label(5, 11)
+
 # Ensure database is initialized for test client
 db_module.db.init_db()
 
@@ -788,13 +829,15 @@ def test_photo_and_text_agree_on_the_date_after_an_upload():
     """
     from camellia import weekly_flyer
 
+    week = _current_week()
+
     class _GroqResp:
         status_code = 200
         def json(self):
             return {"choices": [{"message": {"content": json.dumps({
                 "vegetarian": [{"item": "Shukto", "description": "", "price_inr": 280, "quantity": "250g"}],
                 "non_vegetarian": [],
-                "week_of": "28th August - 3rd September, 2026",
+                "week_of": week,
                 "service_window": "Friday Lunch - Thursday Dinner",
             })}}]}
 
@@ -817,11 +860,11 @@ def test_photo_and_text_agree_on_the_date_after_an_upload():
                 headers=ADMIN_HEADERS,
             )
         assert resp.status_code == 200
-        assert resp.json().get("week_of") == "28th August - 3rd September, 2026"
+        assert resp.json().get("week_of") == week
 
         # Surface 1: the flyer photo's own caption.
         state = weekly_flyer.get()
-        assert "28th August - 3rd September, 2026" in state["caption"]
+        assert week in state["caption"]
 
         # Surface 2: the customer-facing weekly menu text, driven from
         # menu.json — must show the same date the photo now claims.
@@ -829,7 +872,7 @@ def test_photo_and_text_agree_on_the_date_after_an_upload():
             "/api/test-chat",
             json={"message": "veg menu", "user_id": "date_regress_user", "channel": "whatsapp"},
         )
-        assert "28th August - 3rd September, 2026" in reply.json().get("response", "")
+        assert week in reply.json().get("response", "")
     finally:
         weekly_flyer.clear()
         with open(config.MENU_JSON_PATH, "w", encoding="utf-8") as f:
@@ -904,6 +947,10 @@ def test_a_second_upload_with_a_new_date_replaces_the_old_one_everywhere():
     """A week later, a fresh upload must fully replace the previous date, not merge with it."""
     from camellia import weekly_flyer
 
+    old_week, new_week = _current_week(), _next_week()
+    # The day-and-month prefix of the superseded week, to assert it is gone.
+    old_prefix = old_week.split(" - ")[0]
+
     def _groq_response(week_of):
         class _Resp:
             status_code = 200
@@ -921,7 +968,7 @@ def test_a_second_upload_with_a_new_date_replaces_the_old_one_everywhere():
     try:
         with mock.patch.object(config, "GROQ_API_KEY", "gsk-test"), \
              mock.patch.object(config, "GROQ_ENABLED", True):
-            for week_of in ("28th August - 3rd September, 2026", "4th September - 10th September, 2026"):
+            for week_of in (old_week, new_week):
                 class _Client:
                     def __enter__(self): return self
                     def __exit__(self, *a): return False
@@ -935,16 +982,16 @@ def test_a_second_upload_with_a_new_date_replaces_the_old_one_everywhere():
                     )
 
         state = weekly_flyer.get()
-        assert "4th September - 10th September, 2026" in state["caption"]
-        assert "28th August" not in state["caption"]
+        assert new_week in state["caption"]
+        assert old_prefix not in state["caption"]
 
         reply = client.post(
             "/api/test-chat",
             json={"message": "veg menu", "user_id": "date_replace_user", "channel": "whatsapp"},
         )
         text = reply.json().get("response", "")
-        assert "4th September - 10th September, 2026" in text
-        assert "28th August" not in text
+        assert new_week in text
+        assert old_prefix not in text
     finally:
         weekly_flyer.clear()
         with open(config.MENU_JSON_PATH, "w", encoding="utf-8") as f:
@@ -1063,7 +1110,7 @@ def test_a_new_upload_takes_over_the_expired_menu_slot():
             return {"choices": [{"message": {"content": json.dumps({
                 "vegetarian": [{"item": "Shukto", "description": "", "price_inr": 300, "quantity": "250g"}],
                 "non_vegetarian": [],
-                "week_of": "4th September - 10th September, 2026",
+                "week_of": _current_week(),
             })}}]}
 
     class _Client:
@@ -1100,7 +1147,7 @@ def test_a_new_upload_takes_over_the_expired_menu_slot():
             "/api/test-chat",
             json={"message": "veg menu", "user_id": "slot_user_b", "channel": "whatsapp"},
         ).json()
-        assert "4th September - 10th September, 2026" in fresh.get("response", "")
+        assert _current_week() in fresh.get("response", "")
         assert "finalising this week" not in fresh.get("response", "")
     finally:
         weekly_flyer.clear()
