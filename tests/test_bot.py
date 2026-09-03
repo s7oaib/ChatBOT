@@ -1591,9 +1591,9 @@ class TestCamelliaBot(unittest.TestCase):
         resp, match, tmpl, _ = responder.match_and_respond("I want to order 2 veg bento", user_id="test_bento_u1", channel="whatsapp")
         self.assertTrue(match)
         self.assertEqual(tmpl, "order_draft_receipt")
-        self.assertIn("Veg Bento Box", resp)
+        self.assertIn("Vegetarian Bento", resp)
         self.assertIn("2 boxes", resp)
-        self.assertIn("₹800", resp)
+        self.assertIn("₹700", resp)
 
         # Multi-item meal + sweet order
         resp2, match2, tmpl2, _ = responder.match_and_respond(
@@ -1603,9 +1603,9 @@ class TestCamelliaBot(unittest.TestCase):
         )
         self.assertTrue(match2)
         self.assertEqual(tmpl2, "order_draft_receipt")
-        self.assertIn("Non-Veg Bento Box", resp2)
+        self.assertIn("Chicken Bento", resp2)
         self.assertIn("Classic Sondesh", resp2)
-        self.assertIn("₹1,500", resp2)
+        self.assertIn("₹1,200", resp2)
 
     def test_whatsapp_webhook_parsing(self):
         """Tests parsing of WhatsApp webhook payloads for text and interactive replies."""
@@ -2020,15 +2020,18 @@ class TestCamelliaBot(unittest.TestCase):
         self.assertIn("We also handcraft Bengali mishti", resp)
         self.assertIn("subtle natural flavours", resp)
 
-    def test_phase_b_bento_details_escalates_safely(self):
-        """Phase B: Test bento_details has response: null and escalate: true and safely escalates to human team."""
+    def test_phase_b_bento_details_answers_with_confirmed_tiers(self):
+        """bento_details is client-confirmed (2026-09-03): it answers with the three tiers instead of escalating."""
         from camellia.session_memory import session_memory
         session_memory.clear_session("test_bento_user", "whatsapp")
         msg = "What are the bento meal box details and prices?"
         resp, matched, tmpl, imgs = responder.match_and_respond(msg, user_id="test_bento_user", channel="whatsapp")
-        self.assertFalse(matched)
+        self.assertTrue(matched)
         self.assertEqual(tmpl, "bento_details")
-        self.assertIn("+91 87965 51990", resp)
+        self.assertNotIn("+91 87965 51990", resp)
+        self.assertIn("Vegetarian Bento — ₹350", resp)
+        self.assertIn("Chicken Bento — ₹400", resp)
+        self.assertIn("Mangsho Bento — ₹600", resp)
 
     def test_phase_b_subscription_details_and_booking_steps_sequencing(self):
         """Phase B: Test subscription_details (Gurgaon only) followed by 'how do I book' sequences to 4-step subscription_booking_steps."""
@@ -2637,14 +2640,18 @@ class TestInteractiveMenuFlow(unittest.TestCase):
             self.assertEqual(tmpl, expected, f"'{answer}' routed to {tmpl}")
             self.assertIn("₹", text, f"'{answer}' menu came back without prices")
 
-    def test_bento_pricing_guard_still_holds(self):
-        """The pricing-conflict guard must not be weakened by the meals flow."""
+    def test_bento_pricing_quotes_the_confirmed_tiers(self):
+        """The meals flow must quote the client-confirmed tiers, and only those."""
         from camellia.session_memory import session_memory
         for msg in ("bento details", "bento prices", "bento tiers"):
             session_memory.clear_session(f"guard_{msg}", "whatsapp")
-            _, matched, tmpl, _ = self._reply(f"guard_{msg}", msg)
-            self.assertFalse(matched, f"'{msg}' bypassed the bento pricing guard")
+            text, matched, tmpl, _ = self._reply(f"guard_{msg}", msg)
+            self.assertTrue(matched, f"'{msg}' dead-ended into a handover")
             self.assertEqual(tmpl, "bento_details")
+            self.assertIn("₹350", text)
+            self.assertIn("₹400", text)
+            self.assertIn("₹600", text)
+            self.assertNotIn("₹700", text, f"'{msg}' quoted the superseded ₹700 bento price")
 
     def test_sondesh_side_still_answers_bare_price(self):
         from camellia.session_memory import session_memory

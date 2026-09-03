@@ -303,7 +303,8 @@ class Test25AgentStressScenarios(unittest.TestCase):
         resp = self.responder.respond("What is in your Non-Veg Bento box?", user_id=user_id, channel=channel)
         self.assertTrue(resp.was_matched)
         self.assertIn("Bento", resp.text)
-        self.assertIn("Luchi", resp.text)
+        # Client's confirmed copy spells it lowercase "luchi"; match case-insensitively.
+        self.assertIn("luchi", resp.text.lower())
 
     def test_agent_22_allergen_nut_safety(self):
         """Agent 22: Checking nut allergies (Confirmed: milk & sugar only — no nuts)."""
@@ -351,7 +352,7 @@ class Test25AgentStressScenarios(unittest.TestCase):
         self.assertIn("Signature", resp2.text)
 
     def test_agent_26_savoury_lunch_dinner_to_bento(self):
-        """Agent 26 (Phase D): Savoury food inquiry followed by Bengali Bento specific inquiry (bento_details escalates cleanly)."""
+        """Agent 26 (Phase D): Savoury food inquiry followed by Bengali Bento specific inquiry (bento_details answers with confirmed tiers)."""
         user_id = "user_savoury_26"
         channel = "whatsapp"
 
@@ -361,10 +362,13 @@ class Test25AgentStressScenarios(unittest.TestCase):
         self.assertEqual(resp1.template_id, "savoury_food_intro")
         self.assertIn("3 ways to order", resp1.text)
 
-        # Turn 2: Specific Bento box details (bento_details is a locked guard template -> escalates cleanly without pricing leak)
+        # Turn 2: Specific Bento box details (client-confirmed 2026-09-03 -> answers with the three tiers)
         resp2 = self.responder.respond("Tell me more about the Bengali Bento meal box", user_id=user_id, channel=channel)
-        self.assertFalse(resp2.was_matched)
-        self.assertIn("+91 87965 51990", resp2.text)
+        self.assertTrue(resp2.was_matched)
+        self.assertEqual(resp2.template_id, "bento_details")
+        self.assertIn("₹350", resp2.text)
+        self.assertIn("₹400", resp2.text)
+        self.assertIn("₹600", resp2.text)
 
     def test_agent_27_subscription_plan_to_booking_flow(self):
         """Agent 27 (Phase D): Subscription inquiry followed by booking steps in same session."""

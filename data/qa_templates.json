@@ -1347,8 +1347,7 @@
     },
     {
       "id": "bento_details",
-      "client_confirmed_date": "2026-08-21",
-      "guard_reason": "Pricing conflict: 3-tier breakdown (₹350/₹400/₹600) conflicts with existing weekly-menu flyer pricing (₹400/₹700). Pending client confirmation.",
+      "client_confirmed_date": "2026-09-03",
       "triggers": [
         "bento",
         "bengali bento",
@@ -1364,8 +1363,8 @@
         "bento breakdown",
         "bento items"
       ],
-      "response": null,
-      "escalate": true,
+      "response": "Hi, thanks for reaching out. Our Bengali Bentos are freshly made to order in small batches using traditional Bengali recipes.\nAll prices include GST, packaging charges, portal charges and everything else. Only the Porter delivery charge is additional, at actuals, depending on the delivery address.\n\nVegetarian Bento — ₹350\nAloo Dom (slow-cooked potato in the traditional prashad style), luchi (the Bengali version of poori), pre-dessert tomato aamsottwo khejur chatni and our handcrafted Norom Pak Sondesh.\nAlso available with Chholar Dal (Pooja style) instead of Aloo Dom.\n\nChicken Bento — ₹400\nSlow-cooked kolaghat Dhaba Chicken, luchi, pre-dessert tomato aamsottwo khejur chatni and our handcrafted Norom Pak Sondesh.\n\nMangsho Bento — ₹600\nSlow-cooked mutton, luchi, pre-dessert tomato aamsottwo khejur chatni and our handcrafted Norom Pak Sondesh.\n\nSharing our full menu for the week below.",
+      "escalate": false,
       "source_ref": "client Q&A script > savoury food ordering"
     },
     {

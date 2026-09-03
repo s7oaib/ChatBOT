@@ -33,10 +33,13 @@ PRICING_TABLE = {
 }
 
 MEAL_PRICING_TABLE = {
-    "veg bento": { "name": "Veg Bento Box (6 Luchi + Daal + Chatni + Sondesh)", "price": 400 },
-    "non veg bento": { "name": "Non-Veg Bento Box (6 Luchi + Mangsho + Chatni + Sondesh)", "price": 700 },
-    "kosha mangsho bento": { "name": "Kosha Mangsho Bento", "price": 650 },
-    "mutton bento": { "name": "Non-Veg Bento Box (Mutton Kosha)", "price": 700 },
+    "vegetarian bento": { "name": "Vegetarian Bento (Aloo Dom + Luchi + Chatni + Sondesh)", "price": 350 },
+    "veg bento": { "name": "Vegetarian Bento (Aloo Dom + Luchi + Chatni + Sondesh)", "price": 350 },
+    "chicken bento": { "name": "Chicken Bento (Kolaghat Dhaba Chicken + Luchi + Chatni + Sondesh)", "price": 400 },
+    "non veg bento": { "name": "Chicken Bento (Kolaghat Dhaba Chicken + Luchi + Chatni + Sondesh)", "price": 400 },
+    "mangsho bento": { "name": "Mangsho Bento (Slow-cooked Mutton + Luchi + Chatni + Sondesh)", "price": 600 },
+    "kosha mangsho bento": { "name": "Mangsho Bento (Slow-cooked Mutton + Luchi + Chatni + Sondesh)", "price": 600 },
+    "mutton bento": { "name": "Mangsho Bento (Slow-cooked Mutton + Luchi + Chatni + Sondesh)", "price": 600 },
     "aloor dom combo": { "name": "Luchi + Niramish Aloor Dom Combo", "price": 400 },
     "mutton combo": { "name": "Luchi + Robibarer Mangsho Combo", "price": 700 },
     "niramish aloor dom": { "name": "Niramish Aloor Dom (150g)", "price": 300 },
