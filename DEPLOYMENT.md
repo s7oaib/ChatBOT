@@ -50,11 +50,48 @@ The mount path must **not** be `/app/data`. A volume there would hide the seed
 would start with nothing to say.
 
 A fresh volume is empty, so on first boot the bot copies those seed files onto
-it (`camellia/bootstrap.py`) and logs `Storage bootstrap: seeded …`. It seeds
-only files that are missing, so edits made afterwards are never overwritten by
-a later restart. If the volume is unavailable or read-only, the failure is
-logged and the bot falls back to the copies in the image — degraded, but still
-answering.
+it (`camellia/bootstrap.py`) and logs `Storage bootstrap: seeded …`. If the
+volume is unavailable or read-only, the failure is logged and the bot falls
+back to the copies in the image — degraded, but still answering.
+
+**After first boot, `menu.json` and `qa_templates.json` are no longer treated
+the same way — this matters if you edit either one.**
+
+`menu.json` is written at runtime by every menu upload, so once it exists on
+the volume it is never touched again by a deploy. Editing the seed copy in the
+repo and redeploying does nothing; menu content only changes through the
+`/admin` panel or a Google Sheet sync (see below).
+
+`qa_templates.json` **is** reconciled on boot, but only when the seed file's
+`seed_version` (a top-level integer field) is higher than the version recorded
+on the volume. Editing a template's copy in `data/qa_templates.json` and
+deploying **does nothing on its own** — you must also bump `seed_version`, or
+the change never reaches customers. This is deliberate, not an oversight: it
+is what lets a template be edited live through `POST /admin/templates` without
+every routine deploy silently reverting that edit. The file this replaces is
+kept alongside it as `qa_templates.superseded-<epoch>.json`, so a bump that
+lands on top of a live edit is still recoverable.
+
+Before 2026-09-04, `qa_templates.json` used the same "seed once, never again"
+rule `menu.json` still uses — a bento-pricing template was edited in the repo,
+committed, and deployed, but sat undelivered on the volume for two days
+because nothing forced a reconciliation. `/health` now catches this class of
+bug: `answering.template_seed.undelivered_seed_changes` is `true`, and a
+top-level warning names the exact fix, whenever the image's seed has moved on
+from what the volume was last reconciled against. An edit made through
+`/admin` does **not** trip this warning — only an un-bumped repository change
+does.
+
+**To ship a template edit:**
+1. Edit `data/qa_templates.json`.
+2. Bump the top-level `"seed_version"` integer.
+3. Commit, push, deploy.
+4. Confirm via `GET /health` — `template_seed.undelivered_seed_changes` should
+   read `false` and `live_seed_version` should equal `seed_version`.
+
+(Or skip the deploy entirely and `POST /admin/templates` with `{"template":
+{...}}` — same effect, no redeploy, and it does not require a `seed_version`
+bump.)
 
 Confirm it worked in `/health`:
 
