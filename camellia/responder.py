@@ -54,6 +54,20 @@ _DUPLICATE_REPLY_NOTICE = (
 )
 
 
+# Chholar Dal for Aloo Dom in the Vegetarian Bento is the one swap the client
+# has confirmed in writing, so it is answerable rather than escalatable. Kept
+# deliberately narrow: it needs the dish named AND a bento or Aloo Dom in the
+# same message, so "can I swap things around?" still goes to a human.
+#
+# Flavour mixing is NOT here and must not be added — that was never confirmed,
+# and GUARD_customization_flavour_mixing exists to keep it with a human.
+_CONFIRMED_BENTO_SUBSTITUTION_RE = re.compile(
+    r"\bchholar\s+daa?l\b(?=.*\b(bento|aloo\s+dom)\b)"
+    r"|\b(bento|aloo\s+dom)\b(?=.*\bchholar\s+daa?l\b)",
+    re.IGNORECASE,
+)
+
+
 def _strip_flower_emoji(value):
     """Remove the flower emoji from customer-visible text and card captions."""
     if isinstance(value, str):
@@ -348,9 +362,24 @@ class DeterministicResponder:
         return False
 
     def check_explicit_escalation_triggers(self, text: str) -> Optional[str]:
-        """Checks if text contains explicit escalation keywords."""
-        triggers = self.qa_data.get("escalation_triggers", {}).get("keywords", [])
+        """
+        Checks if text contains explicit escalation keywords.
+
+        Runs before template matching, so a keyword here outranks every answer
+        the bot has. "instead of" is on that list because a substitution the
+        client has not ruled on must go to a human rather than be guessed at.
+        """
         lowered = text.lower()
+
+        # One substitution is not a guess: the client's confirmed bento copy
+        # answers it outright — "Also available with Chholar Dal (Pooja style)
+        # instead of Aloo Dom." Without this exemption the single substitution
+        # we are allowed to answer is handed to a human alongside all the ones
+        # we are not, purely because it contains the words "instead of".
+        if _CONFIRMED_BENTO_SUBSTITUTION_RE.search(lowered):
+            return None
+
+        triggers = self.qa_data.get("escalation_triggers", {}).get("keywords", [])
         for kw in triggers:
             if re.search(r'\b' + re.escape(kw.lower()) + r'\b', lowered):
                 return f"Trigger keyword matched: '{kw}'"

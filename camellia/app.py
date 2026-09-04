@@ -6,6 +6,7 @@ import os
 import re
 import httpx
 from contextlib import asynccontextmanager
+from pathlib import Path
 from fastapi import FastAPI, Request, Response, Query, Header, HTTPException, File, UploadFile, BackgroundTasks
 from fastapi.responses import PlainTextResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -805,8 +806,50 @@ def _answering_capability() -> dict:
         "weekly_menus": len(weekly),
         "qa_templates_path": config.QA_TEMPLATES_PATH,
         "menu_json_path": config.MENU_JSON_PATH,
+        "template_seed": _template_seed_state(),
         "problems": problems,
     }
+
+
+def _template_seed_state() -> dict:
+    """
+    Whether the repository's templates have actually reached the live file.
+
+    Compares the seed shipped in this image against the fingerprint recorded
+    when the live file was last seeded or reconciled. Those differ only when
+    the repository's templates changed and no seed_version bump delivered
+    them — which is invisible everywhere else: the deploy succeeds, the
+    process is healthy, and customers read the old file.
+
+    An operator editing a template through /admin also moves the live file,
+    but not the recorded fingerprint, so that case stays silent as it should.
+    """
+    from camellia import bootstrap
+
+    seed_path = bootstrap.DATA_DIR / "qa_templates.json"
+    state = {
+        "seed_version": None,
+        "live_seed_version": None,
+        "undelivered_seed_changes": False,
+    }
+    try:
+        seed_hash = bootstrap.seed_fingerprint(seed_path)
+        state["seed_version"] = bootstrap._seed_version(seed_path)
+
+        live_path = Path(config.QA_TEMPLATES_PATH)
+        if live_path.resolve() == seed_path.resolve():
+            # No volume in play; the bot is reading the seed itself.
+            return state
+
+        with open(live_path, "r", encoding="utf-8") as f:
+            live = json.load(f)
+        state["live_seed_version"] = live.get("seed_version")
+        recorded = live.get("seeded_from_hash")
+        if seed_hash and recorded and seed_hash != recorded:
+            state["undelivered_seed_changes"] = True
+    except Exception as e:
+        log.warning("Could not compare the template seed against the live file: %s", e)
+    return state
 
 
 def _storage_durability() -> dict:
@@ -925,6 +968,16 @@ def health_check():
         warnings.append(
             f"Menu is at {storage['menu']['path']} with no GOOGLE_SHEET_CSV_URL set — "
             "menu edits are lost on every deploy."
+        )
+    seed_state = answering.get("template_seed") or {}
+    if seed_state.get("undelivered_seed_changes"):
+        warnings.append(
+            "data/qa_templates.json has changes customers are not being served. "
+            f"The live file was seeded from an older version of it (seed_version "
+            f"{seed_state.get('live_seed_version')}, image ships "
+            f"{seed_state.get('seed_version')}). Bump seed_version in "
+            "data/qa_templates.json and redeploy, or push the template through "
+            "POST /admin/templates."
         )
 
     return Response(
