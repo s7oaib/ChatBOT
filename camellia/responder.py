@@ -89,7 +89,9 @@ _SHORT_ANSWER_MAX_WORDS = 3
 # they are never guessed from an LLM or a broad geographic heuristic.
 NCR_SERVICEABLE_AREAS = (
     "delhi", "new delhi", "gurgaon", "gurugram", "noida", "greater noida",
-    "ghaziabad", "faridabad", "dwarka", "indirapuram", "cr park",
+    "ghaziabad", "faridabad", "dwarka", "indirapuram", "vaishali",
+    "kaushambi", "raj nagar extension", "sector 15 faridabad", "neelam bagh",
+    "ballabhgarh", "cr park",
     "chittaranjan park", "lajpat nagar", "chatra marg", "chhatra marg",
     "north campus", "delhi university", "du campus", "karol bagh",
     "saket", "vasant kunj", "hauz khas", "greater kailash", "gk",

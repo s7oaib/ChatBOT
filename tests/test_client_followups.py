@@ -42,6 +42,19 @@ def test_delivery_area_flow_confirms_two_serviceable_localities_in_a_row():
     assert session_memory.get_facts(user_id, "whatsapp")["awaiting_area_confirmation"] is True
 
 
+def test_delivery_area_flow_confirms_faridabad_and_ghaziabad_localities():
+    for area in ("Neelam Bagh", "Raj Nagar Extension"):
+        user_id = f"client_serviceable_{area.lower().replace(' ', '_')}"
+        session_memory.clear_session(user_id, "whatsapp")
+        responder.match_and_respond("Where do you deliver?", user_id=user_id, channel="whatsapp")
+
+        reply = responder.match_and_respond(area, user_id=user_id, channel="whatsapp")
+        assert reply[0] == (
+            f"Yes, we deliver to {area} — courier charges on actuals from Sushant Lok, Gurgaon."
+        )
+        assert reply[2] == "delivery_area_confirmation"
+
+
 def test_delivery_area_flow_fails_closed_for_mumbai_and_bijapur():
     for area in ("Mumbai", "Bijapur"):
         user_id = f"client_out_of_area_{area.lower()}"
