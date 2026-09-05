@@ -49,3 +49,7 @@ PROJECT_JOURNAL.md
 # tool call; .specify/ is spec-kit's scaffolding. Neither belongs in history.
 .claude-flow/
 .specify/
+
+# graphify's knowledge graph of this repo. Regenerated from the code itself
+# (graphify . --update), so it is a local cache, not source.
+graphify-out/
