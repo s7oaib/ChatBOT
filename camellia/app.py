@@ -1622,10 +1622,10 @@ def get_admin_dashboard():
         /* Navigation Tabs */
         .tabs-nav {
             display: flex; gap: 8px; background: #EDE8E3; padding: 6px; border-radius: 16px;
-            margin-bottom: 24px; overflow-x: auto; scrollbar-width: none;
+            margin-bottom: 24px; flex-wrap: wrap;
         }
         .tab-btn {
-            flex: 1; padding: 12px 18px; border: none; background: transparent; border-radius: 12px;
+            flex: 1 1 auto; min-width: 0; padding: 12px 18px; border: none; background: transparent; border-radius: 12px;
             font-size: 0.88rem; font-weight: 600; color: #555; cursor: pointer; transition: all 0.2s;
             white-space: nowrap; display: flex; align-items: center; justify-content: center; gap: 8px;
         }
@@ -1738,7 +1738,8 @@ def get_admin_dashboard():
             header { padding: 14px 16px; flex-direction: column; gap: 10px; align-items: stretch; }
             .status-bar { padding: 10px 16px; }
             .main-container { padding: 0 14px 30px; }
-            .tabs-nav { justify-content: flex-start; }
+            .tabs-nav { justify-content: flex-start; gap: 4px; padding: 4px; }
+            .tab-btn { padding: 10px 8px; font-size: 0.8rem; gap: 4px; }
             .panel-card { padding: 20px 16px; }
         }
     </style>
@@ -1802,43 +1803,15 @@ def get_admin_dashboard():
     <div class="main-container">
         <!-- Tab Navigation Bar -->
         <div class="tabs-nav">
-            <button class="tab-btn active" onclick="switchTab('tab-paste', this)">📋 Paste Menu Text</button>
-            <button class="tab-btn" onclick="switchTab('tab-image', this)">📸 Flyer Photo (Vision OCR)</button>
-            <button class="tab-btn" onclick="switchTab('tab-sheets', this)">📊 Google Sheets Sync</button>
-            <button class="tab-btn" onclick="switchTab('tab-active', this)">🍱 Active Menu Viewer</button>
-            <button class="tab-btn" onclick="switchTab('tab-stats', this)">📈 Escalations & Self-Healing</button>
-            <button class="tab-btn" onclick="switchTab('tab-conversations', this)">💬 Live Conversations</button>
-            <button class="tab-btn" onclick="switchTab('tab-knowledge', this)">🧠 Learned Knowledge</button>
-            <button class="tab-btn" onclick="switchTab('tab-candidates', this)">✅ Suggested Answers <span id="candidateBadge" style="display:none; background: var(--danger); color: #fff; border-radius: 10px; padding: 1px 7px; font-size: 0.72rem; margin-left: 4px;"></span></button>
+            <button class="tab-btn active" onclick="switchTab('tab-image', this)">🍱 Menu</button>
+            <button class="tab-btn" onclick="switchTab('tab-stats', this)">💬 Customers</button>
+            <button class="tab-btn" onclick="switchTab('tab-candidates', this)">✅ Answers <span id="candidateBadge" style="display:none; background: var(--danger); color: #fff; border-radius: 10px; padding: 1px 7px; font-size: 0.72rem; margin-left: 4px;"></span></button>
         </div>
 
-        <!-- TAB 1: Paste Menu Text -->
-        <div id="tab-paste" class="panel-card">
+        <!-- MENU tab, panel 2 of 4: same job, for when there is no photo -->
+        <div id="tab-image" class="panel-card" data-group="menu">
             <div class="panel-header">
-                <h2>📋 Quick Paste Menu Text (WhatsApp / Notes)</h2>
-                <p>Paste raw unstructured flyer text, WhatsApp broadcast message, or dish lists. The AI extractor categorizes veg/non-veg, captures prices, and updates the bot instantly.</p>
-            </div>
-            
-            <textarea id="rawTextPaste" class="text-input" placeholder="Example:
-🌸 THIS WEEK'S BENGAL SPECIALS 🌸
-- Rose Sondesh (250g) - ₹450
-- Jolbhora Nolen Gur (500g) - ₹1400
-- Kosha Mangsho (Mutton) (350g) - ₹650
-- Chholar Daal with Coconut (250g) - ₹250
-- Rui Machher Kalia 2 pcs - ₹450"></textarea>
-
-            <div class="action-bar">
-                <button class="btn-primary" onclick="submitMenuText()">✨ Auto-Extract Dishes & Update Bot</button>
-                <button class="btn-secondary" onclick="loadSampleText()">📝 Load Sample Text</button>
-            </div>
-
-            <div id="pasteResult" class="result-box"></div>
-        </div>
-
-        <!-- TAB 2: Image Flyer Upload (Vision OCR) -->
-        <div id="tab-image" class="panel-card" style="display: none;">
-            <div class="panel-header">
-                <h2>📸 Drag-and-Drop Menu Image Flyer (Photo OCR)</h2>
+                <h2>📸 Upload this week's menu</h2>
                 <p>Upload a photo of your printed menu card, packaging flyer, or Instagram story. The image is read and the dishes hot-reload into the live bot.</p>
                 <p id="activeFlyerWeek" style="font-size: 0.85rem; color: #555; margin-top: 4px;"></p>
                 <div id="flyerArchive" style="margin-top: 10px;"></div>
@@ -1862,16 +1835,38 @@ def get_admin_dashboard():
 
             <div class="action-bar">
                 <button class="btn-primary" id="uploadImageBtn" onclick="submitMenuImage()">🔍 Scan Flyer &amp; Update Menu</button>
-                <button class="btn-secondary" onclick="testSampleFlyer()">🧪 Test Sample Menu Flyer (1-Click Test)</button>
             </div>
 
             <div id="imageResult" class="result-box"></div>
         </div>
 
-        <!-- TAB 3: Google Sheets Sync -->
-        <div id="tab-sheets" class="panel-card" style="display: none;">
+        <!-- MENU tab, panel 3 of 4: same job again, from a shared sheet -->
+        <div id="tab-paste" class="panel-card" data-group="menu" style="display: none;">
             <div class="panel-header">
-                <h2>📊 Google Sheets Live Menu Sync</h2>
+                <h2>📋 No photo? Paste the menu as text</h2>
+                <p>Paste raw unstructured flyer text, WhatsApp broadcast message, or dish lists. The AI extractor categorizes veg/non-veg, captures prices, and updates the bot instantly.</p>
+            </div>
+            
+            <textarea id="rawTextPaste" class="text-input" placeholder="Example:
+🌸 THIS WEEK'S BENGAL SPECIALS 🌸
+- Rose Sondesh (250g) - ₹450
+- Jolbhora Nolen Gur (500g) - ₹1400
+- Kosha Mangsho (Mutton) (350g) - ₹650
+- Chholar Daal with Coconut (250g) - ₹250
+- Rui Machher Kalia 2 pcs - ₹450"></textarea>
+
+            <div class="action-bar">
+                <button class="btn-primary" onclick="submitMenuText()">✨ Auto-Extract Dishes & Update Bot</button>
+                <button class="btn-secondary" onclick="loadSampleText()">📝 Load Sample Text</button>
+            </div>
+
+            <div id="pasteResult" class="result-box"></div>
+        </div>
+
+        <!-- MENU tab, panel 1 of 4: the weekly job — upload the flyer -->
+        <div id="tab-sheets" class="panel-card" data-group="menu" style="display: none;">
+            <div class="panel-header">
+                <h2>📊 Or pull it from the Google Sheet</h2>
                 <p>Synchronize your weekly menu directly from a shared Google Sheet. Update prices or add weekend specials in Google Sheets and sync in 1 click.</p>
             </div>
 
@@ -1882,7 +1877,6 @@ def get_admin_dashboard():
 
             <div class="action-bar">
                 <button class="btn-primary" onclick="syncGoogleSheet()">🔄 Sync Live from Google Sheet</button>
-                <button class="btn-secondary" onclick="syncLocalDisk()">📂 Reload from Local Disk Files</button>
             </div>
 
             <div id="sheetResult" class="result-box"></div>
@@ -1897,12 +1891,12 @@ def get_admin_dashboard():
             </div>
         </div>
 
-        <!-- TAB 4: Active Menu Viewer & Reset -->
-        <div id="tab-active" class="panel-card" style="display: none;">
+        <!-- MENU tab, panel 4 of 4: what the bot is serving right now -->
+        <div id="tab-active" class="panel-card" data-group="menu" style="display: none;">
             <div class="panel-header">
                 <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
                     <div>
-                        <h2>🍱 Active Weekly Menu & Standing Collections</h2>
+                        <h2>🍱 What the bot is serving right now</h2>
                         <p>Real-time view of all dishes currently served by the bot to customers on Instagram & WhatsApp.</p>
                     </div>
                     <div style="display: flex; gap: 8px;">
@@ -1917,10 +1911,10 @@ def get_admin_dashboard():
             </div>
         </div>
 
-        <!-- TAB 5: Escalations & Analytics -->
-        <div id="tab-stats" class="panel-card" style="display: none;">
+        <!-- CUSTOMERS tab, panel 1 of 2: who is waiting on a person -->
+        <div id="tab-stats" class="panel-card" data-group="customers" style="display: none;">
             <div class="panel-header">
-                <h2>📈 Bot Intelligence & Escalations Log</h2>
+                <h2>📈 Customers waiting on a person</h2>
                 <p>Monitor automated Q&A resolution rates and view queries routed to kitchen management with 1-click self-healing.</p>
             </div>
 
@@ -1959,12 +1953,12 @@ def get_admin_dashboard():
             </div>
         </div>
 
-        <!-- TAB 6: Live Customer Conversations -->
-        <div id="tab-conversations" class="panel-card" style="display: none;">
+        <!-- CUSTOMERS tab, panel 2 of 2: everything being asked -->
+        <div id="tab-conversations" class="panel-card" data-group="customers" style="display: none;">
             <div class="panel-header">
                 <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
                     <div>
-                        <h2>💬 Live Customer Conversations</h2>
+                        <h2>💬 What customers are asking</h2>
                         <p>Audit recent customer interactions across Instagram Ads and WhatsApp.</p>
                     </div>
                     <div style="display: flex; gap: 8px; align-items: center;">
@@ -1996,12 +1990,41 @@ def get_admin_dashboard():
             </div>
         </div>
 
-        <!-- TAB 7: Learned Knowledge Base -->
-        <div id="tab-knowledge" class="panel-card" style="display: none;">
+        <!-- ANSWERS tab, panel 2 of 2: write one by hand -->
+        <div class="panel-card" id="tab-candidates" data-group="answers" style="display: none;">
             <div class="panel-header">
                 <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
                     <div>
-                        <h2>🧠 Self-Healing Learned Knowledge</h2>
+                        <h2>✅ Waiting for your approval</h2>
+                        <p>When a customer asks something the bot has no approved answer for, it drafts one and parks it here. <b>Nothing on this page has been shown to a customer.</b> Approving an answer adds it to the bot's verified knowledge, so the next customer who asks gets it instantly instead of waiting for a human.</p>
+                    </div>
+                    <button class="btn-secondary" onclick="loadCandidates()">🔄 Refresh</button>
+                </div>
+            </div>
+
+            <div style="overflow-x: auto;">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>Customer Asked</th>
+                            <th>Draft Answer — read it before approving</th>
+                            <th>Confidence</th>
+                            <th>Drafted By</th>
+                            <th>Action</th>
+                        </tr>
+                    </thead>
+                    <tbody id="candidatesTableBody">
+                        <tr><td colspan="5" style="text-align: center; color: #888;">Loading suggested answers...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <div id="tab-knowledge" class="panel-card" data-group="answers" style="display: none;">
+            <div class="panel-header">
+                <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+                    <div>
+                        <h2>🧠 Answers you have written</h2>
                         <p>Verified Q&A items taught by kitchen staff or auto-learned from resolved customer queries.</p>
                     </div>
                     <button class="btn-primary" style="font-size: 0.85rem;" onclick="toggleAddKnowledgeForm()">+ Add Verified Q&A</button>
@@ -2049,35 +2072,8 @@ def get_admin_dashboard():
             </div>
         </div>
 
-        <!-- TAB 8: Candidate Answers Awaiting Approval -->
-        <div class="panel-card" id="tab-candidates" style="display: none;">
-            <div class="panel-header">
-                <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
-                    <div>
-                        <h2>✅ Suggested Answers Awaiting Your Approval</h2>
-                        <p>When a customer asks something the bot has no approved answer for, it drafts one and parks it here. <b>Nothing on this page has been shown to a customer.</b> Approving an answer adds it to the bot's verified knowledge, so the next customer who asks gets it instantly instead of waiting for a human.</p>
-                    </div>
-                    <button class="btn-secondary" onclick="loadCandidates()">🔄 Refresh</button>
-                </div>
-            </div>
+        <!-- ANSWERS tab, panel 1 of 2: the review queue -->
 
-            <div style="overflow-x: auto;">
-                <table class="data-table">
-                    <thead>
-                        <tr>
-                            <th>Customer Asked</th>
-                            <th>Draft Answer — read it before approving</th>
-                            <th>Confidence</th>
-                            <th>Drafted By</th>
-                            <th>Action</th>
-                        </tr>
-                    </thead>
-                    <tbody id="candidatesTableBody">
-                        <tr><td colspan="5" style="text-align: center; color: #888;">Loading suggested answers...</td></tr>
-                    </tbody>
-                </table>
-            </div>
-        </div>
 
     </div>
 
@@ -2125,6 +2121,10 @@ def get_admin_dashboard():
 
         // On Load: check if authenticated
         window.addEventListener('DOMContentLoaded', () => {
+            // The default tab is already marked active in the markup, so its
+            // whole group has to be on screen to match — otherwise only the
+            // leading panel shows and the rest look like they do not exist.
+            showGroup('menu');
             if (currentAdminKey) {
                 document.getElementById('authOverlay').style.display = 'none';
                 loadActiveMenu();
@@ -2201,22 +2201,38 @@ def get_admin_dashboard():
             return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
         }
 
+        // Eight tabs needed 1655px of nav on a 347px phone, so six of them were
+        // simply invisible to a kitchen working off a handset. Panels are now
+        // grouped three ways and a tab shows its whole group stacked. Each tab
+        // is named after the panel it leads with, so the panels themselves did
+        // not have to move.
+        const TAB_GROUPS = {
+            'tab-image': 'menu',
+            'tab-stats': 'customers',
+            'tab-candidates': 'answers'
+        };
+
+        function showGroup(group) {
+            document.querySelectorAll('.panel-card').forEach(panel => {
+                panel.style.display = (panel.dataset.group === group) ? 'block' : 'none';
+            });
+        }
+
         function switchTab(tabId, el) {
             document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
             if (el) el.classList.add('active');
-            
-            document.querySelectorAll('.panel-card').forEach(panel => panel.style.display = 'none');
-            const target = document.getElementById(tabId);
-            if (target) target.style.display = 'block';
 
-            if (tabId === 'tab-active') loadActiveMenu();
-            if (tabId === 'tab-stats') loadAnalytics();
-            if (tabId === 'tab-conversations') loadConversations();
-            if (tabId === 'tab-knowledge') loadKnowledge();
-            if (tabId === 'tab-candidates') loadCandidates();
+            const group = TAB_GROUPS[tabId];
+            showGroup(group);
+
+            // Everything in the group is on screen at once, so everything in it
+            // needs its data.
+            if (group === 'menu') loadActiveMenu();
+            if (group === 'customers') { loadAnalytics(); loadConversations(); }
+            if (group === 'answers') { loadCandidates(); loadKnowledge(); }
         }
 
-        // TAB 1: Submit Text
+        // MENU tab: paste-text upload
         async function submitMenuText() {
             const text = document.getElementById('rawTextPaste').value.trim();
             const resBox = document.getElementById('pasteResult');
@@ -2263,7 +2279,7 @@ Non-Veg:
 • Chicken Kosha (350g) - ₹420`;
         }
 
-        // TAB 2: Image Drag & Drop & Upload
+        // MENU tab: flyer photo upload
         function setupDragAndDrop() {
             const dropZone = document.getElementById('dropZone');
             if (!dropZone) return;
@@ -2354,55 +2370,7 @@ Non-Veg:
         }
 
         // Test Purpose: 1-Click Sample Flyer Test
-        async function testSampleFlyer() {
-            const resBox = document.getElementById('imageResult');
-            resBox.style.display = 'block';
-            resBox.className = 'result-box info';
-            resBox.innerHTML = '🧪 <b>Generating test flyer canvas & running Vision OCR pipeline...</b>';
-
-            // Create a small sample image in memory on canvas
-            const canvas = document.createElement('canvas');
-            canvas.width = 400;
-            canvas.height = 300;
-            const ctx = canvas.getContext('2d');
-            ctx.fillStyle = '#8B1E3F';
-            ctx.fillRect(0, 0, 400, 300);
-            ctx.fillStyle = '#FFFFFF';
-            ctx.font = 'bold 18px sans-serif';
-            ctx.fillText('CAMELLIA ARTISANAL MENU', 30, 40);
-            ctx.font = '14px sans-serif';
-            ctx.fillText('• Classic Rose Sondesh (250g) - Rs 450', 30, 90);
-            ctx.fillText('• Mutton Kosha Bento (350g) - Rs 650', 30, 130);
-            ctx.fillText('• Chholar Daal (250g) - Rs 250', 30, 170);
-            ctx.fillText('• Rui Machher Kalia (2 pcs) - Rs 450', 30, 210);
-
-            canvas.toBlob(async (blob) => {
-                const formData = new FormData();
-                formData.append('file', blob, 'sample_test_flyer.jpg');
-
-                try {
-                    const resp = await fetch('/admin/menu/upload-image', {
-                        method: 'POST',
-                        headers: getAuthHeaders(),
-                        body: formData
-                    });
-                    const data = await resp.json();
-                    if (data.status === 'success') {
-                        resBox.className = 'result-box success';
-                        resBox.innerHTML = `✅ <b>1-Click Test Succeeded!</b><br>${data.message}<pre>${JSON.stringify(data.parsed, null, 2)}</pre>`;
-                        loadActiveMenu();
-                    } else {
-                        resBox.className = 'result-box info';
-                        resBox.innerHTML = `🧪 <b>Test Pipeline Result:</b> ${data.message || data.reason || JSON.stringify(data)}`;
-                    }
-                } catch (e) {
-                    resBox.className = 'result-box error';
-                    resBox.innerHTML = 'Error running test flyer.';
-                }
-            }, 'image/jpeg');
-        }
-
-        // TAB 3: Google Sheets Sync
+        // MENU tab: Google Sheet sync
         async function syncGoogleSheet() {
             const url = document.getElementById('sheetUrlInput').value.trim();
             const resBox = document.getElementById('sheetResult');
@@ -2432,28 +2400,7 @@ Non-Veg:
             }
         }
 
-        async function syncLocalDisk() {
-            const resBox = document.getElementById('sheetResult');
-            resBox.style.display = 'block';
-            resBox.className = 'result-box info';
-            resBox.innerHTML = '📂 Reloading menu from disk files...';
-
-            try {
-                const resp = await fetch('/admin/sync-menu', {
-                    method: 'POST',
-                    headers: getAuthHeaders()
-                });
-                const data = await resp.json();
-                resBox.className = 'result-box success';
-                resBox.innerHTML = `✅ ${data.message || 'Reloaded from disk.'}`;
-                loadActiveMenu();
-            } catch (e) {
-                resBox.className = 'result-box error';
-                resBox.innerHTML = 'Failed to reload from disk.';
-            }
-        }
-
-        // TAB 4: Active Menu Viewer
+        // MENU tab: what is live now
         async function loadActiveMenu() {
             const container = document.getElementById('activeMenuContent');
             try {
@@ -2569,7 +2516,7 @@ Non-Veg:
             }
         }
 
-        // TAB 5: Analytics & Escalations
+        // CUSTOMERS tab: escalations
         async function loadAnalytics() {
             try {
                 const statsResp = await fetch('/admin/analytics', { headers: getAuthHeaders() });
@@ -2612,7 +2559,7 @@ Non-Veg:
             }
         }
 
-        // TAB 6: Live Customer Conversations
+        // CUSTOMERS tab: conversations
         async function loadConversations() {
             const tbody = document.getElementById('conversationsTableBody');
             tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: #888;">Loading conversations...</td></tr>';
@@ -2646,7 +2593,7 @@ Non-Veg:
             }
         }
 
-        // TAB 7: Learned Knowledge Base
+        // ANSWERS tab: hand-written answers
         async function loadKnowledge() {
             const tbody = document.getElementById('knowledgeTableBody');
             tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: #888;">Loading learned knowledge...</td></tr>';
@@ -2677,7 +2624,7 @@ Non-Veg:
             }
         }
 
-        // TAB 8: Candidate answers awaiting approval.
+        // ANSWERS tab: the review queue.
         //
         // The bot has always drafted these and saved them as PENDING_APPROVAL,
         // and the approve/reject API has always existed, but nothing in this
