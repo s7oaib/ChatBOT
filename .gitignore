@@ -43,3 +43,9 @@ data/uploads/
 # a personal working log, and the dev-server config read by local tooling.
 PROJECT_JOURNAL.md
 .claude/
+
+# Claude Code plugin/tooling state, not part of the bot. .claude-flow/ is a
+# hook-call audit log the ruflo-core plugin writes automatically on every MCP
+# tool call; .specify/ is spec-kit's scaffolding. Neither belongs in history.
+.claude-flow/
+.specify/
