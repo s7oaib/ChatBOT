@@ -1610,11 +1610,14 @@ def get_admin_dashboard():
             display: flex; justify-content: space-between; align-items: center; font-size: 0.82rem;
             flex-wrap: wrap; gap: 12px;
         }
-        .status-items { display: flex; gap: 20px; align-items: center; }
-        .status-pill { display: inline-flex; align-items: center; gap: 6px; font-weight: 500; }
+        .status-items { display: flex; gap: 20px; align-items: center; flex-wrap: wrap; }
+        /* Wrap between pills, never inside one — without this the row stayed
+           unbroken and "Active Menu Items:" split across three lines instead. */
+        .status-pill { display: inline-flex; align-items: center; gap: 6px; font-weight: 500; white-space: nowrap; }
         .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
         .dot.green { background: var(--success); box-shadow: 0 0 8px rgba(16,185,129,0.5); }
         .dot.gold { background: var(--gold); }
+        .dot.red { background: var(--danger); }
         
         /* Main Layout */
         .main-container { max-width: 1100px; width: 100%; margin: 24px auto; padding: 0 20px 40px; flex: 1; }
@@ -1736,7 +1739,8 @@ def get_admin_dashboard():
         }
         @media (max-width: 768px) {
             header { padding: 14px 16px; flex-direction: column; gap: 10px; align-items: stretch; }
-            .status-bar { padding: 10px 16px; }
+            .status-bar { padding: 8px 16px; gap: 6px; font-size: 0.76rem; }
+            .status-items { gap: 12px; }
             .main-container { padding: 0 14px 30px; }
             .tabs-nav { justify-content: flex-start; gap: 4px; padding: 4px; }
             .tab-btn { padding: 10px 8px; font-size: 0.8rem; gap: 4px; }
@@ -1790,9 +1794,8 @@ def get_admin_dashboard():
     <!-- Live Status Bar -->
     <div class="status-bar">
         <div class="status-items">
-            <span class="status-pill"><span class="dot green"></span> Server: <b>Online</b></span>
-            <span class="status-pill"><span class="dot gold"></span> Photo OCR: <b>Ready</b></span>
-            <span class="status-pill">Active Menu Items: <b id="activeCountBadge">Loading...</b></span>
+            <span class="status-pill"><span class="dot gold" id="ocrDot"></span> Menu reader: <b id="ocrStatus">checking…</b></span>
+            <span class="status-pill">Dishes live: <b id="activeCountBadge">Loading...</b></span>
         </div>
         <div>
             <span>Escalation Contact: <b>Camellia Kitchen Team</b> (+91 87965 51990)</span>
@@ -2120,11 +2123,44 @@ def get_admin_dashboard():
         let selectedFile = null;
 
         // On Load: check if authenticated
+        // The reader light used to be hardcoded to Ready. /health knows whether
+        // the vision model is actually configured and answering, and it needs no
+        // credentials, so the light can just tell the truth. If the check itself
+        // fails we say so rather than falling back to a reassuring green.
+        async function refreshReaderStatus() {
+            const dot = document.getElementById('ocrDot');
+            const label = document.getElementById('ocrStatus');
+            if (!dot || !label) return;
+            try {
+                const resp = await fetch('/health');
+                const data = await resp.json();
+                const ai = data.ai || {};
+                if (!ai.enabled) {
+                    dot.className = 'dot red';
+                    label.innerText = 'not set up';
+                    label.title = 'No AI key configured, so an uploaded photo cannot be read into dishes.';
+                } else if (ai.working === false) {
+                    dot.className = 'dot red';
+                    label.innerText = 'having trouble';
+                    label.title = 'The last call to the vision model failed. Uploads may not extract dishes.';
+                } else {
+                    dot.className = 'dot green';
+                    label.innerText = 'ready';
+                    label.title = '';
+                }
+            } catch (e) {
+                dot.className = 'dot gold';
+                label.innerText = 'unknown';
+                label.title = 'Could not reach /health to check.';
+            }
+        }
+
         window.addEventListener('DOMContentLoaded', () => {
             // The default tab is already marked active in the markup, so its
             // whole group has to be on screen to match — otherwise only the
             // leading panel shows and the rest look like they do not exist.
             showGroup('menu');
+            refreshReaderStatus();
             if (currentAdminKey) {
                 document.getElementById('authOverlay').style.display = 'none';
                 loadActiveMenu();

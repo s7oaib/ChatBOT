@@ -132,3 +132,40 @@ def test_no_implementation_jargon_in_the_headings(page):
     joined = " ".join(headings)
     for word in ("Vision OCR", "Self-Healing", "Bot Intelligence"):
         assert word not in joined, f"{word!r} still shown to the operator"
+
+
+def test_the_status_bar_carries_no_hardcoded_lights(page):
+    """
+    "Server: Online" restated that the page had loaded, and "Photo OCR: Ready"
+    was hardcoded — it said Ready with no key configured, with the quota spent,
+    and with the model failing, which are exactly the conditions that made
+    uploads silently stop extracting dishes. A light that cannot go red is
+    worse than no light.
+    """
+    assert "Server: <b>Online</b>" not in page
+    assert "Photo OCR: <b>Ready</b>" not in page
+
+
+def test_the_reader_light_is_driven_by_health(page):
+    """It has to read real state, and say so when it cannot read any."""
+    assert 'id="ocrStatus"' in page and 'id="ocrDot"' in page
+    assert "async function refreshReaderStatus" in page
+    assert "fetch('/health')" in page
+
+    reader = page[page.index("async function refreshReaderStatus"):]
+    reader = reader[:reader.index("window.addEventListener")]
+    # Each state the operator can actually be in.
+    for phrase in ("not set up", "having trouble", "ready", "unknown"):
+        assert phrase in reader, f"reader light cannot report {phrase!r}"
+    assert "dot red" in reader, "the light has no failure colour"
+
+
+def test_status_pills_wrap_as_units(page):
+    """
+    Without this the row stayed unbroken on a phone and the labels broke
+    instead — "Active Menu Items:" split across three lines.
+    """
+    assert "white-space: nowrap" in page
+    css = page[page.index(".status-items"):]
+    css = css[:css.index("}") + 1]
+    assert "flex-wrap: wrap" in css, "status pills cannot wrap onto a second row"
