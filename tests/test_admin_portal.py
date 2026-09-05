@@ -1026,12 +1026,61 @@ def test_printed_date_ranges_are_read_off_the_real_flyer_formats():
     today = date(2026, 9, 2)
     assert parse_week_end_date("24th July - 30th July, 2026", today=today) == date(2026, 7, 30)
     assert parse_week_end_date("28TH AUGUST - 3RD SEPTEMBER, 2026", today=today) == date(2026, 9, 3)
-    # No year printed at all — assumed to be the current one.
+    # No year printed at all — resolved to the year nearest today.
     assert parse_week_end_date("19, 20, 21 JUNE", today=today) == date(2026, 6, 21)
 
     # The final day still counts as current: this menu is live all through the 3rd.
     assert is_expired("28th August - 3rd September, 2026", today=date(2026, 9, 3)) is False
     assert is_expired("28th August - 3rd September, 2026", today=date(2026, 9, 4)) is True
+
+
+def test_a_yearless_flyer_does_not_come_back_to_life_in_january():
+    """
+    The annual resurrection. A yearless "24th July - 30th July" used to take
+    the current year, so on 1 January it read as 30 July of the *new* year —
+    seven months in the future, therefore never expired, and July's menu was
+    served to customers again all the way to the following summer.
+    """
+    from datetime import date
+    from camellia.menu_dates import is_expired, parse_week_end_date
+
+    july = "24th July - 30th July"
+    assert parse_week_end_date(july, today=date(2026, 7, 26)) == date(2026, 7, 30)
+    assert is_expired(july, today=date(2026, 7, 26)) is False
+
+    # New Year rolls over. The menu is six months stale and must stay expired.
+    for day in (date(2027, 1, 1), date(2027, 3, 15), date(2027, 6, 30)):
+        assert parse_week_end_date(july, today=day) == date(2026, 7, 30), day
+        assert is_expired(july, today=day) is True, day
+
+
+def test_a_yearless_flyer_spanning_new_year_is_still_current():
+    """
+    The other half of the same fix, and why it is not just "use last year":
+    a menu printed in late December ends in January. Pinning it to the current
+    year would date it to January *past*, expiring a menu that is live today.
+    """
+    from datetime import date
+    from camellia.menu_dates import is_expired, parse_week_end_date
+
+    span = "28th December - 3rd January"
+    assert parse_week_end_date(span, today=date(2026, 12, 30)) == date(2027, 1, 3)
+    assert is_expired(span, today=date(2026, 12, 30)) is False
+    assert is_expired(span, today=date(2027, 1, 3)) is False
+    assert is_expired(span, today=date(2027, 1, 4)) is True
+
+
+def test_a_printed_year_is_always_obeyed_over_the_nearest_guess():
+    """
+    Nearest-year is a fallback for missing information, never an override. A
+    flyer that prints 2026 means 2026 even when 2027 would land closer.
+    """
+    from datetime import date
+    from camellia.menu_dates import parse_week_end_date
+
+    assert parse_week_end_date(
+        "24th July - 30th July, 2026", today=date(2027, 6, 1)
+    ) == date(2026, 7, 30)
 
 
 def test_unreadable_dates_never_expire_a_good_menu():

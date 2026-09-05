@@ -46,15 +46,52 @@ def today_ist() -> date:
     return datetime.now(tz=_IST).date()
 
 
+# How far ahead of today a yearless flyer date may plausibly sit. The flyers
+# cover one week and are uploaded around the week they describe, so a fortnight
+# absorbs an early upload while still rejecting a date most of a year out.
+_FUTURE_GRACE = timedelta(days=14)
+
+
+def _nearest_year(month: int, day: int, today: date) -> Optional[date]:
+    """
+    Resolves a yearless printed date to the most recent plausible year.
+
+    Assuming the current year resurrected last year's menu every New Year: a
+    flyer reading "24th July - 30th July" became 30 July *2027* once the
+    calendar rolled over, sat months in the future, and so never expired — the
+    stale July menu went back to being served to customers on 1 January.
+
+    Picking the numerically nearest year is not enough either. By March, next
+    July is closer than last July, and the same dead menu revives. What
+    actually rules a candidate out is being implausibly far ahead: a weekly
+    flyer's last day is never months away. So take the latest year that is not
+    beyond the grace window, which keeps a genuine December-to-January span
+    live while sending every stale menu to the past where it expires.
+    """
+    candidates = []
+    for year in (today.year - 1, today.year, today.year + 1):
+        try:
+            candidates.append(date(year, month, day))
+        except ValueError:
+            # 29 February outside a leap year — that candidate simply does not
+            # exist. Only give up if no year yields a real date.
+            continue
+    if not candidates:
+        return None
+    plausible = [d for d in candidates if d <= today + _FUTURE_GRACE]
+    # year - 1 is always in the past, so `plausible` is never empty; the
+    # fallback only guards a future caller widening the candidate list.
+    return max(plausible) if plausible else min(candidates)
+
+
 def parse_week_end_date(week_of: Optional[str], today: Optional[date] = None) -> Optional[date]:
     """
     The last day a menu labelled `week_of` is still current, or None when the
     text carries no readable date.
 
     Reads the range's END rather than its start, since that is what decides
-    when the menu stops applying. A missing year is assumed to be the current
-    one — the flyers are printed weekly, so the current year is right except
-    across a New Year boundary.
+    when the menu stops applying. A missing year resolves to whichever year
+    puts the printed day nearest today — see _nearest_year.
     """
     if not week_of:
         return None
@@ -83,15 +120,16 @@ def parse_week_end_date(week_of: Optional[str], today: Optional[date] = None) ->
     if not days:
         return None
 
+    day = max(days)
     year_match = _YEAR_RE.search(text)
-    year = int(year_match.group(1)) if year_match else (today or today_ist()).year
-
-    try:
-        return date(year, month_num, max(days))
-    except ValueError:
-        # A day the month does not have (31 September) means the read was
-        # wrong; treat it as unreadable rather than inventing a nearby date.
-        return None
+    if year_match:
+        try:
+            return date(int(year_match.group(1)), month_num, day)
+        except ValueError:
+            # A day the month does not have (31 September) means the read was
+            # wrong; treat it as unreadable rather than inventing a nearby date.
+            return None
+    return _nearest_year(month_num, day, today or today_ist())
 
 
 def is_expired(week_of: Optional[str], today: Optional[date] = None) -> bool:
