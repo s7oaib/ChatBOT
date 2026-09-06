@@ -1711,6 +1711,10 @@ def get_admin_dashboard():
         .dot.green { background: var(--success); box-shadow: 0 0 8px rgba(16,185,129,0.5); }
         .dot.gold { background: var(--gold); }
         .dot.red { background: var(--danger); }
+        /* Remove sits opposite the veg/non-veg badge rather than under the
+           price, so a mis-tap lands on the badge and not on a deletion. */
+        .menu-card-footer { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-top: 8px; }
+        .btn-remove-dish { padding: 5px 12px; font-size: 0.76rem; }
         /* Editable cells in the pre-publish review table. Bordered on purpose:
            a borderless input reads as printed text, and the client has to be
            able to tell at a glance that these values can be corrected. */
@@ -2742,10 +2746,14 @@ Non-Veg:
                     const veg = currentWeek.vegetarian || [];
                     const nonveg = currentWeek.non_vegetarian || [];
                     totalCount = veg.length + nonveg.length;
+                    // Kept so Remove can send back the dishes that survive.
+                    // update-menu replaces a whole list, so the button needs
+                    // the other dishes as much as the one being dropped.
+                    liveMenu = { vegetarian: veg, non_vegetarian: nonveg };
 
                     html += `<h3 style="color: var(--primary); margin-top: 10px; font-size: 1.1rem;">🌱 Vegetarian Weekly Specials (${veg.length})</h3>`;
                     html += '<div class="menu-grid">';
-                    veg.forEach(item => {
+                    veg.forEach((item, idx) => {
                         html += `
                         <div class="menu-card">
                             <div class="menu-card-header">
@@ -2753,14 +2761,17 @@ Non-Veg:
                                 <span class="menu-item-price">₹${item.price_inr}</span>
                             </div>
                             <p class="menu-item-desc">${escapeHtml(item.description || '')} (${escapeHtml(item.quantity || '1 portion')})</p>
-                            <span class="badge badge-veg">Vegetarian</span>
+                            <div class="menu-card-footer">
+                                <span class="badge badge-veg">Vegetarian</span>
+                                <button class="btn-danger btn-remove-dish" onclick="removeLiveDish('vegetarian', ${idx})">Remove</button>
+                            </div>
                         </div>`;
                     });
                     html += '</div>';
 
                     html += `<h3 style="color: var(--primary); margin-top: 24px; font-size: 1.1rem;">🍗 Non-Vegetarian Weekly Specials (${nonveg.length})</h3>`;
                     html += '<div class="menu-grid">';
-                    nonveg.forEach(item => {
+                    nonveg.forEach((item, idx) => {
                         html += `
                         <div class="menu-card">
                             <div class="menu-card-header">
@@ -2768,7 +2779,10 @@ Non-Veg:
                                 <span class="menu-item-price">₹${item.price_inr}</span>
                             </div>
                             <p class="menu-item-desc">${escapeHtml(item.description || '')} (${escapeHtml(item.quantity || '1 portion')})</p>
-                            <span class="badge badge-nonveg">Non-Veg</span>
+                            <div class="menu-card-footer">
+                                <span class="badge badge-nonveg">Non-Veg</span>
+                                <button class="btn-danger btn-remove-dish" onclick="removeLiveDish('non_vegetarian', ${idx})">Remove</button>
+                            </div>
                         </div>`;
                     });
                     html += '</div>';
@@ -2778,6 +2792,49 @@ Non-Veg:
                 document.getElementById('activeCountBadge').innerText = `${totalCount} dishes`;
             } catch (err) {
                 container.innerHTML = '<p style="color: red;">Failed to load active menu. Please check your PIN.</p>';
+            }
+        }
+
+        // The dishes the bot is serving right now, as last loaded. Removing one
+        // sends the rest back, so this has to be what the server actually holds
+        // rather than anything typed in the review table above.
+        let liveMenu = { vegetarian: [], non_vegetarian: [] };
+
+        async function removeLiveDish(category, index) {
+            const list = liveMenu[category] || [];
+            const dish = list[index];
+            if (!dish) return;
+
+            const remaining = (liveMenu.vegetarian.length + liveMenu.non_vegetarian.length) - 1;
+            let question = `Remove "${dish.item}" from the live menu? Customers will stop being offered it straight away.`;
+            if (remaining === 0) {
+                // Worth spelling out: an empty menu is not an obvious outcome
+                // of pressing Remove on one dish, and the bot has nothing to
+                // quote once it happens.
+                question = `"${dish.item}" is the last dish on the menu. Remove it and the bot has no weekly dishes left to offer anyone. Continue?`;
+            }
+            if (!confirm(question)) return;
+
+            const payload = {
+                vegetarian: liveMenu.vegetarian.slice(),
+                non_vegetarian: liveMenu.non_vegetarian.slice()
+            };
+            payload[category].splice(index, 1);
+
+            try {
+                const resp = await fetch('/admin/update-menu', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+                    body: JSON.stringify(payload)
+                });
+                const data = await resp.json();
+                if (resp.ok && data.status === 'success') {
+                    loadActiveMenu();
+                } else {
+                    alert('Not removed: ' + (data.detail || data.reason || 'the server refused the change.'));
+                }
+            } catch (e) {
+                alert('Connection error - nothing was removed.');
             }
         }
 

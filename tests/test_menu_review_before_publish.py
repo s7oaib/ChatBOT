@@ -177,3 +177,66 @@ def test_writing_an_answer_sits_above_the_list_of_answers():
 
     assert "toggleAddKnowledgeForm" not in page, "the form is still hidden behind a toggle"
     assert 'id="addKnowledgeForm"' not in page
+
+
+def test_a_live_dish_can_be_removed_one_at_a_time(menu_restored):
+    """
+    Dropping one sold-out dish used to mean re-pasting the whole menu or
+    pressing Reset to Baseline, which throws the week away. Removing one must
+    leave the rest exactly as they were.
+    """
+    client.post(
+        "/admin/update-menu",
+        json={
+            "vegetarian": [
+                {"item": "Shukto", "price_inr": 280},
+                {"item": "Chholar Daal", "price_inr": 250},
+            ],
+            "non_vegetarian": [{"item": "Kosha Mangsho", "price_inr": 600}],
+        },
+        headers=ADMIN_HEADERS,
+    )
+
+    # What the Remove button sends: every surviving dish, minus the one dropped.
+    resp = client.post(
+        "/admin/update-menu",
+        json={
+            "vegetarian": [{"item": "Shukto", "price_inr": 280}],
+            "non_vegetarian": [{"item": "Kosha Mangsho", "price_inr": 600}],
+        },
+        headers=ADMIN_HEADERS,
+    )
+    assert resp.status_code == 200
+
+    week = _live_week()
+    assert [d["item"] for d in week["vegetarian"]] == ["Shukto"]
+    assert [d["item"] for d in week["non_vegetarian"]] == ["Kosha Mangsho"]
+
+
+def test_removing_the_last_dish_is_allowed_but_empties_the_menu(menu_restored):
+    """
+    The dashboard warns before this, but the endpoint must still accept it —
+    refusing would strand a client whose whole week really is sold out.
+    """
+    resp = client.post(
+        "/admin/update-menu",
+        json={"vegetarian": [], "non_vegetarian": []},
+        headers=ADMIN_HEADERS,
+    )
+    assert resp.status_code == 200
+    week = _live_week()
+    assert week["vegetarian"] == [] and week["non_vegetarian"] == []
+
+
+def test_the_live_menu_offers_a_remove_button_per_dish():
+    """Both lists, or half the menu is undeletable."""
+    page = client.get("/admin").text
+    assert "removeLiveDish('vegetarian'" in page
+    assert "removeLiveDish('non_vegetarian'" in page
+    assert "async function removeLiveDish" in page
+    # It must send what survives, not just the deletion.
+    handler = page[page.index("async function removeLiveDish"):]
+    handler = handler[:handler.index("async function confirmResetDefaults")]
+    assert "/admin/update-menu" in handler
+    assert "splice" in handler and "confirm(" in handler
+    assert "last dish" in handler, "no warning before emptying the whole menu"
