@@ -266,22 +266,6 @@ class TestCamelliaBot(unittest.TestCase):
             self.assertIn("Check Delivery & Timings", resp)
             self.assertIn("Calculate & Place Orders", resp)
 
-    def test_bot_identity_queries(self):
-        """Brand/bot introduction questions must map cleanly to bot_identity."""
-        test_queries = [
-            "who are you",
-            "who are u",
-            "are you a bot",
-            "are you human",
-            "tell me about yourself",
-            "what is camellia"
-        ]
-        for query in test_queries:
-            resp, matched, tmpl_id, _ = responder.match_and_respond(query)
-            self.assertTrue(matched, f"Query '{query}' should match bot_identity")
-            self.assertEqual(tmpl_id, "bot_identity", f"Query '{query}' should map to bot_identity")
-            self.assertIn("Camellia Artisanal virtual assistant", resp)
-
     def test_strict_out_of_context_and_escalation(self):
         """In-domain queries are answered directly; out-of-domain and explicit triggers escalate."""
         # 1. In-domain product queries -> NOT escalated
@@ -555,10 +539,12 @@ class TestCamelliaBot(unittest.TestCase):
             "who are you",
             "who are you?",
             "who r u",
+            "who are u",
             "what are you",
             "who is this",
             "are you a bot",
             "are you human",
+            "what is camellia",
             "what is camellia artisanal",
             "tell me about yourself",
         ]
