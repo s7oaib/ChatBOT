@@ -18,7 +18,7 @@ if hasattr(sys.stdout, "reconfigure"):
 
 def main():
     print("=" * 60)
-    print("🌸 CAMELLIA ARTISANAL — BOT INTERACTIVE SIMULATOR 🌸")
+    print("CAMELLIA ARTISANAL — BOT INTERACTIVE SIMULATOR")
     print("=" * 60)
     print("Select Testing Mode:")
     print("1. Instagram DM (Ad-Originated Referral) [Auto-Reply Enabled]")

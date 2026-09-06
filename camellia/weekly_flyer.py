@@ -29,10 +29,10 @@ log = get_logger("camellia.weekly_flyer")
 # built straight from menu.json's structured items rather than copied here.
 # Rotated so a customer asking twice in one session does not see identical text.
 CAPTIONS = (
-    "*This Week's Menu* — freshly cooked in small batches, updated just for you! 🌸",
-    "*This Week's Menu* — hot off the kitchen, ready when you are! 🌸",
-    "*This Week's Menu* — fresh ingredients, cooked daily, just for this week. 🌸",
-    "*This Week's Menu* — a little taste of home, made fresh this week! 🌸",
+    "*This Week's Menu* — freshly cooked in small batches, updated just for you!",
+    "*This Week's Menu* — hot off the kitchen, ready when you are!",
+    "*This Week's Menu* — fresh ingredients, cooked daily, just for this week.",
+    "*This Week's Menu* — a little taste of home, made fresh this week!",
 )
 
 _EXT_BY_MIME = {
@@ -174,7 +174,7 @@ def save(
     week_of = (week_of or "").strip()
     has_real_date = menu_dates.parse_week_end_date(week_of) is not None
     caption = (
-        f"*This Week's Menu* ({week_of}) — freshly cooked in small batches, updated just for you! 🌸"
+        f"*This Week's Menu* ({week_of}) — freshly cooked in small batches, updated just for you!"
         if has_real_date else random.choice(CAPTIONS)
     )
     uploaded_at = time.time()

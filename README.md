@@ -1,4 +1,4 @@
-# 🌸 Camellia Artisanal — Meta Instagram & WhatsApp Auto-Response Bot
+# Camellia Artisanal — Meta Instagram & WhatsApp Auto-Response Bot
 
 ![Python Version](https://img.shields.io/badge/Python-3.11%2B-blue.svg)
 ![Framework](https://img.shields.io/badge/FastAPI-0.110.0-green.svg)
@@ -167,7 +167,7 @@ Then open the Web Chat Interface in your browser:
 
 ```text
  ┌────────────────────────────────────────────────────────────────────────┐
- │ 🌸 Camellia Artisanal — Web Bot Tester                                 │
+ │ Camellia Artisanal — Web Bot Tester                                 │
  ├────────────────────────────────────────────────────────────────────────┤
  │ Channel Mode: [ 📢 Instagram Ad DM ]  [ 🛑 Instagram Organic ] [ 🟢 WA ]│
  ├────────────────────────────────────────────────────────────────────────┤

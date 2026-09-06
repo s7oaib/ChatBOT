@@ -848,7 +848,7 @@ class TestCamelliaBot(unittest.TestCase):
             _, kwargs = mock_send.call_args
             buttons = kwargs.get("buttons")
             self.assertIsNotNone(buttons)
-            self.assertIn("🌸 See Menu", buttons)
+            self.assertIn("See Menu", buttons)
             self.assertIn("🛍️ Place Order", buttons)
 
     def test_parse_raw_menu_text(self):
@@ -1659,7 +1659,7 @@ class TestCamelliaBot(unittest.TestCase):
                             "id": "wamid.BTN1",
                             "type": "interactive",
                             "interactive": {
-                                "button_reply": {"id": "quick_btn_1", "title": "🌸 See Menu"}
+                                "button_reply": {"id": "quick_btn_1", "title": "See Menu"}
                             }
                         }]
                     }
@@ -1668,7 +1668,7 @@ class TestCamelliaBot(unittest.TestCase):
         }
         sender_btn, msg_id_btn, text_btn = whatsapp_adapter.parse_webhook_message(btn_payload)
         self.assertEqual(sender_btn, "919876543210")
-        self.assertEqual(text_btn, "🌸 See Menu")
+        self.assertEqual(text_btn, "See Menu")
 
         # 3. Invalid/empty payload
         self.assertIsNone(whatsapp_adapter.parse_webhook_message({}))
@@ -1684,7 +1684,7 @@ class TestCamelliaBot(unittest.TestCase):
         self.assertEqual(result["status"], "processed")
         self.assertTrue(result["was_matched"])
         self.assertEqual(result["template_id"], "greeting")
-        self.assertIn("🌸 See Menu", result["buttons"])
+        self.assertIn("See Menu", result["buttons"])
 
         # Pricing query
         pricing_res = whatsapp_adapter.process_incoming_message("919876543210", "How much is nolen gur sondesh?")
@@ -1770,7 +1770,7 @@ class TestCamelliaBot(unittest.TestCase):
             recipient_phone="919876543210",
             text_body="Here is our signature menu 🌸",
             image_url="/images/signature_card.jpeg",
-            buttons=["🌸 See Menu", "🛍️ Place Order"]
+            buttons=["See Menu", "🛍️ Place Order"]
         )
         self.assertTrue(send_res.get("mock"))
         self.assertEqual(send_res.get("status"), "sent")
@@ -2468,8 +2468,14 @@ class TestCompoundAndAreaAwareReplies(unittest.TestCase):
     def test_menu_for_today_reaches_menu_template(self):
         """'menu for today' scored 0 on every trigger and lost to 'get it today'
         on delivery_time — the menu ask vanished from the reply entirely."""
-        for msg in ("can i get a menu for today", "menu for today", "today's menu"):
-            text, matched, tmpl, images = self._respond(msg, user_id="test_menu_today")
+        # One user id per phrasing. Asking the same thing three times in a row
+        # legitimately trips the duplicate-reply guard, which drops the cards on
+        # purpose — and that would be measuring the guard, not the routing this
+        # test is about. (Before the flower emoji was stripped from the source,
+        # the guard never fired here at all: the stored reply had been stripped
+        # and the candidate had not, so they never compared equal.)
+        for i, msg in enumerate(("can i get a menu for today", "menu for today", "today's menu")):
+            text, matched, tmpl, images = self._respond(msg, user_id=f"test_menu_today_{i}")
             self.assertTrue(matched, f"{msg!r} did not match")
             self.assertEqual(tmpl, "know_more", f"{msg!r} routed to {tmpl}")
             self.assertIsNotNone(images)
@@ -2595,7 +2601,7 @@ class TestClarifyBeforeEscalating(unittest.TestCase):
     def test_clarifier_buttons_match_the_options_offered(self):
         from camellia.whatsapp_adapter import whatsapp_adapter
         buttons = whatsapp_adapter._get_contextual_buttons("clarify_request", True)
-        self.assertEqual(buttons, ["🌸 Sondesh", "🍱 Meals", "🚚 Delivery"])
+        self.assertEqual(buttons, ["Sondesh", "🍱 Meals", "🚚 Delivery"])
 
 
 class TestInteractiveMenuFlow(unittest.TestCase):
@@ -2625,13 +2631,13 @@ class TestInteractiveMenuFlow(unittest.TestCase):
         from camellia.whatsapp_adapter import whatsapp_adapter
         for tmpl in ("know_more", "product_overview"):
             buttons = whatsapp_adapter._get_contextual_buttons(tmpl, True)
-            self.assertNotIn("🌸 See Menu", buttons, "Offers the menu to someone who just got it")
-            self.assertIn("🌸 Sondesh", buttons)
+            self.assertNotIn("See Menu", buttons, "Offers the menu to someone who just got it")
+            self.assertIn("Sondesh", buttons)
             self.assertIn("🍱 Meals", buttons)
 
     def test_every_menu_button_leads_somewhere_real(self):
         from camellia.session_memory import session_memory
-        for label in ("🌸 Sondesh", "🍱 Meals"):
+        for label in ("Sondesh", "🍱 Meals"):
             session_memory.clear_session(f"btn_{label}", "whatsapp")
             text, matched, tmpl, _ = self._reply(f"btn_{label}", label)
             self.assertTrue(matched, f"Button '{label}' dead-ends into a handover")
@@ -2680,7 +2686,7 @@ class TestInteractiveMenuFlow(unittest.TestCase):
     def test_sondesh_side_still_answers_bare_price(self):
         from camellia.session_memory import session_memory
         session_memory.clear_session("sondesh_user", "whatsapp")
-        self._reply("sondesh_user", "🌸 Sondesh")
+        self._reply("sondesh_user", "Sondesh")
         text, matched, tmpl, _ = self._reply("sondesh_user", "how much?")
         self.assertTrue(matched)
         self.assertIn("₹", text)

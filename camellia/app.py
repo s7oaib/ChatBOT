@@ -1881,7 +1881,7 @@ def get_admin_dashboard():
     <!-- Main Navigation Header -->
     <header>
         <div class="brand-box">
-            <span class="brand-logo">🌸</span>
+            <span class="brand-logo">C</span>
             <div class="brand-text">
                 <h1>Camellia Artisanal — Kitchen & Menu Admin</h1>
                 <p>Bengal-Rooted Artisanal Sweets & Food &middot; Gurgaon, Delhi NCR</p>
@@ -1953,7 +1953,7 @@ def get_admin_dashboard():
             </div>
             
             <textarea id="rawTextPaste" class="text-input" placeholder="Example:
-🌸 THIS WEEK'S BENGAL SPECIALS 🌸
+THIS WEEK'S BENGAL SPECIALS
 - Rose Sondesh (250g) - ₹450
 - Jolbhora Nolen Gur (500g) - ₹1400
 - Kosha Mangsho (Mutton) (350g) - ₹650
@@ -2554,7 +2554,7 @@ def get_admin_dashboard():
         }
 
         function loadSampleText() {
-            document.getElementById('rawTextPaste').value = `🌸 Camellia Artisanal Weekly Specials 🌸
+            document.getElementById('rawTextPaste').value = `Camellia Artisanal Weekly Specials
 Veg:
 • Chholar Daal (250g) - ₹250
 • Dhokar Dalna (250g) - ₹300
@@ -3337,7 +3337,7 @@ def get_web_chat():
         <div class="chat-container">
             <div class="header">
                 <div class="header-top">
-                    <h2>🌸 Camellia Artisanal Bot Tester</h2>
+                    <h2>Camellia Artisanal Bot Tester</h2>
                     <div style="display: flex; gap: 6px; align-items: center;">
                         <a href="/admin" target="_blank" class="reset-btn" style="text-decoration: none; display: inline-flex; align-items: center; background: #D4AF37; color: #2B2D42; font-weight: 700; border-color: #D4AF37;">🔐 Kitchen Portal</a>
                         <button class="reset-btn" onclick="openMenuModal()">📋 Paste Menu</button>
@@ -3440,7 +3440,7 @@ def get_web_chat():
                 typingDiv.className = 'message bot-msg';
                 typingDiv.style.color = '#888';
                 typingDiv.style.fontStyle = 'italic';
-                typingDiv.innerText = '🌸 Camellia is typing...';
+                typingDiv.innerText = 'Camellia is typing...';
                 document.getElementById('messages').appendChild(typingDiv);
                 document.getElementById('messages').scrollTop = document.getElementById('messages').scrollHeight;
 

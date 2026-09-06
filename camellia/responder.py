@@ -40,7 +40,7 @@ log = get_logger("camellia.responder")
 # against, and a wrong price is a real cost to the kitchen. Points at the
 # Sondesh collections, which are a separate, undated range and still correct.
 _WEEKLY_MENU_BEING_UPDATED = (
-    "🌸 Our kitchen is finalising this week's menu right now — I'd rather not "
+    "Our kitchen is finalising this week's menu right now — I'd rather not "
     "send you last week's by mistake.\n\n"
     "It'll be ready shortly! In the meantime, say *Sondesh* to see our sweet "
     "collections, or message our team on +91 87965 51990 and they'll confirm "
@@ -48,7 +48,7 @@ _WEEKLY_MENU_BEING_UPDATED = (
 )
 
 _DUPLICATE_REPLY_NOTICE = (
-    "Got it — thanks! I've shared those details just above. 🌸\n\n"
+    "Got it — thanks! I've shared those details just above.\n\n"
     "Anything else I can help with — *Sondesh* prices, this week's *Meals* menu, "
     "or *placing an order*?"
 )
@@ -68,10 +68,33 @@ _CONFIRMED_BENTO_SUBSTITUTION_RE = re.compile(
 )
 
 
+# Every flower the client does not want, not just the cherry blossom the first
+# pass removed. The source text is clean now, so this exists for what the
+# source cannot control: an AI-refined reply, a staff-written learned answer,
+# or a template edited through the admin portal.
+_FLOWER_RE = re.compile(
+    "[\U0001F338\U0001F33A\U0001F33B\U0001F33C\U0001F339\U0001F337"
+    "\U0001F490\U0001F3F5]\uFE0F?"
+)
+
+
 def _strip_flower_emoji(value):
-    """Remove the flower emoji from customer-visible text and card captions."""
+    """
+    Remove flower emoji from customer-visible text and card captions.
+
+    Takes the space with it. Removing the emoji alone left "Both!  Our weekly
+    meals" with a double space in the middle of every sentence it touched.
+    Only the space beside the emoji is touched: several replies carry ASCII
+    price tables whose columns are built out of runs of spaces, and collapsing
+    whitespace generally would tear them apart.
+    """
     if isinstance(value, str):
-        return value.replace("🌸", "")
+        marked = _FLOWER_RE.sub("\x00", value)
+        return re.sub(
+            " *\x00+ *",
+            lambda m: " " if m.group(0).startswith(" ") and m.group(0).endswith(" ") else "",
+            marked,
+        )
     if isinstance(value, list):
         return [_strip_flower_emoji(item) for item in value]
     if isinstance(value, dict):
@@ -389,10 +412,10 @@ class DeterministicResponder:
         """The scripted 'we've handed this to a human' notice from qa_templates.json."""
         return self.qa_data.get("escalation_triggers", {}).get(
             "fallback_response",
-            "Thank you for getting in touch! 🌸 I've notified our team (+91 87965 51990) regarding "
+            "Thank you for getting in touch! I've notified our team (+91 87965 51990) regarding "
             "your request and they'll connect with you directly on WhatsApp/call shortly.\n\n"
             "In the meantime, feel free to ask me about:\n"
-            "• 🌸 Our fresh Sondesh, Kanchagolla & Jolbhora (Aamar Mishti & Signature Collections)\n"
+            "• Our fresh Sondesh, Kanchagolla & Jolbhora (Aamar Mishti & Signature Collections)\n"
             "• 🍱 This week's fresh Bengali Lunch & Dinner Bento menu\n"
             "• 🚚 Delivery details across Delhi NCR\n\n"
             "Or reply 'menu' to see our complete price list!"
@@ -440,7 +463,7 @@ class DeterministicResponder:
 
         if intent == "bulk":
             return (
-                "Wonderful — we would love to make this for you! 🌸\n\n"
+                "Wonderful — we would love to make this for you!\n\n"
                 "Bulk, corporate and festive orders are quoted personally so we can work out pricing, "
                 "packaging and delivery dates around your date.\n\n"
                 "I've passed this to our team (+91 87965 51990) and they will connect with you shortly. "
@@ -453,7 +476,7 @@ class DeterministicResponder:
 
         if intent == "order_intent":
             return (
-                "Lovely — let's get this order placed! 🌸\n\n"
+                "Lovely — let's get this order placed!\n\n"
                 "Our team (+91 87965 51990) has your chat and will confirm on WhatsApp/call shortly.\n\n"
                 "To make it quick, please share:\n"
                 "1. Item & flavour\n"
@@ -649,7 +672,7 @@ class DeterministicResponder:
         if not intro_greeting_prefix:
             if CLOSING_ONLY_RE.match(lowered_text):
                 response_text = (
-                    "Thank you so much! 🌸 Lovely chatting with you.\n\n"
+                    "Thank you so much! Lovely chatting with you.\n\n"
                     "Whenever you'd like Sondesh or this week's Bengali meals, just message here — "
                     "our kitchen is open 10:00 AM – 7:30 PM every day. Take care!"
                 )
@@ -659,7 +682,7 @@ class DeterministicResponder:
             if ACK_ONLY_RE.match(lowered_text):
                 response_text = (
                     "Got it! 😊 What would you like to do next?\n\n"
-                    "• 🌸 Sondesh flavours & prices\n"
+                    "• Sondesh flavours & prices\n"
                     "• 🍱 This week's Bengali meal menu\n"
                     "• 🚚 Delivery details for your area\n"
                     "• 🛒 Place an order"
@@ -764,13 +787,13 @@ class DeterministicResponder:
         if last_topic and BARE_VEG_RE.match(stripped_for_bare_check):
             if last_topic == "savoury":
                 response_text = (
-                    "Both! 🌸 Our weekly Bengali meals include vegetarian dishes (Aloor Dom, Dhokar Dalna, "
+                    "Both! Our weekly Bengali meals include vegetarian dishes (Aloor Dom, Dhokar Dalna, "
                     "Basonti Polao) and non-vegetarian dishes (Bhetki Paturi, Chingri Malaikari, Robibarer Mangsho).\n\n"
                     "Would you like to see the Veg or Non-Veg menu?"
                 )
             else:
                 response_text = (
-                    "Yes, always! 🌸 Every Sondesh we make — Aamar Mishti and Signature Collection alike — is "
+                    "Yes, always! Every Sondesh we make — Aamar Mishti and Signature Collection alike — is "
                     "100% vegetarian, made from milk, sugar & natural flavourings only. No eggs, no meat extracts."
                 )
             if intro_greeting_prefix:
@@ -1364,9 +1387,9 @@ class DeterministicResponder:
         ):
             facts["clarify_sent"] = True
             clarifier = (
-                "Happy to help — I just want to point you the right way 🌸\n\n"
+                "Happy to help — I just want to point you the right way\n\n"
                 "Which of these is closest to what you're after?\n"
-                "• 🌸 Sondesh flavours & prices\n"
+                "• Sondesh flavours & prices\n"
                 "• 🍱 This week's Bengali meals\n"
                 "• 🚚 Delivery to your area\n"
                 "• 🛍️ Placing an order\n\n"
@@ -1591,28 +1614,28 @@ class DeterministicResponder:
             if has_col1 and not has_col2:
                 target_images = [img_aamar_mishti]
                 if has_rose and not has_classic:
-                    formatted_text = "*Collection 1 — Aamar Mishti (Rose Sondesh)* 🌸\nFresh artisanal chhana infused with fragrant organic rose petals, made with pure dairy milk in our kitchen:\n\n```\n+-----------------------+-------+-------+-------+\n| Pack Size             | 250g  | 500g  |  1kg  |\n+-----------------------+-------+-------+-------+\n| Piece Count           | 9 pcs | 18 pcs| 36 pcs|\n| Price (INR)           | ₹450  | ₹800  | ₹1500 |\n+-----------------------+-------+-------+-------+\n```\n\nWhich pack size (250g, 500g, or 1kg) would you like to order?"
+                    formatted_text = "*Collection 1 — Aamar Mishti (Rose Sondesh)*\nFresh artisanal chhana infused with fragrant organic rose petals, made with pure dairy milk in our kitchen:\n\n```\n+-----------------------+-------+-------+-------+\n| Pack Size             | 250g  | 500g  |  1kg  |\n+-----------------------+-------+-------+-------+\n| Piece Count           | 9 pcs | 18 pcs| 36 pcs|\n| Price (INR)           | ₹450  | ₹800  | ₹1500 |\n+-----------------------+-------+-------+-------+\n```\n\nWhich pack size (250g, 500g, or 1kg) would you like to order?"
                 elif has_classic and not has_rose:
-                    formatted_text = "*Collection 1 — Aamar Mishti (Classic Sondesh)* 🌸\nFresh artisanal chhana and delicate aromatic cardamom, made with pure dairy milk in our kitchen:\n\n```\n+-----------------------+-------+-------+-------+\n| Pack Size             | 250g  | 500g  |  1kg  |\n+-----------------------+-------+-------+-------+\n| Piece Count           | 9 pcs | 18 pcs| 36 pcs|\n| Price (INR)           | ₹450  | ₹800  | ₹1500 |\n+-----------------------+-------+-------+-------+\n```\n\nWhich pack size (250g, 500g, or 1kg) would you like to order?"
+                    formatted_text = "*Collection 1 — Aamar Mishti (Classic Sondesh)*\nFresh artisanal chhana and delicate aromatic cardamom, made with pure dairy milk in our kitchen:\n\n```\n+-----------------------+-------+-------+-------+\n| Pack Size             | 250g  | 500g  |  1kg  |\n+-----------------------+-------+-------+-------+\n| Piece Count           | 9 pcs | 18 pcs| 36 pcs|\n| Price (INR)           | ₹450  | ₹800  | ₹1500 |\n+-----------------------+-------+-------+-------+\n```\n\nWhich pack size (250g, 500g, or 1kg) would you like to order?"
                 else:
-                    formatted_text = "*Collection 1 — Aamar Mishti (Classic & Rose Sondesh)* 🌸\nMade with pure dairy milk in our kitchen:\n\n```\n+-----------------------+-------+-------+-------+\n| Item / Flavour        | 250g  | 500g  |  1kg  |\n+-----------------------+-------+-------+-------+\n| Classic / Rose        | ₹450  | ₹800  | ₹1500 |\n+-----------------------+-------+-------+-------+\n* Box count: 9 pcs (250g) | 18 pcs (500g) | 36 pcs (1kg)\n```\n\nWhich flavour and pack size would you like to order?"
+                    formatted_text = "*Collection 1 — Aamar Mishti (Classic & Rose Sondesh)*\nMade with pure dairy milk in our kitchen:\n\n```\n+-----------------------+-------+-------+-------+\n| Item / Flavour        | 250g  | 500g  |  1kg  |\n+-----------------------+-------+-------+-------+\n| Classic / Rose        | ₹450  | ₹800  | ₹1500 |\n+-----------------------+-------+-------+-------+\n* Box count: 9 pcs (250g) | 18 pcs (500g) | 36 pcs (1kg)\n```\n\nWhich flavour and pack size would you like to order?"
 
             elif has_col2 and not has_col1:
                 target_images = [img_signature_sondesh]
                 if has_rose and not has_classic:
-                    formatted_text = "*Collection 2 — Signature A2 (Rose Sondesh)* 🌸\n100% handcrafted with pure desi A2 cow milk and fragrant organic rose petals:\n\n```\n+-----------------------+-------+-------+-------+\n| Pack Size             | 250g  | 500g  |  1kg  |\n+-----------------------+-------+-------+-------+\n| Piece Count           | 9 pcs | 18 pcs| 36 pcs|\n| Price (INR)           | ₹600  | ₹1100 | ₹2000 |\n+-----------------------+-------+-------+-------+\n```\n\nWhich pack size (250g, 500g, or 1kg) would you like to order?"
+                    formatted_text = "*Collection 2 — Signature A2 (Rose Sondesh)*\n100% handcrafted with pure desi A2 cow milk and fragrant organic rose petals:\n\n```\n+-----------------------+-------+-------+-------+\n| Pack Size             | 250g  | 500g  |  1kg  |\n+-----------------------+-------+-------+-------+\n| Piece Count           | 9 pcs | 18 pcs| 36 pcs|\n| Price (INR)           | ₹600  | ₹1100 | ₹2000 |\n+-----------------------+-------+-------+-------+\n```\n\nWhich pack size (250g, 500g, or 1kg) would you like to order?"
                 elif has_classic and not has_rose:
-                    formatted_text = "*Collection 2 — Signature A2 (Classic Sondesh)* 🌸\n100% handcrafted with pure desi A2 cow milk and delicate aromatic cardamom:\n\n```\n+-----------------------+-------+-------+-------+\n| Pack Size             | 250g  | 500g  |  1kg  |\n+-----------------------+-------+-------+-------+\n| Piece Count           | 9 pcs | 18 pcs| 36 pcs|\n| Price (INR)           | ₹600  | ₹1100 | ₹2000 |\n+-----------------------+-------+-------+-------+\n```\n\nWhich pack size (250g, 500g, or 1kg) would you like to order?"
+                    formatted_text = "*Collection 2 — Signature A2 (Classic Sondesh)*\n100% handcrafted with pure desi A2 cow milk and delicate aromatic cardamom:\n\n```\n+-----------------------+-------+-------+-------+\n| Pack Size             | 250g  | 500g  |  1kg  |\n+-----------------------+-------+-------+-------+\n| Piece Count           | 9 pcs | 18 pcs| 36 pcs|\n| Price (INR)           | ₹600  | ₹1100 | ₹2000 |\n+-----------------------+-------+-------+-------+\n```\n\nWhich pack size (250g, 500g, or 1kg) would you like to order?"
                 else:
-                    formatted_text = "*Collection 2 — Signature A2 (Classic & Rose Sondesh)* 🌸\n100% handcrafted with pure desi A2 cow milk:\n\n```\n+-----------------------+-------+-------+-------+\n| Item / Flavour        | 250g  | 500g  |  1kg  |\n+-----------------------+-------+-------+-------+\n| Classic / Rose        | ₹600  | ₹1100 | ₹2000 |\n+-----------------------+-------+-------+-------+\n* Box count: 9 pcs (250g) | 18 pcs (500g) | 36 pcs (1kg)\n```\n\nWhich flavour and pack size would you like to order?"
+                    formatted_text = "*Collection 2 — Signature A2 (Classic & Rose Sondesh)*\n100% handcrafted with pure desi A2 cow milk:\n\n```\n+-----------------------+-------+-------+-------+\n| Item / Flavour        | 250g  | 500g  |  1kg  |\n+-----------------------+-------+-------+-------+\n| Classic / Rose        | ₹600  | ₹1100 | ₹2000 |\n+-----------------------+-------+-------+-------+\n* Box count: 9 pcs (250g) | 18 pcs (500g) | 36 pcs (1kg)\n```\n\nWhich flavour and pack size would you like to order?"
 
             elif has_rose and not has_classic:
                 target_images = [img_aamar_mishti, img_signature_sondesh]
-                formatted_text = "Our handcrafted *Rose Sondesh* 🌸 is made with fresh artisanal chhana infused with fragrant organic rose petals. Available in both collections:\n\n*Rose Sondesh Price Breakdown:*\n```\n+-------------------------------------+-------+-------+-------+\n| Collection                          | 250g  | 500g  |  1kg  |\n+-------------------------------------+-------+-------+-------+\n| Collection 1 — Aamar Mishti (Dairy) | ₹450  | ₹800  | ₹1500 |\n| Collection 2 — Signature (Desi A2)  | ₹600  | ₹1100 | ₹2000 |\n+-------------------------------------+-------+-------+-------+\n* Box count: 9 pcs (250g) | 18 pcs (500g) | 36 pcs (1kg)\n```\n\n• *Collection 1 (Aamar Mishti)*: Daily indulgence, good dairy milk, partially mechanised, made in-house at our kitchen.\n• *Collection 2 (Signature A2)*: Special occasions & gifting — made with pure desi A2 cow milk (not industrially processed), completely handcrafted end to end.\n\nWhich collection and pack size would you like to order (250g, 500g, or 1kg)?"
+                formatted_text = "Our handcrafted *Rose Sondesh* is made with fresh artisanal chhana infused with fragrant organic rose petals. Available in both collections:\n\n*Rose Sondesh Price Breakdown:*\n```\n+-------------------------------------+-------+-------+-------+\n| Collection                          | 250g  | 500g  |  1kg  |\n+-------------------------------------+-------+-------+-------+\n| Collection 1 — Aamar Mishti (Dairy) | ₹450  | ₹800  | ₹1500 |\n| Collection 2 — Signature (Desi A2)  | ₹600  | ₹1100 | ₹2000 |\n+-------------------------------------+-------+-------+-------+\n* Box count: 9 pcs (250g) | 18 pcs (500g) | 36 pcs (1kg)\n```\n\n• *Collection 1 (Aamar Mishti)*: Daily indulgence, good dairy milk, partially mechanised, made in-house at our kitchen.\n• *Collection 2 (Signature A2)*: Special occasions & gifting — made with pure desi A2 cow milk (not industrially processed), completely handcrafted end to end.\n\nWhich collection and pack size would you like to order (250g, 500g, or 1kg)?"
 
             elif has_classic and not has_rose:
                 target_images = [img_aamar_mishti, img_signature_sondesh]
-                formatted_text = "Our traditional *Classic Sondesh* 🌸 is made with fresh artisanal chhana and delicate aromatic cardamom. Available in both collections:\n\n*Classic Sondesh Price Breakdown:*\n```\n+-------------------------------------+-------+-------+-------+\n| Collection                          | 250g  | 500g  |  1kg  |\n+-------------------------------------+-------+-------+-------+\n| Collection 1 — Aamar Mishti (Dairy) | ₹450  | ₹800  | ₹1500 |\n| Collection 2 — Signature (Desi A2)  | ₹600  | ₹1100 | ₹2000 |\n+-------------------------------------+-------+-------+-------+\n* Box count: 9 pcs (250g) | 18 pcs (500g) | 36 pcs (1kg)\n```\n\n• *Collection 1 (Aamar Mishti)*: Daily indulgence, good dairy milk, partially mechanised, made in-house at our kitchen.\n• *Collection 2 (Signature A2)*: Special occasions & gifting — made with pure desi A2 cow milk (not industrially processed), completely handcrafted end to end.\n\nWhich collection and pack size would you like to order (250g, 500g, or 1kg)?"
+                formatted_text = "Our traditional *Classic Sondesh* is made with fresh artisanal chhana and delicate aromatic cardamom. Available in both collections:\n\n*Classic Sondesh Price Breakdown:*\n```\n+-------------------------------------+-------+-------+-------+\n| Collection                          | 250g  | 500g  |  1kg  |\n+-------------------------------------+-------+-------+-------+\n| Collection 1 — Aamar Mishti (Dairy) | ₹450  | ₹800  | ₹1500 |\n| Collection 2 — Signature (Desi A2)  | ₹600  | ₹1100 | ₹2000 |\n+-------------------------------------+-------+-------+-------+\n* Box count: 9 pcs (250g) | 18 pcs (500g) | 36 pcs (1kg)\n```\n\n• *Collection 1 (Aamar Mishti)*: Daily indulgence, good dairy milk, partially mechanised, made in-house at our kitchen.\n• *Collection 2 (Signature A2)*: Special occasions & gifting — made with pure desi A2 cow milk (not industrially processed), completely handcrafted end to end.\n\nWhich collection and pack size would you like to order (250g, 500g, or 1kg)?"
 
             else:
                 target_images = [img_aamar_mishti, img_signature_sondesh]
@@ -1676,7 +1699,7 @@ class DeterministicResponder:
                 veg_list = current_week.get("vegetarian", [])
                 if veg_list:
                     lines = [
-                        f"🌸 *Camellia Artisanal — This Week's Vegetarian Menu* 🌿",
+                        f"*Camellia Artisanal — This Week's Vegetarian Menu* 🌿",
                         f"_{week_name} ({service_window})_\n"
                     ]
                     for itm in veg_list:
@@ -1699,7 +1722,7 @@ class DeterministicResponder:
                 nonveg_list = current_week.get("non_vegetarian", [])
                 if nonveg_list:
                     lines = [
-                        f"🌸 *Camellia Artisanal — This Week's Non-Vegetarian Menu* 🍗",
+                        f"*Camellia Artisanal — This Week's Non-Vegetarian Menu* 🍗",
                         f"_{week_name} ({service_window})_\n"
                     ]
                     for itm in nonveg_list:
@@ -1722,7 +1745,7 @@ class DeterministicResponder:
                 bento_list = current_week.get("bengali_bento", []) or current_week.get("combos", [])
                 if bento_list:
                     lines = [
-                        f"🌸 *Camellia Artisanal — Bengali Bento Meals & Combos* 🍱",
+                        f"*Camellia Artisanal — Bengali Bento Meals & Combos* 🍱",
                         f"_{week_name} ({service_window})_\n"
                     ]
                     for b in bento_list:
@@ -1734,7 +1757,7 @@ class DeterministicResponder:
                     
                     lines.append("\n📦 *Packaging*: 100% plastic-free, eco-friendly cornstarch boxes.")
                     lines.append("🚚 *Delivery*: Across Delhi NCR from Sushant Arcade, Gurgaon.")
-                    lines.append("\nWhich Bento meal would you like to order? 🌸")
+                    lines.append("\nWhich Bento meal would you like to order?")
                     formatted_text = "\n".join(lines)
                 else:
                     formatted_text = default_response
@@ -1780,9 +1803,9 @@ class DeterministicResponder:
                     area = area_match.group(0).title()
                     if city_match:
                         area = f"{area}, {city_match.title()}"
-                    confirmation = f"Yes — {area} is well within our Delhi NCR delivery zone 🌸"
+                    confirmation = f"Yes — {area} is well within our Delhi NCR delivery zone"
                 else:
-                    confirmation = f"Yes — we deliver right across {city_match.title()} 🌸"
+                    confirmation = f"Yes — we deliver right across {city_match.title()}"
                 formatted_text = default_response.replace("Which area are you in?", confirmation)
 
             # Menu + delivery asked in one message ("can i get a menu for
@@ -1801,9 +1824,9 @@ class DeterministicResponder:
             session = session_memory.get_session(user_id or "default_user", channel or "default_channel")
             flv = session.get("facts", {}).get("order_draft", {}).get("flavour")
             if flv:
-                formatted_text = f"Yes! We already have your selected flavour (*{flv.title()}*) saved in your active session — no need to repeat it at all! 🌸 Which pack size (250g, 500g, or 1kg) and delivery address would you like to proceed with?"
+                formatted_text = f"Yes! We already have your selected flavour (*{flv.title()}*) saved in your active session — no need to repeat it at all! Which pack size (250g, 500g, or 1kg) and delivery address would you like to proceed with?"
             else:
-                formatted_text = "I don't have a flavour saved yet. Which flavour (Classic, Rose, Nolen Gur, Mango, Kesar, Jolbhora) would you like? 🌸"
+                formatted_text = "I don't have a flavour saved yet. Which flavour (Classic, Rose, Nolen Gur, Mango, Kesar, Jolbhora) would you like?"
 
         elif template_id == "artisanal_differentiation":
             target_images = [img_aamar_mishti, img_signature_sondesh]

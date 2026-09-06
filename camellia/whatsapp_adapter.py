@@ -1,7 +1,7 @@
 import httpx
 from typing import Dict, Any, Tuple, Optional
 from camellia.config import config
-from camellia.responder import responder
+from camellia.responder import responder, _strip_flower_emoji
 from camellia.database import db
 from camellia.escalator import escalator
 from camellia.monitoring import get_logger, delivery_monitor
@@ -126,25 +126,25 @@ class WhatsAppAdapter:
         """Generates dynamic, context-aware WhatsApp quick reply buttons (max 3 buttons)."""
         # Asked the customer what they meant — the buttons are the options offered.
         if template_id == "clarify_request":
-            return ["🌸 Sondesh", "🍱 Meals", "🚚 Delivery"]
+            return ["Sondesh", "🍱 Meals", "🚚 Delivery"]
         # The menu reply already shows the card and names the two ranges, so its
         # buttons continue that choice instead of offering the menu again.
         if template_id in ["know_more", "product_overview", "menu_general"]:
-            return ["🌸 Sondesh", "🍱 Meals", "🛍️ Place Order"]
+            return ["Sondesh", "🍱 Meals", "🛍️ Place Order"]
         # Asked "Veg or Non-Veg?" — the buttons must be the two answers.
         if template_id in ["context_meal_price_followup", "savoury_food_intro", "context_veg_followup"]:
             return ["🌿 Veg Menu", "🍗 Non-Veg Menu", "🛍️ Place Order"]
         if not was_matched or template_id in ["greeting", "bot_capabilities", "bot_identity"]:
-            return ["🌸 See Menu", "🍫 Sondesh Prices", "🛍️ Place Order"]
+            return ["See Menu", "🍫 Sondesh Prices", "🛍️ Place Order"]
         elif template_id in ["pricing_general", "pricing_aamar", "pricing_signature", "nolen_gur_aamar", "nolen_gur_signature", "order_calculation"]:
             return ["🛍️ Place Order", "📦 Delivery Times", "👨‍🍳 Talk to Chef"]
         elif template_id in ["delivery_time", "delivery_faq", "delivery_area"]:
-            return ["🌸 See Menu", "🛍️ Place Order", "📍 Kitchen Location"]
+            return ["See Menu", "🛍️ Place Order", "📍 Kitchen Location"]
         elif template_id in ["order_next_steps", "how_to_order"]:
             return ["📋 Confirm Details", "💳 Payment Info", "📞 Call Kitchen"]
         elif template_id in ["festive_gifting", "custom_order"]:
             return ["🎁 Gift Hampers", "🛍️ Custom Box", "📞 Speak to Chef"]
-        return ["🌸 See Menu", "🍫 Sondesh Prices", "🛍️ Place Order"]
+        return ["See Menu", "🍫 Sondesh Prices", "🛍️ Place Order"]
 
     def _public_url(self, path: str) -> str:
         """Converts a relative image path to a full public URL Meta can fetch.
@@ -175,10 +175,14 @@ class WhatsAppAdapter:
 
     def send_message(self, recipient_phone: str, text_body: str, image_url=None, buttons=None) -> Dict[str, Any]:
         """Sends a text or interactive button message plus zero or more image cards via Meta WhatsApp Cloud API."""
-        text_body = (text_body or "").replace("🌸", "")
-        buttons = [str(button).replace("🌸", "") for button in (buttons or [])]
+        # Last stop before Meta. The source text carries no flowers any more,
+        # but a refined reply or a staff-written learned answer can still
+        # arrive with one, and this is the only place every outbound WhatsApp
+        # message passes through.
+        text_body = _strip_flower_emoji(text_body or "")
+        buttons = [_strip_flower_emoji(str(button)) for button in (buttons or [])]
         pairs = self._normalise_images(image_url)
-        captioned = [(self._public_url(u), (c or "").replace("🌸", "")) for u, c in pairs]
+        captioned = [(self._public_url(u), _strip_flower_emoji(c or "")) for u, c in pairs]
         images = [u for u, _ in captioned]
         # When cards carry their own descriptions, they lead and the closing
         # question follows, so each card arrives next to the detail it belongs to

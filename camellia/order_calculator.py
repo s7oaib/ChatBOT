@@ -486,7 +486,7 @@ class OrderCalculator:
 
             receipt = (
                 f"{removal_prefix}"
-                f"💐 *CAMELLIA ARTISANAL — ORDER DRAFT RECEIPT*\n"
+                f"🧾 *CAMELLIA ARTISANAL — ORDER DRAFT RECEIPT*\n"
                 f"─────────────────────────────\n"
                 f"• *Collection:* {coll_title}\n"
                 f"• *Item:* {item_title}\n"
@@ -532,7 +532,7 @@ class OrderCalculator:
             items_formatted = "\n".join(item_lines)
             receipt = (
                 f"{removal_prefix}"
-                f"💐 *CAMELLIA ARTISANAL — ORDER DRAFT RECEIPT*\n"
+                f"🧾 *CAMELLIA ARTISANAL — ORDER DRAFT RECEIPT*\n"
                 f"─────────────────────────────\n"
                 f"{items_formatted}\n"
                 f"─────────────────────────────\n"
