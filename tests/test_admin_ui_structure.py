@@ -169,3 +169,20 @@ def test_status_pills_wrap_as_units(page):
     css = page[page.index(".status-items"):]
     css = css[:css.index("}") + 1]
     assert "flex-wrap: wrap" in css, "status pills cannot wrap onto a second row"
+
+
+def test_the_dashboard_is_never_cached():
+    """
+    It shipped with no Cache-Control, no ETag and no Last-Modified, so a browser
+    could keep serving the copy it already had. A deployed dashboard change then
+    looks like a failed deploy — the server has the new page, the phone does not.
+    """
+    resp = client.get("/admin")
+    cache = resp.headers.get("cache-control", "")
+    assert "no-store" in cache, f"dashboard is cacheable: {cache!r}"
+
+
+def test_both_dashboard_routes_send_the_same_no_cache_headers():
+    """/admin and /admin/dashboard are the same page; one must not be stale."""
+    for path in ("/admin", "/admin/dashboard"):
+        assert "no-store" in client.get(path).headers.get("cache-control", ""), path

@@ -3127,7 +3127,21 @@ Non-Veg:
 </body>
 </html>
 """
-    return HTMLResponse(content=html_content)
+    # The dashboard is one HTML document with its JavaScript inline, and it
+    # shipped with no cache headers at all - no Cache-Control, no ETag, no
+    # Last-Modified. A browser is then free to keep serving the copy it already
+    # has, which is exactly what makes a deployed dashboard change look like a
+    # failed deploy: the server has the new page, the kitchen's phone does not.
+    # It is rendered per request anyway, so there is nothing to gain by caching
+    # it and a support call to lose.
+    return HTMLResponse(
+        content=html_content,
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
 
 # --------------------------------------------------------------------------
 # Interactive Web Chat Tester Endpoint (/chat)
