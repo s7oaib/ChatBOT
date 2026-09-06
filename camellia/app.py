@@ -1135,6 +1135,44 @@ async def upload_menu_image(
 
     return result
 
+@app.post("/admin/menu/archive/{flyer_id}/remove")
+async def remove_archived_flyer(flyer_id: str, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    """
+    Deletes one archived weekly menu, so customers stop being offered it.
+
+    Retention drops these after two weeks on its own, but a menu can be wrong
+    long before it is old, and until now waiting was the only option.
+    """
+    require_admin(x_admin_key, x_admin_pin)
+    try:
+        label = weekly_flyer.remove_from_archive(flyer_id)
+    except ValueError as exc:
+        # The live flyer is not history; refusing by name beats a 500.
+        raise HTTPException(status_code=400, detail=str(exc))
+    if label is None:
+        raise HTTPException(status_code=404, detail="No archived menu with that id")
+    return {"status": "success", "removed": label}
+
+
+@app.post("/admin/menu/archive/{flyer_id}/replace")
+async def replace_archived_flyer(flyer_id: str, file: UploadFile = File(...), x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    """
+    Swaps the photo on one archived menu, keeping its date and its place.
+
+    Re-uploading through the main form would make it this week's menu, which
+    is not what fixing a badly shot old flyer means.
+    """
+    require_admin(x_admin_key, x_admin_pin)
+    image_bytes = await file.read()
+    try:
+        updated = weekly_flyer.replace_archived(flyer_id, image_bytes, file.content_type or "image/jpeg")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if updated is None:
+        raise HTTPException(status_code=404, detail="No archived menu with that id")
+    return {"status": "success", "week_of": updated.get("week_of"), "url": updated.get("url")}
+
+
 @app.post("/admin/menu/reset-defaults")
 def reset_menu_defaults(x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
     """Resets weekly menu dishes to default Bengal-rooted culinary baseline and reloads."""
@@ -1715,6 +1753,8 @@ def get_admin_dashboard():
            price, so a mis-tap lands on the badge and not on a deletion. */
         .menu-card-footer { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-top: 8px; }
         .btn-remove-dish { padding: 5px 12px; font-size: 0.76rem; }
+        /* Sized to sit under an 84px thumbnail without wrapping the pair. */
+        .btn-archive-action { padding: 3px 7px; font-size: 0.66rem; border-radius: 6px; }
         /* Editable cells in the pre-publish review table. Bordered on purpose:
            a borderless input reads as printed text, and the client has to be
            able to tell at a glance that these values can be corrected. */
@@ -2719,12 +2759,20 @@ Non-Veg:
                               + '<div style="display: flex; gap: 10px; flex-wrap: wrap;">';
                         archive.forEach(function (entry) {
                             const label = entry.week_of || 'undated';
+                            const safeLabel = escapeHtml(label);
+                            const id = escapeHtml(entry.id || '');
                             a += '<div style="text-align: center; font-size: 0.7rem; color: #555;">'
                                + '<a href="' + entry.url + '" target="_blank" rel="noopener">'
-                               + '<img src="' + entry.url + '" alt="Menu ' + label + '" '
+                               + '<img src="' + entry.url + '" alt="Menu ' + safeLabel + '" '
                                + 'style="width: 84px; height: 84px; object-fit: cover; '
                                + 'border-radius: 6px; border: 1px solid #ddd;"></a>'
-                               + '<div style="margin-top: 3px; max-width: 84px;">' + label + '</div>'
+                               + '<div style="margin-top: 3px; max-width: 84px;">' + safeLabel + '</div>'
+                               + '<div style="display: flex; gap: 4px; margin-top: 4px; justify-content: center;">'
+                               + '<button class="btn-secondary btn-archive-action" '
+                               + 'onclick="replaceArchivedFlyer(\'' + id + '\')">Replace</button>'
+                               + '<button class="btn-danger btn-archive-action" '
+                               + 'onclick="removeArchivedFlyer(\'' + id + '\', \'' + safeLabel + '\')">Remove</button>'
+                               + '</div>'
                                + '</div>';
                         });
                         a += '</div>';
@@ -2836,6 +2884,55 @@ Non-Veg:
             } catch (e) {
                 alert('Connection error - nothing was removed.');
             }
+        }
+
+        async function removeArchivedFlyer(flyerId, label) {
+            if (!confirm(`Delete the menu for ${label}? Customers who ask for previous menus will stop being shown it. This cannot be undone.`)) return;
+            try {
+                const resp = await fetch(`/admin/menu/archive/${encodeURIComponent(flyerId)}/remove`, {
+                    method: 'POST',
+                    headers: getAuthHeaders()
+                });
+                const data = await resp.json();
+                if (resp.ok && data.status === 'success') {
+                    loadActiveMenu();
+                } else {
+                    alert('Not removed: ' + (data.detail || 'the server refused the change.'));
+                }
+            } catch (e) {
+                alert('Connection error - nothing was removed.');
+            }
+        }
+
+        // Replace keeps the entry's date and its two-week clock. Uploading
+        // through the main form instead would make this old flyer the menu
+        // customers are served this week.
+        function replaceArchivedFlyer(flyerId) {
+            const picker = document.createElement('input');
+            picker.type = 'file';
+            picker.accept = 'image/jpeg,image/png,image/webp';
+            picker.onchange = async () => {
+                const file = picker.files && picker.files[0];
+                if (!file) return;
+                const body = new FormData();
+                body.append('file', file);
+                try {
+                    const resp = await fetch(`/admin/menu/archive/${encodeURIComponent(flyerId)}/replace`, {
+                        method: 'POST',
+                        headers: getAuthHeaders(),
+                        body: body
+                    });
+                    const data = await resp.json();
+                    if (resp.ok && data.status === 'success') {
+                        loadActiveMenu();
+                    } else {
+                        alert('Not replaced: ' + (data.detail || 'the server refused the change.'));
+                    }
+                } catch (e) {
+                    alert('Connection error - nothing was replaced.');
+                }
+            };
+            picker.click();
         }
 
         async function confirmResetDefaults() {

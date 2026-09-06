@@ -289,3 +289,84 @@ def clear() -> None:
             os.remove(_archive_state_path())
     except OSError as e:
         log.warning("Could not clear flyer archive: %s", e)
+
+
+def remove_from_archive(flyer_id: str) -> Optional[str]:
+    """
+    Deletes one archived flyer and its photo. Returns its label, or None.
+
+    Retention drops these automatically after two weeks, but a menu can be
+    wrong long before it is old — a cancelled week, a flyer photographed
+    badly, a price the client has since changed. Until now the only way to
+    take one back was to wait it out, and customers asking for "previous
+    menus" kept being shown it in the meantime.
+
+    Removing the live flyer is refused. It is not history yet, and deleting it
+    here would leave the bot serving a photo whose archive entry is gone; the
+    Remove control on the current menu is a different action.
+    """
+    current_id = (get() or {}).get("id")
+    if flyer_id and flyer_id == current_id:
+        raise ValueError("that is the menu customers are being shown right now")
+
+    entries = _read_archive()
+    match = next((e for e in entries if e.get("id") == flyer_id), None)
+    if match is None:
+        return None
+
+    filename = os.path.basename(match.get("url", ""))
+    if filename:
+        try:
+            os.remove(os.path.join(archive_dir(), filename))
+        except OSError:
+            # The row goes either way. A missing file is already the outcome
+            # the client asked for, and keeping the row would show a broken
+            # thumbnail forever.
+            pass
+
+    _write_archive([e for e in entries if e.get("id") != flyer_id])
+    label = str(match.get("week_of") or "undated menu")
+    log.info("Removed archived flyer %s (%s)", flyer_id, label)
+    return label
+
+
+def replace_archived(flyer_id: str, image_bytes: bytes, mime_type: str) -> Optional[Dict[str, Any]]:
+    """
+    Swaps the photo on one archived flyer, keeping its place and its label.
+
+    For the flyer that was right but photographed wrong: a glare, a cropped
+    corner, the wrong one of two pictures taken that morning. Re-uploading
+    through the main form would make it this week's menu instead, which is not
+    what the client means by fixing an old one.
+
+    The entry keeps its id, its week and its upload time, so it does not jump
+    to the front of "previous menus" and its two-week clock is not restarted.
+    """
+    if not image_bytes:
+        raise ValueError("no image data received")
+
+    entries = _read_archive()
+    match = next((e for e in entries if e.get("id") == flyer_id), None)
+    if match is None:
+        return None
+
+    ext = _EXT_BY_MIME.get((mime_type or "").lower(), "jpeg")
+    os.makedirs(archive_dir(), exist_ok=True)
+    old_name = os.path.basename(match.get("url", ""))
+    new_name = f"flyer-{flyer_id}.{ext}"
+
+    with open(os.path.join(archive_dir(), new_name), "wb") as f:
+        f.write(image_bytes)
+
+    # Only when the extension changed, so a jpeg replaced by a png does not
+    # leave the old file orphaned in the directory forever.
+    if old_name and old_name != new_name:
+        try:
+            os.remove(os.path.join(archive_dir(), old_name))
+        except OSError:
+            pass
+
+    updated = {**match, "url": f"/uploads/archive/{new_name}"}
+    _write_archive([updated if e.get("id") == flyer_id else e for e in entries])
+    log.info("Replaced the photo on archived flyer %s", flyer_id)
+    return updated

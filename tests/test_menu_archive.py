@@ -177,3 +177,86 @@ def test_an_archive_write_failure_never_costs_the_operator_the_upload():
 
     assert state["url"].endswith("weekly_flyer.jpeg")
     assert weekly_flyer.get() is not None
+
+
+def test_an_archived_menu_can_be_removed_before_it_ages_out():
+    """
+    Retention drops these after two weeks, but a menu can be wrong long before
+    it is old — a cancelled week, a price since changed. Waiting it out was
+    the only option, and customers asking for previous menus kept seeing it.
+    """
+    weekly_flyer.save(b"\xff\xd8\xffX", "image/jpeg", week_of="1st - 7th July, 2026")
+    weekly_flyer.save(b"\xff\xd8\xffX", "image/jpeg", week_of="8th - 14th July, 2026")
+
+    archived = weekly_flyer.list_archive()
+    assert archived, "nothing was archived to remove"
+    victim = archived[0]
+
+    label = weekly_flyer.remove_from_archive(victim["id"])
+    assert label == victim["week_of"]
+
+    remaining = [e["id"] for e in weekly_flyer.list_archive()]
+    assert victim["id"] not in remaining
+    # The photo goes with the row, not just the listing.
+    gone = os.path.join(weekly_flyer.archive_dir(), os.path.basename(victim["url"]))
+    assert not os.path.exists(gone)
+
+
+def test_the_live_menu_cannot_be_deleted_through_the_archive():
+    """
+    It is not history yet. Deleting it here would leave the bot serving a photo
+    whose archive row no longer exists.
+    """
+    current = weekly_flyer.save(b"\xff\xd8\xffX", "image/jpeg", week_of="15th - 21st July, 2026")
+    with pytest.raises(ValueError):
+        weekly_flyer.remove_from_archive(current["id"])
+    assert weekly_flyer.get()["id"] == current["id"]
+
+
+def test_removing_a_menu_that_is_already_gone_reports_nothing_removed():
+    """A double-click must not read as success."""
+    assert weekly_flyer.remove_from_archive("no-such-flyer-id") is None
+
+
+def test_replacing_an_archived_photo_keeps_its_date_and_its_place():
+    """
+    For the flyer that was right but photographed wrong. Re-uploading through
+    the main form would make it this week's menu instead.
+    """
+    weekly_flyer.save(b"\xff\xd8\xffX", "image/jpeg", week_of="22nd - 28th July, 2026")
+    weekly_flyer.save(b"\xff\xd8\xffX", "image/jpeg", week_of="29th July - 4th August, 2026")
+
+    target = weekly_flyer.list_archive()[0]
+    updated = weekly_flyer.replace_archived(target["id"], b"\xff\xd8\xffY", "image/jpeg")
+
+    assert updated["id"] == target["id"]
+    assert updated["week_of"] == target["week_of"]
+    # Not restarted: the two-week clock must keep running from the original.
+    assert updated["uploaded_at"] == target["uploaded_at"]
+
+    listed = {e["id"]: e for e in weekly_flyer.list_archive()}
+    assert listed[target["id"]]["url"] == updated["url"]
+    assert os.path.exists(
+        os.path.join(weekly_flyer.archive_dir(), os.path.basename(updated["url"]))
+    )
+
+
+def test_replacing_a_missing_or_empty_flyer_is_refused():
+    weekly_flyer.save(b"\xff\xd8\xffX", "image/jpeg", week_of="5th - 11th August, 2026")
+    assert weekly_flyer.replace_archived("no-such-flyer-id", b"\xff\xd8\xffY", "image/jpeg") is None
+
+    archived = weekly_flyer.list_archive()
+    if archived:
+        with pytest.raises(ValueError):
+            weekly_flyer.replace_archived(archived[0]["id"], b"", "image/jpeg")
+
+
+def test_the_dashboard_offers_remove_and_replace_on_each_archived_menu():
+    from fastapi.testclient import TestClient
+    from camellia.app import app
+
+    page = TestClient(app).get("/admin").text
+    assert "async function removeArchivedFlyer" in page
+    assert "function replaceArchivedFlyer" in page
+    assert "/admin/menu/archive/" in page
+    assert "btn-archive-action" in page
