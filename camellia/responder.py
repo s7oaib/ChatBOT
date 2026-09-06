@@ -1002,9 +1002,28 @@ class DeterministicResponder:
                     score += 100
                 elif tmpl_id == "delivery_out_of_area" and (
                     re.search(r'\b(deliver(y|ing)?|courier|ship(ping)?|send|order|to|in)\b.*\b(bangalore|bengaluru|mumbai|kolkata|pune|hyderabad|chennai|jaipur|ahmedabad|chandigarh|lucknow)\b', lowered_text) or
-                    re.search(r'\b(bangalore|bengaluru|mumbai|kolkata|pune|hyderabad|chennai|jaipur|ahmedabad|chandigarh|lucknow)\b.*\b(deliver(y|ing)?|courier|ship(ping)?|send|order)\b', lowered_text) or
-                    any(c in lowered_text for c in ["bangalore", "bengaluru", "outside delhi", "outside ncr", "other cities", "other city", "out of delhi", "out of ncr", "out of state", "interstate"])
+                    re.search(r'\b(bangalore|bengaluru|mumbai|kolkata|pune|hyderabad|chennai|jaipur|ahmedabad|chandigarh|lucknow)\b.*\b(deliver(y|ing)?|courier|ship(ping)?|send|order)\b', lowered_text)
                 ):
+                    # Above every flavour and collection boost, deliberately.
+                    # "Can you deliver 2 boxes of Nolen Gur Sondesh to
+                    # Bangalore?" names a flavour and a destination we cannot
+                    # ship to, and the flavour table scored 150 against this
+                    # answer's 50 — so the customer was quoted a price grid and
+                    # never told the sondesh cannot leave Delhi NCR. Naming a
+                    # product does not make an unservable address servable, and
+                    # a price for an order that cannot happen is the worse
+                    # failure of the two.
+                    score += 200
+                elif tmpl_id == "delivery_out_of_area" and any(
+                    c in lowered_text for c in [
+                        "bangalore", "bengaluru", "outside delhi", "outside ncr",
+                        "other cities", "other city", "out of delhi", "out of ncr",
+                        "out of state", "interstate",
+                    ]
+                ):
+                    # A bare mention with no delivery ask stays a weak nudge, so
+                    # "do you use Bangalore vendors" does not become a shipping
+                    # refusal.
                     score += 50
                 elif tmpl_id == "combo_bento" and any(b in lowered_text for b in ["bento", "combo"]):
                     score += 100

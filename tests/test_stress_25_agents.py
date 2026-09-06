@@ -21,6 +21,25 @@ from camellia.config import config
 
 from camellia.database import db
 
+def _plain(text: str) -> str:
+    """
+    Flattens typographic spacing so an assertion can be written in ASCII.
+
+    The approved copy uses U+202F (narrow no-break space) and U+2011
+    (non-breaking hyphen) to stop "10:00 AM" and "all-women" breaking across
+    lines on a phone. That is a deliberate choice about how the message looks,
+    not about what it says, so a test asserting the wording should not depend
+    on it.
+    """
+    return (
+        (text or "")
+        .replace("\u202f", " ")
+        .replace("\u00a0", " ")
+        .replace("\u2011", "-")
+        .replace("\u2010", "-")
+    )
+
+
 class Test25AgentStressScenarios(unittest.TestCase):
     def setUp(self):
         # Reset session memory and initialize DB before each agent test
@@ -175,7 +194,15 @@ class Test25AgentStressScenarios(unittest.TestCase):
             # 10b: Ad Referral Click -> Allowed
             resp_ad = self.responder.respond("Hi send menu", user_id=user_id, channel=channel, referral_source="ADS", referral_ad_id="ad_diwali_123")
             self.assertTrue(resp_ad.was_matched)
-            self.assertIn("Camellia Artisanal", resp_ad.text)
+            # This test is about the gate: the identical message is silenced
+            # organically and answered after an ad click. It used to assert the
+            # brand name appeared in the reply, which pinned it to whichever
+            # template "Hi send menu" happened to hit — today the clarifier,
+            # which asks whether they want Sondesh or Meals and names neither
+            # the brand nor a wrong thing. Asserting a real reply came back
+            # keeps the gate covered without re-testing template copy.
+            self.assertNotEqual(resp_ad.template_id, "ad_gate_blocked")
+            self.assertTrue(resp_ad.text.strip(), "an ad-referred DM got no reply")
         finally:
             config.BYPASS_AD_GATE = orig_bypass
 
@@ -197,8 +224,8 @@ class Test25AgentStressScenarios(unittest.TestCase):
         resp = self.responder.respond("Can I pick up my order from your kitchen? What is the address and timings?", user_id=user_id, channel=channel)
         self.assertTrue(resp.was_matched)
         self.assertEqual(resp.template_id, "GUARD_pickup_address_hours")
-        self.assertIn("Sushant Arcade", resp.text)
-        self.assertIn("10:00 AM – 7:30 PM", resp.text)
+        self.assertIn("Sushant Arcade", _plain(resp.text))
+        self.assertIn("10:00 AM – 7:30 PM", _plain(resp.text))
 
     def test_agent_13_artisanal_differentiation(self):
         """Agent 13: Customer asking what makes Camellia special."""
@@ -209,7 +236,7 @@ class Test25AgentStressScenarios(unittest.TestCase):
         self.assertTrue(resp.was_matched)
         self.assertIn("100% pure dairy", resp.text)
         self.assertIn("Nolen Gur", resp.text)
-        self.assertIn("all-women kitchen", resp.text)
+        self.assertIn("all-women kitchen", _plain(resp.text))
 
     def test_agent_14_custom_assorted_box(self):
         """Agent 14: Mixing flavours in a 500g box (Escalated per custom box policy)."""
@@ -437,7 +464,12 @@ class Test25AgentStressScenarios(unittest.TestCase):
         sess_after = session_memory.get_session(gap_uid, channel)
         self.assertEqual(sess_after["facts"]["name"], "Priya")
         self.assertIsNone(sess_after["facts"]["order_draft"]["flavour"])
-        self.assertIn("*P.S.* We also make & send Bengali mishti", resp2.text)
+        # The approved line reads "handcraft", not "make & send"; the copy was
+        # changed and this assertion was never updated. Matching the part that
+        # carries the meaning rather than the exact phrasing, so the next
+        # wording tweak does not fail a test about cross-sell behaviour.
+        self.assertIn("*P.S.*", resp2.text)
+        self.assertIn("Bengali mishti", resp2.text)
 
 
 if __name__ == "__main__":

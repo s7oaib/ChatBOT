@@ -1,5 +1,5 @@
 {
-  "seed_version": 3,
+  "seed_version": 4,
   "matching_rules": {
     "guard_precedence": "GUARD_ templates (id starting with GUARD_) have absolute precedence over any answer template. When matched, they escalate immediately with response: null to prevent unverified brand statements.",
     "how_it_works": "Each template has 'triggers' (keywords/phrases). If a customer message contains ANY trigger from a template's list, that template fires. If multiple templates match, the one with the MOST matched keywords wins. If nothing matches confidently, escalate to human — never guess.",
@@ -19,7 +19,7 @@
       ],
       "responses": [
         "Hi! 👋 Welcome to Camellia Artisanal — Bengal-rooted, artisanal food. What can we help you discover today?",
-        "Hello from Camellia Are you in the mood for Sondesh, a Bengali meal, or a little menu browsing?",
+        "Hello from Camellia Artisanal! Are you in the mood for Sondesh, a Bengali meal, or a little menu browsing?",
         "Hey there from Camellia Artisanal! Our chhana is fresh, our flavours are thoughtful, and our menu is ready when you are. 😊",
         "Namaste from Camellia Artisanal! Shall we explore artisanal Sondesh or this week's Bengali bento menu?",
         "Hi! You’ve reached Camellia Artisanal — where Bengal meets small-batch craft. What are you curious about?",
@@ -27,7 +27,7 @@
         "Hey from Camellia Artisanal! Freshly made Bengali goodness is on the other side of your next question — what shall we look at?",
         "Hi there from Camellia Artisanal! Sondesh, savoury meals, delivery details — point me toward what you’re craving.",
         "Hello hello from Camellia Artisanal! 😊 Are we talking mishti today, or should I show you the weekly Bengali menu?",
-        "Hey from Camellia Artisanal What would make your day sweeter — a flavour guide or the menu?"
+        "Hey from Camellia Artisanal! What would make your day sweeter — a flavour guide or the menu?"
       ],
       "escalate": false
     },

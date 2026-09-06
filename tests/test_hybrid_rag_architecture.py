@@ -5,6 +5,40 @@ from camellia.responder import responder
 from camellia.rag_fallback import rag_fallback_engine, RAGFallbackEngine, MEDIUM_CONFIDENCE_THRESHOLD
 from camellia.database import db
 
+def _plain(text: str) -> str:
+    """
+    Flattens typographic spacing so an assertion can be written in ASCII.
+
+    The kitchen hours are written with U+202F narrow no-break spaces so
+    "10:00 AM" cannot break across two lines on a phone. That is a choice
+    about how the answer looks, not what it says.
+    """
+    return (
+        (text or "")
+        .replace("\u202f", " ")
+        .replace("\u00a0", " ")
+        .replace("\u2011", "-")
+        .replace("\u2010", "-")
+    )
+
+
+def _plain(text: str) -> str:
+    """
+    Flattens typographic spacing so an assertion can be written in ASCII.
+
+    The kitchen hours are written with U+202F narrow no-break spaces so
+    "10:00 AM" cannot break across two lines on a phone. That is a choice
+    about how the answer looks, not what it says.
+    """
+    return (
+        (text or "")
+        .replace("\u202f", " ")
+        .replace("\u00a0", " ")
+        .replace("\u2011", "-")
+        .replace("\u2010", "-")
+    )
+
+
 class TestHybridRAGArchitecture(unittest.TestCase):
     """
     Comprehensive regression test suite for Hybrid Deterministic-RAG Architecture
@@ -23,8 +57,8 @@ class TestHybridRAGArchitecture(unittest.TestCase):
         
         self.assertTrue(was_matched)
         self.assertIsNotNone(tmpl_id)
-        self.assertIn("10:00 AM", text)
-        self.assertIn("7:30 PM", text)
+        self.assertIn("10:00 AM", _plain(text))
+        self.assertIn("7:30 PM", _plain(text))
 
     def test_scenario_b_unknown_query_with_relevant_source(self):
         """Scenario B: Unknown query with relevant source context creates candidate template with PENDING_APPROVAL status, does NOT auto-publish."""

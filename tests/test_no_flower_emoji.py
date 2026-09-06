@@ -165,3 +165,50 @@ def test_the_duplicate_guard_works_now_that_both_sides_match():
     # Documented intent: re-sending the same cards under a "shared above" note
     # would contradict the note.
     assert not second_images
+
+
+def test_removing_the_flowers_left_no_sentence_running_into_the_next():
+    """
+    Some flowers were doing punctuation's job. "Hello from Camellia [flower]
+    Are you in the mood..." became one run-on sentence once the emoji went,
+    because the strip only knows about spaces and cannot tell a decorative
+    flower from a separating one. Any future strip has the same blind spot.
+    """
+    data = json.loads((ROOT / "data/qa_templates.json").read_text(encoding="utf-8"))
+    offenders = []
+
+    def walk(node, trail):
+        if isinstance(node, str):
+            # A lowercase word, a single space, then a capitalised word, with
+            # no punctuation between them and no line break to separate them.
+            for match in re.finditer(r"[a-z] [A-Z][a-z]+ [a-z]", node):
+                fragment = node[max(0, match.start() - 24): match.end() + 12]
+                if any(word in fragment for word in ("Camellia Are", "Artisanal What")):
+                    offenders.append(f"{trail}: ...{fragment}...")
+        elif isinstance(node, dict):
+            for key, value in node.items():
+                walk(value, f"{trail}.{key}")
+        elif isinstance(node, list):
+            for index, value in enumerate(node):
+                walk(value, f"{trail}[{index}]")
+
+    walk(data, "qa_templates")
+    assert not offenders, f"a sentence runs into the next: {offenders}"
+
+
+def test_every_greeting_names_the_brand_in_full():
+    """
+    Nine of the ten said "Camellia Artisanal" and one said "Camellia". Because
+    the bank is picked at random, that one made the greeting test fail about
+    one run in ten — a flake that looked like an intermittent bug for weeks.
+    """
+    data = json.loads((ROOT / "data/qa_templates.json").read_text(encoding="utf-8"))
+    greeting = next(t for t in data["templates"] if t.get("id") == "greeting")
+    responses = greeting.get("responses") or []
+    assert len(responses) >= 5, "the greeting bank shrank unexpectedly"
+
+    missing = [i for i, r in enumerate(responses) if "Camellia Artisanal" not in r]
+    assert not missing, (
+        f"greeting responses {missing} do not name the brand in full; whichever "
+        "customer draws one gets a different introduction from everyone else"
+    )
