@@ -10,7 +10,7 @@ from pathlib import Path
 from fastapi import FastAPI, Request, Response, Query, Header, HTTPException, File, UploadFile, BackgroundTasks
 from fastapi.responses import PlainTextResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
@@ -1458,6 +1458,17 @@ async def update_menu(request: Request, x_admin_key: Optional[str] = Header(None
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON body")
 
+    # Validated out here on purpose: the try below turns every exception into a
+    # 500, which would bury the 400 that names the row the client must fix.
+    veg_items = (
+        _reviewed_menu_items(body["vegetarian"], "vegetarian")
+        if isinstance(body.get("vegetarian"), list) else None
+    )
+    nonveg_items = (
+        _reviewed_menu_items(body["non_vegetarian"], "non_vegetarian")
+        if isinstance(body.get("non_vegetarian"), list) else None
+    )
+
     menu_path = config.MENU_JSON_PATH
     try:
         with open(menu_path, "r", encoding="utf-8") as f:
@@ -1467,10 +1478,10 @@ async def update_menu(request: Request, x_admin_key: Optional[str] = Header(None
             current_week = menu_data["weekly_menus"][-1]
             if "week" in body:
                 current_week["week"] = body["week"]
-            if "vegetarian" in body and isinstance(body["vegetarian"], list):
-                current_week["vegetarian"] = body["vegetarian"]
-            if "non_vegetarian" in body and isinstance(body["non_vegetarian"], list):
-                current_week["non_vegetarian"] = body["non_vegetarian"]
+            if veg_items is not None:
+                current_week["vegetarian"] = veg_items
+            if nonveg_items is not None:
+                current_week["non_vegetarian"] = nonveg_items
 
             with open(menu_path, "w", encoding="utf-8") as f:
                 json.dump(menu_data, f, indent=2, ensure_ascii=False)
@@ -1501,6 +1512,88 @@ async def parse_menu_card(request: Request, x_admin_key: Optional[str] = Header(
 
     result = menu_parser.parse_and_update_menu(raw_text)
     return result
+
+
+@app.post("/admin/menu/preview-text")
+async def preview_menu_text(request: Request, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    """
+    Reads dishes out of pasted text and returns them WITHOUT touching menu.json.
+
+    The dashboard used to parse and publish in one press, so a misread price
+    was being quoted to customers before anyone had seen it. This is the read
+    half on its own: the client checks the rows, fixes them, and publishes
+    through /admin/update-menu when they are right.
+    """
+    require_admin(x_admin_key, x_admin_pin)
+    try:
+        body = await request.json()
+        raw_text = body.get("raw_text", "")
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    if not raw_text or not raw_text.strip():
+        raise HTTPException(status_code=400, detail="raw_text cannot be empty")
+
+    parsed = menu_parser.parse_menu_text(raw_text)
+    veg = parsed.get("vegetarian", []) or []
+    nonveg = parsed.get("non_vegetarian", []) or []
+    if not veg and not nonveg:
+        return {
+            "status": "failed",
+            "reason": "Could not find any dish with a price in that text.",
+            "parsed": parsed,
+        }
+    return {
+        "status": "success",
+        "parsed": {"vegetarian": veg, "non_vegetarian": nonveg},
+        "vegetarian_count": len(veg),
+        "non_vegetarian_count": len(nonveg),
+    }
+
+
+def _reviewed_menu_items(raw: Any, field: str) -> List[Dict[str, Any]]:
+    """
+    Validates dishes coming back from the dashboard's review table.
+
+    The client can now retype every field before publishing, so this is the
+    last thing standing between a typo and the prices customers are quoted. A
+    bad row is refused by name rather than dropped: silently skipping it would
+    report success while the dish never reached the menu.
+
+    description and quantity are only carried through when they have content,
+    so a hand-added dish is stored exactly as sparse as it was entered instead
+    of gaining empty keys the menu renderer would print as blanks.
+    """
+    if not isinstance(raw, list):
+        raise HTTPException(status_code=400, detail=f"'{field}' must be a list of dishes")
+
+    cleaned: List[Dict[str, Any]] = []
+    for index, entry in enumerate(raw):
+        if not isinstance(entry, dict):
+            raise HTTPException(status_code=400, detail=f"{field}[{index}] is not a dish")
+        name = str(entry.get("item") or "").strip()
+        if not name:
+            raise HTTPException(status_code=400, detail=f"{field}[{index}] has no dish name")
+        try:
+            price = int(float(entry.get("price_inr")))
+        except (TypeError, ValueError):
+            raise HTTPException(
+                status_code=400, detail=f"{field}[{index}] ({name}) has no readable price"
+            )
+        if price <= 0:
+            raise HTTPException(
+                status_code=400, detail=f"{field}[{index}] ({name}) is priced at {price}"
+            )
+        item: Dict[str, Any] = {"item": name, "price_inr": price}
+        description = str(entry.get("description") or "").strip()
+        quantity = str(entry.get("quantity") or "").strip()
+        if description:
+            item["description"] = description
+        if quantity:
+            item["quantity"] = quantity
+        cleaned.append(item)
+    return cleaned
+
 
 @app.get("/admin", response_class=HTMLResponse)
 @app.get("/admin/dashboard", response_class=HTMLResponse)
@@ -1618,6 +1711,11 @@ def get_admin_dashboard():
         .dot.green { background: var(--success); box-shadow: 0 0 8px rgba(16,185,129,0.5); }
         .dot.gold { background: var(--gold); }
         .dot.red { background: var(--danger); }
+        /* Editable cells in the pre-publish review table. Bordered on purpose:
+           a borderless input reads as printed text, and the client has to be
+           able to tell at a glance that these values can be corrected. */
+        .review-input { width: 100%; min-width: 90px; padding: 7px 9px; border: 1px solid var(--border); border-radius: 8px; font-size: 0.84rem; font-family: inherit; }
+        .review-input:focus { outline: none; border-color: var(--primary); }
         
         /* Main Layout */
         .main-container { max-width: 1100px; width: 100%; margin: 24px auto; padding: 0 20px 40px; flex: 1; }
@@ -1859,11 +1957,38 @@ def get_admin_dashboard():
 - Rui Machher Kalia 2 pcs - ₹450"></textarea>
 
             <div class="action-bar">
-                <button class="btn-primary" onclick="submitMenuText()">✨ Auto-Extract Dishes & Update Bot</button>
+                <button class="btn-primary" onclick="submitMenuText()">✨ Read the dishes</button>
                 <button class="btn-secondary" onclick="loadSampleText()">📝 Load Sample Text</button>
             </div>
 
             <div id="pasteResult" class="result-box"></div>
+
+            <!-- Nothing in here has reached a customer. The client corrects what
+                 the parser misread, drops rows they do not want, and only
+                 Publish writes to the live menu. -->
+            <div id="menuReview" style="display: none; margin-top: 18px;">
+                <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 10px;">
+                    <div>
+                        <h3 style="margin: 0; font-size: 1rem; color: var(--primary);">Check this before it goes live</h3>
+                        <p style="margin: 2px 0 0; font-size: 0.82rem; color: #555;">Fix any box, delete a row you do not want, then publish. <b>Customers keep seeing the old menu until you press Publish.</b></p>
+                    </div>
+                    <button class="btn-secondary" style="font-size: 0.82rem;" onclick="addReviewRow()">+ Add a dish</button>
+                </div>
+
+                <div style="overflow-x: auto;">
+                    <table class="data-table">
+                        <thead>
+                            <tr><th>Dish</th><th>Description</th><th>Size</th><th>Price ₹</th><th>Type</th><th></th></tr>
+                        </thead>
+                        <tbody id="menuReviewBody"></tbody>
+                    </table>
+                </div>
+
+                <div class="action-bar">
+                    <button class="btn-primary" onclick="publishMenuReview()">✅ Publish to the bot</button>
+                    <button class="btn-danger" onclick="discardMenuReview()">🗑️ Discard, change nothing</button>
+                </div>
+            </div>
         </div>
 
         <!-- MENU tab, panel 1 of 4: the weekly job — upload the flyer -->
@@ -2023,38 +2148,41 @@ def get_admin_dashboard():
             </div>
         </div>
 
-        <div id="tab-knowledge" class="panel-card" data-group="answers" style="display: none;">
+        <!-- Writing an answer by hand used to be a collapsed form inside the
+             panel below, opened by a button the client never pressed: the list
+             of existing answers filled the screen and the button went with it.
+             Given its own card, above that list and already open, it is the
+             first thing the tab offers instead of the last. -->
+        <div id="tab-write" class="panel-card" data-group="answers" style="display: none;">
             <div class="panel-header">
-                <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
-                    <div>
-                        <h2>🧠 Answers you have written</h2>
-                        <p>Verified Q&A items taught by kitchen staff or auto-learned from resolved customer queries.</p>
-                    </div>
-                    <button class="btn-primary" style="font-size: 0.85rem;" onclick="toggleAddKnowledgeForm()">+ Add Verified Q&A</button>
-                </div>
+                <h2>✍️ Write an answer for the bot</h2>
+                <p>Type a question customers ask and the exact reply the bot should send. It goes live at once, so nobody waits for a person to answer it again.</p>
             </div>
 
-            <!-- Add Knowledge Inline Form -->
-            <div id="addKnowledgeForm" style="display: none; background: #F8FAFC; border: 1.5px solid var(--border); border-radius: 12px; padding: 18px; margin-bottom: 20px;">
-                <h3 style="margin-top: 0; font-size: 1rem; color: var(--primary);">➕ Teach Bot New Verified Answer</h3>
-                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px;">
-                    <div>
-                        <label style="font-size: 0.82rem; font-weight: 600; display: block; margin-bottom: 4px;">Topic / Category:</label>
-                        <input type="text" id="newTopic" placeholder="e.g. Corporate Gifting, Custom Packaging" style="width: 100%; padding: 10px; border-radius: 8px; border: 1px solid var(--border);">
-                    </div>
-                    <div>
-                        <label style="font-size: 0.82rem; font-weight: 600; display: block; margin-bottom: 4px;">Trigger / Question Keyword:</label>
-                        <input type="text" id="newPattern" placeholder="e.g. corporate orders, wedding packaging" style="width: 100%; padding: 10px; border-radius: 8px; border: 1px solid var(--border);">
-                    </div>
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px;">
+                <div>
+                    <label style="font-size: 0.82rem; font-weight: 600; display: block; margin-bottom: 4px;">Topic / Category:</label>
+                    <input type="text" id="newTopic" placeholder="e.g. Corporate Gifting, Custom Packaging" style="width: 100%; padding: 10px; border-radius: 8px; border: 1px solid var(--border);">
                 </div>
-                <div style="margin-bottom: 12px;">
-                    <label style="font-size: 0.82rem; font-weight: 600; display: block; margin-bottom: 4px;">Verified Answer for Customer:</label>
-                    <textarea id="newAnswer" placeholder="Type official response..." style="width: 100%; height: 80px; padding: 10px; border-radius: 8px; border: 1px solid var(--border);"></textarea>
+                <div>
+                    <label style="font-size: 0.82rem; font-weight: 600; display: block; margin-bottom: 4px;">Words a customer would use:</label>
+                    <input type="text" id="newPattern" placeholder="e.g. corporate orders, wedding packaging" style="width: 100%; padding: 10px; border-radius: 8px; border: 1px solid var(--border);">
                 </div>
-                <div style="display: flex; gap: 8px;">
-                    <button class="btn-primary" onclick="submitNewKnowledge()">💾 Save & Activate</button>
-                    <button class="btn-secondary" onclick="toggleAddKnowledgeForm()">Cancel</button>
-                </div>
+            </div>
+            <div style="margin-bottom: 12px;">
+                <label style="font-size: 0.82rem; font-weight: 600; display: block; margin-bottom: 4px;">What the bot should reply:</label>
+                <textarea id="newAnswer" placeholder="Type official response..." style="width: 100%; height: 80px; padding: 10px; border-radius: 8px; border: 1px solid var(--border);"></textarea>
+            </div>
+            <div class="action-bar">
+                <button class="btn-primary" onclick="submitNewKnowledge()">💾 Save & Activate</button>
+                <button class="btn-secondary" onclick="clearKnowledgeForm()">Clear</button>
+            </div>
+        </div>
+
+        <div id="tab-knowledge" class="panel-card" data-group="answers" style="display: none;">
+            <div class="panel-header">
+                <h2>🧠 Answers you have written</h2>
+                <p>Verified Q&A items taught by kitchen staff or auto-learned from resolved customer queries.</p>
             </div>
 
             <div style="overflow-x: auto;">
@@ -2269,6 +2397,12 @@ def get_admin_dashboard():
         }
 
         // MENU tab: paste-text upload
+        // Dishes read out of the pasted text, held in this browser only. Nothing
+        // here exists on the server until publishMenuReview() sends it, so a bad
+        // read costs the client a Discard rather than a wrong price quoted to a
+        // customer.
+        let menuReview = [];
+
         async function submitMenuText() {
             const text = document.getElementById('rawTextPaste').value.trim();
             const resBox = document.getElementById('pasteResult');
@@ -2276,10 +2410,10 @@ def get_admin_dashboard():
 
             resBox.style.display = 'block';
             resBox.className = 'result-box info';
-            resBox.innerHTML = '⏳ <b>Extracting dishes and updating menu.json...</b>';
+            resBox.innerHTML = '⏳ <b>Reading the dishes...</b>';
 
             try {
-                const resp = await fetch('/admin/parse-menu-card', {
+                const resp = await fetch('/admin/menu/preview-text', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
                     body: JSON.stringify({ raw_text: text })
@@ -2287,16 +2421,131 @@ def get_admin_dashboard():
                 const data = await resp.json();
 
                 if (resp.ok && data.status === 'success') {
-                    resBox.className = 'result-box success';
-                    resBox.innerHTML = `✅ <b>Menu Successfully Updated!</b><br>${data.message || ''}<br>Updated: <b>${data.vegetarian_count || 0} Veg</b>, <b>${data.non_vegetarian_count || 0} Non-Veg</b> items.<pre>${JSON.stringify(data.parsed, null, 2)}</pre>`;
-                    loadActiveMenu();
+                    const parsed = data.parsed || {};
+                    menuReview = []
+                        .concat((parsed.vegetarian || []).map(d => rowFrom(d, 'vegetarian')))
+                        .concat((parsed.non_vegetarian || []).map(d => rowFrom(d, 'non_vegetarian')));
+                    resBox.className = 'result-box info';
+                    resBox.innerHTML = `📖 Read <b>${menuReview.length} dishes</b>. Nothing has changed for customers yet — check the rows below and press Publish.`;
+                    renderMenuReview();
                 } else {
+                    menuReview = [];
+                    renderMenuReview();
                     resBox.className = 'result-box error';
-                    resBox.innerHTML = `⚠️ <b>Extraction Failed:</b> ${data.detail || data.reason || 'Could not parse text.'}`;
+                    resBox.innerHTML = `⚠️ <b>Could not read that:</b> ${data.detail || data.reason || 'No dish with a price was found.'}`;
                 }
             } catch (err) {
                 resBox.className = 'result-box error';
                 resBox.innerHTML = `❌ Network error communicating with server.`;
+            }
+        }
+
+        function rowFrom(dish, category) {
+            return {
+                item: dish.item || '',
+                description: dish.description || '',
+                quantity: dish.quantity || '',
+                price_inr: dish.price_inr != null ? dish.price_inr : '',
+                category: category
+            };
+        }
+
+        function renderMenuReview() {
+            const wrap = document.getElementById('menuReview');
+            const body = document.getElementById('menuReviewBody');
+            if (!menuReview.length) {
+                wrap.style.display = 'none';
+                body.innerHTML = '';
+                return;
+            }
+            wrap.style.display = 'block';
+            // Values go through escapeHtml because they came off a flyer the
+            // kitchen typed or photographed, and land straight in an attribute.
+            body.innerHTML = menuReview.map((row, i) => `
+                <tr>
+                    <td><input class="review-input" value="${escapeHtml(row.item)}" oninput="editReviewRow(${i}, 'item', this.value)"></td>
+                    <td><input class="review-input" value="${escapeHtml(row.description)}" oninput="editReviewRow(${i}, 'description', this.value)"></td>
+                    <td><input class="review-input" style="min-width: 70px;" value="${escapeHtml(row.quantity)}" oninput="editReviewRow(${i}, 'quantity', this.value)"></td>
+                    <td><input class="review-input" style="min-width: 70px;" type="number" min="1" value="${escapeHtml(row.price_inr)}" oninput="editReviewRow(${i}, 'price_inr', this.value)"></td>
+                    <td>
+                        <select class="review-input" onchange="editReviewRow(${i}, 'category', this.value)">
+                            <option value="vegetarian" ${row.category === 'vegetarian' ? 'selected' : ''}>Veg</option>
+                            <option value="non_vegetarian" ${row.category === 'non_vegetarian' ? 'selected' : ''}>Non-Veg</option>
+                        </select>
+                    </td>
+                    <td><button class="btn-danger" style="padding: 5px 10px; font-size: 0.78rem;" onclick="deleteReviewRow(${i})">Delete</button></td>
+                </tr>`).join('');
+        }
+
+        function editReviewRow(index, field, value) {
+            if (menuReview[index]) menuReview[index][field] = value;
+        }
+
+        function deleteReviewRow(index) {
+            menuReview.splice(index, 1);
+            // Re-render rather than removing the <tr>: every remaining row's
+            // handlers are bound to its old index and would edit the wrong dish.
+            renderMenuReview();
+        }
+
+        function addReviewRow() {
+            menuReview.push({ item: '', description: '', quantity: '', price_inr: '', category: 'vegetarian' });
+            renderMenuReview();
+        }
+
+        function discardMenuReview() {
+            if (menuReview.length && !confirm('Throw away these dishes? The menu customers see is unchanged either way.')) return;
+            menuReview = [];
+            renderMenuReview();
+            const resBox = document.getElementById('pasteResult');
+            resBox.className = 'result-box info';
+            resBox.style.display = 'block';
+            resBox.innerHTML = '🗑️ Discarded. The live menu was never touched.';
+        }
+
+        async function publishMenuReview() {
+            const resBox = document.getElementById('pasteResult');
+            if (!menuReview.length) return alert('There are no dishes to publish.');
+
+            const blank = menuReview.findIndex(r => !String(r.item).trim() || !String(r.price_inr).trim());
+            if (blank !== -1) {
+                return alert(`Row ${blank + 1} needs both a dish name and a price before it can be published.`);
+            }
+
+            const payload = { vegetarian: [], non_vegetarian: [] };
+            menuReview.forEach(row => {
+                payload[row.category].push({
+                    item: String(row.item).trim(),
+                    description: String(row.description).trim(),
+                    quantity: String(row.quantity).trim(),
+                    price_inr: Number(row.price_inr)
+                });
+            });
+
+            resBox.style.display = 'block';
+            resBox.className = 'result-box info';
+            resBox.innerHTML = '⏳ <b>Publishing to the bot...</b>';
+
+            try {
+                const resp = await fetch('/admin/update-menu', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+                    body: JSON.stringify(payload)
+                });
+                const data = await resp.json();
+                if (resp.ok && data.status === 'success') {
+                    resBox.className = 'result-box success';
+                    resBox.innerHTML = `✅ <b>Published.</b> ${payload.vegetarian.length} veg and ${payload.non_vegetarian.length} non-veg dishes are now what the bot quotes.`;
+                    menuReview = [];
+                    renderMenuReview();
+                    loadActiveMenu();
+                } else {
+                    resBox.className = 'result-box error';
+                    resBox.innerHTML = `⚠️ <b>Not published:</b> ${data.detail || data.reason || 'The server refused the change.'}`;
+                }
+            } catch (err) {
+                resBox.className = 'result-box error';
+                resBox.innerHTML = `❌ Network error — nothing was published.`;
             }
         }
 
@@ -2769,9 +3018,10 @@ Non-Veg:
             }
         }
 
-        function toggleAddKnowledgeForm() {
-            const form = document.getElementById('addKnowledgeForm');
-            form.style.display = form.style.display === 'none' ? 'block' : 'none';
+        function clearKnowledgeForm() {
+            document.getElementById('newTopic').value = '';
+            document.getElementById('newPattern').value = '';
+            document.getElementById('newAnswer').value = '';
         }
 
         async function submitNewKnowledge() {
@@ -2792,10 +3042,7 @@ Non-Veg:
 
                 if (resp.ok) {
                     alert('Verified Q&A saved! The bot will now answer this question immediately without escalation.');
-                    document.getElementById('newTopic').value = '';
-                    document.getElementById('newPattern').value = '';
-                    document.getElementById('newAnswer').value = '';
-                    document.getElementById('addKnowledgeForm').style.display = 'none';
+                    clearKnowledgeForm();
                     loadKnowledge();
                 } else {
                     const err = await resp.json();
