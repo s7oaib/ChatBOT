@@ -816,6 +816,24 @@ class DeterministicResponder:
             session_memory.add_turn(user_id, channel, user_message, response_text)
             return response_text, True, "context_meal_price_followup", None
 
+        # A bare "what's the price?" with no product topic established yet is
+        # genuinely ambiguous — Sondesh and Bengali meals are priced and sold
+        # completely differently (per box vs per dish), and this is often the
+        # very first message on an Instagram ad reply, where we cannot tell
+        # from the referral payload which product the ad was even for. Ask
+        # rather than default to Sondesh, which was answering meal-ad
+        # customers with the wrong price sheet entirely.
+        if not last_topic and BARE_PRICE_RE.match(stripped_for_bare_check):
+            response_text = (
+                "Happy to share prices! Are you asking about our *Sondesh* "
+                "(handcrafted Bengali sweets) or our *Bengali Meals* (fresh "
+                "lunch/dinner bento)?"
+            )
+            if intro_greeting_prefix:
+                response_text = intro_greeting_prefix + response_text
+            session_memory.add_turn(user_id, channel, user_message, response_text)
+            return response_text, True, "price_clarify_product", None
+
         # A one-word "veg" / "non veg" is only an answer to that question — on its
         # own it is too thin to match a template, so resolve it here. Non-veg is
         # tested first because "non veg" also contains "veg".
@@ -1679,12 +1697,12 @@ class DeterministicResponder:
                 target_images = [
                     {
                         "url": img_aamar_mishti,
-                        "caption": "Aamar Mishti — our everyday Sondesh, made fresh in pure dairy milk",
+                        "caption": "*Aamar Mishti* — everyday sondesh, pure dairy milk. Classic, Rose, Mango, Kesar, plus our signature Nolen Gur & liquid Jolbhora. From ₹450.",
                         "text_first": True,
                     },
                     {
                         "url": img_signature_sondesh,
-                        "caption": "Signature Collection — handcrafted end to end in desi A2 cow milk, for gifting & special occasions.",
+                        "caption": "*Signature Collection* — pure desi A2 cow milk, handcrafted end to end, for gifting & special occasions. From ₹600.",
                     },
                 ]
 

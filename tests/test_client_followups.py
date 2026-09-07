@@ -75,7 +75,10 @@ def test_delivery_area_flag_does_not_consume_a_new_business_question():
     responder.match_and_respond("Where do you deliver?", user_id=user_id, channel="whatsapp")
     reply = responder.match_and_respond("What is the price?", user_id=user_id, channel="whatsapp")
 
-    assert reply[2] == "sondesh_price_detailed"
+    # No product topic was ever established (delivery_area doesn't set one),
+    # so a bare "what is the price?" is genuinely ambiguous between Sondesh
+    # and Bengali meals — the bot asks rather than guessing Sondesh.
+    assert reply[2] == "price_clarify_product"
     assert "Yes, we deliver to" not in reply[0]
     assert session_memory.get_facts(user_id, "whatsapp")["awaiting_area_confirmation"] is False
 
@@ -107,6 +110,31 @@ def test_instagram_escalation_requests_and_attaches_whatsapp_number():
         assert escalate.call_args.kwargs["context_data"]["customer_whatsapp_number"] == "+919876543210"
         assert session_memory.get_facts(user_id, "instagram")["awaiting_instagram_contact"] is False
         assert send_reply.call_args.args[1] == "standard escalation"
+
+
+def test_bare_price_question_with_no_topic_asks_which_product_instead_of_guessing_sondesh():
+    # match_and_respond is the deterministic matcher itself (no ad gating) —
+    # channel is whatsapp here purely to stay clear of the Instagram ad-gate
+    # path exercised elsewhere, which is unrelated to this clarifying-question
+    # behaviour and is channel-agnostic in match_and_respond.
+    user_id = "client_ad_price_ambiguous"
+    session_memory.clear_session(user_id, "whatsapp")
+
+    reply = responder.match_and_respond("What is the price?", user_id=user_id, channel="whatsapp")
+
+    assert reply[2] == "price_clarify_product"
+    assert "Sondesh" in reply[0] and "Bengali Meals" in reply[0]
+    assert "sondesh_price_detailed" != reply[2]
+
+
+def test_bare_price_question_after_meals_topic_still_asks_about_the_weekly_menu():
+    user_id = "client_meals_then_price"
+    session_memory.clear_session(user_id, "whatsapp")
+
+    responder.match_and_respond("combo", user_id=user_id, channel="whatsapp")
+    reply = responder.match_and_respond("What's the price?", user_id=user_id, channel="whatsapp")
+
+    assert reply[2] == "context_meal_price_followup"
 
 
 def test_whatsapp_escalation_keeps_sender_phone_and_never_requests_contact():
