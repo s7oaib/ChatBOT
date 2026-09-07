@@ -125,6 +125,19 @@ class Config:
     # is to measure where the two disagree before anything depends on it.
     # Off by default: it costs a Groq call per message.
     ROUTER_SHADOW_ENABLED: bool = os.getenv("ROUTER_SHADOW_ENABLED", "false").lower() in ("true", "1", "t", "yes")
+    # The router runs on every message, so it is the call most likely to hit a
+    # per-minute token ceiling — and it is a different job from writing a
+    # reply, so it gets its own model rather than sharing GROQ_MODEL.
+    #
+    # Measured on this account's key (x-ratelimit-limit-tokens):
+    #   openai/gpt-oss-20b    8,000 TPM     qwen/qwen3.8-27b     8,000 TPM
+    #   openai/gpt-oss-120b   8,000 TPM     groq/compound-mini  70,000 TPM
+    # At ~1,900 tokens a call that is ~4 router calls a minute against ~36,
+    # and the 8,000 is already shared with refinement and grounded answers.
+    # compound-mini picked slightly less well on a seven-case trial, which is
+    # far too small to decide on — the shadow table records the model behind
+    # every pick so the choice can be settled on real traffic instead.
+    GROQ_ROUTER_MODEL: str = os.getenv("GROQ_ROUTER_MODEL", "") or "groq/compound-mini"
 
     # Conversations older than this are purged; stated in the privacy policy.
     DATA_RETENTION_DAYS: int = int(os.getenv("DATA_RETENTION_DAYS", "90"))

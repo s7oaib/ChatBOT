@@ -76,6 +76,7 @@ class Database:
                 agreed INTEGER DEFAULT 0,
                 detail TEXT,
                 latency_ms REAL,
+                model TEXT,
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
             """)
@@ -88,6 +89,7 @@ class Database:
             self._ensure_column(cursor, "conversations", "ad_id", "TEXT")
             self._ensure_column(cursor, "conversations", "ad_title", "TEXT")
             self._ensure_column(cursor, "sessions", "ad_title", "TEXT")
+            self._ensure_column(cursor, "router_shadow", "model", "TEXT")
 
             # Escalations table for human handoff
             cursor.execute("""
@@ -216,16 +218,18 @@ class Database:
         router_pick: Optional[str],
         detail: str,
         latency_ms: float,
+        model: Optional[str] = None,
     ) -> None:
         """Stores one silent router pick beside the keyword matcher's pick."""
         with self.get_connection() as conn:
             conn.execute("""
             INSERT INTO router_shadow (
-                channel, user_message, keyword_pick, router_pick, agreed, detail, latency_ms
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                channel, user_message, keyword_pick, router_pick, agreed, detail,
+                latency_ms, model
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 channel, user_message, keyword_pick, router_pick,
-                1 if keyword_pick == router_pick else 0, detail, round(latency_ms, 1),
+                1 if keyword_pick == router_pick else 0, detail, round(latency_ms, 1), model,
             ))
             conn.commit()
 
@@ -252,6 +256,20 @@ class Database:
 
             compared = totals["n"] or 0
             agreed = totals["agreed"] or 0
+
+            by_model = [
+                {
+                    "model": row["model"] or "unrecorded",
+                    "compared": row["n"],
+                    "agreement_rate": round((row["agreed"] or 0) / row["n"], 3) if row["n"] else None,
+                    "avg_latency_ms": round(row["avg_latency"], 1) if row["avg_latency"] else None,
+                }
+                for row in cursor.execute("""
+                    SELECT model, COUNT(*) AS n, SUM(agreed) AS agreed, AVG(latency_ms) AS avg_latency
+                    FROM router_shadow WHERE timestamp >= ?
+                    GROUP BY model ORDER BY n DESC
+                """, (cutoff,))
+            ]
 
             by_detail = [
                 {"detail": row["detail"], "count": row["n"]}
@@ -292,6 +310,7 @@ class Database:
                 "agreement_rate": round(agreed / compared, 3) if compared else None,
                 "avg_router_latency_ms": round(totals["avg_latency"], 1) if totals["avg_latency"] else None,
                 "outcomes": by_detail,
+                "by_model": by_model,
                 "unmatched_but_routed_in_sample": rescued,
                 "disagreements": disagreements,
             }

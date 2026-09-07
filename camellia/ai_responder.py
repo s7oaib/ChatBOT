@@ -306,13 +306,25 @@ class AIResponder:
             context = context[:char_budget]
         return context
 
-    def _query_groq(self, prompt_text: str, is_refinement: bool = False, template_id: str = "") -> Tuple[str, bool, str]:
-        """Queries Groq's OpenAI-compatible chat completions endpoint."""
+    def _query_groq(
+        self,
+        prompt_text: str,
+        is_refinement: bool = False,
+        template_id: str = "",
+        model: Optional[str] = None,
+    ) -> Tuple[str, bool, str]:
+        """
+        Queries Groq's OpenAI-compatible chat completions endpoint.
+
+        `model` overrides GROQ_MODEL for callers whose job is not writing a
+        reply — the router runs on every message and needs its own token
+        budget, since rate limits on Groq are per model.
+        """
         if not config.GROQ_API_KEY:
             return "", False, "groq_no_key"
 
         payload: Dict[str, Any] = {
-            "model": config.GROQ_MODEL,
+            "model": model or config.GROQ_MODEL,
             "messages": [{"role": "user", "content": prompt_text}],
             "temperature": 0.2 if is_refinement else 0.1,
             "max_tokens": 1024 if is_refinement else 2048,
@@ -322,6 +334,12 @@ class AIResponder:
             "Authorization": f"Bearer {config.GROQ_API_KEY}",
             "Content-Type": "application/json",
         }
+
+        # Rate limits on Groq are per model, so a router running on its own
+        # model must not park the model that writes replies. A router 429 also
+        # must not make /health report the AI layer as broken, since the part
+        # customers depend on is still fine.
+        on_side_model = bool(model) and model != config.GROQ_MODEL
 
         url = "https://api.groq.com/openai/v1/chat/completions"
 
@@ -358,7 +376,7 @@ class AIResponder:
                                 break
 
                     cooldown = _cooldown_for_status(resp.status_code)
-                    if cooldown:
+                    if cooldown and not on_side_model:
                         self._groq_cooldown_until = time.time() + cooldown
                         if resp.status_code in CONFIG_ERROR_HTTP_STATUSES:
                             log.error(
@@ -366,8 +384,9 @@ class AIResponder:
                                 "Pausing Groq calls for %.0fs — check GROQ_API_KEY and GROQ_MODEL.",
                                 resp.status_code, config.GROQ_MODEL, cooldown,
                             )
-                    log.warning("Groq HTTP %s: %s", resp.status_code, resp.text[:200])
-                    self._record_call(False, f"HTTP {resp.status_code}: {resp.text[:120]}")
+                    log.warning("Groq HTTP %s (%s): %s", resp.status_code, payload["model"], resp.text[:200])
+                    if not on_side_model:
+                        self._record_call(False, f"HTTP {resp.status_code}: {resp.text[:120]}")
                     return "", False, f"groq_http_{resp.status_code}"
 
                 data = resp.json()
@@ -384,12 +403,14 @@ class AIResponder:
                     )
                     return fallback, False, "out_of_context"
 
-                self._record_call(True, "ok")
+                if not on_side_model:
+                    self._record_call(True, "ok")
                 return assistant_text, True, "groq_rag"
 
         except Exception as e:
-            self._groq_cooldown_until = time.time() + TRANSIENT_COOLDOWN_SECONDS
-            self._record_call(False, f"{type(e).__name__}: {str(e)[:120]}")
+            if not on_side_model:
+                self._groq_cooldown_until = time.time() + TRANSIENT_COOLDOWN_SECONDS
+                self._record_call(False, f"{type(e).__name__}: {str(e)[:120]}")
             log.warning("Groq API call failed (%s): %s", config.GROQ_MODEL, e)
             fallback = self.qa_data.get("escalation_triggers", {}).get(
                 "fallback_response",

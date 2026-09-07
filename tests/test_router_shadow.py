@@ -157,3 +157,62 @@ class TestReport:
 
         report = db.router_shadow_report(days=3650, limit=50)
         assert report["unmatched_but_routed_in_sample"] >= 1
+
+
+class TestRouterModelIsolation:
+    """The router runs on its own model, and must not disturb the reply path."""
+
+    def test_the_router_uses_its_own_model_not_the_reply_model(self):
+        r = ShadowRouter()
+        fake = MagicMock()
+        fake.get_active_provider.return_value = "groq"
+        fake._query_groq.return_value = ("delivery_area", True, "groq_rag")
+        with patch("camellia.ai_responder.ai_responder", fake), \
+             patch.object(config, "GROQ_ROUTER_MODEL", "groq/compound-mini"):
+            r.classify("do you ship to noida", TEMPLATES)
+        assert fake._query_groq.call_args.kwargs["model"] == "groq/compound-mini"
+
+    def test_a_router_rate_limit_does_not_pause_the_model_that_writes_replies(self):
+        # Rate limits on Groq are per model. A 429 on the router's model must
+        # not stop refinement and grounded answers, which customers depend on.
+        from camellia.ai_responder import AIResponder
+
+        responder_ai = AIResponder()
+        resp = MagicMock(status_code=429, text="rate limited")
+        resp.headers = {}
+        client = MagicMock()
+        client.__enter__.return_value.post.return_value = resp
+
+        with patch.object(config, "GROQ_API_KEY", "k"), \
+             patch.object(config, "GROQ_MODEL", "openai/gpt-oss-20b"), \
+             patch("camellia.ai_responder.httpx.Client", return_value=client):
+            responder_ai._query_groq("hi", model="groq/compound-mini")
+
+        assert responder_ai._groq_cooldown_until == 0.0
+        assert responder_ai._last_call_ok is None
+
+    def test_a_failure_on_the_reply_model_still_trips_its_cooldown(self):
+        from camellia.ai_responder import AIResponder
+
+        responder_ai = AIResponder()
+        resp = MagicMock(status_code=429, text="rate limited")
+        resp.headers = {}
+        client = MagicMock()
+        client.__enter__.return_value.post.return_value = resp
+
+        with patch.object(config, "GROQ_API_KEY", "k"), \
+             patch.object(config, "GROQ_MODEL", "openai/gpt-oss-20b"), \
+             patch("camellia.ai_responder.httpx.Client", return_value=client):
+            responder_ai._query_groq("hi")
+
+        assert responder_ai._groq_cooldown_until > 0.0
+        assert responder_ai._last_call_ok is False
+
+    def test_the_model_behind_each_pick_is_recorded_for_comparison(self):
+        db.record_router_shadow(
+            "whatsapp", "model attribution", "know_more", "know_more", "ok", 600.0,
+            model="groq/compound-mini",
+        )
+        report = db.router_shadow_report(days=3650)
+        models = {m["model"] for m in report["by_model"]}
+        assert "groq/compound-mini" in models

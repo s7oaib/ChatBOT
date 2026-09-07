@@ -165,7 +165,9 @@ class ShadowRouter:
             f"Customer message: {user_message}"
         )
 
-        raw, ok, reason = ai_responder._query_groq(prompt, is_refinement=True)
+        raw, ok, reason = ai_responder._query_groq(
+            prompt, is_refinement=True, model=config.GROQ_ROUTER_MODEL
+        )
         if not ok:
             return None, f"provider_error:{reason}"
 
@@ -249,6 +251,7 @@ class ShadowRouter:
                 router_pick=router_pick,
                 detail=detail,
                 latency_ms=(time.perf_counter() - started) * 1000.0,
+                model=config.GROQ_ROUTER_MODEL,
             )
         except Exception as e:
             log.warning("Could not record a router shadow comparison: %s", e)
