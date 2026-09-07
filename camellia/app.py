@@ -1283,6 +1283,85 @@ def get_entry_points(
     require_admin(x_admin_key, x_admin_pin)
     return db.entry_point_breakdown(channel=channel, days=days)
 
+@app.get("/admin/instagram/profile")
+def get_instagram_messaging_profile(
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """
+    Reads the Ice Breakers and persistent menu configured on the Instagram
+    account, using the credentials this service already holds.
+
+    Read-only on purpose. Ice Breakers are the tappable questions Instagram
+    shows a customer before they type anything, so changing them changes what
+    every customer is invited to ask — that is a decision to take deliberately,
+    with Phase 1's evidence in hand, not a side effect of a diagnostic.
+
+    Exists because the token lives only in the Railway dashboard: this is the
+    one place that can ask Meta the question without anyone copying a secret
+    around.
+    """
+    require_admin(x_admin_key, x_admin_pin)
+
+    token = (config.INSTAGRAM_ACCESS_TOKEN or "").strip()
+    if not token:
+        return {"configured": False, "reason": "INSTAGRAM_ACCESS_TOKEN is not set on this service."}
+
+    # Same split the outbound sender uses, so this reports on the identity the
+    # bot actually talks to Meta as.
+    if token.startswith("IGAA"):
+        url = f"https://graph.instagram.com/{config.WHATSAPP_API_VERSION}/me/messenger_profile"
+        identity = "instagram_login_token (graph.instagram.com/me)"
+    else:
+        page_id = config.INSTAGRAM_PAGE_ID or "me"
+        url = f"https://graph.facebook.com/{config.WHATSAPP_API_VERSION}/{page_id}/messenger_profile"
+        identity = f"page_token (graph.facebook.com/{page_id})"
+
+    try:
+        with httpx.Client(timeout=15.0) as client:
+            resp = client.get(
+                url,
+                params={"fields": "ice_breakers,persistent_menu", "access_token": token},
+            )
+        body = resp.json()
+    except Exception as e:
+        log.warning("Could not read the Instagram messaging profile: %s", e)
+        return {"configured": True, "identity": identity, "ok": False, "error": f"{type(e).__name__}: {e}"}
+
+    if resp.status_code != 200:
+        error = body.get("error", {}) if isinstance(body, dict) else {}
+        return {
+            "configured": True,
+            "identity": identity,
+            "ok": False,
+            "http_status": resp.status_code,
+            "meta_error": {
+                "message": error.get("message"),
+                "code": error.get("code"),
+                "type": error.get("type"),
+            },
+        }
+
+    entries = body.get("data") or []
+    profile = entries[0] if entries else {}
+    ice_breakers = profile.get("ice_breakers") or []
+    questions = [
+        q.get("question")
+        for block in ice_breakers
+        for q in (block.get("call_to_actions") or [])
+        if isinstance(q, dict)
+    ]
+
+    return {
+        "configured": True,
+        "identity": identity,
+        "ok": True,
+        "ice_breakers_set": bool(questions),
+        "ice_breaker_questions": questions,
+        "persistent_menu_set": bool(profile.get("persistent_menu")),
+        "raw": profile,
+    }
+
 @app.get("/admin/conversations")
 def get_conversations_list(
     limit: int = 50,
