@@ -1056,6 +1056,19 @@ def health_check():
     storage = _storage_durability()
     instagram_token = instagram_token_status()
 
+    # Which phone actually receives escalation alerts. The environment
+    # overrides the code default, and the environment is a dashboard nothing
+    # here can read — so changing the number in code and assuming it took is
+    # the same mistake the undelivered templates and the dead token both were.
+    # Masked to the last four digits: enough to tell two numbers apart, not
+    # enough to publish someone's phone on an unauthenticated endpoint.
+    escalation_phone = (config.HUMAN_ESCALATION_PHONE or "").strip()
+    alert_destination = {
+        "configured": bool(escalation_phone),
+        "ends_with": escalation_phone[-4:] if len(escalation_phone) >= 4 else None,
+        "from_environment": bool(os.getenv("HUMAN_ESCALATION_PHONE")),
+    }
+
     # Shadow mode is switched on in the host dashboard, which nothing in this
     # repo can read. Without this, turning it on and hoping is the only option.
     router_shadow: Dict[str, Any] = {
@@ -1132,6 +1145,7 @@ def health_check():
             "webhook_signature": signature,
             "outbound_delivery": outbound,
             "instagram_token": instagram_token,
+            "escalation_alerts_to": alert_destination,
             "router_shadow": router_shadow,
             # Not just which provider is configured — whether it last worked.
             "ai": ai_responder.status(),

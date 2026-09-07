@@ -158,7 +158,10 @@ class Config:
     INSTAGRAM_ACCESS_TOKEN: str = os.getenv("INSTAGRAM_ACCESS_TOKEN", "") or os.getenv("WHATSAPP_ACCESS_TOKEN", "")
     
     # Human Escalation Contact
-    HUMAN_ESCALATION_PHONE: str = os.getenv("HUMAN_ESCALATION_PHONE", "+918796551990")
+    # Where the bot sends its escalation alerts. Distinct from the number
+    # customers are told to call, which stays +91 87965 51990 across the
+    # templates, the menu and the order summaries — this one is internal.
+    HUMAN_ESCALATION_PHONE: str = os.getenv("HUMAN_ESCALATION_PHONE", "+919902181650")
     HUMAN_ESCALATION_EMAIL: str = os.getenv("HUMAN_ESCALATION_EMAIL", "")
 
     # Slow-reply notice.

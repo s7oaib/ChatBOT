@@ -19,9 +19,17 @@ class Escalator:
     - Sends automated alert message to owner/human contact.
     """
 
-    def __init__(self):
-        self.human_phone = config.HUMAN_ESCALATION_PHONE
-        self.human_email = config.HUMAN_ESCALATION_EMAIL
+    # Read from config on every use rather than captured once at import. This
+    # is a module-level singleton, so a captured copy would keep alerting the
+    # previous number for the life of the process after the setting changed —
+    # the failure would look exactly like the change not having been made.
+    @property
+    def human_phone(self) -> str:
+        return config.HUMAN_ESCALATION_PHONE
+
+    @property
+    def human_email(self) -> str:
+        return config.HUMAN_ESCALATION_EMAIL
 
     def handle_escalation(
         self,
