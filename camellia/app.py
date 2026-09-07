@@ -4,13 +4,14 @@ import hashlib
 import json
 import os
 import re
+import time
 import httpx
 from contextlib import asynccontextmanager
 from pathlib import Path
 from fastapi import FastAPI, Request, Response, Query, Header, HTTPException, File, UploadFile, BackgroundTasks
 from fastapi.responses import PlainTextResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
@@ -959,6 +960,92 @@ def _webhook_signature_status() -> str:
     return "DISABLED"
 
 
+def _instagram_profile_url_and_identity() -> Tuple[str, str]:
+    """The messenger_profile URL for whichever token flavour is configured."""
+    token = (config.INSTAGRAM_ACCESS_TOKEN or "").strip()
+    if token.startswith("IGAA"):
+        return (
+            f"https://graph.instagram.com/{config.WHATSAPP_API_VERSION}/me/messenger_profile",
+            "instagram_login_token (graph.instagram.com/me)",
+        )
+    page_id = config.INSTAGRAM_PAGE_ID or "me"
+    return (
+        f"https://graph.facebook.com/{config.WHATSAPP_API_VERSION}/{page_id}/messenger_profile",
+        f"page_token (graph.facebook.com/{page_id})",
+    )
+
+
+# An expired Instagram token is the worst failure this service has: webhooks
+# keep arriving and every reply silently fails to send, while /health stays
+# green. It happened — Meta invalidated the token after an account password
+# change, and the only trace was a consecutive-failure counter that resets on
+# every deploy, so nothing ever reported it.
+#
+# Checking costs a call to Meta, so the result is cached: an uptime monitor
+# polling /health every thirty seconds must not turn into a Graph API call
+# every thirty seconds.
+_IG_TOKEN_TTL_SECONDS = 600.0
+_IG_TOKEN_TIMEOUT_SECONDS = 6.0
+_ig_token_state: Dict[str, Any] = {"checked_at": 0.0, "result": None}
+
+
+def instagram_token_status(force: bool = False) -> Dict[str, Any]:
+    """
+    Whether Meta still accepts the Instagram token, cached for ten minutes.
+
+    States: `not_configured` (no token — mock mode, normal in development),
+    `valid`, `invalid` (Meta rejected the credential itself), and `unknown`
+    (we could not reach Meta, which is not evidence of anything).
+
+    `unknown` is deliberately not an alarm. A network blip must not be
+    reported as a dead credential, or the warning stops meaning anything.
+    """
+    token = (config.INSTAGRAM_ACCESS_TOKEN or "").strip()
+    if not token:
+        return {"state": "not_configured", "detail": "INSTAGRAM_ACCESS_TOKEN is not set."}
+
+    now = time.time()
+    cached = _ig_token_state.get("result")
+    if not force and cached and (now - _ig_token_state["checked_at"]) < _IG_TOKEN_TTL_SECONDS:
+        return {**cached, "checked_seconds_ago": round(now - _ig_token_state["checked_at"], 1)}
+
+    url, identity = _instagram_profile_url_and_identity()
+    try:
+        with httpx.Client(timeout=_IG_TOKEN_TIMEOUT_SECONDS) as client:
+            resp = client.get(url, params={"fields": "ice_breakers", "access_token": token})
+        if resp.status_code == 200:
+            result = {"state": "valid", "identity": identity, "detail": "Meta accepted the token."}
+        else:
+            error = (resp.json() or {}).get("error", {}) if resp.content else {}
+            code = error.get("code")
+            # 190 is the credential itself being rejected — expired, revoked,
+            # or invalidated by a password change. Other statuses may be a
+            # permission or a path problem, which is a different conversation.
+            state = "invalid" if code == 190 or error.get("type") == "OAuthException" else "unknown"
+            result = {
+                "state": state,
+                "identity": identity,
+                "detail": error.get("message") or f"HTTP {resp.status_code}",
+                "meta_code": code,
+            }
+    except Exception as e:
+        result = {
+            "state": "unknown",
+            "identity": identity,
+            "detail": f"Could not reach Meta: {type(e).__name__}",
+        }
+
+    _ig_token_state["result"] = result
+    _ig_token_state["checked_at"] = now
+    if result["state"] == "invalid":
+        log.error(
+            "Instagram access token rejected by Meta (%s). Replies cannot be "
+            "delivered until INSTAGRAM_ACCESS_TOKEN is renewed: %s",
+            result.get("meta_code"), result.get("detail"),
+        )
+    return {**result, "checked_seconds_ago": 0.0}
+
+
 @app.get("/health")
 def health_check():
     """Deep health check. Point an uptime monitor at this, not at /."""
@@ -967,6 +1054,7 @@ def health_check():
     delivery = _delivery_capability()
     signature = _webhook_signature_status()
     storage = _storage_durability()
+    instagram_token = instagram_token_status()
 
     # A bot that cannot answer is down, whatever else is working. Live mode
     # without credentials is the same kind of failure one step later — it
@@ -998,6 +1086,18 @@ def health_check():
             f"Menu is at {storage['menu']['path']} with no GOOGLE_SHEET_CSV_URL set — "
             "menu edits are lost on every deploy."
         )
+    if instagram_token.get("state") == "invalid":
+        # A warning rather than a 503, on purpose. This genuinely is an outage
+        # of the Instagram channel, but the health endpoint is what the host
+        # restarts the service on — and returning 503 for a dead credential
+        # would take WhatsApp down too, to fix nothing. Only a new token in the
+        # environment can resolve this, so it is reported as loudly as possible
+        # without knocking over the half that still works.
+        warnings.append(
+            "Instagram access token is rejected by Meta "
+            f"({instagram_token.get('detail')}). DMs are still being received "
+            "and every reply is failing to send. Renew INSTAGRAM_ACCESS_TOKEN."
+        )
     seed_state = answering.get("template_seed") or {}
     if seed_state.get("undelivered_seed_changes"):
         warnings.append(
@@ -1018,6 +1118,7 @@ def health_check():
             "reply_delivery": delivery,
             "webhook_signature": signature,
             "outbound_delivery": outbound,
+            "instagram_token": instagram_token,
             # Not just which provider is configured — whether it last worked.
             "ai": ai_responder.status(),
             "reply_latency": latency_monitor.snapshot(),
@@ -1309,13 +1410,7 @@ def get_instagram_messaging_profile(
 
     # Same split the outbound sender uses, so this reports on the identity the
     # bot actually talks to Meta as.
-    if token.startswith("IGAA"):
-        url = f"https://graph.instagram.com/{config.WHATSAPP_API_VERSION}/me/messenger_profile"
-        identity = "instagram_login_token (graph.instagram.com/me)"
-    else:
-        page_id = config.INSTAGRAM_PAGE_ID or "me"
-        url = f"https://graph.facebook.com/{config.WHATSAPP_API_VERSION}/{page_id}/messenger_profile"
-        identity = f"page_token (graph.facebook.com/{page_id})"
+    url, identity = _instagram_profile_url_and_identity()
 
     try:
         with httpx.Client(timeout=15.0) as client:
