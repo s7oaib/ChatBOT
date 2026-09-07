@@ -435,6 +435,41 @@ _DROPPED_WEBHOOK_EVENTS: List[Dict[str, Any]] = []
 _DROPPED_WEBHOOK_LIMIT = 25
 
 
+_UNREADABLE_ATTACHMENT_REPLY = (
+    "Thanks for sending that! I can't open photos or voice notes here — "
+    "could you type your question instead?\n\n"
+    "I can help with our Sondesh flavours & prices, this week's Bengali meals, "
+    "or delivery across Delhi NCR. If you'd rather speak to someone, our team "
+    "is on +91 87965 51990."
+)
+
+
+def _reply_to_unreadable_attachment(sender_id: str) -> None:
+    """
+    Answers a photo, sticker or voice note we cannot read.
+
+    Sent at most once per conversation. A customer who sends three photos
+    should not get the same apology three times — after the first, silence is
+    less annoying than a bot repeating itself, and the message already told
+    them how to reach a human.
+    """
+    try:
+        facts = session_memory.get_facts(sender_id, "instagram")
+        if facts.get("attachment_notice_sent"):
+            log.info("Attachment from %s; the type-instead notice was already sent.", sender_id)
+            return
+        facts["attachment_notice_sent"] = True
+
+        session_memory.add_turn(sender_id, "instagram", "[attachment]", _UNREADABLE_ATTACHMENT_REPLY)
+        db.log_conversation(
+            sender_id, "instagram", "[attachment]", _UNREADABLE_ATTACHMENT_REPLY,
+            True, "unreadable_attachment", message_source="attachment",
+        )
+        send_instagram_reply(sender_id, _UNREADABLE_ATTACHMENT_REPLY)
+    except Exception:
+        log.exception("Failed to answer an unreadable attachment from %s.", sender_id)
+
+
 def _classify_unanswered_event(messaging_event: dict) -> Optional[str]:
     """
     Why an event with no usable text is worth someone's attention, or None.
@@ -520,6 +555,18 @@ def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks
                 # them to fill the buffer in about a minute, burying the one
                 # event that actually mattered.
                 reason = _classify_unanswered_event(messaging_event)
+
+                # A photo, voice note or sticker is a real person saying
+                # something we cannot read. Silence is the worst available
+                # answer — they cannot tell whether anyone is there. Asking
+                # them to type costs one message and keeps the conversation
+                # alive; it was found by the drop log within a minute of that
+                # log existing.
+                if reason == "attachment_only" and is_ad_qualified:
+                    background_tasks.add_task(_reply_to_unreadable_attachment, sender_id)
+                    results.append({"sender_id": sender_id, "action": "queued_attachment_reply"})
+                    continue
+
                 if reason:
                     _record_dropped_webhook_event(reason, messaging_event, sender_id)
                 log.warning(

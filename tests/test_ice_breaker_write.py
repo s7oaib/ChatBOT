@@ -219,26 +219,29 @@ class TestDroppedEventsAreVisible:
             {"message_edit": {"mid": "m"}}) == "message_edit_without_text"
 
     def test_an_event_with_no_text_is_recorded_rather_than_vanishing(self):
+        # An attachment now gets a reply instead, so this uses the case that is
+        # still genuinely unanswerable: an edit carrying no text at all.
         app_module._DROPPED_WEBHOOK_EVENTS.clear()
         tasks = MagicMock()
         payload = {"entry": [{"messaging": [{
             "sender": {"id": "silent_user"},
-            "message": {"mid": "m9", "attachments": [{"type": "image"}]},
+            "message_edit": {"mid": "m9"},
         }]}]}
 
-        with patch.object(app_module.config, "BYPASS_AD_GATE", True):
+        with patch.object(app_module.config, "BYPASS_AD_GATE", True), \
+             patch("camellia.ad_gate.fetch_message_details_fallback", return_value=(None, None)):
             result = app_module._dispatch_instagram_payload(payload, tasks)
 
         assert result["results"][0]["action"] == "ignored_empty_text"
         assert len(app_module._DROPPED_WEBHOOK_EVENTS) == 1
-        assert app_module._DROPPED_WEBHOOK_EVENTS[0]["reason"] == "attachment_only"
+        assert app_module._DROPPED_WEBHOOK_EVENTS[0]["reason"] == "message_edit_without_text"
 
     def test_no_customer_text_is_retained_in_the_drop_record(self):
         app_module._DROPPED_WEBHOOK_EVENTS.clear()
         tasks = MagicMock()
         payload = {"entry": [{"messaging": [{
             "sender": {"id": "u2"},
-            "message": {"mid": "m1", "attachments": [{"type": "image", "payload": {"url": "secret"}}]},
+            "message_edit": {"mid": "m1", "secret_field": "secret"},
         }]}]}
 
         with patch.object(app_module.config, "BYPASS_AD_GATE", True):
@@ -251,3 +254,70 @@ class TestDroppedEventsAreVisible:
         for i in range(40):
             app_module._record_dropped_webhook_event("empty_text", {"postback": {}}, f"u{i}")
         assert len(app_module._DROPPED_WEBHOOK_EVENTS) == app_module._DROPPED_WEBHOOK_LIMIT
+
+
+class TestUnreadableAttachments:
+    """
+    A photo or voice note is a real person saying something we cannot read.
+    Answering nothing leaves them unable to tell whether anyone is there.
+    """
+
+    def _event(self, sender="att_user"):
+        return {"entry": [{"messaging": [{
+            "sender": {"id": sender},
+            "recipient": {"id": "page"},
+            "message": {"mid": "m1", "attachments": [{"type": "image"}]},
+        }]}]}
+
+    def test_a_photo_gets_an_answer_instead_of_silence(self):
+        tasks = MagicMock()
+        with patch.object(app_module.config, "BYPASS_AD_GATE", True):
+            result = app_module._dispatch_instagram_payload(self._event(), tasks)
+
+        assert result["results"][0]["action"] == "queued_attachment_reply"
+        assert tasks.add_task.call_args.args[0] is app_module._reply_to_unreadable_attachment
+
+    def test_the_reply_tells_them_what_to_do_and_how_to_reach_a_human(self):
+        session_memory.clear_session("att_send", "instagram")
+        with patch.object(app_module, "send_instagram_reply") as send, \
+             patch.object(app_module.db, "log_conversation"):
+            app_module._reply_to_unreadable_attachment("att_send")
+
+        sent = send.call_args.args[1]
+        assert "type your question" in sent
+        assert "87965 51990" in sent
+
+    def test_it_is_sent_once_not_once_per_photo(self):
+        session_memory.clear_session("att_repeat", "instagram")
+        with patch.object(app_module, "send_instagram_reply") as send, \
+             patch.object(app_module.db, "log_conversation"):
+            for _ in range(3):
+                app_module._reply_to_unreadable_attachment("att_repeat")
+
+        assert send.call_count == 1
+
+    def test_it_is_logged_so_the_conversation_makes_sense_to_staff(self):
+        session_memory.clear_session("att_log", "instagram")
+        with patch.object(app_module, "send_instagram_reply"), \
+             patch.object(app_module.db, "log_conversation") as logged:
+            app_module._reply_to_unreadable_attachment("att_log")
+
+        assert logged.call_args.args[5] == "unreadable_attachment"
+        assert logged.call_args.kwargs["message_source"] == "attachment"
+
+    def test_a_send_failure_never_escapes_the_background_task(self):
+        session_memory.clear_session("att_boom", "instagram")
+        with patch.object(app_module, "send_instagram_reply", side_effect=RuntimeError("meta down")), \
+             patch.object(app_module.db, "log_conversation"):
+            app_module._reply_to_unreadable_attachment("att_boom")  # must not raise
+
+    def test_an_echo_of_our_own_message_never_triggers_it(self):
+        tasks = MagicMock()
+        event = {"entry": [{"messaging": [{
+            "sender": {"id": "page"},
+            "message": {"mid": "m2", "is_echo": True, "attachments": [{"type": "image"}]},
+        }]}]}
+        with patch.object(app_module.config, "BYPASS_AD_GATE", True):
+            app_module._dispatch_instagram_payload(event, tasks)
+
+        assert not tasks.add_task.called
