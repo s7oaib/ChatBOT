@@ -1,10 +1,94 @@
 import logging
+import re
 import httpx
+from dataclasses import dataclass
 from typing import Dict, Any, Tuple, Optional
 from camellia.database import db
 from camellia.config import config
 
 log = logging.getLogger("camellia.ad_gate")
+
+# Meta's own generated ice-breaker postbacks carry a payload naming themselves.
+# A business-configured one carries whatever payload we set, so this pattern is
+# a positive identification only — anything else stays the vaguer "postback".
+_ICE_BREAKER_PAYLOAD_RE = re.compile(r'ice[_\s-]?breaker', re.IGNORECASE)
+
+
+@dataclass(frozen=True)
+class EntryPoint:
+    """
+    How one inbound message was composed, and which ad it came in from.
+
+    These are two separate questions and conflating them loses the answer to
+    both. `source` is what the person did — typed a sentence, or tapped
+    something we (or Meta) put in front of them. `ad_id` / `ad_title` are where
+    they arrived from, which is true of a tap and a typed message alike.
+
+    Worth the columns because of a specific complaint: around fifty people
+    asked whether we deliver outside Delhi NCR and then named Gurgaon, Noida
+    and Faridabad — all of which are inside it. Fifty people do not
+    independently phrase a question that way. Either Instagram is offering it
+    as a tappable prompt or they are typing it, and until the two are recorded
+    separately there is no way to tell which, or to prove a fix worked.
+    """
+
+    source: str = "unknown"        # typed | ice_breaker | postback | story_reply | unknown
+    ad_id: Optional[str] = None
+    ad_title: Optional[str] = None
+    from_ad_click: bool = False    # this event carried the ad referral itself
+    raw_payload: Optional[str] = None
+
+
+def _referral_of(messaging_event: Dict[str, Any]) -> Dict[str, Any]:
+    """The referral block, wherever Meta hung it on this event."""
+    message_obj = messaging_event.get("message") or {}
+    postback_obj = messaging_event.get("postback") or {}
+    for candidate in (
+        message_obj.get("referral"),
+        postback_obj.get("referral"),
+        messaging_event.get("referral"),
+    ):
+        if isinstance(candidate, dict):
+            return candidate
+    return {}
+
+
+def describe_entry_point(messaging_event: Dict[str, Any]) -> EntryPoint:
+    """
+    Classifies one raw messaging event without gating or replying to it.
+
+    Deliberately separate from `inspect_and_gate_message`, which answers a
+    different question (may we reply at all) and whose tuple shape several
+    callers and tests already depend on.
+    """
+    message_obj = messaging_event.get("message") or {}
+    postback_obj = messaging_event.get("postback") or {}
+    referral = _referral_of(messaging_event)
+
+    ad_id = referral.get("ad_id")
+    ads_context = referral.get("ads_context_data")
+    ad_title = ads_context.get("ad_title") if isinstance(ads_context, dict) else None
+    from_ad_click = str(referral.get("source", "")).upper() == "ADS"
+
+    payload = postback_obj.get("payload")
+    if postback_obj:
+        # A tap, not typing. Which kind of tap is the whole question, so the
+        # raw payload is kept even when it does not match a known shape.
+        source = "ice_breaker" if payload and _ICE_BREAKER_PAYLOAD_RE.search(str(payload)) else "postback"
+    elif isinstance(message_obj.get("reply_to"), dict) and message_obj["reply_to"].get("story"):
+        source = "story_reply"
+    elif message_obj.get("text") or (messaging_event.get("message_edit") or {}).get("text"):
+        source = "typed"
+    else:
+        source = "unknown"
+
+    return EntryPoint(
+        source=source,
+        ad_id=ad_id,
+        ad_title=ad_title,
+        from_ad_click=from_ad_click,
+        raw_payload=str(payload) if payload else None,
+    )
 
 def fetch_message_details_fallback(mid: str) -> Tuple[Optional[str], Optional[str]]:
     """

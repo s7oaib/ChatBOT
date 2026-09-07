@@ -18,6 +18,13 @@ class Database:
         conn.row_factory = sqlite3.Row
         return conn
 
+    @staticmethod
+    def _ensure_column(cursor, table: str, column: str, decl: str) -> None:
+        """Adds a column to an existing table, once, if it is not there yet."""
+        existing = {row[1] for row in cursor.execute(f"PRAGMA table_info({table})")}
+        if existing and column not in existing:
+            cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+
     def init_db(self):
         """Initialize database schema if tables do not exist."""
         with self.get_connection() as conn:
@@ -54,6 +61,15 @@ class Database:
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
             """)
+
+            # Columns added after this table shipped. CREATE TABLE IF NOT
+            # EXISTS does nothing to a table that already exists, and the
+            # production database lives on a Railway volume full of real rows,
+            # so new columns have to be added to it in place.
+            self._ensure_column(cursor, "conversations", "message_source", "TEXT")
+            self._ensure_column(cursor, "conversations", "ad_id", "TEXT")
+            self._ensure_column(cursor, "conversations", "ad_title", "TEXT")
+            self._ensure_column(cursor, "sessions", "ad_title", "TEXT")
 
             # Escalations table for human handoff
             cursor.execute("""
@@ -174,6 +190,74 @@ class Database:
         for statement in statements:
             cursor.execute(statement)
 
+    def entry_point_breakdown(self, channel: str = "instagram", days: int = 30) -> Dict[str, Any]:
+        """
+        How customers on a channel are composing their messages, and which
+        questions arrive the same way over and over.
+
+        The repeated-question list is the point: a question fifty different
+        people send in identical words, all as taps, is a prompt someone is
+        being shown — not fifty people wondering the same thing.
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cutoff = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+
+            by_source = [
+                {"source": row["source"], "messages": row["n"], "senders": row["senders"]}
+                for row in cursor.execute("""
+                    SELECT COALESCE(message_source, 'unrecorded') AS source,
+                           COUNT(*) AS n,
+                           COUNT(DISTINCT user_id) AS senders
+                    FROM conversations
+                    WHERE channel = ? AND timestamp >= ?
+                    GROUP BY source
+                    ORDER BY n DESC
+                """, (channel, cutoff))
+            ]
+
+            repeated = [
+                {
+                    "message": row["msg"],
+                    "source": row["source"],
+                    "messages": row["n"],
+                    "senders": row["senders"],
+                }
+                for row in cursor.execute("""
+                    SELECT LOWER(TRIM(user_message)) AS msg,
+                           COALESCE(message_source, 'unrecorded') AS source,
+                           COUNT(*) AS n,
+                           COUNT(DISTINCT user_id) AS senders
+                    FROM conversations
+                    WHERE channel = ? AND timestamp >= ? AND TRIM(user_message) <> ''
+                    GROUP BY msg, source
+                    HAVING COUNT(DISTINCT user_id) > 1
+                    ORDER BY senders DESC, n DESC
+                    LIMIT 25
+                """, (channel, cutoff))
+            ]
+
+            by_ad = [
+                {"ad_id": row["ad_id"], "ad_title": row["ad_title"], "messages": row["n"], "senders": row["senders"]}
+                for row in cursor.execute("""
+                    SELECT ad_id, ad_title, COUNT(*) AS n, COUNT(DISTINCT user_id) AS senders
+                    FROM conversations
+                    WHERE channel = ? AND timestamp >= ? AND ad_id IS NOT NULL
+                    GROUP BY ad_id, ad_title
+                    ORDER BY senders DESC
+                    LIMIT 25
+                """, (channel, cutoff))
+            ]
+
+            return {
+                "channel": channel,
+                "days": days,
+                "by_source": by_source,
+                "repeated_questions": repeated,
+                "by_ad": by_ad,
+                "ad_titles_seen": sum(1 for a in by_ad if a["ad_title"]),
+            }
+
     def set_ad_qualified(self, user_id: str, channel: str, is_ad_qualified: bool = True, ad_id: Optional[str] = None):
         """Mark user session as ad_qualified."""
         with self.get_connection() as conn:
@@ -199,14 +283,31 @@ class Database:
                 return bool(row["is_ad_qualified"])
             return False
 
-    def log_conversation(self, user_id: str, channel: str, user_message: str, bot_response: str, was_matched: bool, template_id: Optional[str] = None):
+    def log_conversation(
+        self,
+        user_id: str,
+        channel: str,
+        user_message: str,
+        bot_response: str,
+        was_matched: bool,
+        template_id: Optional[str] = None,
+        message_source: Optional[str] = None,
+        ad_id: Optional[str] = None,
+        ad_title: Optional[str] = None,
+    ):
         """Log message exchange and increment analytics counters."""
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
-            INSERT INTO conversations (user_id, channel, user_message, bot_response, was_matched, template_id)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """, (user_id, channel, user_message, bot_response, 1 if was_matched else 0, template_id))
+            INSERT INTO conversations (
+                user_id, channel, user_message, bot_response, was_matched, template_id,
+                message_source, ad_id, ad_title
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                user_id, channel, user_message, bot_response, 1 if was_matched else 0, template_id,
+                message_source, ad_id, ad_title,
+            ))
             
             cursor.execute("UPDATE analytics SET value = value + 1 WHERE key = 'total_messages';")
             if was_matched:

@@ -20,7 +20,7 @@ from slowapi.errors import RateLimitExceeded
 # against a pre-.env environment and seed the wrong paths.
 from camellia.config import config, STARTUP_ACTIONS
 from camellia.database import db
-from camellia.ad_gate import ad_gate
+from camellia.ad_gate import EntryPoint, ad_gate, describe_entry_point
 from camellia.responder import responder
 from camellia.ai_responder import ai_responder
 from camellia.whatsapp_adapter import whatsapp_adapter
@@ -299,7 +299,12 @@ def verify_instagram_webhook(
     log.warning("Instagram webhook verification failed (mode=%s).", hub_mode)
     return Response(content="Forbidden", media_type="text/plain", status_code=403)
 
-def _process_instagram_event(sender_id: str, message_text: str, ad_id: Optional[str]) -> None:
+def _process_instagram_event(
+    sender_id: str,
+    message_text: str,
+    ad_id: Optional[str],
+    entry_point: Optional[EntryPoint] = None,
+) -> None:
     """
     Matches, logs, escalates and replies for one Instagram DM.
 
@@ -318,9 +323,28 @@ def _process_instagram_event(sender_id: str, message_text: str, ad_id: Optional[
         awaiting_contact = facts.get("awaiting_instagram_contact", False)
         supplied_contact = _extract_whatsapp_number(message_text)
 
+        # How this message was composed, and which ad it came from, recorded on
+        # every row this function writes. Phase 1 of the router rollout: until
+        # a tap and a typed sentence look different in the data, there is no
+        # way to tell whether a question repeated by fifty people is a prompt
+        # Instagram is showing them.
+        entry = entry_point or EntryPoint()
+        trace = {
+            "message_source": entry.source,
+            # The ad on this event, else the one this session arrived on.
+            "ad_id": entry.ad_id or ad_id,
+            "ad_title": entry.ad_title or facts.get("ad_title"),
+        }
+        if entry.ad_title and not facts.get("ad_title"):
+            facts["ad_title"] = entry.ad_title
+        log.info(
+            "Instagram inbound from %s: source=%s ad_id=%s ad_title=%r payload=%r",
+            sender_id, entry.source, trace["ad_id"], trace["ad_title"], entry.raw_payload,
+        )
+
         if awaiting_contact and not supplied_contact:
             response_text = _INSTAGRAM_CONTACT_REQUEST
-            db.log_conversation(sender_id, "instagram", message_text, response_text, True, "instagram_contact_required")
+            db.log_conversation(sender_id, "instagram", message_text, response_text, True, "instagram_contact_required", **trace)
             send_instagram_reply(sender_id, response_text)
             return
 
@@ -346,7 +370,7 @@ def _process_instagram_event(sender_id: str, message_text: str, ad_id: Optional[
                     "customer_whatsapp_number": supplied_contact,
                 },
             )
-            db.log_conversation(sender_id, "instagram", message_text, response_text, was_matched, template_id)
+            db.log_conversation(sender_id, "instagram", message_text, response_text, was_matched, template_id, **trace)
             send_instagram_reply(sender_id, response_text)
             return
 
@@ -367,7 +391,7 @@ def _process_instagram_event(sender_id: str, message_text: str, ad_id: Optional[
             }
             response_text = _INSTAGRAM_CONTACT_REQUEST
             session_memory.add_turn(sender_id, "instagram", message_text, response_text)
-            db.log_conversation(sender_id, "instagram", message_text, response_text, True, "instagram_contact_required")
+            db.log_conversation(sender_id, "instagram", message_text, response_text, True, "instagram_contact_required", **trace)
             send_instagram_reply(sender_id, response_text)
             return
 
@@ -387,7 +411,7 @@ def _process_instagram_event(sender_id: str, message_text: str, ad_id: Optional[
                 },
             )
 
-        db.log_conversation(sender_id, "instagram", message_text, response_text, was_matched, template_id)
+        db.log_conversation(sender_id, "instagram", message_text, response_text, was_matched, template_id, **trace)
 
         send_instagram_reply(sender_id, response_text, image_url=image_url)
     except Exception:
@@ -410,7 +434,8 @@ def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks
 
         for messaging_event in events:
             is_ad_qualified, sender_id, message_text, ad_id = ad_gate.inspect_and_gate_message(messaging_event)
-            
+            entry_point = describe_entry_point(messaging_event)
+
             if not sender_id:
                 log.info("Ignored Instagram event without sender ID (keys: %s).", list(messaging_event.keys()))
                 results.append({"action": "ignored_no_sender"})
@@ -429,11 +454,15 @@ def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks
 
             # Accepted. The reply itself is built and sent off the request path
             # so Meta gets its 200 immediately and does not retry this delivery.
-            background_tasks.add_task(_process_instagram_event, sender_id, message_text, ad_id)
+            background_tasks.add_task(
+                _process_instagram_event, sender_id, message_text, ad_id, entry_point
+            )
             results.append({
                 "sender_id": sender_id,
                 "action": "queued",
                 "ad_id": ad_id,
+                "message_source": entry_point.source,
+                "ad_title": entry_point.ad_title,
             })
 
     return {"status": "processed", "results": results}
@@ -1235,6 +1264,24 @@ def get_analytics(x_admin_key: Optional[str] = Header(None), x_admin_pin: Option
     """Returns match rate vs escalation analytics summary."""
     require_admin(x_admin_key, x_admin_pin)
     return db.get_analytics()
+
+@app.get("/admin/entry-points")
+def get_entry_points(
+    channel: str = "instagram",
+    days: int = 30,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """
+    Where inbound messages are coming from, and which questions repeat.
+
+    Reads the evidence for two open questions: whether the repeated
+    "do you deliver outside Delhi NCR" messages are taps on a prompt or people
+    typing, and whether Instagram sends us an ad title we could use to tell
+    which product a customer is asking about.
+    """
+    require_admin(x_admin_key, x_admin_pin)
+    return db.entry_point_breakdown(channel=channel, days=days)
 
 @app.get("/admin/conversations")
 def get_conversations_list(
