@@ -69,10 +69,10 @@ class TestTheDefaultsAreAnswerable:
 
     def test_every_default_fits_metas_character_limit(self):
         for item in app_module.DEFAULT_ICE_BREAKERS:
-            assert len(item["question"]) <= app_module._MAX_ICE_BREAKER_CHARS
+            assert len(item["question"]) <= app_module.MAX_ICE_BREAKER_CHARS
 
     def test_there_are_no_more_than_meta_accepts(self):
-        assert len(app_module.DEFAULT_ICE_BREAKERS) <= app_module._MAX_ICE_BREAKERS
+        assert len(app_module.DEFAULT_ICE_BREAKERS) <= app_module.MAX_ICE_BREAKERS
 
     def test_a_tap_on_a_default_is_recorded_as_a_tap_not_as_typing(self):
         # The payloads say ICE_BREAKER so the Phase 1 entry-point logging can
@@ -138,3 +138,101 @@ class TestRemoval:
         method, _url = client.__enter__.return_value.request.call_args.args
         assert method == "DELETE"
         assert client.__enter__.return_value.request.call_args.kwargs["json"] == {"fields": ["ice_breakers"]}
+
+
+class TestATappedPromptIsAnswered:
+    """
+    The failure this class exists for: the ice breakers went live, a customer
+    tapped "Show me the menu", and got silence. Instagram sent a postback with
+    no `title`, so the text extraction produced "" and the dispatcher discarded
+    the event as empty before it ever reached a reply.
+    """
+
+    def test_a_tap_without_a_title_still_becomes_the_question(self):
+        from camellia.ad_gate import ad_gate
+
+        event = {
+            "sender": {"id": "u1"},
+            "recipient": {"id": "p1"},
+            "postback": {"mid": "m1", "payload": "ICE_BREAKER_MENU"},
+        }
+        _ok, _sender, text, _ad = ad_gate.inspect_and_gate_message(event)
+        assert text == "Show me the menu"
+
+    def test_a_tap_with_a_title_still_prefers_the_title(self):
+        from camellia.ad_gate import ad_gate
+
+        event = {
+            "sender": {"id": "u1"},
+            "postback": {"mid": "m1", "title": "Show me the menu", "payload": "ICE_BREAKER_MENU"},
+        }
+        assert ad_gate.inspect_and_gate_message(event)[2] == "Show me the menu"
+
+    def test_an_unknown_ice_breaker_payload_still_yields_usable_words(self):
+        from camellia.ice_breakers import question_for_payload
+
+        assert question_for_payload("ICE_BREAKER_GIFT_BOXES") == "gift boxes"
+
+    def test_a_payload_we_do_not_recognise_at_all_is_not_invented(self):
+        from camellia.ice_breakers import question_for_payload
+
+        assert question_for_payload("") == ""
+
+    def test_every_default_payload_maps_back_to_its_own_question(self):
+        from camellia.ice_breakers import DEFAULT_ICE_BREAKERS, question_for_payload
+
+        for item in DEFAULT_ICE_BREAKERS:
+            assert question_for_payload(item["payload"]) == item["question"]
+
+    def test_a_tap_reaches_the_reply_path_instead_of_being_dropped(self):
+        tasks = MagicMock()
+        tasks.queued = []
+        payload = {"entry": [{"messaging": [{
+            "sender": {"id": "tap_user"},
+            "recipient": {"id": "page"},
+            "postback": {"mid": "m1", "payload": "ICE_BREAKER_MENU"},
+        }]}]}
+
+        with patch.object(app_module.config, "BYPASS_AD_GATE", True):
+            result = app_module._dispatch_instagram_payload(payload, tasks)
+
+        assert result["results"][0]["action"] == "queued"
+        assert result["results"][0]["message_source"] == "ice_breaker"
+        assert tasks.add_task.called
+        assert "Show me the menu" in tasks.add_task.call_args.args
+
+
+class TestDroppedEventsAreVisible:
+    def test_an_event_with_no_text_is_recorded_rather_than_vanishing(self):
+        app_module._DROPPED_WEBHOOK_EVENTS.clear()
+        tasks = MagicMock()
+        payload = {"entry": [{"messaging": [{
+            "sender": {"id": "silent_user"},
+            "message": {"mid": "m9", "attachments": [{"type": "image"}]},
+        }]}]}
+
+        with patch.object(app_module.config, "BYPASS_AD_GATE", True):
+            result = app_module._dispatch_instagram_payload(payload, tasks)
+
+        assert result["results"][0]["action"] == "ignored_empty_text"
+        assert len(app_module._DROPPED_WEBHOOK_EVENTS) == 1
+        assert app_module._DROPPED_WEBHOOK_EVENTS[0]["reason"] == "empty_text"
+
+    def test_no_customer_text_is_retained_in_the_drop_record(self):
+        app_module._DROPPED_WEBHOOK_EVENTS.clear()
+        tasks = MagicMock()
+        payload = {"entry": [{"messaging": [{
+            "sender": {"id": "u2"},
+            "message": {"mid": "m1", "attachments": [{"type": "image", "payload": {"url": "secret"}}]},
+        }]}]}
+
+        with patch.object(app_module.config, "BYPASS_AD_GATE", True):
+            app_module._dispatch_instagram_payload(payload, tasks)
+
+        assert "secret" not in json.dumps(app_module._DROPPED_WEBHOOK_EVENTS)
+
+    def test_the_buffer_cannot_grow_without_bound(self):
+        app_module._DROPPED_WEBHOOK_EVENTS.clear()
+        for i in range(40):
+            app_module._record_dropped_webhook_event("empty_text", {"postback": {}}, f"u{i}")
+        assert len(app_module._DROPPED_WEBHOOK_EVENTS) == app_module._DROPPED_WEBHOOK_LIMIT

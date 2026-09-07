@@ -6,6 +6,7 @@ import os
 import re
 import time
 import httpx
+from datetime import datetime
 from contextlib import asynccontextmanager
 from pathlib import Path
 from fastapi import FastAPI, Request, Response, Query, Header, HTTPException, File, UploadFile, BackgroundTasks
@@ -22,6 +23,11 @@ from slowapi.errors import RateLimitExceeded
 from camellia.config import config, STARTUP_ACTIONS
 from camellia.database import db
 from camellia.ad_gate import EntryPoint, ad_gate, describe_entry_point
+from camellia.ice_breakers import (
+    DEFAULT_ICE_BREAKERS,
+    MAX_ICE_BREAKERS,
+    MAX_ICE_BREAKER_CHARS,
+)
 from camellia.responder import responder
 from camellia.ai_responder import ai_responder
 from camellia.whatsapp_adapter import whatsapp_adapter
@@ -421,6 +427,40 @@ def _process_instagram_event(
         log.exception("Failed to process Instagram message from %s.", sender_id)
 
 
+# Webhook events the bot received and did not answer. Kept in memory and
+# small: this exists to make a silent drop visible within seconds of it
+# happening, not to be a second conversation log. The event's shape is
+# recorded rather than its content, so no customer message is retained here.
+_DROPPED_WEBHOOK_EVENTS: List[Dict[str, Any]] = []
+_DROPPED_WEBHOOK_LIMIT = 25
+
+
+def _record_dropped_webhook_event(reason: str, messaging_event: dict, sender_id: Optional[str]) -> None:
+    """Remembers that an event was discarded, and enough to tell why."""
+    inner = messaging_event.get("postback") or messaging_event.get("message") or {}
+    _DROPPED_WEBHOOK_EVENTS.append({
+        "at": datetime.utcnow().isoformat(timespec="seconds"),
+        "reason": reason,
+        "had_sender": bool(sender_id),
+        "event_keys": sorted(messaging_event.keys()),
+        "inner_keys": sorted(inner.keys()) if isinstance(inner, dict) else [],
+        # The payload identifies which prompt was tapped and is our own string,
+        # not anything the customer wrote.
+        "postback_payload": (messaging_event.get("postback") or {}).get("payload"),
+    })
+    del _DROPPED_WEBHOOK_EVENTS[:-_DROPPED_WEBHOOK_LIMIT]
+
+
+@app.get("/admin/dropped-events")
+def get_dropped_webhook_events(
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """Recent webhook events the bot received and did not reply to."""
+    require_admin(x_admin_key, x_admin_pin)
+    return {"count": len(_DROPPED_WEBHOOK_EVENTS), "events": list(reversed(_DROPPED_WEBHOOK_EVENTS))}
+
+
 def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks) -> dict:
     log.info("Instagram Webhook Raw Payload:\n%s", json.dumps(payload, indent=2))
 
@@ -443,7 +483,16 @@ def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks
                 continue
 
             if not message_text:
-                log.info("Ignored Instagram event without text payload (sender: %s, keys: %s).", sender_id, list(messaging_event.keys()))
+                # Worth more than a log line. A dropped event is a customer who
+                # messaged and got silence, and it leaves no trace anywhere the
+                # dashboard can see — which is how a tapped ice breaker went
+                # unanswered with /health still reporting everything green.
+                _record_dropped_webhook_event("empty_text", messaging_event, sender_id)
+                log.warning(
+                    "Ignored Instagram event without text payload (sender: %s, keys: %s, inner: %s).",
+                    sender_id, list(messaging_event.keys()),
+                    list((messaging_event.get("postback") or messaging_event.get("message") or {}).keys()),
+                )
                 results.append({"sender_id": sender_id, "action": "ignored_empty_text"})
                 continue
 
@@ -1446,16 +1495,8 @@ def get_router_shadow_report(
 #
 # The payloads say ICE_BREAKER on purpose: that is what describe_entry_point
 # matches on, so a tap is recorded as a tap rather than as someone typing.
-DEFAULT_ICE_BREAKERS = [
-    {"question": "Show me the menu", "payload": "ICE_BREAKER_MENU"},
-    {"question": "Sondesh flavours & prices", "payload": "ICE_BREAKER_PRICES"},
-    {"question": "Do you deliver to my area?", "payload": "ICE_BREAKER_DELIVERY"},
-    {"question": "I would like to place an order", "payload": "ICE_BREAKER_ORDER"},
-]
-
-# Meta's limits: at most four, and a question is capped at 80 characters.
-_MAX_ICE_BREAKERS = 4
-_MAX_ICE_BREAKER_CHARS = 80
+# Defined in camellia/ice_breakers.py so the webhook path can understand a tap
+# on one without importing app.py, which would be a cycle.
 
 
 @app.post("/admin/instagram/ice-breakers")
@@ -1488,10 +1529,10 @@ async def set_instagram_ice_breakers(
     requested = body.get("questions") or DEFAULT_ICE_BREAKERS
     if not isinstance(requested, list) or not requested:
         raise HTTPException(status_code=400, detail="questions must be a non-empty list.")
-    if len(requested) > _MAX_ICE_BREAKERS:
+    if len(requested) > MAX_ICE_BREAKERS:
         raise HTTPException(
             status_code=400,
-            detail=f"Instagram allows at most {_MAX_ICE_BREAKERS} ice breakers; {len(requested)} given.",
+            detail=f"Instagram allows at most {MAX_ICE_BREAKERS} ice breakers; {len(requested)} given.",
         )
 
     call_to_actions = []
@@ -1499,10 +1540,10 @@ async def set_instagram_ice_breakers(
         question = (item.get("question") or "").strip() if isinstance(item, dict) else str(item).strip()
         if not question:
             raise HTTPException(status_code=400, detail=f"Ice breaker {index + 1} has no question text.")
-        if len(question) > _MAX_ICE_BREAKER_CHARS:
+        if len(question) > MAX_ICE_BREAKER_CHARS:
             raise HTTPException(
                 status_code=400,
-                detail=f"Ice breaker {index + 1} is {len(question)} characters; the limit is {_MAX_ICE_BREAKER_CHARS}.",
+                detail=f"Ice breaker {index + 1} is {len(question)} characters; the limit is {MAX_ICE_BREAKER_CHARS}.",
             )
         payload = (item.get("payload") if isinstance(item, dict) else None) or f"ICE_BREAKER_{index + 1}"
         call_to_actions.append({"question": question, "payload": payload})

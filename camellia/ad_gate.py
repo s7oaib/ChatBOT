@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Dict, Any, Tuple, Optional
 from camellia.database import db
 from camellia.config import config
+from camellia.ice_breakers import question_for_payload
 
 log = logging.getLogger("camellia.ad_gate")
 
@@ -168,7 +169,19 @@ class AdGate:
         elif sender_obj:
             sender_id = str(sender_obj)
 
-        message_text = message_obj.get("text") or postback_obj.get("title") or edit_obj.get("text") or ""
+        # A tapped prompt is the customer asking a question, so it has to end
+        # up as text the matcher can read. Messenger sends `title` on a
+        # postback; Instagram does not reliably, and without the payload
+        # fallback below a tap arrives with no text at all and is discarded as
+        # an empty event — the customer taps "Show me the menu" and gets
+        # silence, which is exactly what happened when these went live.
+        message_text = (
+            message_obj.get("text")
+            or postback_obj.get("title")
+            or edit_obj.get("text")
+            or question_for_payload(postback_obj.get("payload") or "")
+            or ""
+        )
 
         # Fallback for message_edit events lacking a sender field
         mid = edit_obj.get("mid") or messaging_event.get("mid") or message_obj.get("mid")
