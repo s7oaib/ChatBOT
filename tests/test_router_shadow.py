@@ -6,7 +6,10 @@ live customer traffic, so it must be incapable of changing a reply, delaying
 one, or breaking one when the provider misbehaves.
 """
 
+import json
 from unittest.mock import MagicMock, patch
+
+from camellia import app as app_module
 
 from camellia.config import config
 from camellia.database import db
@@ -216,3 +219,35 @@ class TestRouterModelIsolation:
         report = db.router_shadow_report(days=3650)
         models = {m["model"] for m in report["by_model"]}
         assert "groq/compound-mini" in models
+
+
+class TestHealthReportsShadowState:
+    """Flipping the flag in the host dashboard has to be verifiable."""
+
+    def test_health_shows_the_flag_is_off(self):
+        with patch.object(config, "ROUTER_SHADOW_ENABLED", False):
+            payload = json.loads(app_module.health_check().body)
+        assert payload["router_shadow"]["enabled"] is False
+        assert payload["router_shadow"]["model"] is None
+
+    def test_health_shows_the_model_and_a_live_count_when_on(self):
+        with patch.object(config, "ROUTER_SHADOW_ENABLED", True), \
+             patch.object(config, "GROQ_ROUTER_MODEL", "groq/compound-mini"), \
+             patch.object(db, "router_shadow_pulse", return_value={
+                 "compared_recently": 12, "agreement_rate": 0.75,
+                 "last_comparison_at": "2026-09-08 02:00:00", "window_hours": 24,
+             }):
+            payload = json.loads(app_module.health_check().body)
+
+        shadow = payload["router_shadow"]
+        assert shadow["enabled"] is True
+        assert shadow["model"] == "groq/compound-mini"
+        assert shadow["compared_recently"] == 12
+
+    def test_a_broken_pulse_query_never_takes_health_down_with_it(self):
+        with patch.object(config, "ROUTER_SHADOW_ENABLED", True), \
+             patch.object(db, "router_shadow_pulse", side_effect=RuntimeError("locked")):
+            resp = app_module.health_check()
+        payload = json.loads(resp.body)
+        assert resp.status_code == 200
+        assert payload["router_shadow"]["error"] == "RuntimeError"

@@ -1056,6 +1056,19 @@ def health_check():
     storage = _storage_durability()
     instagram_token = instagram_token_status()
 
+    # Shadow mode is switched on in the host dashboard, which nothing in this
+    # repo can read. Without this, turning it on and hoping is the only option.
+    router_shadow: Dict[str, Any] = {
+        "enabled": config.ROUTER_SHADOW_ENABLED,
+        "model": config.GROQ_ROUTER_MODEL if config.ROUTER_SHADOW_ENABLED else None,
+    }
+    if config.ROUTER_SHADOW_ENABLED:
+        try:
+            router_shadow.update(db.router_shadow_pulse())
+        except Exception as e:
+            router_shadow["error"] = f"{type(e).__name__}"
+            log.warning("Could not read the router shadow pulse: %s", e)
+
     # A bot that cannot answer is down, whatever else is working. Live mode
     # without credentials is the same kind of failure one step later — it
     # produces a reply that cannot be delivered.
@@ -1119,6 +1132,7 @@ def health_check():
             "webhook_signature": signature,
             "outbound_delivery": outbound,
             "instagram_token": instagram_token,
+            "router_shadow": router_shadow,
             # Not just which provider is configured — whether it last worked.
             "ai": ai_responder.status(),
             "reply_latency": latency_monitor.snapshot(),

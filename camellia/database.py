@@ -192,6 +192,8 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_conversations_user_channel ON conversations(user_id, channel, id DESC);",
             "CREATE INDEX IF NOT EXISTS idx_conversations_channel_id ON conversations(channel, id DESC);",
             "CREATE INDEX IF NOT EXISTS idx_conversations_timestamp ON conversations(timestamp);",
+            # /health reads this table on every poll, so it must not scan it.
+            "CREATE INDEX IF NOT EXISTS idx_router_shadow_timestamp ON router_shadow(timestamp);",
             # get_escalations() filters on status, ordered by id DESC.
             "CREATE INDEX IF NOT EXISTS idx_escalations_status_id ON escalations(status, id DESC);",
             "CREATE INDEX IF NOT EXISTS idx_escalations_user ON escalations(user_id);",
@@ -232,6 +234,29 @@ class Database:
                 1 if keyword_pick == router_pick else 0, detail, round(latency_ms, 1), model,
             ))
             conn.commit()
+
+    def router_shadow_pulse(self, hours: int = 24) -> Dict[str, Any]:
+        """
+        Just enough to tell whether shadow mode is actually running.
+
+        Flipping ROUTER_SHADOW_ENABLED in the host dashboard is otherwise an
+        act of faith: the flag lives in an environment nothing in the repo can
+        read, and the comparison table is behind admin auth. This is the cheap
+        counterpart that /health can show without credentials.
+        """
+        with self.get_connection() as conn:
+            cutoff = (datetime.utcnow() - timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
+            row = conn.execute("""
+                SELECT COUNT(*) AS n, MAX(timestamp) AS last_at, SUM(agreed) AS agreed
+                FROM router_shadow WHERE timestamp >= ?
+            """, (cutoff,)).fetchone()
+            compared = row["n"] or 0
+            return {
+                "compared_recently": compared,
+                "agreement_rate": round((row["agreed"] or 0) / compared, 3) if compared else None,
+                "last_comparison_at": row["last_at"],
+                "window_hours": hours,
+            }
 
     def router_shadow_report(self, days: int = 30, limit: int = 40) -> Dict[str, Any]:
         """
