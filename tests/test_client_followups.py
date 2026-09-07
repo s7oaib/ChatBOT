@@ -148,3 +148,69 @@ def test_whatsapp_escalation_keeps_sender_phone_and_never_requests_contact():
 
     assert escalate.call_args.kwargs["context_data"]["phone"] == "919876543210"
     assert send_message.call_args.args[1] == "standard escalation"
+
+
+def test_asking_about_delivery_outside_ncr_lists_the_covered_cities():
+    # The client's report: ~50 people asked this, then named Gurgaon, Noida and
+    # Faridabad. The bot used to answer with the out-of-area refusal ("we are
+    # unable to ship outside Delhi NCR"), so a customer in Gurgaon was told no
+    # and naturally replied with their city to correct it.
+    user_id = "client_outside_ncr_question"
+    session_memory.clear_session(user_id, "whatsapp")
+
+    text, _matched, template_id, _ = responder.match_and_respond(
+        "Do you deliver outside Delhi NCR?", user_id=user_id, channel="whatsapp"
+    )
+
+    assert template_id == "delivery_area"
+    assert "unable to ship our sondesh outside Delhi NCR" not in text
+    for city in ("Delhi", "Gurgaon", "Noida", "Ghaziabad", "Faridabad"):
+        assert city in text
+    assert "Which area are you in?" in text
+
+
+def test_the_zone_question_then_a_city_confirms_instead_of_repeating():
+    # Naming the zone is not naming your own area. Treating the "Delhi" in
+    # "outside Delhi NCR" as the customer's location suppressed the area
+    # question, so their next message re-matched the template and repeated it.
+    user_id = "client_outside_ncr_then_city"
+    session_memory.clear_session(user_id, "whatsapp")
+
+    first, _m1, _t1, _ = responder.match_and_respond(
+        "Do you deliver outside Delhi NCR?", user_id=user_id, channel="whatsapp"
+    )
+    second, _m2, template_id, _ = responder.match_and_respond(
+        "Gurgaon", user_id=user_id, channel="whatsapp"
+    )
+
+    assert template_id == "delivery_area_confirmation"
+    assert second != first
+    assert "Yes, we deliver to Gurgaon" in second
+
+
+def test_a_genuinely_out_of_zone_city_still_gets_the_approved_refusal():
+    for message in ("do you deliver to bangalore", "can you ship to mumbai"):
+        user_id = f"client_out_of_zone_{message.split()[-1]}"
+        session_memory.clear_session(user_id, "whatsapp")
+
+        text, _matched, template_id, _ = responder.match_and_respond(
+            message, user_id=user_id, channel="whatsapp"
+        )
+
+        assert template_id == "delivery_out_of_area"
+        assert "unable to ship our sondesh outside Delhi NCR" in text
+
+
+def test_naming_an_out_of_zone_city_after_the_coverage_answer_fails_closed():
+    user_id = "client_outside_ncr_then_bangalore"
+    session_memory.clear_session(user_id, "whatsapp")
+
+    responder.match_and_respond(
+        "Do you deliver outside Delhi NCR?", user_id=user_id, channel="whatsapp"
+    )
+    text, _matched, template_id, _ = responder.match_and_respond(
+        "Bangalore", user_id=user_id, channel="whatsapp"
+    )
+
+    assert template_id == "delivery_out_of_area"
+    assert "Yes, we deliver to" not in text

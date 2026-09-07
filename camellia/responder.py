@@ -1897,7 +1897,18 @@ class DeterministicResponder:
                 r'\b(deliver|delivery|courier|ship|shipping)\b', lowered_msg
             )
             area_match = re.search(r'\bsector\s*\d+[a-z]?\b', lowered_msg)
-            city_match = next(
+            # "Do you deliver outside Delhi NCR?" names the zone, not the
+            # customer's own area — they are asking precisely because they do
+            # not know whether their city counts. Reading that "delhi" as their
+            # location swapped out the "Which area are you in?" question, which
+            # is the string that arms the area-confirmation flow. The customer
+            # then answered "Gurgaon" anyway and got the whole coverage message
+            # again: the repeat loop the client reported, by another route.
+            asks_about_the_zone_itself = re.search(
+                r'\b(outside|out of|beyond|apart from|other than|other cit|another cit|different cit)\b',
+                lowered_msg,
+            )
+            city_match = None if asks_about_the_zone_itself else next(
                 (c for c in ("gurgaon", "gurugram", "delhi", "noida", "ghaziabad", "faridabad") if c in lowered_msg),
                 None,
             )

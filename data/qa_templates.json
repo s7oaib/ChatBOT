@@ -1,5 +1,5 @@
 {
-  "seed_version": 4,
+  "seed_version": 5,
   "matching_rules": {
     "guard_precedence": "GUARD_ templates (id starting with GUARD_) have absolute precedence over any answer template. When matched, they escalate immediately with response: null to prevent unverified brand statements.",
     "how_it_works": "Each template has 'triggers' (keywords/phrases). If a customer message contains ANY trigger from a template's list, that template fires. If multiple templates match, the one with the MOST matched keywords wins. If nothing matches confidently, escalate to human — never guess.",
@@ -903,7 +903,7 @@
         "areas covered",
         "coverage area"
       ],
-      "response": "We deliver across Delhi NCR (Delhi, Gurgaon, Noida, Ghaziabad & Faridabad). Courier charges are on actuals (added above listed prices) and shipped from Sushant Arcade, Gurgaon. Which area are you in?",
+      "response": "We deliver right across Delhi NCR — that means Delhi, Gurgaon, Noida, Ghaziabad and Faridabad are all covered.\n\nCourier charges are on actuals (added above listed prices) and shipped from Sushant Arcade, Gurgaon. Which area are you in?",
       "escalate": false,
       "source_ref": "menu.json > delivery"
     },
@@ -931,10 +931,6 @@
         "kochi",
         "trivandrum",
         "coimbatore",
-        "out of delhi",
-        "outside delhi",
-        "outside ncr",
-        "outside delhi ncr",
         "other city",
         "other cities",
         "different city",
