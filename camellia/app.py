@@ -1435,6 +1435,144 @@ def get_router_shadow_report(
         report["note"] = "ROUTER_SHADOW_ENABLED is off, so nothing is being compared."
     return report
 
+# The four prompts Instagram shows before a customer types anything. Each one
+# was run through the matcher first: an opener the bot answers badly is worse
+# than no opener at all, because every customer sees it.
+#
+#   Show me the menu               -> know_more, sends all three cards
+#   Sondesh flavours & prices      -> sondesh_price_detailed
+#   Do you deliver to my area?     -> delivery_area, then the area flow
+#   I would like to place an order -> how_to_order
+#
+# The payloads say ICE_BREAKER on purpose: that is what describe_entry_point
+# matches on, so a tap is recorded as a tap rather than as someone typing.
+DEFAULT_ICE_BREAKERS = [
+    {"question": "Show me the menu", "payload": "ICE_BREAKER_MENU"},
+    {"question": "Sondesh flavours & prices", "payload": "ICE_BREAKER_PRICES"},
+    {"question": "Do you deliver to my area?", "payload": "ICE_BREAKER_DELIVERY"},
+    {"question": "I would like to place an order", "payload": "ICE_BREAKER_ORDER"},
+]
+
+# Meta's limits: at most four, and a question is capped at 80 characters.
+_MAX_ICE_BREAKERS = 4
+_MAX_ICE_BREAKER_CHARS = 80
+
+
+@app.post("/admin/instagram/ice-breakers")
+async def set_instagram_ice_breakers(
+    request: Request,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """
+    Writes the Ice Breakers shown to every customer who opens a DM.
+
+    Separate from the GET on purpose. This one changes what a stranger sees
+    before they have typed a word, so it is a deliberate action taken once,
+    not something a diagnostic does on the way past.
+
+    POST an empty body for the four defaults, or {"questions": [...]} to
+    choose your own. DELETE removes them and restores the blank state.
+    """
+    require_admin(x_admin_key, x_admin_pin)
+
+    token = (config.INSTAGRAM_ACCESS_TOKEN or "").strip()
+    if not token:
+        raise HTTPException(status_code=400, detail="INSTAGRAM_ACCESS_TOKEN is not set on this service.")
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    requested = body.get("questions") or DEFAULT_ICE_BREAKERS
+    if not isinstance(requested, list) or not requested:
+        raise HTTPException(status_code=400, detail="questions must be a non-empty list.")
+    if len(requested) > _MAX_ICE_BREAKERS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Instagram allows at most {_MAX_ICE_BREAKERS} ice breakers; {len(requested)} given.",
+        )
+
+    call_to_actions = []
+    for index, item in enumerate(requested):
+        question = (item.get("question") or "").strip() if isinstance(item, dict) else str(item).strip()
+        if not question:
+            raise HTTPException(status_code=400, detail=f"Ice breaker {index + 1} has no question text.")
+        if len(question) > _MAX_ICE_BREAKER_CHARS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Ice breaker {index + 1} is {len(question)} characters; the limit is {_MAX_ICE_BREAKER_CHARS}.",
+            )
+        payload = (item.get("payload") if isinstance(item, dict) else None) or f"ICE_BREAKER_{index + 1}"
+        call_to_actions.append({"question": question, "payload": payload})
+
+    url, identity = _instagram_profile_url_and_identity()
+    try:
+        with httpx.Client(timeout=20.0) as client:
+            resp = client.post(
+                url,
+                params={"access_token": token},
+                json={"ice_breakers": [{"call_to_actions": call_to_actions, "locale": "default"}]},
+            )
+        result = resp.json() if resp.content else {}
+    except Exception as e:
+        log.warning("Could not set Instagram ice breakers: %s", e)
+        raise HTTPException(status_code=502, detail=f"Could not reach Meta: {type(e).__name__}")
+
+    if resp.status_code != 200:
+        error = result.get("error", {}) if isinstance(result, dict) else {}
+        log.error("Meta rejected the ice breaker write: %s", error or resp.text[:200])
+        raise HTTPException(
+            status_code=502,
+            detail=f"Meta rejected the change: {error.get('message') or resp.text[:200]}",
+        )
+
+    log.info("Instagram ice breakers set (%s): %s", identity, [c["question"] for c in call_to_actions])
+    # The write having been accepted is not the same as it being live, so the
+    # state is read back rather than reported from what we just sent.
+    return {
+        "status": "set",
+        "identity": identity,
+        "questions": [c["question"] for c in call_to_actions],
+        "meta_response": result,
+        "now_live": get_instagram_messaging_profile(x_admin_key=x_admin_key, x_admin_pin=x_admin_pin),
+    }
+
+
+@app.delete("/admin/instagram/ice-breakers")
+def clear_instagram_ice_breakers(
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """Removes the Ice Breakers, restoring the blank state they were in."""
+    require_admin(x_admin_key, x_admin_pin)
+
+    token = (config.INSTAGRAM_ACCESS_TOKEN or "").strip()
+    if not token:
+        raise HTTPException(status_code=400, detail="INSTAGRAM_ACCESS_TOKEN is not set on this service.")
+
+    url, identity = _instagram_profile_url_and_identity()
+    try:
+        with httpx.Client(timeout=20.0) as client:
+            resp = client.request(
+                "DELETE", url, params={"access_token": token}, json={"fields": ["ice_breakers"]},
+            )
+        result = resp.json() if resp.content else {}
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Could not reach Meta: {type(e).__name__}")
+
+    if resp.status_code != 200:
+        error = result.get("error", {}) if isinstance(result, dict) else {}
+        raise HTTPException(
+            status_code=502,
+            detail=f"Meta rejected the removal: {error.get('message') or resp.text[:200]}",
+        )
+
+    log.info("Instagram ice breakers cleared (%s).", identity)
+    return {"status": "cleared", "identity": identity, "meta_response": result}
+
+
 @app.get("/admin/instagram/profile")
 def get_instagram_messaging_profile(
     x_admin_key: Optional[str] = Header(None),
