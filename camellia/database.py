@@ -62,6 +62,24 @@ class Database:
             );
             """)
 
+            # Phase 3 of the router rollout: the LLM router's silent pick
+            # beside the keyword matcher's, for messages nobody replied to
+            # differently. Kept out of `conversations` because these rows are a
+            # measurement, not a thing any customer was ever sent.
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS router_shadow (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                channel TEXT,
+                user_message TEXT NOT NULL,
+                keyword_pick TEXT,
+                router_pick TEXT,
+                agreed INTEGER DEFAULT 0,
+                detail TEXT,
+                latency_ms REAL,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+
             # Columns added after this table shipped. CREATE TABLE IF NOT
             # EXISTS does nothing to a table that already exists, and the
             # production database lives on a Railway volume full of real rows,
@@ -189,6 +207,94 @@ class Database:
         )
         for statement in statements:
             cursor.execute(statement)
+
+    def record_router_shadow(
+        self,
+        channel: str,
+        user_message: str,
+        keyword_pick: Optional[str],
+        router_pick: Optional[str],
+        detail: str,
+        latency_ms: float,
+    ) -> None:
+        """Stores one silent router pick beside the keyword matcher's pick."""
+        with self.get_connection() as conn:
+            conn.execute("""
+            INSERT INTO router_shadow (
+                channel, user_message, keyword_pick, router_pick, agreed, detail, latency_ms
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (
+                channel, user_message, keyword_pick, router_pick,
+                1 if keyword_pick == router_pick else 0, detail, round(latency_ms, 1),
+            ))
+            conn.commit()
+
+    def router_shadow_report(self, days: int = 30, limit: int = 40) -> Dict[str, Any]:
+        """
+        How often the router and the keyword matcher choose the same answer,
+        and every case where they did not.
+
+        The disagreements are the point. A bare agreement percentage cannot say
+        which side was right, and on the cases that matter — the phrasings the
+        trigger list never anticipated — the matcher is the one expected to be
+        wrong. These have to be read, not just counted.
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cutoff = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+
+            totals = cursor.execute("""
+                SELECT COUNT(*) AS n,
+                       SUM(agreed) AS agreed,
+                       AVG(latency_ms) AS avg_latency
+                FROM router_shadow WHERE timestamp >= ?
+            """, (cutoff,)).fetchone()
+
+            compared = totals["n"] or 0
+            agreed = totals["agreed"] or 0
+
+            by_detail = [
+                {"detail": row["detail"], "count": row["n"]}
+                for row in cursor.execute("""
+                    SELECT detail, COUNT(*) AS n FROM router_shadow
+                    WHERE timestamp >= ? GROUP BY detail ORDER BY n DESC
+                """, (cutoff,))
+            ]
+
+            disagreements = [
+                {
+                    "message": row["user_message"],
+                    "keyword_pick": row["keyword_pick"],
+                    "router_pick": row["router_pick"],
+                    "detail": row["detail"],
+                    "channel": row["channel"],
+                    "at": row["timestamp"],
+                }
+                for row in cursor.execute("""
+                    SELECT * FROM router_shadow
+                    WHERE timestamp >= ? AND agreed = 0
+                    ORDER BY id DESC LIMIT ?
+                """, (cutoff, limit))
+            ]
+
+            # The cases the trigger list missed entirely and the router placed.
+            # This is the number that justifies the whole rollout, so it is
+            # counted rather than left to be spotted by eye.
+            rescued = sum(
+                1 for d in disagreements
+                if not d["keyword_pick"] and d["router_pick"]
+            )
+
+            return {
+                "days": days,
+                "compared": compared,
+                "agreed": agreed,
+                "agreement_rate": round(agreed / compared, 3) if compared else None,
+                "avg_router_latency_ms": round(totals["avg_latency"], 1) if totals["avg_latency"] else None,
+                "outcomes": by_detail,
+                "unmatched_but_routed_in_sample": rescued,
+                "disagreements": disagreements,
+            }
 
     def entry_point_breakdown(self, channel: str = "instagram", days: int = 30) -> Dict[str, Any]:
         """

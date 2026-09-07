@@ -1,5 +1,5 @@
 {
-  "seed_version": 5,
+  "seed_version": 6,
   "matching_rules": {
     "guard_precedence": "GUARD_ templates (id starting with GUARD_) have absolute precedence over any answer template. When matched, they escalate immediately with response: null to prevent unverified brand statements.",
     "how_it_works": "Each template has 'triggers' (keywords/phrases). If a customer message contains ANY trigger from a template's list, that template fires. If multiple templates match, the one with the MOST matched keywords wins. If nothing matches confidently, escalate to human — never guess.",
@@ -29,7 +29,8 @@
         "Hello hello from Camellia Artisanal! 😊 Are we talking mishti today, or should I show you the weekly Bengali menu?",
         "Hey from Camellia Artisanal! What would make your day sweeter — a flavour guide or the menu?"
       ],
-      "escalate": false
+      "escalate": false,
+      "router_hint": "A bare hello with no question attached to it."
     },
     {
       "id": "bot_identity",
@@ -129,7 +130,8 @@
         "*Aamar Mishti* — everyday sondesh, pure dairy milk. Classic, Rose, Mango, Kesar, plus our signature Nolen Gur & liquid Jolbhora. From ₹450.",
         "*Signature Collection* — pure desi A2 cow milk, handcrafted end to end, for gifting & special occasions. From ₹600.",
         "*Bengali Meals* — fresh lunch & dinner across Delhi NCR: Aloor Dom, Dhokar Dalna, Bhetki Paturi, Robibarer Mangsho."
-      ]
+      ],
+      "router_hint": "A general question about what products exist, sweets versus meals."
     },
     {
       "id": "product_recommendation",
@@ -177,7 +179,8 @@
         "its"
       ],
       "response": "Nice to meet you! 👋 Welcome to Camellia Artisanal. Ask us about our Sondesh flavours & prices, weekly menu, or delivery — happy to help!",
-      "escalate": false
+      "escalate": false,
+      "router_hint": "ONLY when the customer is telling you their own name."
     },
     {
       "id": "recall_name",
@@ -195,7 +198,8 @@
         "my name?"
       ],
       "response": "Yes! You introduced yourself earlier. How can I assist you today with our Sondesh or weekly menu?",
-      "escalate": false
+      "escalate": false,
+      "router_hint": "ONLY when the customer asks whether you remember their name."
     },
     {
       "id": "know_more",
@@ -236,7 +240,8 @@
         "*Aamar Mishti* — everyday sondesh, pure dairy milk. Classic, Rose, Mango, Kesar, plus our signature Nolen Gur & liquid Jolbhora. From ₹450.",
         "*Signature Collection* — pure desi A2 cow milk, handcrafted end to end, for gifting & special occasions. From ₹600.",
         "*Bengali Meals* — fresh lunch & dinner across Delhi NCR: Aloor Dom, Dhokar Dalna, Bhetki Paturi, Robibarer Mangsho."
-      ]
+      ],
+      "router_hint": "The general answer when someone asks to see the menu, the collections, or what you offer."
     },
     {
       "id": "order_next_steps",
@@ -254,7 +259,8 @@
       ],
       "response": "Wonderful — thank you!\n\nOur team (+91 87965 51990) has been notified of your order request and recent chat history. We will connect with you shortly on WhatsApp/Call to verify your address, share your official invoice, and confirm delivery timing!\n\nFeel free to ask any questions in the meantime. 🙏",
       "escalate": true,
-      "source_ref": "client Q&A script > QUESTION"
+      "source_ref": "client Q&A script > QUESTION",
+      "router_hint": "The customer is ready to place an order and needs to know what to share."
     },
     {
       "id": "delivery_time",
@@ -1400,7 +1406,8 @@
       ],
       "response": "Here are the menus from the past couple of weeks.",
       "escalate": false,
-      "source_ref": "client request 2026-09-04 > keep 2 weeks of menus browsable"
+      "source_ref": "client request 2026-09-04 > keep 2 weeks of menus browsable",
+      "router_hint": "ONLY when the customer explicitly asks for an earlier or last week's menu, not the current one."
     },
     {
       "id": "subscription_details",
@@ -1517,7 +1524,8 @@
       ],
       "response": "We also make & send Bengali mishti - norom pak Sondesh. All milk protein, no gluten, mild sweet, no added fat - subtle natural flavours…. Handcrafted.",
       "escalate": false,
-      "source_ref": "client Q&A script > savoury food ordering"
+      "source_ref": "client Q&A script > savoury food ordering",
+      "router_hint": "ONLY when a customer already discussing meals asks whether you also do sweets."
     },
     {
       "id": "sondesh_crosssell_savoury",
@@ -1540,7 +1548,8 @@
       ],
       "response": "We also prepare and deliver freshly cooked Bengali meals across Delhi NCR. I've attached this week's menu in case you'd like to have a look. Everything is cooked fresh in small batches, and some dishes are available only in limited quantities. If you'd like a recommendation based on whether you prefer vegetarian, fish or meat, just let me know — I'd be happy to help.",
       "escalate": false,
-      "source_ref": "client Q&A script > sondesh to savoury crosssell"
+      "source_ref": "client Q&A script > sondesh to savoury crosssell",
+      "router_hint": "ONLY when a customer already discussing sweets asks whether you also cook meals."
     },
     {
       "id": "savoury_best_time_to_book",

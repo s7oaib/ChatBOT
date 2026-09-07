@@ -1384,6 +1384,29 @@ def get_entry_points(
     require_admin(x_admin_key, x_admin_pin)
     return db.entry_point_breakdown(channel=channel, days=days)
 
+@app.get("/admin/router-shadow")
+def get_router_shadow_report(
+    days: int = 7,
+    limit: int = 40,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """
+    How the LLM router would have routed, compared with the keyword matcher.
+
+    Phase 3 of the rollout: the router picks in silence and nothing it decides
+    reaches a customer. This is the evidence for whether it is trusted with
+    live traffic — and the disagreements matter more than the agreement rate,
+    because on the phrasings the trigger list never anticipated the matcher is
+    the side expected to be wrong.
+    """
+    require_admin(x_admin_key, x_admin_pin)
+    report = db.router_shadow_report(days=days, limit=limit)
+    report["shadow_enabled"] = config.ROUTER_SHADOW_ENABLED
+    if not config.ROUTER_SHADOW_ENABLED and not report["compared"]:
+        report["note"] = "ROUTER_SHADOW_ENABLED is off, so nothing is being compared."
+    return report
+
 @app.get("/admin/instagram/profile")
 def get_instagram_messaging_profile(
     x_admin_key: Optional[str] = Header(None),

@@ -119,6 +119,12 @@ class Config:
 
     # When true, auto-replies to all DMs regardless of ad referral (bypasses PRD #4 Ad-Gate)
     BYPASS_AD_GATE: bool = os.getenv("BYPASS_AD_GATE", "false").lower() in ("true", "1", "t", "yes")
+    # Phase 3 of the router rollout. With this on, every message is also shown
+    # to an LLM router that picks a template id, and its pick is logged beside
+    # the keyword matcher's. It changes no reply and sends nothing — the point
+    # is to measure where the two disagree before anything depends on it.
+    # Off by default: it costs a Groq call per message.
+    ROUTER_SHADOW_ENABLED: bool = os.getenv("ROUTER_SHADOW_ENABLED", "false").lower() in ("true", "1", "t", "yes")
 
     # Conversations older than this are purged; stated in the privacy policy.
     DATA_RETENTION_DAYS: int = int(os.getenv("DATA_RETENTION_DAYS", "90"))

@@ -12,6 +12,7 @@ from camellia.session_memory import session_memory
 
 from camellia.order_calculator import order_calculator
 from camellia.rag_fallback import MEDIUM_CONFIDENCE_THRESHOLD, rag_fallback_engine
+from camellia.router import shadow_router
 from camellia.database import db
 from camellia.trigger_index import trigger_index
 from camellia import weekly_flyer
@@ -530,6 +531,19 @@ class DeterministicResponder:
             )
         finally:
             latency_monitor.record((time.perf_counter() - started) * 1000.0)
+
+        # The reply is already decided. Showing the same message to the router
+        # now costs the customer nothing — it is queued to a background worker
+        # and its answer is only ever written to a table. Skipped for the
+        # ad-gate block, which is not a customer message we answered at all.
+        if config.ROUTER_SHADOW_ENABLED and template_id != "ad_gate_blocked":
+            shadow_router.record_shadow(
+                user_message=user_message,
+                channel=channel,
+                keyword_pick=template_id,
+                templates=self.qa_data.get("templates", []),
+                history_turns=session_memory.get_session(user_id, channel).get("turns", []),
+            )
 
         if self._should_send_slow_notice(user_id, channel, response_text, template_id):
             session_memory.get_facts(user_id, channel)["slow_notice_sent"] = True
