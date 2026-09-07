@@ -87,6 +87,36 @@ class RAGFallbackEngine:
                 return True
         return False
 
+    @staticmethod
+    def is_grounded_in_context(answer: str, context_chunks: List[str]) -> bool:
+        """
+        True when a generated answer states no number the approved excerpts
+        did not already state.
+
+        Numbers are where a fabricated answer does real damage on this bot:
+        a price, a pack size, a piece count, a delivery window, a phone
+        number. Prose can be judged loosely, but "₹550 for 250g" is either in
+        the approved source or it is invented, and there is no third case. So
+        every digit group in the answer must appear in the context; anything
+        else is discarded and the customer goes to a human instead.
+
+        Separators are stripped before comparing so "₹1,500" in the answer
+        still matches "₹1500" in the source.
+        """
+        if not answer:
+            return False
+
+        def digit_groups(text: str) -> set:
+            collapsed = re.sub(r'(?<=\d)[,\s](?=\d)', '', text or "")
+            return set(re.findall(r'\d+', collapsed))
+
+        answer_numbers = digit_groups(answer)
+        if not answer_numbers:
+            return True
+
+        context_numbers = digit_groups(" ".join(context_chunks or []))
+        return answer_numbers.issubset(context_numbers)
+
     def retrieve(self, user_message: str) -> RAGResult:
         """
         Retrieves relevant context chunks strictly from approved source documents,

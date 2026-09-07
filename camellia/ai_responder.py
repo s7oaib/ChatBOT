@@ -443,6 +443,73 @@ class AIResponder:
 
         return self._query_groq(prompt_text, is_refinement=False)
 
+    def answer_from_retrieved_context(
+        self,
+        user_message: str,
+        context_chunks: List[str],
+        user_context: str = None,
+        history_turns: list = None,
+    ) -> Tuple[str, bool, str]:
+        """
+        Answers a question the deterministic matcher missed, using ONLY the
+        approved excerpts retrieval already selected.
+
+        Different from `generate_response`, which drafts against a summary of
+        the whole corpus for a human to review later. This one is allowed to
+        reach the customer, so it is given a much narrower brief: a handful of
+        approved passages and an instruction to refuse rather than fill gaps.
+        The refusal path is the existing OUT_OF_CONTEXT contract in
+        `_query_groq`, which returns the escalation copy with ok=False.
+        """
+        if not context_chunks:
+            return "", False, "no_context"
+
+        provider = self.get_active_provider()
+        if provider == "none":
+            return "", False, "ai_disabled_or_no_key"
+
+        excerpts = "\n\n".join(
+            f"[APPROVED EXCERPT {i + 1}]\n{chunk}"
+            for i, chunk in enumerate(context_chunks)
+        )
+        excerpts = excerpts[:_RAG_CONTEXT_CHAR_BUDGET]
+
+        history_str = ""
+        if history_turns:
+            history_str = "\n".join(
+                f"{t.get('role', '').capitalize()}: {self._truncate(t.get('content', ''), _HISTORY_LINE_CHARS)}"
+                for t in history_turns[-_HISTORY_TURNS_IN_PROMPT:]
+            )
+
+        user_ctx_block = f"\nACTIVE CUSTOMER PROFILE:\n{user_context}\n" if user_context else ""
+
+        system_prompt = (
+            "You are the warm, polite customer support assistant for Camellia Artisanal, "
+            "a Bengal-rooted artisanal kitchen in Sushant Lok, Gurgaon.\n\n"
+            "Answer the customer's message using ONLY the approved excerpts below.\n\n"
+            "HARD RULES:\n"
+            "- Never state a price, product name, flavour, delivery area, delivery time, "
+            "ingredient, allergen, storage instruction, discount or policy that is not written "
+            "in the excerpts. Do not estimate, round, convert or infer any of these.\n"
+            "- Do not introduce any number that does not appear in the excerpts.\n"
+            "- If the excerpts do not contain what the customer asked for, reply with exactly "
+            "OUT_OF_CONTEXT and nothing else. Refusing is always better than guessing.\n"
+            "- Do not invent an apology for something that did not happen, and do not promise "
+            "a callback, refund or timeline.\n"
+            "- Keep it short, warm and natural. Reuse the excerpts' own wording for facts.\n\n"
+            f"--- APPROVED EXCERPTS ---\n{excerpts}\n"
+            f"{user_ctx_block}"
+        )
+
+        prompt_text = f"{system_prompt}\n\nCustomer Message: {user_message}"
+        if history_str:
+            prompt_text = (
+                f"{system_prompt}\n\nRecent Chat History:\n{history_str}\n\n"
+                f"Customer Message: {user_message}"
+            )
+
+        return self._query_groq(prompt_text, is_refinement=False)
+
     def refine_template_response(
         self,
         template_id: str,

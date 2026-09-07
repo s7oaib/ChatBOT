@@ -11,7 +11,7 @@ from camellia.ai_responder import ai_responder
 from camellia.session_memory import session_memory
 
 from camellia.order_calculator import order_calculator
-from camellia.rag_fallback import rag_fallback_engine
+from camellia.rag_fallback import MEDIUM_CONFIDENCE_THRESHOLD, rag_fallback_engine
 from camellia.database import db
 from camellia.trigger_index import trigger_index
 from camellia import weekly_flyer
@@ -534,7 +534,17 @@ class DeterministicResponder:
         if self._should_send_slow_notice(user_id, channel, response_text, template_id):
             session_memory.get_facts(user_id, channel)["slow_notice_sent"] = True
             log.info("Slow-reply notice sent to %s on %s.", user_id, channel)
-            response_text = f"{config.SLOW_REPLY_NOTICE_TEXT}\n\n{response_text}"
+            if was_matched:
+                response_text = f"{config.SLOW_REPLY_NOTICE_TEXT}\n\n{response_text}"
+            else:
+                # The handover copy underneath says we have notified the team and
+                # they will call back. The notice above it says the opposite —
+                # replies are slow this week, please call the manager yourself.
+                # Sending both hands the customer two contradictory instructions
+                # and two phone numbers. The notice already names Guru Dayal as
+                # the single point of contact, which is the whole content of the
+                # handover message, so on an unmatched reply it stands alone.
+                response_text = config.SLOW_REPLY_NOTICE_TEXT
 
         return _strip_flower_emoji(response_text), was_matched, template_id, _strip_flower_emoji(image_url)
 
@@ -783,7 +793,10 @@ class DeterministicResponder:
         # message with no product words of its own fall through to a human
         # handover the customer didn't need.
         last_topic = facts.get("last_topic")
-        stripped_for_bare_check = user_message.strip()
+        # The greeting-stripped text, so "Hi, what is the price?" is treated as
+        # the same bare price question as "what is the price?" — a customer who
+        # says hello first is not asking a different question.
+        stripped_for_bare_check = cleaned_business_text.strip() or user_message.strip()
         if last_topic and BARE_VEG_RE.match(stripped_for_bare_check):
             if last_topic == "savoury":
                 response_text = (
@@ -863,6 +876,14 @@ class DeterministicResponder:
                 "nut", "pickup", "tracking", "subscription", "subscriptions", "alacarte", "dispatch",
                 "product", "products", "recommend", "recommendation", "options"
             ])
+        )
+
+        # True when something real survives stripping the greeting off the
+        # front — "hey, I need sweets for an event" carries a request, while
+        # "hello there" is still only a hello. Without this the greeting
+        # template answers the hello and silently drops the request.
+        greeting_carries_a_request = bool(
+            {w for w in cleaned_words if w not in VAGUE_FILLER_WORDS} - STOP_WORDS
         )
 
         templates = self.qa_data.get("templates", [])
@@ -992,8 +1013,27 @@ class DeterministicResponder:
             if tmpl_id == "GUARD_shelf_life_storage" and "jolbhora" in lowered_text:
                 score = 0
 
-            # Suppress greeting/name intro when user message contains substantive business inquiry and another specific template matched
-            if has_business_query and tmpl_id in TIER_4_GREETING_INTRO and best_composite_score > 0:
+            # Every trigger on the cross-sell templates assumes the *other*
+            # product is already being discussed ("do you have sweets too",
+            # "any sweets with meal"). Without that context they hijack plain
+            # first-contact questions: "What sweets do you have?" was being
+            # answered with "We ALSO make Bengali mishti", which reads as a
+            # non-sequitur to someone who never mentioned meals.
+            if tmpl_id == "savoury_crosssell_sondesh" and last_topic != "savoury":
+                score = 0
+            if tmpl_id == "sondesh_crosssell_savoury" and last_topic not in (
+                "aamar_mishti", "signature", "sondesh_general"
+            ):
+                score = 0
+
+            # Suppress greeting/name intro whenever the message carries a real
+            # business inquiry, even when nothing else matched it. "Hey, I need
+            # sweets for an event" is a greeting *and* a request; answering only
+            # the greeting drops the request on the floor, and the customer has
+            # to ask twice. With the greeting out of the way an unanswered
+            # request falls through to retrieval and then to a human, which is
+            # what an event enquiry needed in the first place.
+            if tmpl_id in TIER_4_GREETING_INTRO and has_business_query and greeting_carries_a_request:
                 score = 0
 
             if intro_greeting_prefix and tmpl_id == "name_introduction":
@@ -1373,25 +1413,69 @@ class DeterministicResponder:
         except Exception as e:
             log.error("RAG retrieval error: %s", e)
 
-        # Generative providers may suggest candidate answers for review only.
-        if config.is_ai_enabled and ai_responder.get_active_provider() != "none":
+        # Groq answers from the approved excerpts retrieval just selected — the
+        # understanding layer for the thousands of phrasings no trigger list can
+        # enumerate. It is not free rein: it only runs when retrieval actually
+        # found approved material, it is shown nothing but that material, and
+        # anything it writes that states a number the sources did not state is
+        # thrown away in favour of a human. Every answer is still logged as a
+        # candidate so staff can promote the good ones into approved templates.
+        # A complaint, a bulk/event enquiry or a live order intent is not a
+        # comprehension problem — those already have their own handover copy and
+        # genuinely need a person, so the model does not get to answer them with
+        # whatever generic passage retrieval happened to surface.
+        if (
+            config.is_ai_enabled
+            and ai_responder.get_active_provider() != "none"
+            and _intent == "unknown"
+            and rag_res is not None
+            and rag_res.source_chunks
+            and rag_res.confidence_score >= MEDIUM_CONFIDENCE_THRESHOLD
+            and not rag_res.has_conflict
+        ):
             try:
                 user_ctx = f"Customer Name: {facts.get('name', 'Unknown')}"
-                ai_resp, ok, reason = ai_responder.generate_response(user_message, user_context=user_ctx)
-                if ok and ai_resp:
-                    # Controlled Architecture: Save AI generated response as candidate template for admin review (PENDING_APPROVAL).
-                    # DO NOT return AI generated text directly to the customer.
-                    try:
+                history = session_memory.get_session(user_id, channel).get("turns", [])
+                ai_resp, ok, reason = ai_responder.answer_from_retrieved_context(
+                    user_message,
+                    rag_res.source_chunks,
+                    user_context=user_ctx,
+                    history_turns=history,
+                )
+                try:
+                    if ok and ai_resp:
                         db.save_candidate_template(
-                            name="gemini_rag_candidate",
+                            name=f"groq_grounded_{rag_res.proposed_intent}",
                             response=ai_resp,
                             user_message=user_message,
-                            source_refs=["ai_responder"],
-                            confidence=0.85,
-                            created_by="ai_responder"
+                            source_refs=rag_res.source_refs or ["ai_responder"],
+                            confidence=rag_res.confidence_score,
+                            created_by="ai_responder",
                         )
-                    except Exception as ce:
-                        log.warning("Could not save the Groq candidate template: %s", ce)
+                except Exception as ce:
+                    log.warning("Could not save the Groq candidate template: %s", ce)
+
+                if ok and ai_resp:
+                    if rag_fallback_engine.is_grounded_in_context(ai_resp, rag_res.source_chunks):
+                        if intro_greeting_prefix:
+                            ai_resp = intro_greeting_prefix + ai_resp
+                        db.log_rag_audit(
+                            user_message=user_message,
+                            matched_template=None,
+                            rag_invoked=True,
+                            retrieved_sources=rag_res.retrieved_sources,
+                            confidence_score=rag_res.confidence_score,
+                            proposed_template=rag_res.proposed_intent,
+                            proposed_response=ai_resp,
+                            approval_status="GROQ_GROUNDED",
+                            final_customer_response=ai_resp,
+                        )
+                        session_memory.add_turn(user_id, channel, user_message, ai_resp)
+                        return ai_resp, True, "groq_grounded_answer", None
+                    log.warning(
+                        "Discarded a Groq answer for %r: it stated a number the approved "
+                        "sources did not. Escalating instead.", user_message[:60],
+                    )
             except Exception as e:
                 log.warning("AI RAG generation failed: %s", e)
 

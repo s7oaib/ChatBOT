@@ -2783,7 +2783,23 @@ Non-Veg:
                 const activeFlyerWeekEl = document.getElementById('activeFlyerWeek');
                 if (activeFlyerWeekEl) {
                     const weekLabel = flyerWeekOf || menuWeekOf;
-                    activeFlyerWeekEl.innerText = weekLabel ? `📅 Active menu: ${weekLabel}` : '';
+                    // The flyer photo and the dish list are two separate things,
+                    // and removing every dish leaves the photo up. The label used
+                    // to keep announcing that week as active regardless, which
+                    // reads as "the menu is live" when nothing is actually live.
+                    const labelWeek = menu.weekly_menus && menu.weekly_menus.length
+                        ? menu.weekly_menus[menu.weekly_menus.length - 1]
+                        : null;
+                    const liveDishCount = labelWeek
+                        ? ((labelWeek.vegetarian || []).length + (labelWeek.non_vegetarian || []).length)
+                        : 0;
+                    if (!weekLabel) {
+                        activeFlyerWeekEl.innerText = '';
+                    } else if (liveDishCount > 0) {
+                        activeFlyerWeekEl.innerText = `📅 Active menu: ${weekLabel}`;
+                    } else {
+                        activeFlyerWeekEl.innerText = `📅 Menu photo still up: ${weekLabel} — but no dishes are live. Upload this week's photo, or use Reset to Baseline to take the photo down too.`;
+                    }
                 }
 
                 let html = '';
