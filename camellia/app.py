@@ -435,6 +435,36 @@ _DROPPED_WEBHOOK_EVENTS: List[Dict[str, Any]] = []
 _DROPPED_WEBHOOK_LIMIT = 25
 
 
+def _classify_unanswered_event(messaging_event: dict) -> Optional[str]:
+    """
+    Why an event with no usable text is worth someone's attention, or None.
+
+    Measured against one minute of live traffic: 5 read receipts, 3 echoes of
+    our own replies and 16 empty message_edits filled the whole 25-event buffer
+    and pushed out the single event that represented a real customer — someone
+    who sent a photo and got nothing back.
+    """
+    if "read" in messaging_event or "delivery" in messaging_event:
+        return None  # a receipt, not a message
+
+    message = messaging_event.get("message") or {}
+    edit = messaging_event.get("message_edit") or {}
+    if message.get("is_echo") or edit.get("is_echo"):
+        return None  # our own outbound message coming back
+
+    if messaging_event.get("postback"):
+        # A tapped prompt we could not turn into text. This is the one that
+        # left a customer staring at silence after tapping "Show me the menu".
+        return "postback_without_text"
+    if message.get("attachments"):
+        # A photo, sticker or voice note. A real person said something we
+        # cannot read, and answering nothing is the worst available response.
+        return "attachment_only"
+    if edit:
+        return "message_edit_without_text"
+    return "empty_text"
+
+
 def _record_dropped_webhook_event(reason: str, messaging_event: dict, sender_id: Optional[str]) -> None:
     """Remembers that an event was discarded, and enough to tell why."""
     inner = messaging_event.get("postback") or messaging_event.get("message") or {}
@@ -483,11 +513,15 @@ def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks
                 continue
 
             if not message_text:
-                # Worth more than a log line. A dropped event is a customer who
-                # messaged and got silence, and it leaves no trace anywhere the
-                # dashboard can see — which is how a tapped ice breaker went
-                # unanswered with /health still reporting everything green.
-                _record_dropped_webhook_event("empty_text", messaging_event, sender_id)
+                # Only record the events that represent a customer going
+                # unanswered. Instagram also sends read receipts, delivery
+                # receipts and echoes of our own outbound messages, none of
+                # which is anyone waiting for a reply — and there are enough of
+                # them to fill the buffer in about a minute, burying the one
+                # event that actually mattered.
+                reason = _classify_unanswered_event(messaging_event)
+                if reason:
+                    _record_dropped_webhook_event(reason, messaging_event, sender_id)
                 log.warning(
                     "Ignored Instagram event without text payload (sender: %s, keys: %s, inner: %s).",
                     sender_id, list(messaging_event.keys()),

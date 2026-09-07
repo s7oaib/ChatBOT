@@ -203,6 +203,21 @@ class TestATappedPromptIsAnswered:
 
 
 class TestDroppedEventsAreVisible:
+    def test_protocol_noise_is_not_recorded_as_a_customer_going_unanswered(self):
+        # One minute of live traffic filled the whole buffer with read
+        # receipts, echoes and empty edits, burying the one real event.
+        assert app_module._classify_unanswered_event({"read": {"watermark": 1}}) is None
+        assert app_module._classify_unanswered_event({"delivery": {"watermark": 1}}) is None
+        assert app_module._classify_unanswered_event({"message": {"is_echo": True, "text": "x"}}) is None
+
+    def test_the_events_worth_seeing_are_named_by_what_they_are(self):
+        assert app_module._classify_unanswered_event(
+            {"postback": {"payload": "X"}}) == "postback_without_text"
+        assert app_module._classify_unanswered_event(
+            {"message": {"attachments": [{"type": "image"}]}}) == "attachment_only"
+        assert app_module._classify_unanswered_event(
+            {"message_edit": {"mid": "m"}}) == "message_edit_without_text"
+
     def test_an_event_with_no_text_is_recorded_rather_than_vanishing(self):
         app_module._DROPPED_WEBHOOK_EVENTS.clear()
         tasks = MagicMock()
@@ -216,7 +231,7 @@ class TestDroppedEventsAreVisible:
 
         assert result["results"][0]["action"] == "ignored_empty_text"
         assert len(app_module._DROPPED_WEBHOOK_EVENTS) == 1
-        assert app_module._DROPPED_WEBHOOK_EVENTS[0]["reason"] == "empty_text"
+        assert app_module._DROPPED_WEBHOOK_EVENTS[0]["reason"] == "attachment_only"
 
     def test_no_customer_text_is_retained_in_the_drop_record(self):
         app_module._DROPPED_WEBHOOK_EVENTS.clear()
