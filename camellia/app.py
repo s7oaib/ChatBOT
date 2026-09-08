@@ -1496,6 +1496,11 @@ def reset_menu_defaults(x_admin_key: Optional[str] = Header(None), x_admin_pin: 
         {"item": "Chingri Malaikari", "description": "Gold tiger prawns in creamy coconut milk sauce", "price_inr": 550, "quantity": "4 pcs"},
         {"item": "Chicken Kosha", "description": "Tender chicken braised with mustard oil & spices", "price_inr": 420, "quantity": "350g"}
     ]
+    default_bento = [
+        {"item": "Vegetarian Bento", "description": "Aloo Dom / Chholar Dal, luchi, pre-dessert tomato aamsottwo khejur chatni and Norom Pak Sondesh", "price_inr": 350, "quantity": "1 Bento Box"},
+        {"item": "Chicken Bento", "description": "Kolaghat Dhaba Chicken, luchi, pre-dessert tomato aamsottwo khejur chatni and Norom Pak Sondesh", "price_inr": 400, "quantity": "1 Bento Box"},
+        {"item": "Mangsho Bento", "description": "Slow-cooked mutton, luchi, pre-dessert tomato aamsottwo khejur chatni and Norom Pak Sondesh", "price_inr": 600, "quantity": "1 Bento Box"}
+    ]
 
     menu_path = config.MENU_JSON_PATH
     try:
@@ -1505,6 +1510,7 @@ def reset_menu_defaults(x_admin_key: Optional[str] = Header(None), x_admin_pin: 
             current_week = menu_data["weekly_menus"][-1]
             current_week["vegetarian"] = default_veg
             current_week["non_vegetarian"] = default_nonveg
+            current_week["bengali_bento"] = default_bento
             with open(menu_path, "w", encoding="utf-8") as f:
                 json.dump(menu_data, f, indent=2, ensure_ascii=False)
             sheet_sync.sync_local_reload()
@@ -2052,6 +2058,10 @@ async def update_menu(request: Request, x_admin_key: Optional[str] = Header(None
         _reviewed_menu_items(body["non_vegetarian"], "non_vegetarian")
         if isinstance(body.get("non_vegetarian"), list) else None
     )
+    bento_items = (
+        _reviewed_menu_items(body["bengali_bento"], "bengali_bento")
+        if isinstance(body.get("bengali_bento"), list) else None
+    )
 
     menu_path = config.MENU_JSON_PATH
     try:
@@ -2066,6 +2076,8 @@ async def update_menu(request: Request, x_admin_key: Optional[str] = Header(None
                 current_week["vegetarian"] = veg_items
             if nonveg_items is not None:
                 current_week["non_vegetarian"] = nonveg_items
+            if bento_items is not None:
+                current_week["bengali_bento"] = bento_items
 
             with open(menu_path, "w", encoding="utf-8") as f:
                 json.dump(menu_data, f, indent=2, ensure_ascii=False)
@@ -2121,7 +2133,8 @@ async def preview_menu_text(request: Request, x_admin_key: Optional[str] = Heade
     parsed = menu_parser.parse_menu_text(raw_text)
     veg = parsed.get("vegetarian", []) or []
     nonveg = parsed.get("non_vegetarian", []) or []
-    if not veg and not nonveg:
+    bento = parsed.get("bengali_bento", []) or []
+    if not veg and not nonveg and not bento:
         return {
             "status": "failed",
             "reason": "Could not find any dish with a price in that text.",
@@ -2129,9 +2142,10 @@ async def preview_menu_text(request: Request, x_admin_key: Optional[str] = Heade
         }
     return {
         "status": "success",
-        "parsed": {"vegetarian": veg, "non_vegetarian": nonveg},
+        "parsed": {"vegetarian": veg, "non_vegetarian": nonveg, "bengali_bento": bento},
         "vegetarian_count": len(veg),
         "non_vegetarian_count": len(nonveg),
+        "bengali_bento_count": len(bento),
     }
 
 
@@ -2408,6 +2422,7 @@ def get_admin_dashboard():
         }
         .badge-veg { background: #D1FAE5; color: #065F46; }
         .badge-nonveg { background: #FEE2E2; color: #991B1B; }
+        .badge-bento { background: #FEF3C7; color: #92400E; }
         
         /* Analytics Table */
         table.data-table { width: 100%; border-collapse: collapse; margin-top: 16px; font-size: 0.86rem; }
@@ -2562,7 +2577,10 @@ THIS WEEK'S BENGAL SPECIALS
                         <h3 style="margin: 0; font-size: 1rem; color: var(--primary);">Check this before it goes live</h3>
                         <p style="margin: 2px 0 0; font-size: 0.82rem; color: #555;">Fix any box, delete a row you do not want, then publish. <b>Customers keep seeing the old menu until you press Publish.</b></p>
                     </div>
-                    <button class="btn-secondary" style="font-size: 0.82rem;" onclick="addReviewRow()">+ Add a dish</button>
+                    <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+                        <button class="btn-secondary" style="font-size: 0.82rem;" onclick="addReviewRow()">+ Add Savoury Dish (À la carte)</button>
+                        <button class="btn-primary" style="font-size: 0.82rem; background: linear-gradient(135deg, #a8622d, #85491d);" onclick="addBentoReviewRow()">🍱 + Add Bento Meal Box</button>
+                    </div>
                 </div>
 
                 <div style="overflow-x: auto;">
@@ -2617,7 +2635,9 @@ THIS WEEK'S BENGAL SPECIALS
                         <h2>🍱 What the bot is serving right now</h2>
                         <p>Real-time view of all dishes currently served by the bot to customers on Instagram & WhatsApp.</p>
                     </div>
-                    <div style="display: flex; gap: 8px;">
+                    <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+                        <button class="btn-secondary" onclick="addLiveSavouryDish()">+ Add Savoury Dish (À la carte)</button>
+                        <button class="btn-secondary" style="background: linear-gradient(135deg, #a8622d, #85491d); color: #fff; border: none;" onclick="addLiveBentoDish()">🍱 + Add Bento Meal Box</button>
                         <button class="btn-secondary" onclick="loadActiveMenu()">🔄 Refresh View</button>
                         <button class="btn-danger" onclick="confirmResetDefaults()">⚠️ Reset to Baseline Bengali Menu</button>
                     </div>
@@ -3014,9 +3034,10 @@ THIS WEEK'S BENGAL SPECIALS
                     const parsed = data.parsed || {};
                     menuReview = []
                         .concat((parsed.vegetarian || []).map(d => rowFrom(d, 'vegetarian')))
-                        .concat((parsed.non_vegetarian || []).map(d => rowFrom(d, 'non_vegetarian')));
+                        .concat((parsed.non_vegetarian || []).map(d => rowFrom(d, 'non_vegetarian')))
+                        .concat((parsed.bengali_bento || []).map(d => rowFrom(d, 'bengali_bento')));
                     resBox.className = 'result-box info';
-                    resBox.innerHTML = `📖 Read <b>${menuReview.length} dishes</b>. Nothing has changed for customers yet — check the rows below and press Publish.`;
+                    resBox.innerHTML = `📖 Read <b>${menuReview.length} items</b>. Nothing has changed for customers yet — check the rows below and press Publish.`;
                     renderMenuReview();
                 } else {
                     menuReview = [];
@@ -3059,8 +3080,9 @@ THIS WEEK'S BENGAL SPECIALS
                     <td><input class="review-input" style="min-width: 70px;" type="number" min="1" value="${escapeHtml(row.price_inr)}" oninput="editReviewRow(${i}, 'price_inr', this.value)"></td>
                     <td>
                         <select class="review-input" onchange="editReviewRow(${i}, 'category', this.value)">
-                            <option value="vegetarian" ${row.category === 'vegetarian' ? 'selected' : ''}>Veg</option>
-                            <option value="non_vegetarian" ${row.category === 'non_vegetarian' ? 'selected' : ''}>Non-Veg</option>
+                            <option value="vegetarian" ${row.category === 'vegetarian' ? 'selected' : ''}>Veg (Savoury)</option>
+                            <option value="non_vegetarian" ${row.category === 'non_vegetarian' ? 'selected' : ''}>Non-Veg (Savoury)</option>
+                            <option value="bengali_bento" ${row.category === 'bengali_bento' ? 'selected' : ''}>🍱 Bento Meal Box</option>
                         </select>
                     </td>
                     <td><button class="btn-danger" style="padding: 5px 10px; font-size: 0.78rem;" onclick="deleteReviewRow(${i})">Delete</button></td>
@@ -3079,7 +3101,12 @@ THIS WEEK'S BENGAL SPECIALS
         }
 
         function addReviewRow() {
-            menuReview.push({ item: '', description: '', quantity: '', price_inr: '', category: 'vegetarian' });
+            menuReview.push({ item: '', description: '', quantity: '250g', price_inr: '', category: 'vegetarian' });
+            renderMenuReview();
+        }
+
+        function addBentoReviewRow() {
+            menuReview.push({ item: 'Bento Box', description: 'Curry, luchi, tomato aamsottwo chatni & Norom Pak Sondesh', quantity: '1 Bento Box', price_inr: '', category: 'bengali_bento' });
             renderMenuReview();
         }
 
@@ -3102,9 +3129,10 @@ THIS WEEK'S BENGAL SPECIALS
                 return alert(`Row ${blank + 1} needs both a dish name and a price before it can be published.`);
             }
 
-            const payload = { vegetarian: [], non_vegetarian: [] };
+            const payload = { vegetarian: [], non_vegetarian: [], bengali_bento: [] };
             menuReview.forEach(row => {
-                payload[row.category].push({
+                const cat = (row.category in payload) ? row.category : 'vegetarian';
+                payload[cat].push({
                     item: String(row.item).trim(),
                     description: String(row.description).trim(),
                     quantity: String(row.quantity).trim(),
@@ -3125,7 +3153,7 @@ THIS WEEK'S BENGAL SPECIALS
                 const data = await resp.json();
                 if (resp.ok && data.status === 'success') {
                     resBox.className = 'result-box success';
-                    resBox.innerHTML = `✅ <b>Published.</b> ${payload.vegetarian.length} veg and ${payload.non_vegetarian.length} non-veg dishes are now what the bot quotes.`;
+                    resBox.innerHTML = `✅ <b>Published.</b> ${payload.vegetarian.length} veg, ${payload.non_vegetarian.length} non-veg dishes, and ${payload.bengali_bento.length} bento boxes are now what the bot quotes.`;
                     menuReview = [];
                     renderMenuReview();
                     loadActiveMenu();
@@ -3355,11 +3383,17 @@ Non-Veg:
                     const currentWeek = menu.weekly_menus[menu.weekly_menus.length - 1];
                     const veg = currentWeek.vegetarian || [];
                     const nonveg = currentWeek.non_vegetarian || [];
-                    totalCount = veg.length + nonveg.length;
+                    const bento = currentWeek.bengali_bento || [];
+                    totalCount = veg.length + nonveg.length + bento.length;
                     // Kept so Remove can send back the dishes that survive.
                     // update-menu replaces a whole list, so the button needs
                     // the other dishes as much as the one being dropped.
-                    liveMenu = { vegetarian: veg, non_vegetarian: nonveg };
+                    // bengali_bento was missing here entirely — Bento Meals is
+                    // its own confirmed product line (₹350/₹400/₹600), and
+                    // without it in liveMenu this view could not show it, add
+                    // to it, or remove from it at all, only Sondesh's veg and
+                    // non-veg à la carte dishes.
+                    liveMenu = { vegetarian: veg, non_vegetarian: nonveg, bengali_bento: bento };
 
                     html += `<h3 style="color: var(--primary); margin-top: 10px; font-size: 1.1rem;">🌱 Vegetarian Weekly Specials (${veg.length})</h3>`;
                     html += '<div class="menu-grid">';
@@ -3396,6 +3430,24 @@ Non-Veg:
                         </div>`;
                     });
                     html += '</div>';
+
+                    html += `<h3 style="color: var(--primary); margin-top: 24px; font-size: 1.1rem;">🍱 Bento Meals (${bento.length})</h3>`;
+                    html += '<div class="menu-grid">';
+                    bento.forEach((item, idx) => {
+                        html += `
+                        <div class="menu-card">
+                            <div class="menu-card-header">
+                                <span class="menu-item-name">${escapeHtml(item.item)}</span>
+                                <span class="menu-item-price">₹${item.price_inr}</span>
+                            </div>
+                            <p class="menu-item-desc">${escapeHtml(item.description || '')} (${escapeHtml(item.quantity || '1 Bento Box')})</p>
+                            <div class="menu-card-footer">
+                                <span class="badge" style="background: #FDF0E4; color: #85491d;">Bento</span>
+                                <button class="btn-danger btn-remove-dish" onclick="removeLiveDish('bengali_bento', ${idx})">Remove</button>
+                            </div>
+                        </div>`;
+                    });
+                    html += '</div>';
                 }
 
                 container.innerHTML = html;
@@ -3405,17 +3457,19 @@ Non-Veg:
             }
         }
 
-        // The dishes the bot is serving right now, as last loaded. Removing one
-        // sends the rest back, so this has to be what the server actually holds
-        // rather than anything typed in the review table above.
-        let liveMenu = { vegetarian: [], non_vegetarian: [] };
+        // The dishes the bot is serving right now, as last loaded. Adding or
+        // removing one sends the other two categories back unchanged, so this
+        // has to be what the server actually holds rather than anything typed
+        // in the review table above.
+        let liveMenu = { vegetarian: [], non_vegetarian: [], bengali_bento: [] };
 
         async function removeLiveDish(category, index) {
             const list = liveMenu[category] || [];
             const dish = list[index];
             if (!dish) return;
 
-            const remaining = (liveMenu.vegetarian.length + liveMenu.non_vegetarian.length) - 1;
+            const totalDishes = liveMenu.vegetarian.length + liveMenu.non_vegetarian.length + liveMenu.bengali_bento.length;
+            const remaining = totalDishes - 1;
             let question = `Remove "${dish.item}" from the live menu? Customers will stop being offered it straight away.`;
             if (remaining === 0) {
                 // Worth spelling out: an empty menu is not an obvious outcome
@@ -3427,7 +3481,8 @@ Non-Veg:
 
             const payload = {
                 vegetarian: liveMenu.vegetarian.slice(),
-                non_vegetarian: liveMenu.non_vegetarian.slice()
+                non_vegetarian: liveMenu.non_vegetarian.slice(),
+                bengali_bento: liveMenu.bengali_bento.slice()
             };
             payload[category].splice(index, 1);
 
@@ -3446,6 +3501,68 @@ Non-Veg:
             } catch (e) {
                 alert('Connection error - nothing was removed.');
             }
+        }
+
+        // Adding a dish straight from the live view, without going through
+        // the paste-and-parse flow, which needs raw text to already exist
+        // somewhere. Savoury asks which of veg/non-veg it belongs to; Bento
+        // is always its own category and defaults to the client's confirmed
+        // "Curry, luchi, ... & Norom Pak Sondesh" description so the admin
+        // only has to change what differs for that box.
+        async function addLiveDishToServer(category, dish) {
+            const payload = {
+                vegetarian: liveMenu.vegetarian.slice(),
+                non_vegetarian: liveMenu.non_vegetarian.slice(),
+                bengali_bento: liveMenu.bengali_bento.slice()
+            };
+            payload[category].push(dish);
+
+            try {
+                const resp = await fetch('/admin/update-menu', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+                    body: JSON.stringify(payload)
+                });
+                const data = await resp.json();
+                if (resp.ok && data.status === 'success') {
+                    loadActiveMenu();
+                } else {
+                    alert('Not added: ' + (data.detail || data.reason || 'the server refused the change.'));
+                }
+            } catch (e) {
+                alert('Connection error - nothing was added.');
+            }
+        }
+
+        function addLiveSavouryDish() {
+            const item = prompt('Dish name (e.g. Aloor Dom):');
+            if (!item || !item.trim()) return;
+            const description = prompt('Description (optional):', '') || '';
+            const quantity = prompt('Quantity / portion (e.g. 250g, 2 pcs):', '250g') || '';
+            const priceRaw = prompt('Price in ₹ (numbers only):');
+            const price_inr = Number(priceRaw);
+            if (!priceRaw || Number.isNaN(price_inr) || price_inr <= 0) {
+                return alert('A valid price is needed — nothing was added.');
+            }
+            const isNonVeg = confirm('Is this a Non-Vegetarian dish?\n\nOK = Non-Veg, Cancel = Vegetarian');
+            const category = isNonVeg ? 'non_vegetarian' : 'vegetarian';
+            addLiveDishToServer(category, { item: item.trim(), description: description.trim(), quantity: quantity.trim(), price_inr });
+        }
+
+        function addLiveBentoDish() {
+            const item = prompt('Bento box name (e.g. Vegetarian Bento):', 'Bento Box');
+            if (!item || !item.trim()) return;
+            const description = prompt(
+                'Description:',
+                'Curry, luchi, tomato aamsottwo chatni & Norom Pak Sondesh'
+            ) || '';
+            const quantity = prompt('Quantity label:', '1 Bento Box') || '';
+            const priceRaw = prompt('Price in ₹ (numbers only):');
+            const price_inr = Number(priceRaw);
+            if (!priceRaw || Number.isNaN(price_inr) || price_inr <= 0) {
+                return alert('A valid price is needed — nothing was added.');
+            }
+            addLiveDishToServer('bengali_bento', { item: item.trim(), description: description.trim(), quantity: quantity.trim(), price_inr });
         }
 
         async function removeArchivedFlyer(flyerId, label) {
