@@ -22,7 +22,7 @@ Built to convert Meta Ad leads, filter out organic DM noise, send high-resolutio
 > **The live deployment runs with the gate bypassed** (`BYPASS_AD_GATE=true`),
 > so the bot currently answers every Instagram DM, organic ones included. The
 > behaviour described above is what `BYPASS_AD_GATE=false` restores. See
-> [DEPLOYMENT.md](DEPLOYMENT.md).
+> [deployment guide](docs/deployment.md).
 
 ### 2. 🖼️ Visual Menu Photo Card Engine
 - Delivers high-resolution menu photo cards directly in Instagram DMs and WhatsApp chats instead of long text lists.
@@ -93,14 +93,21 @@ Camellia.artisal/
 │   └── qa_templates.json        # Q&A triggers & template responses
 ├── images/                      # Menu photo cards served at /images
 ├── tests/                       # Pytest suite (conftest puts the root on sys.path)
+├── pytest.ini                   # Restricts discovery to the committed test suite
 ├── scripts/                     # Operational tools, not shipped in the image
 │   ├── validate_schemas.py      # menu.json / qa_templates.json validator
 │   ├── simulate_bot.py          # Interactive CLI simulator
 │   └── generate_pdf.py          # Menu PDF generator
-├── Dockerfile, docker-compose.yml, railway.json, Procfile, DEPLOYMENT.md
+├── docs/                        # Deployment, evaluation and architecture docs
+├── Dockerfile, docker-compose.yml, railway.json, Procfile
 ├── requirements.txt             # Dependencies list
 └── LICENSE                      # MIT License
 ```
+
+See [docs/architecture.md](docs/architecture.md) for package ownership,
+[docs/deployment.md](docs/deployment.md) for hosting, and
+[docs/conversation-benchmark.md](docs/conversation-benchmark.md) for quality
+evaluation.
 
 > The runtime SQLite database is **not** kept in `data/`. `docker-compose.yml`
 > mounts its persistent volume at `/app/var`, which would otherwise hide the
