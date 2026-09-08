@@ -1,5 +1,5 @@
 {
-  "seed_version": 13,
+  "seed_version": 14,
   "matching_rules": {
     "guard_precedence": "GUARD_ templates (id starting with GUARD_) have absolute precedence over any answer template. When matched, they escalate immediately with response: null to prevent unverified brand statements.",
     "how_it_works": "Each template has 'triggers' (keywords/phrases). If a customer message contains ANY trigger from a template's list, that template fires. If multiple templates match, the one with the MOST matched keywords wins. If nothing matches confidently, escalate to human — never guess.",
@@ -1477,7 +1477,7 @@
         "what subscriptions",
         "meal subscriptions"
       ],
-      "response": "Hi! Thank you for asking about our Everyday Meal Subscription (Gurgaon only).\n\nFreshly cooked, home-style balanced food, using good-quality ingredients, home recipes and no shortcuts.\n\nPrice of 5 MEALS (including GST). Porter delivery charges at actuals, depending on fare from our Sushant Lok Gurgaon kitchen to your location\n\n• Option 1 Vegetarian — ₹1,500 for 5 meals\n(Rice/roti + 2 sabzis + chatni/mishti)\n• Option 2 Veg + Chicken — ₹1,750 (vegetarian on 3 days, chicken on 2 days) for 5 meals\n• Option 3 Chicken — ₹2,000 for 5 meals\n(Rice/roti + 1 sabzi + chicken + chatni/mishti)\n\nOnce during the package, you can opt for luchi or polao\n• No fixed schedule — have your meals over 5 days, 10 days or at your own pace\n• For every 10 meals, we gift you the 11th\n\nSimple, varied everyday food — as close as we can make it to a meal from a home kitchen.\n\nAttached below is our à la carte menu that changes every week. In case you don't want a subscription, you can just order a dish any day from here.\n\nWould you like to book?",
+      "response": "*SUBSCRIPTION - HOME FOOD AWAY FROM HOME*\n\nHi! Thank you for asking about our Everyday Meal Subscription (Gurgaon only).\n\nFreshly cooked, home-style balanced food, using good-quality ingredients, home recipes and no shortcuts.\n\nPrice of 5 MEALS (including GST). Porter delivery charges at actuals, depending on fare from our Sushant Lok Gurgaon kitchen to your location\n\n• Option 1 Vegetarian — ₹1,500 for 5 meals\n(Rice/roti + 2 sabzis + chatni/mishti)\n• Option 2 Veg + Chicken — ₹1,750 (vegetarian on 3 days, chicken on 2 days) for 5 meals\n• Option 3 Chicken — ₹2,000 for 5 meals\n(Rice/roti + 1 sabzi + chicken + chatni/mishti)\n\nOnce during the package, you can opt for luchi or polao\n• No fixed schedule — have your meals over 5 days, 10 days or at your own pace\n• For every 10 meals, we gift you the 11th\n\nSimple, varied everyday food — as close as we can make it to a meal from a home kitchen.\n\nAttached below is our à la carte menu that changes every week. In case you don't want a subscription, you can just order a dish any day from here.\n\nWould you like to book?",
       "escalate": false,
       "source_ref": "client confirmation 2026-09-08 (Somdeb Ji)"
     },
@@ -1576,7 +1576,7 @@
         "do you sell sondesh sweet boxes",
         "do you sell sondesh boxes"
       ],
-      "response": "We also make & send Bengali mishti - norom pak Sondesh. All milk protein, no gluten, mild sweet, no added fat - subtle natural flavours…. Handcrafted.",
+      "response": "*WE ALSO OFFER SONDESH*\n\nWe also make & send Bengali mishti - norom pak Sondesh. All milk protein, no gluten, mild sweet, no added fat - subtle natural flavours…. Handcrafted.",
       "escalate": false,
       "source_ref": "client Q&A script > savoury food ordering",
       "router_hint": "ONLY when a customer already discussing meals asks whether you also do sweets."

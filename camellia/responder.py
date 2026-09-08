@@ -1095,10 +1095,18 @@ class DeterministicResponder:
                 tmpl = self._template_by_id("savoury_delivery_time")
                 if tmpl and tmpl.get("response"):
                     response_text = tmpl["response"]
+                    images = None
+                    if not facts.get("savoury_crosssell_sent"):
+                        facts["savoury_crosssell_sent"] = True
+                        crosssell = self._template_by_id("savoury_crosssell_sondesh")
+                        crosssell_text = (crosssell.get("response") or "").strip()
+                        if crosssell_text:
+                            response_text = response_text.rstrip() + "\n\n" + crosssell_text
+                            images = self._append_sondesh_crosssell_images(None)
                     if intro_greeting_prefix:
                         response_text = intro_greeting_prefix + response_text
                     session_memory.add_turn(user_id, channel, user_message, response_text)
-                    return response_text, True, "savoury_delivery_time", None
+                    return response_text, True, "savoury_delivery_time", images
             elif any(w in lowered_text for w in SONDESH_CONTEXT_WORDS):
                 tmpl = self._template_by_id("sondesh_dispatch_time")
                 if tmpl and tmpl.get("response"):
@@ -1566,8 +1574,9 @@ class DeterministicResponder:
             # One-time savoury cross-sell nudge logic
             savoury_templates = {
                 "savoury_food_intro", "weekly_menu_veg", "weekly_menu_nonveg",
-                "combo_bento", "alacarte_prebooking_steps",
-                "subscription_details", "subscription_booking_steps"
+                "combo_bento", "bento_details", "alacarte_prebooking_steps",
+                "subscription_details", "subscription_booking_steps",
+                "savoury_best_time_to_book", "savoury_delivery_time"
             }
             # The expired-menu fallback ("kitchen is finalising this week's
             # menu") explicitly promises no photo and no price a customer
@@ -1586,15 +1595,10 @@ class DeterministicResponder:
                 crosssell_text = (crosssell_tmpl.get("response") or "").strip()
                 if crosssell_text:
                     response_text = response_text.rstrip() + "\n\n" + crosssell_text
-                    aamar_card = "/images/AAMAR%20MISHTI.jpeg"
-                    if isinstance(image_url, list):
-                        image_url = image_url + [aamar_card]
-                    elif image_url:
-                        image_url = [image_url, aamar_card]
-                    else:
-                        image_url = [aamar_card]
+                    image_url = self._append_sondesh_crosssell_images(image_url)
             elif tmpl_id == "savoury_crosssell_sondesh":
                 facts["savoury_crosssell_sent"] = True
+                image_url = self._append_sondesh_crosssell_images(image_url)
 
             # One-time sondesh cross-sell nudge logic (reverse direction: sondesh -> savoury)
             sondesh_templates = {
@@ -1892,6 +1896,27 @@ class DeterministicResponder:
             caption = captions[index] if index < len(captions) else None
             paired.append({"url": url, "caption": caption} if caption else url)
         return paired
+
+    @staticmethod
+    def _append_sondesh_crosssell_images(image_url: Any) -> List[Any]:
+        """Keeps the savoury answer first, then sends the three approved photos."""
+        supplied = [
+            "/images/Sondesh%20Norom%20Pak%20Closeup.jpeg",
+            "/images/Sondesh%20Handcrafted%20Collection.jpeg",
+            "/images/Sondesh%20Gift%20Platter.jpeg",
+        ]
+        existing = list(image_url) if isinstance(image_url, list) else ([image_url] if image_url else [])
+        images = existing + supplied
+
+        # Instagram, WhatsApp and /chat all understand this marker. It ensures
+        # the customer's savoury answer and the cross-sell copy finish before
+        # the photos arrive, even when the savoury template also has a menu card.
+        first = images[0]
+        if isinstance(first, dict):
+            images[0] = {**first, "text_first": True}
+        else:
+            images[0] = {"url": first, "text_first": True}
+        return images
 
     def _current_week(self) -> Dict[str, Any]:
         """

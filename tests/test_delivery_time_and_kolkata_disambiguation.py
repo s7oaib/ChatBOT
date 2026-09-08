@@ -143,7 +143,9 @@ class TestTheSavourySondeshCrosssellUsesTheClientsOwnText:
     def test_a_sondesh_menu_card_is_attached_alongside_the_weekly_menu(self):
         _text, _matched, _template_id, images = reply_to("do you have lunch or dinner")
         assert isinstance(images, list)
-        assert any("AAMAR" in img for img in images)
+        urls = [img.get("url") if isinstance(img, dict) else img for img in images]
+        assert sum("/images/Sondesh%20" in url for url in urls) == 3
+        assert isinstance(images[0], dict) and images[0].get("text_first") is True
 
     def test_the_nudge_is_sent_once_per_session_not_on_every_savoury_reply(self):
         user_id = "crosssell_once_" + uuid.uuid4().hex[:8]
@@ -154,3 +156,18 @@ class TestTheSavourySondeshCrosssellUsesTheClientsOwnText:
 
         assert "We also make & send Bengali mishti" in first[0]
         assert "We also make & send Bengali mishti" not in second[0]
+
+    @pytest.mark.parametrize("message, expected_template", [
+        ("what are the bento meal box prices", "bento_details"),
+        ("when should i book savoury food", "savoury_best_time_to_book"),
+        ("how long does savoury food take", "savoury_delivery_time"),
+    ])
+    def test_every_direct_savoury_information_path_gets_the_one_time_offer(
+        self, message, expected_template
+    ):
+        text, matched, template_id, images = reply_to(message)
+        assert matched is True
+        assert template_id == expected_template
+        assert "WE ALSO OFFER SONDESH" in text
+        urls = [img.get("url") if isinstance(img, dict) else img for img in images]
+        assert sum("/images/Sondesh%20" in url for url in urls) == 3
