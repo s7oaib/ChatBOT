@@ -107,6 +107,12 @@ def test_instagram_escalation_requests_and_attaches_whatsapp_number():
         assert not escalate.called
 
         app._process_instagram_event(user_id, "My WhatsApp number is +91 9876543210", "ad-1")
+        assert send_reply.call_args.args[1] == (
+            "I have your WhatsApp number as +919876543210. Is this correct? Reply yes or no."
+        )
+        assert not escalate.called
+
+        app._process_instagram_event(user_id, "Yes, correct", "ad-1")
         assert escalate.call_args.kwargs["context_data"]["customer_whatsapp_number"] == "+919876543210"
         assert session_memory.get_facts(user_id, "instagram")["awaiting_instagram_contact"] is False
         assert send_reply.call_args.args[1] == "standard escalation"
@@ -125,6 +131,7 @@ def test_instagram_contact_accepts_leading_zero_and_spaced_indian_number():
     ) as escalate:
         app._process_instagram_event(user_id, "I need help with an unusual request", "ad-1")
         app._process_instagram_event(user_id, "099021 81650", "ad-1")
+        app._process_instagram_event(user_id, "yes", "ad-1")
 
     assert escalate.call_args.kwargs["context_data"]["customer_whatsapp_number"] == "+919902181650"
     assert session_memory.get_facts(user_id, "instagram")["awaiting_instagram_contact"] is False
@@ -139,6 +146,29 @@ def test_instagram_contact_card_attachment_yields_a_phone_number():
         }
     }
     assert app._extract_contact_number_from_event(event) == "+919902181650"
+
+
+def test_instagram_contact_must_be_confirmed_and_can_be_corrected():
+    user_id = "client_instagram_contact_correction"
+    session_memory.clear_session(user_id, "instagram")
+
+    with patch.object(
+        app.responder,
+        "match_and_respond",
+        return_value=("standard escalation", False, None, None),
+    ), patch.object(app, "send_instagram_reply") as send_reply, patch.object(
+        app.escalator, "handle_escalation"
+    ) as escalate:
+        app._process_instagram_event(user_id, "I need help with an unusual request", "ad-1")
+        app._process_instagram_event(user_id, "9876543210", "ad-1")
+        app._process_instagram_event(user_id, "No, correct number is 099021 81650", "ad-1")
+        assert not escalate.called
+        assert send_reply.call_args.args[1] == (
+            "I have your WhatsApp number as +919902181650. Is this correct? Reply yes or no."
+        )
+        app._process_instagram_event(user_id, "yes", "ad-1")
+
+    assert escalate.call_args.kwargs["context_data"]["customer_whatsapp_number"] == "+919902181650"
 
 
 def test_bare_price_question_with_no_topic_asks_which_product_instead_of_guessing_sondesh():

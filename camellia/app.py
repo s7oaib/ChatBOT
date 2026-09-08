@@ -42,6 +42,7 @@ from camellia.monitoring import get_logger, delivery_monitor, latency_monitor
 log = get_logger("camellia.app")
 
 _INSTAGRAM_CONTACT_REQUEST = "Could you share your WhatsApp number so our team can reach you directly?"
+_INSTAGRAM_CONTACT_CONFIRM = "I have your WhatsApp number as {number}. Is this correct? Reply yes or no."
 _INDIAN_MOBILE_RE = re.compile(
     r"(?<!\d)(?:(?:\+|00)?91[\s-]*)?0?[\s-]*"
     r"([6-9](?:[\s-]*\d){9})(?!\d)"
@@ -347,6 +348,7 @@ def _process_instagram_event(
     try:
         facts = session_memory.get_facts(sender_id, "instagram")
         awaiting_contact = facts.get("awaiting_instagram_contact", False)
+        awaiting_contact_confirmation = facts.get("awaiting_instagram_contact_confirmation", False)
         supplied_contact = _extract_whatsapp_number(message_text)
 
         # How this message was composed, and which ad it came from, recorded on
@@ -368,6 +370,52 @@ def _process_instagram_event(
             sender_id, entry.source, trace["ad_id"], trace["ad_title"], entry.raw_payload,
         )
 
+        if awaiting_contact_confirmation:
+            candidate = facts.get("pending_instagram_contact")
+            lowered = " ".join((message_text or "").lower().split())
+            if supplied_contact:
+                candidate = supplied_contact
+                facts["pending_instagram_contact"] = candidate
+                response_text = _INSTAGRAM_CONTACT_CONFIRM.format(number=candidate)
+                db.log_conversation(sender_id, "instagram", message_text, response_text, True, "instagram_contact_confirmation", **trace)
+                send_instagram_reply(sender_id, response_text)
+                return
+            if re.search(r"\b(?:yes|yeah|yep|correct|right|haan|confirm|ok|okay)\b", lowered) and candidate:
+                pending = facts.get("pending_instagram_escalation") or {}
+                facts["awaiting_instagram_contact_confirmation"] = False
+                facts["pending_instagram_contact"] = None
+                response_text = pending.get("response_text") or _INSTAGRAM_CONTACT_REQUEST
+                was_matched = pending.get("was_matched", False)
+                template_id = pending.get("template_id")
+                user_message_for_escalation = pending.get("user_message", message_text)
+                reason = pending.get("reason", "Unmatched Instagram Query / Sensitive Request")
+                session_memory.add_turn(sender_id, "instagram", message_text, response_text)
+                escalator.handle_escalation(
+                    user_id=sender_id,
+                    channel="instagram",
+                    user_message=user_message_for_escalation,
+                    reason=reason,
+                    context_data={
+                        "ad_id": ad_id,
+                        "sender_id": sender_id,
+                        "template_id": template_id,
+                        "customer_whatsapp_number": candidate,
+                    },
+                )
+                db.log_conversation(sender_id, "instagram", message_text, response_text, was_matched, template_id, **trace)
+                send_instagram_reply(sender_id, response_text)
+                return
+            if re.search(r"\b(?:no|nope|wrong|incorrect|गलत)\b", lowered):
+                facts["awaiting_instagram_contact_confirmation"] = False
+                facts["pending_instagram_contact"] = None
+                facts["awaiting_instagram_contact"] = True
+                response_text = _INSTAGRAM_CONTACT_REQUEST
+            else:
+                response_text = _INSTAGRAM_CONTACT_CONFIRM.format(number=candidate or "the number you sent")
+            db.log_conversation(sender_id, "instagram", message_text, response_text, True, "instagram_contact_confirmation", **trace)
+            send_instagram_reply(sender_id, response_text)
+            return
+
         if awaiting_contact and not supplied_contact:
             response_text = _INSTAGRAM_CONTACT_REQUEST
             db.log_conversation(sender_id, "instagram", message_text, response_text, True, "instagram_contact_required", **trace)
@@ -375,28 +423,11 @@ def _process_instagram_event(
             return
 
         if awaiting_contact and supplied_contact:
-            pending = facts.get("pending_instagram_escalation") or {}
             facts["awaiting_instagram_contact"] = False
-            facts["pending_instagram_escalation"] = None
-            response_text = pending.get("response_text") or _INSTAGRAM_CONTACT_REQUEST
-            was_matched = pending.get("was_matched", False)
-            template_id = pending.get("template_id")
-            user_message_for_escalation = pending.get("user_message", message_text)
-            reason = pending.get("reason", "Unmatched Instagram Query / Sensitive Request")
-            session_memory.add_turn(sender_id, "instagram", message_text, response_text)
-            escalator.handle_escalation(
-                user_id=sender_id,
-                channel="instagram",
-                user_message=user_message_for_escalation,
-                reason=reason,
-                context_data={
-                    "ad_id": ad_id,
-                    "sender_id": sender_id,
-                    "template_id": template_id,
-                    "customer_whatsapp_number": supplied_contact,
-                },
-            )
-            db.log_conversation(sender_id, "instagram", message_text, response_text, was_matched, template_id, **trace)
+            facts["awaiting_instagram_contact_confirmation"] = True
+            facts["pending_instagram_contact"] = supplied_contact
+            response_text = _INSTAGRAM_CONTACT_CONFIRM.format(number=supplied_contact)
+            db.log_conversation(sender_id, "instagram", message_text, response_text, True, "instagram_contact_confirmation", **trace)
             send_instagram_reply(sender_id, response_text)
             return
 
@@ -408,6 +439,8 @@ def _process_instagram_event(
         needs_escalation = awaiting_contact or not was_matched or template_id == "order_next_steps"
         if needs_escalation and not supplied_contact and not awaiting_contact:
             facts["awaiting_instagram_contact"] = True
+            facts["awaiting_instagram_contact_confirmation"] = False
+            facts["pending_instagram_contact"] = None
             facts["pending_instagram_escalation"] = {
                 "response_text": response_text,
                 "was_matched": was_matched,
