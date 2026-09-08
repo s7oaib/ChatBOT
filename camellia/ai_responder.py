@@ -452,7 +452,8 @@ class AIResponder:
             "3. If a customer asks for recommendations, gifting ideas, or dietary advice, provide thoughtful, appetizing suggestions based on our actual collections (Aamar Mishti & Signature A2).\n"
             "4. If a customer asks general friendly or conversational questions, respond warmly and guide them back to exploring our fresh sweets or weekly meals.\n"
             "5. If a customer asks to order, summarize their request and encourage them to confirm their items, delivery address, and preferred time.\n"
-            "6. When displaying prices, menus, or flavour options, format them clearly with clean bullet points or structured monospace code-block tables (``` +---+---+ ```) for mobile & WhatsApp readability.\n\n"
+            "6. When displaying prices, menus, or flavour options, format them clearly with clean bullet points or structured monospace code-block tables (``` +---+---+ ```) for mobile & WhatsApp readability.\n"
+            "7. Never use flower emoji of any kind. The client has asked for them to be removed from everything their customers see, and a draft carrying one still has to be cleaned by hand before it can be approved.\n\n"
             f"--- KNOWLEDGE CONTEXT ---\n{context_str}\n"
             f"{user_ctx_block}"
         )
@@ -517,7 +518,8 @@ class AIResponder:
             "OUT_OF_CONTEXT and nothing else. Refusing is always better than guessing.\n"
             "- Do not invent an apology for something that did not happen, and do not promise "
             "a callback, refund or timeline.\n"
-            "- Keep it short, warm and natural. Reuse the excerpts' own wording for facts.\n\n"
+            "- Keep it short, warm and natural. Reuse the excerpts' own wording for facts.\n"
+            "- Never use flower emoji. The client has asked for them to be removed everywhere.\n\n"
             f"--- APPROVED EXCERPTS ---\n{excerpts}\n"
             f"{user_ctx_block}"
         )

@@ -5,6 +5,7 @@ import json
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional
 from camellia.config import config
+from camellia.text_rules import strip_flower_emoji
 
 class Database:
     def __init__(self, db_path: str = None):
@@ -732,7 +733,14 @@ class Database:
         confidence: float = 0.0,
         created_by: str = "rag_fallback"
     ) -> int:
-        """Saves a proposed candidate template with status 'PENDING_APPROVAL'."""
+        """
+        Saves a proposed candidate template with status 'PENDING_APPROVAL'.
+
+        Flowers are stripped here rather than on the way out. A candidate is
+        read by staff in the approval queue and, once approved, becomes copy
+        the client owns — so it must never carry a flower in the first place.
+        """
+        response = strip_flower_emoji(response or "")
         sources_str = json.dumps(source_refs or [])
         with self.get_connection() as conn:
             cursor = conn.cursor()
@@ -753,6 +761,9 @@ class Database:
             result = []
             for row in rows:
                 item = dict(row)
+                # Rows written before the save-time strip existed still carry
+                # flowers, so clean them on the way to the dashboard too.
+                item["response"] = strip_flower_emoji(item.get("response") or "")
                 try:
                     item["source_refs"] = json.loads(item.get("source_refs") or "[]")
                 except Exception:

@@ -4288,6 +4288,17 @@ def get_web_chat():
                         const wrap = document.createElement('div');
                         wrap.className = 'menu-card-wrap';
 
+                        // The real channels send the note before the card it
+                        // describes when caption_first is set. The tester used
+                        // to always draw image-then-caption, so it showed the
+                        // old order and looked like the change had not shipped.
+                        if (caption && isObj && entry.caption_first) {
+                            const leadIn = document.createElement('div');
+                            leadIn.className = 'msg-content menu-card-caption';
+                            leadIn.innerHTML = formatMarkdown(caption);
+                            wrap.appendChild(leadIn);
+                        }
+
                         const img = document.createElement('img');
                         img.src = u;
                         img.className = 'menu-card-img';
@@ -4304,7 +4315,7 @@ def get_web_chat():
                         }
                         wrap.appendChild(img);
 
-                        if (caption) {
+                        if (caption && !(isObj && entry.caption_first)) {
                             const capDiv = document.createElement('div');
                             capDiv.className = 'msg-content menu-card-caption';
                             capDiv.innerHTML = formatMarkdown(caption);

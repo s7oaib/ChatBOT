@@ -12,6 +12,7 @@ from camellia.session_memory import session_memory
 
 from camellia.order_calculator import order_calculator
 from camellia.rag_fallback import MEDIUM_CONFIDENCE_THRESHOLD, rag_fallback_engine
+from camellia.text_rules import FLOWER_RE, strip_flower_emoji
 from camellia.router import shadow_router
 from camellia.database import db
 from camellia.trigger_index import trigger_index
@@ -69,38 +70,10 @@ _CONFIRMED_BENTO_SUBSTITUTION_RE = re.compile(
 )
 
 
-# Every flower the client does not want, not just the cherry blossom the first
-# pass removed. The source text is clean now, so this exists for what the
-# source cannot control: an AI-refined reply, a staff-written learned answer,
-# or a template edited through the admin portal.
-_FLOWER_RE = re.compile(
-    "[\U0001F338\U0001F33A\U0001F33B\U0001F33C\U0001F339\U0001F337"
-    "\U0001F490\U0001F3F5]\uFE0F?"
-)
-
-
-def _strip_flower_emoji(value):
-    """
-    Remove flower emoji from customer-visible text and card captions.
-
-    Takes the space with it. Removing the emoji alone left "Both!  Our weekly
-    meals" with a double space in the middle of every sentence it touched.
-    Only the space beside the emoji is touched: several replies carry ASCII
-    price tables whose columns are built out of runs of spaces, and collapsing
-    whitespace generally would tear them apart.
-    """
-    if isinstance(value, str):
-        marked = _FLOWER_RE.sub("\x00", value)
-        return re.sub(
-            " *\x00+ *",
-            lambda m: " " if m.group(0).startswith(" ") and m.group(0).endswith(" ") else "",
-            marked,
-        )
-    if isinstance(value, list):
-        return [_strip_flower_emoji(item) for item in value]
-    if isinstance(value, dict):
-        return {key: _strip_flower_emoji(item) for key, item in value.items()}
-    return value
+# The flower strip lives in text_rules so database.py can use it too — the
+# reply path is not the only place text reaches the client's people.
+_FLOWER_RE = FLOWER_RE
+_strip_flower_emoji = strip_flower_emoji
 
 
 def _normalise_reply(text: str) -> str:
