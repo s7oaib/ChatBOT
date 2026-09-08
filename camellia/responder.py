@@ -537,6 +537,18 @@ class DeterministicResponder:
         arbitrary conjunctions: a flavour name or an order can contain 'and'.
         """
         text = " ".join(message.lower().split()).strip(" .?!")
+        # Staff-approved answers must win over broad conversational routing.
+        # A learned answer may intentionally contain words such as "bulk" or
+        # "corporate", but it is still a verified answer rather than a new
+        # escalation request.
+        try:
+            learned_match = db.search_learned_knowledge(message)
+            learned_answer = (learned_match or {}).get("verified_answer", "").strip()
+            if learned_answer:
+                session_memory.add_turn(user_id, channel, message, learned_answer)
+                return learned_answer, True, f"learned_{learned_match.get('id')}", None
+        except Exception:
+            pass
         if (self.classify_unmatched_intent(message) in {"complaint", "bulk"}
                 or re.search(r"\b(cancel (?:my |the )?order|order is missing|(?:speak|talk) to (?:a |an )?(?:human|person))\b", text)):
             reply, _ = self.build_handover_response(message)
