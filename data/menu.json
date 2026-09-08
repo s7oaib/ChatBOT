@@ -266,22 +266,24 @@
       ],
       "bengali_bento": [
         {
-          "item": "Vegetarian Bento",
-          "description": "Aloo Dom (slow-cooked potato in the traditional prashad style), luchi (the Bengali version of poori), pre-dessert tomato aamsottwo khejur chatni and our handcrafted Norom Pak Sondesh. Also available with Chholar Dal (Pooja style) instead of Aloo Dom.",
-          "quantity": "1 Bento Box",
-          "price_inr": 350
+          "name": "Veg Bento",
+          "price_inr": 400,
+          "includes": [
+            "6 Luchi",
+            "Chholar Daal",
+            "Tomato Aamsottwo Chatni",
+            "1 Classic Aamar Sondesh"
+          ]
         },
         {
-          "item": "Chicken Bento",
-          "description": "Slow-cooked kolaghat Dhaba Chicken, luchi, pre-dessert tomato aamsottwo khejur chatni and our handcrafted Norom Pak Sondesh.",
-          "quantity": "1 Bento Box",
-          "price_inr": 400
-        },
-        {
-          "item": "Mangsho Bento",
-          "description": "Slow-cooked mutton, luchi, pre-dessert tomato aamsottwo khejur chatni and our handcrafted Norom Pak Sondesh.",
-          "quantity": "1 Bento Box",
-          "price_inr": 600
+          "name": "Non-Veg Bento",
+          "price_inr": 700,
+          "includes": [
+            "6 Luchi",
+            "Mangsho (Mutton Kosha)",
+            "Tomato Aamsottwo Chatni",
+            "1 Classic Aamar Sondesh"
+          ]
         }
       ],
       "norom_pak_sondesh": [
