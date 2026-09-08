@@ -74,9 +74,8 @@ def test_each_upload_is_archived_and_the_newest_is_the_live_one():
 
 def test_two_uploads_in_the_same_second_do_not_overwrite_each_other():
     """
-    The live flyer deliberately reuses one filename so no cached reference can
-    point at a deleted photo. The archive cannot share that trick, and a
-    second-resolution name would silently collapse two uploads into one.
+    The live flyer and archive both need immutable names. A fixed live URL can
+    make browsers or Meta reuse the prior week's cached image.
     """
     first = _upload("week one")
     second = _upload("week two")
@@ -175,7 +174,8 @@ def test_an_archive_write_failure_never_costs_the_operator_the_upload():
     with mock.patch.object(weekly_flyer, "archive_dir", side_effect=OSError("disk full")):
         state = weekly_flyer.save(b"\xff\xd8\xffZ", "image/jpeg", week_of="28th August, 2026")
 
-    assert state["url"].endswith("weekly_flyer.jpeg")
+    assert "/weekly_flyer-" in state["url"]
+    assert state["url"].endswith(".jpeg")
     assert weekly_flyer.get() is not None
 
 

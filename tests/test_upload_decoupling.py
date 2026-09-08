@@ -80,6 +80,17 @@ def test_a_failed_reader_still_puts_the_photo_in_front_of_customers():
     assert weekly_flyer.get() is not None, "the upload did nothing at all"
 
 
+def test_each_new_flyer_has_a_fresh_url_so_media_caches_cannot_send_the_old_one():
+    _upload({"status": "failed", "error": "first"})
+    first_url = weekly_flyer.get()["url"]
+    _upload({"status": "failed", "error": "second"})
+    second_url = weekly_flyer.get()["url"]
+
+    assert first_url != second_url
+    assert second_url.startswith("/uploads/weekly_flyer-")
+    assert second_url.endswith(".jpeg")
+
+
 def test_the_operator_is_told_the_photo_went_live_anyway():
     """A bare "failed" reads as "nothing happened" and sends them re-uploading."""
     body = _upload({"status": "failed", "error": "json_validate_failed"}).json()

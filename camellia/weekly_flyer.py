@@ -147,10 +147,11 @@ def save(
     """
     Persists an uploaded photo as the current weekly menu card.
 
-    Overwrites whatever was there before: there is exactly one current weekly
-    menu, and keeping old uploads around risks an outdated one being served by
-    a stale reference. The filename does not change between uploads, so no
-    caching layer can be left pointing at a photo that no longer exists.
+    Each upload gets a new immutable URL. Reusing ``weekly_flyer.jpeg`` made
+    a correct new file look unchanged to browsers and Meta's media fetch/cache
+    layer: they were allowed to reuse the old response for the same URL. The
+    state file still points to exactly one current flyer, while old files are
+    retained only long enough for already-sent messages to resolve safely.
 
     week_of, when the vision OCR could read one off the flyer, is folded into
     the caption so the date customers see updates in lockstep with the photo
@@ -161,7 +162,11 @@ def save(
     ext = _EXT_BY_MIME.get((mime_type or "").lower(), "jpeg")
     directory = uploads_dir()
     os.makedirs(directory, exist_ok=True)
-    filename = f"weekly_flyer.{ext}"
+    uploaded_at = time.time()
+    # A per-upload ID means a client, CDN or Meta cannot mistake a newly
+    # uploaded menu for a cached response to last week's identical URL.
+    flyer_id = f"{int(uploaded_at * 1000)}-{uuid.uuid4().hex[:8]}"
+    filename = f"weekly_flyer-{flyer_id}.{ext}"
 
     with open(os.path.join(directory, filename), "wb") as f:
         f.write(image_bytes)
@@ -177,12 +182,6 @@ def save(
         f"*This Week's Menu* ({week_of}) — freshly cooked in small batches, updated just for you!"
         if has_real_date else random.choice(CAPTIONS)
     )
-    uploaded_at = time.time()
-    # A per-upload id, not the timestamp: two uploads in the same second would
-    # collide on a second-resolution name, and the archive would silently keep
-    # one photo for two weeks. It also lets the archive say which entry is the
-    # live one without comparing floats for equality.
-    flyer_id = f"{int(uploaded_at * 1000)}-{uuid.uuid4().hex[:8]}"
     state = {
         "id": flyer_id,
         "url": f"/uploads/{filename}",
@@ -274,6 +273,22 @@ def clear() -> None:
             os.remove(_state_path())
     except OSError as e:
         log.warning("Could not clear weekly flyer state: %s", e)
+
+    # Current flyers use immutable, per-upload URLs. Clear every live copy on
+    # reset (including the old fixed-name format from before cache busting),
+    # but never touch the JSON state files by prefix accident.
+    try:
+        for filename in os.listdir(uploads_dir()):
+            if (
+                filename.startswith("weekly_flyer-")
+                or filename in {"weekly_flyer.jpeg", "weekly_flyer.png", "weekly_flyer.webp"}
+            ):
+                try:
+                    os.remove(os.path.join(uploads_dir(), filename))
+                except OSError:
+                    pass
+    except OSError as e:
+        log.warning("Could not clear current weekly flyer files: %s", e)
 
     # Reset to Baseline means baseline: leaving a browsable archive of past
     # menus behind would be the same stale-photo problem one level down.
