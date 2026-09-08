@@ -151,7 +151,7 @@ def evaluate(cases, improved, live=False, rates=None):
                 latencies.append(elapsed)
                 lengths.append(len(reply.split()))
                 failures += bool(errors)
-                records.append({"case": case["id"], "turn": number, "message": expected["message"], "template": tid, "matched": matched, "reply": reply, "errors": errors, "repeated_questions": sorted(repeated), "latency_ms": round(elapsed, 2)})
+                records.append({"case": case["id"], "turn": number, "message": expected["message"], "expected": expected, "template": tid, "matched": matched, "reply": reply, "errors": errors, "repeated_questions": sorted(repeated), "latency_ms": round(elapsed, 2)})
         dollars = 0.0
         for model, tokens in usage.items():
             rate = (rates or {}).get(model)

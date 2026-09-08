@@ -57,3 +57,43 @@ Next evaluation: have the client label anonymized real conversations, reserve a
 held-out set before tuning, and measure answer correctness and completed staff
 handoffs there. Passing this deliberately small regression suite does not prove
 general multilingual comprehension or production conversion gains.
+
+## Independent judge evaluation
+
+`scripts/judge_conversation_benchmark.py` adds an evaluation layer on top of
+the regression benchmark. It always runs deterministic checks first for menu
+facts, delivery refusals, routing and handoff safety. This keeps factual
+business rules out of subjective LLM scoring.
+
+Without an external judge it produces those deterministic point-wise scores:
+
+```powershell
+.\.venv\Scripts\python.exe scripts/judge_conversation_benchmark.py --output scratch/judge-benchmark.json
+```
+
+To enable LLM judging, configure an **independent** OpenAI-compatible model.
+Do not use the same `GROQ_MODEL` or router model that writes customer replies.
+The judge returns strict JSON scores for correctness, relevance, tone and
+safety. It also compares baseline and candidate answers twice, swapping their
+positions so a preference for the first answer does not decide the result.
+
+```powershell
+$env:JUDGE_API_KEY = "your-judge-key"
+$env:JUDGE_BASE_URL = "https://your-provider.example/v1"
+$env:JUDGE_MODEL = "your-independent-judge-model"
+.\.venv\Scripts\python.exe scripts/judge_conversation_benchmark.py --judge --limit 160 --output scratch/judge-benchmark.json
+```
+
+`--limit 160` evaluates the full synthetic set. Start with the default 25
+turns while tuning the judge prompt, because each turn makes two point-wise and
+two pairwise judge calls.
+
+For calibration, provide a JSONL file of **anonymized** human-scored examples:
+
+```json
+{"case":"core-000","turn":0,"overall":5}
+```
+
+Then pass `--human-labels scratch/human-labels.jsonl`. The report includes mean
+absolute error and the proportion of judge scores within one point of the human
+score. Review the rubric/prompt before relying on a judge whose MAE exceeds 1.
