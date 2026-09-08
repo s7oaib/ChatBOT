@@ -139,3 +139,39 @@ class TestWhatsAppKeepsTheSameOrder:
         for payload in posted:
             if payload["type"] == "image":
                 assert "caption" not in payload["image"]
+
+
+class TestTheTesterUiMatchesTheRealSendOrder:
+    """
+    The web tester renders a reply as one HTML bubble built by client-side
+    JS, not by replaying the same code path as send_instagram_reply/
+    whatsapp_adapter — so getting the wire order right (tested above) does
+    not by itself get the on-screen order right. appendMessage() used to
+    unconditionally draw every image card before the outer reply text,
+    regardless of text_first, so a customer opening the tester saw the
+    general text arrive dead last: the opposite of what real channels send
+    and of the order the client asked for.
+    """
+
+    def _tester_script(self):
+        from unittest.mock import patch
+
+        with patch("camellia.app.require_web_tester"):
+            html = app_module.get_web_chat().body.decode("utf-8")
+        start = html.index("function appendMessage")
+        # appendMessage is a few dozen lines; a generous fixed window avoids
+        # guessing at the indentation of whatever function follows it.
+        return html[start:start + 4500]
+
+    def test_leadswithtext_is_computed_before_the_card_loop(self):
+        script = self._tester_script()
+        assert script.index("leadsWithText") < script.index("menu-card-wrap")
+
+    def test_the_outer_text_bubble_is_skipped_when_it_already_led(self):
+        # Otherwise a text_first reply would be shown twice.
+        script = self._tester_script()
+        assert "if (!leadsWithText)" in script
+
+    def test_a_text_first_reply_draws_the_lead_in_paragraph(self):
+        script = self._tester_script()
+        assert "if (leadsWithText && text)" in script

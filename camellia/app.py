@@ -4274,7 +4274,24 @@ def get_web_chat():
                 const box = document.getElementById('messages');
                 const div = document.createElement('div');
                 div.className = 'message ' + className;
-                
+
+                // Real channels send the reply's own text first when the
+                // first card is marked text_first (the price/menu flows: text,
+                // then each collection's note-and-card pair). This function
+                // used to always draw every image before the outer text
+                // regardless of that flag, so the tester showed the general
+                // text arriving dead last — the opposite of what Instagram and
+                // WhatsApp actually send, and of the order the client asked for.
+                const entries0 = Array.isArray(imageUrl) ? imageUrl : (imageUrl ? [imageUrl] : []);
+                const leadsWithText = entries0.some(e => e && typeof e === 'object' && e.text_first);
+
+                if (leadsWithText && text) {
+                    const leadText = document.createElement('div');
+                    leadText.className = 'msg-content';
+                    leadText.innerHTML = formatMarkdown(text);
+                    div.appendChild(leadText);
+                }
+
                 if (imageUrl) {
                     const entries = Array.isArray(imageUrl) ? imageUrl : [imageUrl];
                     // Each entry is either a plain URL string, or {url, caption}
@@ -4326,11 +4343,13 @@ def get_web_chat():
                     });
                 }
 
-                const contentDiv = document.createElement('div');
-                contentDiv.className = 'msg-content';
-                contentDiv.innerHTML = formatMarkdown(text);
-                div.appendChild(contentDiv);
-                
+                if (!leadsWithText) {
+                    const contentDiv = document.createElement('div');
+                    contentDiv.className = 'msg-content';
+                    contentDiv.innerHTML = formatMarkdown(text);
+                    div.appendChild(contentDiv);
+                }
+
                 if (meta) {
                     const span = document.createElement('span');
                     span.className = 'meta-tag';
