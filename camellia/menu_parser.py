@@ -35,9 +35,19 @@ _VISION_RETRY_BACKOFF_SECONDS = 1.5
 # as what the reply actually costs. The free tier allows 8000 TPM and a flyer
 # photo is already ~5000 of those, so an over-generous reservation turns a
 # request that would have succeeded into a guaranteed 429. A first pass at
-# this used 4096 and made uploads fail that had previously worked. An
-# extracted menu of a dozen dishes with descriptions runs well under 2000.
-_VISION_MAX_TOKENS = 2048
+# this used 4096 and made uploads fail that had previously worked.
+#
+# 2048 was still too high, for a reason the TPM number hides: Groq caps
+# *output* separately, and on qwen/qwen3.6-27b that OTPM ceiling is 1000.
+# Reserving 2048 against a 1000 ceiling is rejected before a single token is
+# generated — "Request too large ... on output tokens per minute (OTPM):
+# Limit 1000". Every full-flyer upload therefore failed, saved the photo, and
+# left the dish text on the previous week. Confirmed by replaying the
+# client's own flyer: 400 json_validate_failed, then two 429s, then give up.
+#
+# So this must stay under 1000, and the prompt must keep the reply small
+# enough to finish inside it — hence the short-description rule below.
+_VISION_MAX_TOKENS = 900
 _VISION_TIMEOUT_SECONDS = 60.0
 
 # A 429 here is the per-minute token window being spent, not a fault, and it
@@ -187,6 +197,49 @@ def _extract_json_object(content: str) -> Optional[Dict[str, Any]]:
                 except json.JSONDecodeError:
                     return None
     return None
+
+
+DESCRIPTION_SECTIONS = (
+    "vegetarian",
+    "non_vegetarian",
+    "bengali_bento",
+    "norom_pak_sondesh",
+)
+
+
+def _known_descriptions(menu_data: Dict[str, Any]) -> Dict[str, str]:
+    """Every dish description already on file, keyed by lowercased dish name."""
+    known: Dict[str, str] = {}
+    for week in menu_data.get("weekly_menus", []) or []:
+        for section in DESCRIPTION_SECTIONS:
+            for dish in week.get(section, []) or []:
+                name = str(dish.get("item", "")).strip().lower()
+                text = str(dish.get("description", "")).strip()
+                if name and text:
+                    known.setdefault(name, text)
+    return known
+
+
+def _fill_descriptions(items: List[Dict[str, Any]], known: Dict[str, str]) -> List[Dict[str, Any]]:
+    """
+    Gives every extracted dish a description.
+
+    The vision model is not asked for one - see the prompt in
+    _parse_image_with_groq - because descriptions are what pushed the reply
+    past the model's output quota and broke every upload. The menu repeats
+    dishes week to week, so the wording already written for a dish is reused
+    whenever the name comes back, and anything genuinely new gets the same
+    neutral line the text parser uses. The kitchen can edit either in /admin.
+    """
+    for dish in items:
+        if str(dish.get("description", "")).strip():
+            continue
+        name = str(dish.get("item", "")).strip().lower()
+        quantity = str(dish.get("quantity", "")).strip()
+        dish["description"] = known.get(name) or (
+            f"Freshly handcrafted ({quantity})" if quantity else "Freshly handcrafted"
+        )
+    return items
 
 
 class MenuParser:
@@ -377,8 +430,18 @@ class MenuParser:
             '  "non_vegetarian"     - list of non-vegetarian dishes.\n'
             '  "bengali_bento"      - list of bento/combo boxes, or [].\n'
             '  "norom_pak_sondesh"  - list of sweets/sondesh, or [].\n\n'
-            'Every dish is {"item": str, "description": str, "price_inr": int, "quantity": str}.\n'
-            "price_inr must be a plain number with no currency symbol.\n\n"
+            'Every dish is {"item": str, "price_inr": int, "quantity": str}.\n'
+            "price_inr must be a plain number with no currency symbol.\n"
+            # No description is asked for, and that is deliberate. The whole
+            # reply has to land inside _VISION_MAX_TOKENS, which sits under
+            # the model's 1000 output-tokens-per-minute ceiling. Descriptions
+            # are most of the text on a flyer: with them, a full ~15-dish menu
+            # ran to 825+ output tokens and the JSON never closed, so every
+            # upload died on json_validate_failed and burned the minute. Names
+            # and prices alone come in around half that. Descriptions are
+            # filled in afterwards by _apply_extracted_data_to_menu.
+            "Add no keys beyond those three. Output compact JSON with no line breaks\n"
+            "and no indentation.\n\n"
             "Read the flyer header FIRST and fill in week_of before extracting any dishes.\n"
             "Return strict JSON with all six keys present."
         )
@@ -395,6 +458,15 @@ class MenuParser:
             ],
             "temperature": 0.1,
             "response_format": {"type": "json_object"},
+            # The vision model is a reasoning model, and its thinking tokens
+            # are billed as output. Left on, it spent 700-800 tokens thinking
+            # about a menu flyer, hit the 1000 output-tokens-per-minute
+            # ceiling before writing any JSON, and came back as HTTP 400
+            # json_validate_failed with an empty failed_generation - the
+            # validator rejecting a reply that was never written. Every client
+            # upload failed that way: photo saved, dishes never updated. With
+            # reasoning off the same flyer's date costs 19 tokens.
+            "reasoning_effort": "none",
         }
         payload["max_tokens"] = _VISION_MAX_TOKENS
 
@@ -482,6 +554,10 @@ class MenuParser:
         menu_path = config.MENU_JSON_PATH
         with open(menu_path, "r", encoding="utf-8") as f:
             menu_data = json.load(f)
+
+        known = _known_descriptions(menu_data)
+        for section in (veg_items, nonveg_items, bento_items, sondesh_items):
+            _fill_descriptions(section, known)
 
         if "weekly_menus" in menu_data and menu_data["weekly_menus"]:
             current_week = menu_data["weekly_menus"][-1]

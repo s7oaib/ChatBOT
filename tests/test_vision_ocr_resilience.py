@@ -141,9 +141,9 @@ def test_a_completion_ceiling_is_always_sent():
     """A truncated completion is invalid JSON, indistinguishable from a bad read."""
     _, posts = _run([_ok(json.dumps(MENU_JSON))])
 
-    # Big enough for a dozen dishes with descriptions; the upper bound that
-    # keeps it inside the token budget is asserted separately below.
-    assert posts.call_args_list[0].kwargs["json"]["max_tokens"] >= 1024
+    # Big enough for a full flyer of dish names and prices; the upper bound
+    # that keeps it inside the output quota is asserted separately below.
+    assert posts.call_args_list[0].kwargs["json"]["max_tokens"] >= 512
 
 
 def test_json_is_recovered_from_prose_and_fences():
@@ -166,9 +166,14 @@ def test_the_completion_reservation_stays_inside_the_token_budget():
     is already ~5000 of them, so an over-generous reservation turns a request
     that would have worked into a guaranteed 429. A first pass used 4096 and
     broke uploads that had previously succeeded.
+
+    Output is capped far lower than input, and that is the binding limit: the
+    vision model allows 1000 output tokens per minute, so reserving more than
+    that is rejected outright as "Request too large" before a single token is
+    generated. 2048 did exactly that to every upload the client attempted.
     """
     _, posts = _run([_ok(json.dumps(MENU_JSON))])
-    assert posts.call_args_list[0].kwargs["json"]["max_tokens"] <= 2048
+    assert posts.call_args_list[0].kwargs["json"]["max_tokens"] < 1000
 
 
 def test_a_spent_quota_waits_longer_than_a_malformed_reply():
@@ -199,3 +204,74 @@ def test_a_spent_quota_is_reported_as_quota_not_as_an_unreadable_flyer():
     assert result["status"] == "failed"
     assert "quota" in result["reason"].lower()
     assert "photo is live" in result["reason"]
+
+
+def test_the_model_is_told_not_to_think():
+    """
+    The vision model reasons by default and bills those thinking tokens as
+    output. Against a real flyer it spent 700-800 of its 1000-per-minute
+    output allowance thinking, wrote no JSON before the ceiling cut it off,
+    and Groq returned 400 json_validate_failed with an empty
+    failed_generation - the validator rejecting a reply that never existed.
+    Every menu upload the client made failed that way: the photo went live
+    and the dish list stayed on the previous week. With reasoning off the
+    same flyer's date costs 19 tokens.
+    """
+    _, posts = _run([_ok(json.dumps(MENU_JSON))])
+    assert posts.call_args_list[0].kwargs["json"]["reasoning_effort"] == "none"
+
+
+def test_the_flyer_prompt_does_not_ask_for_descriptions():
+    """
+    Descriptions are the bulk of a flyer's text. Asking for them pushed a
+    full menu past 900 output tokens mid-JSON, and the object never closed -
+    and the 1000-per-minute output ceiling leaves no room to raise the cap.
+    Names, prices and quantities fit with room to spare; the descriptions are
+    filled in afterwards.
+    """
+    _, posts = _run([_ok(json.dumps(MENU_JSON))])
+    prompt = posts.call_args_list[0].kwargs["json"]["messages"][0]["content"][0]["text"]
+    assert "description" not in prompt
+
+
+def test_a_returning_dish_keeps_the_description_already_written_for_it():
+    known = {"shukto": "Bitter-sweet monsoon vegetables, the way Thakuma made it."}
+    items = [{"item": "Shukto", "price_inr": 280, "quantity": "250g"}]
+
+    mp._fill_descriptions(items, known)
+
+    assert items[0]["description"] == known["shukto"]
+
+
+def test_a_dish_nobody_has_described_still_gets_a_description():
+    """menu.json consumers read description unconditionally; a missing one is a KeyError."""
+    items = [
+        {"item": "Notun Kichu", "price_inr": 300, "quantity": "250 g"},
+        {"item": "Kichu Aro", "price_inr": 300},
+    ]
+
+    mp._fill_descriptions(items, {})
+
+    assert items[0]["description"] == "Freshly handcrafted (250 g)"
+    assert items[1]["description"] == "Freshly handcrafted"
+
+
+def test_extraction_without_descriptions_still_writes_a_usable_menu():
+    """End to end: the model returns no descriptions, menu.json gets them anyway."""
+    lean = {
+        "week_of": "2nd September - 8th September, 2026",
+        "service_window": "Friday Lunch - Thursday Dinner",
+        "vegetarian": [{"item": "Shukto", "price_inr": 280, "quantity": "250g"}],
+        "non_vegetarian": [{"item": "Kosha Mangsho", "price_inr": 600, "quantity": "200g"}],
+        "bengali_bento": [],
+        "norom_pak_sondesh": [],
+    }
+
+    result, _ = _run([_ok(json.dumps(lean))])
+
+    assert result["status"] == "success"
+    with open(config.MENU_JSON_PATH, "r", encoding="utf-8") as f:
+        week = json.load(f)["weekly_menus"][-1]
+    assert week["week_of"] == "2nd September - 8th September, 2026"
+    for dish in week["vegetarian"] + week["non_vegetarian"]:
+        assert dish["description"].strip()
