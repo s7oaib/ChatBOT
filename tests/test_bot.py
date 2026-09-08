@@ -2027,7 +2027,7 @@ class TestCamelliaBot(unittest.TestCase):
         self.assertIn("+91 87965 51990", resp5)
 
     def test_phase_b_savoury_food_intro_and_image(self):
-        """Phase B: Test savoury_food_intro returns 3 ways to order with Gurgaon only restriction, No minimum order, and attaches weekly menu image."""
+        """Phase B: Test savoury_food_intro returns 3 ways to order, No minimum order, and attaches weekly menu image."""
         from camellia.session_memory import session_memory
         session_memory.clear_session("test_savoury_intro_user", "whatsapp")
         msg = "What is your lunch menu and savoury food options?"
@@ -2037,7 +2037,8 @@ class TestCamelliaBot(unittest.TestCase):
         self.assertIn("three ways to order", resp)
         self.assertIn("No minimum order", resp)
         self.assertIn("BENGALI BENTO", resp)
-        self.assertIn("EVERYDAY MEAL SUBSCRIPTION | Gurgaon only", resp)
+        self.assertIn("EVERYDAY MEAL SUBSCRIPTION", resp)
+        self.assertNotIn("Gurgaon only", resp)
         self.assertIn("include GST", resp)
         self.assertIn("Delivery charges are at actuals", resp)
         # Image attachment must be weekly menu card

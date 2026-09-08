@@ -1,5 +1,5 @@
 {
-  "seed_version": 15,
+  "seed_version": 16,
   "matching_rules": {
     "guard_precedence": "GUARD_ templates (id starting with GUARD_) have absolute precedence over any answer template. When matched, they escalate immediately with response: null to prevent unverified brand statements.",
     "how_it_works": "Each template has 'triggers' (keywords/phrases). If a customer message contains ANY trigger from a template's list, that template fires. If multiple templates match, the one with the MOST matched keywords wins. If nothing matches confidently, escalate to human — never guess.",
@@ -1392,7 +1392,7 @@
         "what dishes do you have",
         "whats on the menu this week"
       ],
-      "response": "Hi! Thank you for reaching out to Camellia.artisanal.\n\nWe cook freshly prepared Bengali food in small batches, with three ways to order:\n\n1. À LA CARTE | Across Delhi NCR\nChoose any dish from this week's menu, in any quantity. No minimum order.\n\n2. BENGALI BENTO | Across Delhi NCR\nA compact, complete Bengali meal, available in Vegetarian, Chicken and Mutton options.\n\n3. EVERYDAY MEAL SUBSCRIPTION | Gurgaon only. Flexible 5 or 10 meal packages starting from ₹1,500 for 5 meals.\n\nAll prices mentioned in the menu include GST. Delivery charges are at actuals, with no other additional charges.\n\nEverything is cooked fresh and quantities are limited, so pre-ordering is recommended.\n\nThe weekly menu, including the BENGALI BENTO options, is attached below. If this is your first Camellia meal and the menu feels unfamiliar, I'll be happy to help you choose.",
+      "response": "Hi! Thank you for reaching out to Camellia.artisanal.\n\nWe cook freshly prepared Bengali food in small batches, with three ways to order:\n\n1. À LA CARTE | Across Delhi NCR\nChoose any dish from this week's menu, in any quantity. No minimum order.\n\n2. BENGALI BENTO | Across Delhi NCR\nA compact, complete Bengali meal, available in Vegetarian, Chicken and Mutton options.\n\n3. EVERYDAY MEAL SUBSCRIPTION\nFlexible 5 or 10 meal packages starting from ₹1,500 for 5 meals.\n\nAll prices mentioned in the menu include GST. Delivery charges are at actuals, with no other additional charges.\n\nEverything is cooked fresh and quantities are limited, so pre-ordering is recommended.\n\nThe weekly menu, including the BENGALI BENTO options, is attached below. If this is your first Camellia meal and the menu feels unfamiliar, I'll be happy to help you choose.",
       "escalate": false,
       "source_ref": "client confirmation 2026-09-08 (Somdeb Ji)"
     },
