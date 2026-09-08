@@ -530,6 +530,129 @@ class DeterministicResponder:
             return False
         return not session_memory.get_facts(user_id, channel).get("slow_notice_sent")
 
+    def _conversation_request(self, message, user_id, channel):
+        """Small conversation repairs, before broad keyword matching.
+
+        Compose only the supported menu + delivery-coverage pair. Never split
+        arbitrary conjunctions: a flavour name or an order can contain 'and'.
+        """
+        text = " ".join(message.lower().split()).strip(" .?!")
+        if (self.classify_unmatched_intent(message) in {"complaint", "bulk"}
+                or re.search(r"\b(cancel (?:my |the )?order|order is missing|(?:speak|talk) to (?:a |an )?(?:human|person))\b", text)):
+            reply, _ = self.build_handover_response(message)
+            session_memory.add_turn(user_id, channel, message, reply)
+            return reply, False, "explicit_escalation", None
+        if (re.search(r"https?://|www\.", text)
+                or self.check_explicit_escalation_triggers(message)
+                or self.classify_unmatched_intent(message) != "unknown"
+                or re.search(r"\b(allerg\w*|payment|refund|cancel|custom|without|instead|not|nahi)\b", text)):
+            return None
+        facts = session_memory.get_facts(user_id, channel)
+
+        def finish(reply, template_id, images=None):
+            session_memory.add_turn(user_id, channel, message, reply)
+            return reply, True, template_id, images
+
+        if ACK_ONLY_RE.fullmatch(text):
+            return finish("Got it!", "acknowledgement")
+        if CLOSING_ONLY_RE.fullmatch(text):
+            return finish("You're welcome! Message us whenever you need anything.", "conversation_closing")
+
+        price_question = re.fullmatch(
+            r"(?:price|prices|cost|rate|how much|kitna|kitne ka|kitna padega|"
+            r"kitne paise|iska price|what does it cost|what is the price|whats the price)", text)
+        if price_question and not facts.get("last_topic"):
+            facts["awaiting_product_price"] = True
+            return finish("Would you like prices for Sondesh or Bengali meals?", "price_clarify_product")
+        if facts.get("awaiting_product_price"):
+            if text in {"meals", "meal", "food", "khana", "bengali meals"}:
+                facts["awaiting_product_price"] = False
+                facts["last_topic"] = "savoury"
+                facts["awaiting_menu_choice"] = True
+                return finish("Would you like the vegetarian or non-vegetarian menu with prices?", "context_meal_price_followup")
+            if text in {"sondesh", "sweets", "mishti", "mithai"}:
+                facts["awaiting_product_price"] = False
+                facts["last_topic"] = "sondesh_general"
+                tmpl = self._template_by_id("sondesh_price_detailed")
+                if tmpl.get("response") and not tmpl.get("escalate"):
+                    reply, images = self._format_dynamic_response(tmpl["id"], tmpl["response"], user_id=user_id, channel=channel, user_message="sondesh price")
+                    return finish(reply, tmpl["id"], images)
+            facts["awaiting_product_price"] = False
+
+        parts = re.split(r"\s+(?:and|also|aur)\s+|\?\s*", text)
+        parts = [p.strip(" ,") for p in parts if p.strip(" ,")]
+        if len(parts) != 2:
+            return None
+        menu_pattern = r"(?:(?:please|pls|send|show|share|me|the|your|can i get)\s+)*(?:(veg|vegetarian|non veg|non-veg|nonveg)\s+)?menu(?:\s+(?:please|pls|bhejo|dikhao|for today))*"
+        for menu_part, delivery_part in (parts, parts[::-1]):
+            menu_match = re.fullmatch(menu_pattern, menu_part)
+            area_match = re.fullmatch(r"(?:do you deliver to|can you deliver to|delivery to|deliver to)\s+([a-z ]+)|([a-z ]+)\s+delivery hai", delivery_part)
+            if not menu_match or not area_match:
+                continue
+            area = (area_match.group(1) or area_match.group(2)).strip()
+            # Unknown areas get the approved coverage answer, never a guessed
+            # promise. Exact equality prevents 'not Gurgaon' becoming Gurgaon.
+            delivery_id = "delivery_area" if area in NCR_SERVICEABLE_AREAS else "delivery_out_of_area"
+            known_outside = {"mumbai", "pune", "bangalore", "bengaluru", "kolkata", "chennai", "hyderabad", "jaipur", "lucknow"}
+            if area not in NCR_SERVICEABLE_AREAS and area not in known_outside:
+                return None
+            choice = menu_match.group(1)
+            menu_id = "weekly_menu_nonveg" if choice and choice.startswith("non") else "weekly_menu_veg" if choice else "know_more"
+            mt, dt = self._template_by_id(menu_id), self._template_by_id(delivery_id)
+            if any(not t.get("response") or t.get("escalate") for t in (mt, dt)):
+                return None
+            menu_reply, images = self._format_dynamic_response(menu_id, mt["response"], user_id=user_id, channel=channel, user_message=menu_part)
+            if menu_id == "know_more":
+                menu_reply = "Here are our menus. Would you like Sondesh or Bengali meals?"
+            delivery_reply, _ = self._format_dynamic_response(delivery_id, dt["response"], user_id=user_id, channel=channel, user_message=delivery_part)
+            facts["last_topic"] = "savoury" if choice else facts.get("last_topic")
+            facts["awaiting_area_confirmation"] = False
+            return finish(delivery_reply + "\n\n" + menu_reply, "compound_menu_delivery", images)
+        return None
+
+    def _semantic_fallback_template(
+        self,
+        user_message: str,
+        templates: List[Dict[str, Any]],
+        user_id: str,
+        channel: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Return an approved low-risk template selected by the LLM router.
+
+        This is deliberately a fallback, not a replacement for the keyword
+        matcher. The router only interprets the customer's intent; the reply
+        still comes verbatim from qa_templates.json. GUARD and escalation
+        templates remain deterministic-only because their facts or handoff
+        rules need an explicit anchor in the customer's message.
+        """
+        if not config.SEMANTIC_ROUTER_ENABLED:
+            return None
+
+        try:
+            history = session_memory.get_session(user_id, channel).get("turns", [])
+            template_id, detail = shadow_router.classify(user_message, templates, history)
+        except Exception as exc:
+            log.warning("Semantic router failed for %s: %s", channel, exc)
+            return None
+
+        if not template_id:
+            log.info("Semantic router did not route %r (%s).", user_message[:80], detail)
+            return None
+
+        template = next((t for t in templates if t.get("id") == template_id), None)
+        if not template or template_id.startswith("GUARD_") or template.get("escalate") is True:
+            log.warning(
+                "Semantic router proposed restricted template %r for %r; falling back.",
+                template_id, user_message[:80],
+            )
+            return None
+
+        if not (template.get("response") or template.get("responses")):
+            return None
+
+        log.info("Semantic router matched %r to approved template %s.", user_message[:80], template_id)
+        return template
+
     def match_and_respond(
         self,
         user_message: str,
@@ -613,6 +736,11 @@ class DeterministicResponder:
             return self._generic_fallback(), False, None, None
 
         lowered_text = user_message.lower().strip()
+
+        if config.CONVERSATION_IMPROVEMENTS_ENABLED:
+            conversational = self._conversation_request(user_message, user_id, channel)
+            if conversational is not None:
+                return conversational
 
         # Normalise elongated / misspelled greetings ("hii", "heyyy", "helo") so they
         # still reach the greeting template instead of falling through to escalation.
@@ -1311,6 +1439,18 @@ class DeterministicResponder:
                 runner_up_template.get("id"),
                 runner_up_composite,
             )
+
+        # NLP fallback for wording the deterministic trigger list cannot
+        # confidently recognize. It returns an approved template only, so menu
+        # prices, policies and copy remain the same source of truth. Explicit
+        # guards and escalation rules are intentionally excluded above.
+        if not best_template or best_score < 4:
+            semantic_template = self._semantic_fallback_template(
+                user_message, templates, user_id, channel,
+            )
+            if semantic_template is not None:
+                best_template = semantic_template
+                best_score = 4
 
         if best_template and best_score >= 4:
             tmpl_id = best_template.get("id", "")

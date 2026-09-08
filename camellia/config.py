@@ -85,6 +85,7 @@ def _resolve_path(env_var: str, default: Path, must_exist: bool = False) -> str:
 
 
 class Config:
+    CONVERSATION_IMPROVEMENTS_ENABLED: bool = os.getenv("CONVERSATION_IMPROVEMENTS_ENABLED", "true").lower() in ("true", "1", "yes")
     # Meta & Webhook Config
     META_VERIFY_TOKEN: str = os.getenv("META_VERIFY_TOKEN", "camellia_verify_secret_2026")
     META_APP_SECRET: str = os.getenv("META_APP_SECRET", "")
@@ -138,6 +139,11 @@ class Config:
     # far too small to decide on — the shadow table records the model behind
     # every pick so the choice can be settled on real traffic instead.
     GROQ_ROUTER_MODEL: str = os.getenv("GROQ_ROUTER_MODEL", "") or "groq/compound-mini"
+    # A bounded, live semantic fallback for messages the deterministic trigger
+    # matcher cannot confidently place (typos, Hinglish, and unusual wording).
+    # The router selects only an existing approved template; it never writes
+    # customer-facing facts. Set false to retain deterministic-only routing.
+    SEMANTIC_ROUTER_ENABLED: bool = os.getenv("SEMANTIC_ROUTER_ENABLED", "true").lower() in ("true", "1", "t", "yes")
 
     # Conversations older than this are purged; stated in the privacy policy.
     DATA_RETENTION_DAYS: int = int(os.getenv("DATA_RETENTION_DAYS", "90"))

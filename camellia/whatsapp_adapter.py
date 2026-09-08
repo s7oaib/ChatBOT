@@ -124,6 +124,11 @@ class WhatsAppAdapter:
 
     def _get_contextual_buttons(self, template_id: Optional[str], was_matched: bool) -> Optional[list]:
         """Generates dynamic, context-aware WhatsApp quick reply buttons (max 3 buttons)."""
+        if config.CONVERSATION_IMPROVEMENTS_ENABLED:
+            if template_id in {"acknowledgement", "conversation_closing", "explicit_escalation"}:
+                return None
+            if template_id in {"price_clarify_product", "compound_menu_delivery"}:
+                return ["Sondesh", "🍱 Meals"]
         # Asked the customer what they meant — the buttons are the options offered.
         if template_id == "clarify_request":
             return ["Sondesh", "🍱 Meals", "🚚 Delivery"]

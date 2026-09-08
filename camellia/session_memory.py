@@ -32,6 +32,7 @@ class SessionMemoryManager:
                     "previous_menus_offered": False,
                     "slow_notice_sent": False,
                     "awaiting_menu_choice": False,
+                    "awaiting_product_price": False,
                     "awaiting_area_confirmation": False,
                     "awaiting_instagram_contact": False,
                     "pending_instagram_escalation": None,
@@ -62,6 +63,7 @@ class SessionMemoryManager:
                 facts["sondesh_crosssell_sent"] = False
                 facts["slow_notice_sent"] = False
                 facts["awaiting_menu_choice"] = False
+                facts["awaiting_product_price"] = False
                 facts["awaiting_area_confirmation"] = False
                 facts["awaiting_instagram_contact"] = False
                 facts["pending_instagram_escalation"] = None
