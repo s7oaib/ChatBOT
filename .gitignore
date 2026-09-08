@@ -53,3 +53,9 @@ PROJECT_JOURNAL.md
 # graphify's knowledge graph of this repo. Regenerated from the code itself
 # (graphify . --update), so it is a local cache, not source.
 graphify-out/
+
+# Codex/agent workspace artifacts. These are machine-local caches and
+# generated diffs, not application source.
+$TEMP/
+.agents/skills/
+.codex/
