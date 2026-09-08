@@ -130,6 +130,17 @@ def test_instagram_contact_accepts_leading_zero_and_spaced_indian_number():
     assert session_memory.get_facts(user_id, "instagram")["awaiting_instagram_contact"] is False
 
 
+def test_instagram_contact_card_attachment_yields_a_phone_number():
+    event = {
+        "message": {
+            "attachments": [
+                {"type": "contact", "payload": {"title": "Phone number", "phone": "099021 81650"}}
+            ]
+        }
+    }
+    assert app._extract_contact_number_from_event(event) == "+919902181650"
+
+
 def test_bare_price_question_with_no_topic_asks_which_product_instead_of_guessing_sondesh():
     # match_and_respond is the deterministic matcher itself (no ad gating) —
     # channel is whatsapp here purely to stay clear of the Instagram ad-gate

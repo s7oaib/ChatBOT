@@ -57,6 +57,19 @@ def _extract_whatsapp_number(text: str) -> Optional[str]:
     return f"+91{digits}" if len(digits) == 10 else None
 
 
+def _extract_contact_number_from_event(messaging_event: dict) -> Optional[str]:
+    """Read a phone number from an Instagram contact-card attachment, if present."""
+    message = messaging_event.get("message") or {}
+    attachments = message.get("attachments") or []
+    if not attachments:
+        return None
+    # Meta has used more than one attachment shape for shared/contact cards.
+    # Searching the serialized attachment is deliberately limited to the
+    # contact-collection state by the caller, so image URLs from normal chats
+    # cannot accidentally become phone numbers.
+    return _extract_whatsapp_number(json.dumps(attachments, ensure_ascii=False))
+
+
 def _prune_expired_weekly_menus() -> None:
     """
     Drops weekly menus whose printed dates have passed.
@@ -547,11 +560,22 @@ def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks
         for messaging_event in events:
             is_ad_qualified, sender_id, message_text, ad_id = ad_gate.inspect_and_gate_message(messaging_event)
             entry_point = describe_entry_point(messaging_event)
+            message = messaging_event.get("message") or {}
 
             if not sender_id:
                 log.info("Ignored Instagram event without sender ID (keys: %s).", list(messaging_event.keys()))
                 results.append({"action": "ignored_no_sender"})
                 continue
+
+            if not message_text:
+                # A customer may send the WhatsApp number using Instagram's
+                # contact-card picker. Meta delivers that as an attachment
+                # with no message.text, so treat it as the contact response
+                # instead of replying that we cannot read photos or voice notes.
+                if message.get("attachments") and session_memory.get_facts(sender_id, "instagram").get("awaiting_instagram_contact"):
+                    message_text = _extract_contact_number_from_event(messaging_event)
+                    if message_text:
+                        log.info("Extracted WhatsApp contact card for Instagram sender %s.", sender_id)
 
             if not message_text:
                 # Only record the events that represent a customer going
