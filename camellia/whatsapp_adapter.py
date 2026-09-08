@@ -194,6 +194,13 @@ class WhatsAppAdapter:
         text_first = isinstance(image_url, list) and any(
             isinstance(entry, dict) and entry.get("text_first") for entry in image_url
         )
+        # The client's requested sequence puts each note before the menu it
+        # describes. A WhatsApp caption renders under its image, so honouring
+        # that means sending the note as its own message first rather than
+        # attaching it — the same order Instagram produces.
+        caption_first = isinstance(image_url, list) and any(
+            isinstance(entry, dict) and entry.get("caption_first") for entry in image_url
+        )
         cards_first = any(c for _, c in captioned) and not text_first
 
         if config.WHATSAPP_MOCK_MODE:
@@ -233,6 +240,14 @@ class WhatsAppAdapter:
                     if caption:
                         undelivered_captions.append(caption)
                     continue
+            if caption and caption_first:
+                image_payloads.append({
+                    "messaging_product": "whatsapp",
+                    "recipient_type": "individual",
+                    "to": recipient_phone,
+                    "type": "text",
+                    "text": {"preview_url": False, "body": caption},
+                })
             payload = {
                 "messaging_product": "whatsapp",
                 "recipient_type": "individual",
@@ -240,7 +255,7 @@ class WhatsAppAdapter:
                 "type": "image",
                 "image": {"link": img_url},
             }
-            if caption:
+            if caption and not caption_first:
                 payload["image"]["caption"] = caption
             image_payloads.append(payload)
 

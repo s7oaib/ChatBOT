@@ -236,7 +236,10 @@ class TestCamelliaBot(unittest.TestCase):
             )
             self.assertRegex(delivered, r"(?i)sondesh")
             self.assertRegex(delivered, r"(?i)meal")
-            self.assertIn("₹450", delivered)
+            # The client's collection notes deliberately carry no prices —
+            # the menu card that follows each note carries them all.
+            self.assertIn("Aamar Mishti", delivered)
+            self.assertIn("Signature collection", delivered)
             # Every card should be paired with a caption, not left unexplained.
             self.assertTrue(
                 all(isinstance(img, dict) and img.get("caption") for img in img_urls),

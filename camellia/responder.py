@@ -1680,6 +1680,41 @@ class DeterministicResponder:
             return current_weekly_img
         return None
 
+    @staticmethod
+    def _collection_cards_static(aamar_url: str, signature_url: str) -> List[Any]:
+        """
+        The two Sondesh cards in the sequence the client asked for.
+
+        "First the general text, then the aamar collection note, then the
+        aamar collection menu, then signature note, signature menu." So the
+        reply text leads, and each collection's note introduces its own card
+        rather than trailing it. The notes are the client's own wording for
+        the two collections.
+        """
+        return [
+            {
+                "url": aamar_url,
+                "caption": (
+                    "Collection 1. Aamar Mishti আমার মিষ্টি — indulgence for your sweet "
+                    "cravings at home or work. Good local dairy milk, partially mechanised, "
+                    "made in-house at our kitchen. Sharing the menu for Aamar Mishti below."
+                ),
+                "text_first": True,
+                "caption_first": True,
+            },
+            {
+                "url": signature_url,
+                "caption": (
+                    "Collection 2. Signature collection — mishti for special occasions, "
+                    "gifting & when you are in the mood to give yourself a treat. Made using "
+                    "desi A2 cow milk that has not been industrially processed. The mishti is "
+                    "completely hand crafted end to end. Sharing the menu for signature "
+                    "collection below."
+                ),
+                "caption_first": True,
+            },
+        ]
+
     def _format_dynamic_response(
         self, template_id: str, default_response: str, user_id: str = None, channel: str = None, user_message: str = ""
     ) -> Tuple[str, Optional[Any]]:
@@ -1734,8 +1769,16 @@ class DeterministicResponder:
             # The two Sondesh cards are undated and stay; only the weekly card
             # drops out once its week has ended, so a customer browsing still
             # sees the sweets rather than nothing at all.
-            cards = [i for i in [img_aamar_mishti, img_signature_sondesh, current_weekly_img] if i]
-            target_images = self._with_captions(template_id, cards)
+            # Same sequence the client asked for on the price flow: the reply
+            # text, then each collection's note introducing its own menu card.
+            # The weekly meals card keeps its own caption from the template.
+            target_images = self._collection_cards_static(img_aamar_mishti, img_signature_sondesh)
+            if current_weekly_img:
+                weekly_caption = (self._with_captions(template_id, [None, None, current_weekly_img]) or [None, None, None])[2]
+                target_images.append(
+                    weekly_caption if isinstance(weekly_caption, dict)
+                    else {"url": current_weekly_img, "caption": None}
+                )
             # An uploaded flyer replaces the qa_templates.json caption for just
             # this one card. That caption ("fresh lunch & dinner across Delhi
             # NCR...") describes the fixed fallback image; once a real photo is
@@ -1805,17 +1848,7 @@ class DeterministicResponder:
             if template_id == "sondesh_price_detailed":
                 # The client-approved price reply is text first, followed by
                 # each collection note and its matching menu card.
-                target_images = [
-                    {
-                        "url": img_aamar_mishti,
-                        "caption": "*Aamar Mishti* — everyday sondesh, pure dairy milk. Classic, Rose, Mango, Kesar, plus our signature Nolen Gur & liquid Jolbhora. From ₹450.",
-                        "text_first": True,
-                    },
-                    {
-                        "url": img_signature_sondesh,
-                        "caption": "*Signature Collection* — pure desi A2 cow milk, handcrafted end to end, for gifting & special occasions. From ₹600.",
-                    },
-                ]
+                target_images = self._collection_cards_static(img_aamar_mishti, img_signature_sondesh)
 
         # Savoury food intro & Sondesh->Savoury cross-sell — attach current weekly menu image card alongside text
         elif template_id in ["savoury_food_intro", "sondesh_crosssell_savoury"]:

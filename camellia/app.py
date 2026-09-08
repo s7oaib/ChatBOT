@@ -652,7 +652,19 @@ def send_instagram_reply(recipient_id: str, text: str, image_url=None) -> Dict[s
         text = "\n\n".join(undelivered_captions + ([text] if text else []))
 
     images = [url for url, _ in captioned]
-    cards_first = any(caption for _, caption in captioned)
+    # The client's requested sequence is note, then the menu it describes —
+    # "first the general text, then the aamar collection note, then the aamar
+    # collection menu, then signature note, signature menu". Instagram has no
+    # caption field, so a card is an image message followed by a text message;
+    # this flips that pair so the note introduces its card instead of trailing
+    # it. Read off the raw list, the same way text_first is.
+    caption_first = isinstance(image_url, list) and any(
+        isinstance(entry, dict) and entry.get("caption_first") for entry in image_url
+    )
+    text_first = isinstance(image_url, list) and any(
+        isinstance(entry, dict) and entry.get("text_first") for entry in image_url
+    )
+    cards_first = any(caption for _, caption in captioned) and not text_first
 
     if not config.INSTAGRAM_ACCESS_TOKEN:
         safe_text = text[:60].encode("ascii", "backslashreplace").decode("ascii")
@@ -685,6 +697,8 @@ def send_instagram_reply(recipient_id: str, text: str, image_url=None) -> Dict[s
                 send_text(text)
 
             for img, caption in captioned:
+                if caption and caption_first:
+                    send_text(caption)
                 # A rejected card must not cost the customer the whole reply.
                 # Meta refuses images for reasons outside our control — an
                 # unreachable host, an unsupported format, a size limit — and
@@ -699,7 +713,7 @@ def send_instagram_reply(recipient_id: str, text: str, image_url=None) -> Dict[s
                     last = resp
                 except Exception as img_error:
                     log.warning("Instagram rejected image card %s: %s", img, img_error)
-                if caption:
+                if caption and not caption_first:
                     send_text(caption)
 
             # The closing question follows the cards it refers to.
