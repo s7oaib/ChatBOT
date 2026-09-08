@@ -78,6 +78,27 @@ def test_preview_says_so_when_it_finds_no_priced_dish():
     assert resp.json()["status"] == "failed"
 
 
+def test_preview_and_publish_keep_bento_items_in_their_own_category(menu_restored):
+    pasted = """Bento Menu:
+- Vegetarian Bengali Bento (1 box) - ₹350
+- Chicken Bengali Bento (1 box) - ₹400
+"""
+    preview = client.post(
+        "/admin/menu/preview-text", json={"raw_text": pasted}, headers=ADMIN_HEADERS
+    )
+    assert preview.status_code == 200
+    bentos = preview.json()["parsed"]["bengali_bento"]
+    assert [item["price_inr"] for item in bentos] == [350, 400]
+
+    published = client.post(
+        "/admin/update-menu",
+        json={"bengali_bento": bentos},
+        headers=ADMIN_HEADERS,
+    )
+    assert published.status_code == 200
+    assert [item["price_inr"] for item in _live_week()["bengali_bento"]] == [350, 400]
+
+
 def test_preview_requires_admin():
     """Menu content is not public, and neither is the parser."""
     resp = client.post("/admin/menu/preview-text", json={"raw_text": PASTED})

@@ -215,6 +215,7 @@ class MenuParser:
         lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
         veg_items = []
         nonveg_items = []
+        bento_items = []
 
         current_category = "vegetarian"
 
@@ -224,7 +225,9 @@ class MenuParser:
 
             # Pure Category headers (no price digits present in header line)
             if not price_match:
-                if "non-veg" in line_lower or "non veg" in line_lower or "non vegetarian" in line_lower:
+                if "bento" in line_lower or "meal box" in line_lower or "combo" in line_lower:
+                    current_category = "bengali_bento"
+                elif "non-veg" in line_lower or "non veg" in line_lower or "non vegetarian" in line_lower:
                     current_category = "non_vegetarian"
                 elif "veg" in line_lower or "vegetarian" in line_lower or "sweets" in line_lower:
                     current_category = "vegetarian"
@@ -247,6 +250,10 @@ class MenuParser:
                 clean_name = "Artisanal Specialty"
 
             # Determine category
+            # A named item can contain the word "bento" while still belonging
+            # to an explicit Veg/Non-Veg section. Only a Bento/Meal Box/Combo
+            # section changes the stored category.
+            is_bento = current_category == "bengali_bento"
             is_nonveg = any(kw in clean_name.lower() for kw in NON_VEG_KEYWORDS) or current_category == "non_vegetarian"
             
             item_dict = {
@@ -256,12 +263,14 @@ class MenuParser:
                 "quantity": quantity_val
             }
 
-            if is_nonveg:
+            if is_bento:
+                bento_items.append(item_dict)
+            elif is_nonveg:
                 nonveg_items.append(item_dict)
             else:
                 veg_items.append(item_dict)
 
-        return {"vegetarian": veg_items, "non_vegetarian": nonveg_items}
+        return {"vegetarian": veg_items, "non_vegetarian": nonveg_items, "bengali_bento": bento_items}
 
     def parse_and_update_menu(self, raw_text: str) -> Dict[str, Any]:
         """Parses raw text, updates menu.json, and hot-reloads the bot."""
@@ -270,7 +279,7 @@ class MenuParser:
         nonveg_items = parsed.get("non_vegetarian", [])
         bento_items = parsed.get("bengali_bento", [])
 
-        total_extracted = len(veg_items) + len(nonveg_items)
+        total_extracted = len(veg_items) + len(nonveg_items) + len(bento_items)
         if total_extracted == 0:
             return {
                 "status": "failed",
@@ -301,6 +310,7 @@ class MenuParser:
                     "updated_items_count": total_extracted,
                     "vegetarian_count": len(veg_items),
                     "non_vegetarian_count": len(nonveg_items),
+                    "bengali_bento_count": len(bento_items),
                     "parsed": parsed,
                     "message": f"Successfully extracted {total_extracted} items and updated menu.json."
                 }

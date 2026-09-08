@@ -2052,6 +2052,10 @@ async def update_menu(request: Request, x_admin_key: Optional[str] = Header(None
         _reviewed_menu_items(body["non_vegetarian"], "non_vegetarian")
         if isinstance(body.get("non_vegetarian"), list) else None
     )
+    bento_items = (
+        _reviewed_menu_items(body["bengali_bento"], "bengali_bento")
+        if isinstance(body.get("bengali_bento"), list) else None
+    )
 
     menu_path = config.MENU_JSON_PATH
     try:
@@ -2066,6 +2070,8 @@ async def update_menu(request: Request, x_admin_key: Optional[str] = Header(None
                 current_week["vegetarian"] = veg_items
             if nonveg_items is not None:
                 current_week["non_vegetarian"] = nonveg_items
+            if bento_items is not None:
+                current_week["bengali_bento"] = bento_items
 
             with open(menu_path, "w", encoding="utf-8") as f:
                 json.dump(menu_data, f, indent=2, ensure_ascii=False)
@@ -3014,7 +3020,8 @@ THIS WEEK'S BENGAL SPECIALS
                     const parsed = data.parsed || {};
                     menuReview = []
                         .concat((parsed.vegetarian || []).map(d => rowFrom(d, 'vegetarian')))
-                        .concat((parsed.non_vegetarian || []).map(d => rowFrom(d, 'non_vegetarian')));
+                        .concat((parsed.non_vegetarian || []).map(d => rowFrom(d, 'non_vegetarian')))
+                        .concat((parsed.bengali_bento || []).map(d => rowFrom(d, 'bengali_bento')));
                     resBox.className = 'result-box info';
                     resBox.innerHTML = `📖 Read <b>${menuReview.length} dishes</b>. Nothing has changed for customers yet — check the rows below and press Publish.`;
                     renderMenuReview();
@@ -3061,6 +3068,7 @@ THIS WEEK'S BENGAL SPECIALS
                         <select class="review-input" onchange="editReviewRow(${i}, 'category', this.value)">
                             <option value="vegetarian" ${row.category === 'vegetarian' ? 'selected' : ''}>Veg</option>
                             <option value="non_vegetarian" ${row.category === 'non_vegetarian' ? 'selected' : ''}>Non-Veg</option>
+                            <option value="bengali_bento" ${row.category === 'bengali_bento' ? 'selected' : ''}>Bento Meal Box</option>
                         </select>
                     </td>
                     <td><button class="btn-danger" style="padding: 5px 10px; font-size: 0.78rem;" onclick="deleteReviewRow(${i})">Delete</button></td>
@@ -3102,7 +3110,7 @@ THIS WEEK'S BENGAL SPECIALS
                 return alert(`Row ${blank + 1} needs both a dish name and a price before it can be published.`);
             }
 
-            const payload = { vegetarian: [], non_vegetarian: [] };
+            const payload = { vegetarian: [], non_vegetarian: [], bengali_bento: [] };
             menuReview.forEach(row => {
                 payload[row.category].push({
                     item: String(row.item).trim(),
@@ -3125,7 +3133,7 @@ THIS WEEK'S BENGAL SPECIALS
                 const data = await resp.json();
                 if (resp.ok && data.status === 'success') {
                     resBox.className = 'result-box success';
-                    resBox.innerHTML = `✅ <b>Published.</b> ${payload.vegetarian.length} veg and ${payload.non_vegetarian.length} non-veg dishes are now what the bot quotes.`;
+                    resBox.innerHTML = `✅ <b>Published.</b> ${payload.vegetarian.length} veg, ${payload.non_vegetarian.length} non-veg, and ${payload.bengali_bento.length} bento items are now what the bot quotes.`;
                     menuReview = [];
                     renderMenuReview();
                     loadActiveMenu();
