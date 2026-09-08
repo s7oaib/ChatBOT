@@ -27,6 +27,7 @@ class SessionMemoryManager:
                     "last_greeting_index": None,
                     "image_card_sent": False,
                     "awaiting_subscription_booking": False,
+                    "subscription_context": False,
                     "savoury_crosssell_sent": False,
                     "sondesh_crosssell_sent": False,
                     "previous_menus_offered": False,
@@ -61,6 +62,7 @@ class SessionMemoryManager:
                 facts = session.get("facts", {})
                 facts["image_card_sent"] = False
                 facts["awaiting_subscription_booking"] = False
+                facts["subscription_context"] = False
                 facts["last_greeting_index"] = None
                 facts["savoury_crosssell_sent"] = False
                 facts["sondesh_crosssell_sent"] = False

@@ -314,6 +314,36 @@ BARE_VEG_CHOICE_RE = re.compile(
     re.IGNORECASE
 )
 
+# The subscription message ends with "Would you like to book?", so the reply
+# to it is usually a bare "yes", "sign me up" or "I'll take option 2" — none
+# of which carry a subscription word for trigger scoring to work with.
+SUBSCRIPTION_BOOKING_INTENT_RE = re.compile(
+    r'^(yes|yep|yeah|ya|sure|ok|okay|yes please|go ahead|please do)[\s\?\.\!]*$'
+    r'|\b(book|booking|subscribe|sign me up|count me in|i.?ll take|i will take|'
+    r'i want (option|the veg|the chicken|this|that)|lets do|let.s do|'
+    # "how do i pay" is deliberately absent: that question has its own
+    # approved answer (UPI / bank transfer), and step 2 here only says "Pay".
+    r'how do i (start|proceed)|what.s next|whats next|next step)\b',
+    re.IGNORECASE
+)
+
+# "Option 2" also names Collection 2 of the Sondesh menu, which is what the
+# matcher answered with while a customer was choosing a subscription plan.
+SUBSCRIPTION_OPTION_RE = re.compile(
+    r'\boption\s*(1|2|3|one|two|three)\b',
+    re.IGNORECASE
+)
+
+# The 5-hour notice line lives at the end of the booking steps, so a
+# date-change question is answered with the client's own wording.
+SUBSCRIPTION_DATE_CHANGE_RE = re.compile(
+    r'\b(change|changing|reschedul\w*|postpone|prepone|shift|move|swap|skip)\b'
+    r'[^.?!]*\b(date|dates|day|days|delivery|deliveries|slot|schedule|booking)\b'
+    r'|\b(date|dates|delivery|slot|schedule)\b[^.?!]*\b(change|changed|reschedul\w*|'
+    r'postpone|prepone|shift|move)\b',
+    re.IGNORECASE
+)
+
 # Maps a matched template id to the product topic it just discussed, so the
 # next bare follow-up can be resolved against it.
 TOPIC_MAP = {
@@ -1064,6 +1094,51 @@ class DeterministicResponder:
                 cleaned_business_text = f"{cleaned_business_text} {hint}".strip()
                 cleaned_words = set(re.findall(r'\b\w+\b', cleaned_business_text))
 
+        # A customer who has just been sent the subscription plans is answering
+        # its closing "Would you like to book?" — with a bare "yes", "sign me
+        # up", or "I'll take option 2". None of those carry a subscription
+        # word, so trigger scoring sent them to the Sondesh Signature
+        # Collection ("option 2" is Collection 2 there) or to the generic
+        # pre-ordering blurb. Context answers them from the subscription
+        # templates the customer is actually looking at.
+        # The date-change question usually arrives after the steps have been
+        # sent and the awaiting flag has been cleared, so the subscription
+        # context outlives it.
+        if facts.get("awaiting_subscription_booking") or facts.get("subscription_context"):
+            choosing_a_plan = bool(facts.get("awaiting_subscription_booking"))
+            asks_about_an_option = choosing_a_plan and bool(SUBSCRIPTION_OPTION_RE.search(lowered_text))
+            wants_to_book = choosing_a_plan and bool(SUBSCRIPTION_BOOKING_INTENT_RE.search(lowered_text))
+            changes_a_date = bool(SUBSCRIPTION_DATE_CHANGE_RE.search(lowered_text)) and not any(
+                w in lowered_text for w in SONDESH_CONTEXT_WORDS
+            )
+            follow_up_id = None
+            if changes_a_date or wants_to_book:
+                # The booking steps carry the 5-hour date-change notice.
+                follow_up_id = "subscription_booking_steps"
+            elif asks_about_an_option:
+                # What each option contains is in the plans message itself.
+                follow_up_id = "subscription_details"
+
+            if follow_up_id:
+                tmpl = self._template_by_id(follow_up_id)
+                if tmpl and tmpl.get("response"):
+                    response_text = tmpl["response"]
+                    images = None
+                    facts["subscription_context"] = True
+                    if follow_up_id == "subscription_booking_steps":
+                        facts["awaiting_subscription_booking"] = False
+                    if not facts.get("savoury_crosssell_sent"):
+                        facts["savoury_crosssell_sent"] = True
+                        crosssell = self._template_by_id("savoury_crosssell_sondesh")
+                        crosssell_text = ((crosssell or {}).get("response") or "").strip()
+                        if crosssell_text:
+                            response_text = response_text.rstrip() + "\n\n" + crosssell_text
+                            images = self._append_sondesh_crosssell_images(None)
+                    if intro_greeting_prefix:
+                        response_text = intro_greeting_prefix + response_text
+                    session_memory.add_turn(user_id, channel, user_message, response_text)
+                    return response_text, True, follow_up_id, images
+
         if last_topic and BARE_PRICE_RE.match(stripped_for_bare_check) and last_topic in TOPIC_PRICE_HINT:
             hint = TOPIC_PRICE_HINT[last_topic]
             lowered_text = f"{lowered_text} {hint}".strip()
@@ -1561,8 +1636,10 @@ class DeterministicResponder:
                     facts["awaiting_name"] = True
             elif tmpl_id == "subscription_details":
                 facts["awaiting_subscription_booking"] = True
+                facts["subscription_context"] = True
             elif tmpl_id == "subscription_booking_steps":
                 facts["awaiting_subscription_booking"] = False
+                facts["subscription_context"] = True
             elif tmpl_id == "order_next_steps":
                 session_memory.clear_order_draft(user_id, channel)
 
