@@ -1,5 +1,5 @@
 {
-  "seed_version": 10,
+  "seed_version": 13,
   "matching_rules": {
     "guard_precedence": "GUARD_ templates (id starting with GUARD_) have absolute precedence over any answer template. When matched, they escalate immediately with response: null to prevent unverified brand statements.",
     "how_it_works": "Each template has 'triggers' (keywords/phrases). If a customer message contains ANY trigger from a template's list, that template fires. If multiple templates match, the one with the MOST matched keywords wins. If nothing matches confidently, escalate to human — never guess.",
@@ -452,9 +452,9 @@
         "mango",
         "kesar"
       ],
-      "response": "Mango, Kesar, Vanilla & Cinnamon Sondesh Table:\n\n```\n+-------------------------+-------+-------+-------+\n| Collection & Flavours   | 250g  | 500g  |  1kg  |\n+-------------------------+-------+-------+-------+\n| Aamar (Mango/Kesar/Ada) | ₹550  | ₹1000 | ₹1800 |\n| Sig A2 (Mango/Van/Cin)  | ₹650  | ₹1200 | ₹2200 |\n+-------------------------+-------+-------+-------+\n* Box count: 9 pcs (250g) | 18 pcs (500g) | 36 pcs (1kg)\n```\n\nWhich collection, flavour, and pack size would you like to order?",
+      "response": "Mango, Kesar, Real Vanilla & Dalchini Sondesh:\n\n```\n+----------------------------------+-------+-------+-------+\n| Collection & Flavours            | 250g  | 500g  |  1kg  |\n+----------------------------------+-------+-------+-------+\n| Aamar — Mango / Kesar            | ₹550  | ₹1000 | ₹1800 |\n| Signature — Mango / Real Vanilla |       |       |       |\n|   / Dalchini / Kesar             | ₹650  | ₹1200 | ₹2200 |\n+----------------------------------+-------+-------+-------+\n* Box count: 9 pcs (250g) | 18 pcs (500g) | 36 pcs (1kg)\n* Real Vanilla and Dalchini (cinnamon) are Signature Collection only.\n```\n\nWhich collection, flavour, and pack size would you like to order?",
       "escalate": false,
-      "source_ref": "menu.json > Sondesh > Mango/Kesar"
+      "source_ref": "client menu cards, Aamar Mishti & Signature, April 2026"
     },
     {
       "id": "sondesh_nolen_gur",
@@ -483,9 +483,9 @@
         "নলেন গুড়",
         "নলেন গুড়ের সন্দেশ"
       ],
-      "response": "Nolen Gur & Chocolate Sondesh Table:\n\n```\n+-------------------------+-------+-------+-------+\n| Collection & Flavours   | 250g  | 500g  |  1kg  |\n+-------------------------+-------+-------+-------+\n| Aamar Mishti (Nolen Gur)| ₹600  | ₹1100 | ₹2000 |\n| Sig A2 (Gur/Chocolate) | ₹700  | ₹1300 | ₹2500 |\n+-------------------------+-------+-------+-------+\n* Box count: 9 pcs (250g) | 18 pcs (500g) | 36 pcs (1kg)\n```\n\nWhich collection, flavour, and pack size would you like to order?",
+      "response": "Nolen Gur & Chocolate Sondesh:\n\n```\n+-------------------------------+-------+-------+-------+\n| Collection & Flavour          | 250g  | 500g  |  1kg  |\n+-------------------------------+-------+-------+-------+\n| Aamar Mishti — Nolen Gur      | ₹600  | ₹1100 | ₹2000 |\n| Signature — Nolen Gur         | ₹700  | ₹1300 | ₹2500 |\n| Signature — Chocolate         | ₹700  | ₹1300 | ₹2500 |\n+-------------------------------+-------+-------+-------+\n* Box count: 9 pcs (250g) | 18 pcs (500g) | 36 pcs (1kg)\n* Chocolate is Signature Collection only.\n```\n\nWhich collection and pack size would you like to order?",
       "escalate": false,
-      "source_ref": "menu.json > Sondesh > Nolen Gur"
+      "source_ref": "client menu cards, April 2026"
     },
     {
       "id": "jolbhora",
@@ -627,9 +627,9 @@
         "9 pieces",
         "box of 9"
       ],
-      "response": "All 250g Box Options (9 pcs / 6 pcs for Jolbhora):\n\n```\n+------------------------------+-------+-------+\n| Flavour / Variety (250g Box) | Aamar | SigA2 |\n+------------------------------+-------+-------+\n| Classic / Rose Sondesh       | ₹450  | ₹600  |\n| Mango/Vanilla/Dalchini/Kesar | ₹550  | ₹650  |\n| Nolen Gur / Chocolate        | ₹600  | ₹700  |\n| Mahua Special                | —     | ₹900  |\n| Jolbhora (6 pcs liquid fill) | ₹750  | ₹900  |\n| Kanchagolla (Classic)        | ₹450  | ₹600  |\n| Kanchagolla (Nolen Gur)      | ₹600  | ₹700  |\n+------------------------------+-------+-------+\n```\n\nWhich 250g pack would you like to order?",
+      "response": "All 250g Box Options (9 pcs / 6 pcs for Jolbhora):\n\n```\n+------------------------------+-------+-------+\n| Flavour / Variety (250g)     | Aamar | SigA2 |\n+------------------------------+-------+-------+\n| Classic / Rose               | ₹450  | ₹600  |\n| Mango / Kesar                | ₹550  | ₹650  |\n| Real Vanilla / Dalchini      | —     | ₹650  |\n| Nolen Gur                    | ₹600  | ₹700  |\n| Chocolate                    | —     | ₹700  |\n| Mahua                        | —     | ₹900  |\n| Jolbhora (Nolen Gur, liquid) | ₹750  | ₹900  |\n| Kanchagolla (Classic)        | ₹450  | —     |\n| Kanchagolla (Nolen Gur)      | ₹600  | ₹700  |\n+------------------------------+-------+-------+\n— means that collection does not offer it.\n```\n\nWhich 250g pack would you like to order?",
       "escalate": false,
-      "source_ref": "menu.json > 250g pack options"
+      "source_ref": "client menu cards, Aamar Mishti & Signature, April 2026"
     },
     {
       "id": "pack_size_500g",
@@ -642,9 +642,9 @@
         "18 pieces",
         "box of 18"
       ],
-      "response": "All 500g Box Options (18 pcs / 12 pcs for Jolbhora):\n\n```\n+------------------------------+-------+-------+\n| Flavour / Variety (500g Box) | Aamar | SigA2 |\n+------------------------------+-------+-------+\n| Classic / Rose Sondesh       | ₹800  | ₹1100 |\n| Mango/Vanilla/Dalchini/Kesar | ₹1000 | ₹1200 |\n| Nolen Gur / Chocolate        | ₹1100 | ₹1300 |\n| Mahua Special                | —     | ₹1600 |\n| Jolbhora (12 pcs liquid fill)| ₹1400 | ₹1600 |\n| Kanchagolla (Classic)        | ₹800  | ₹1100 |\n| Kanchagolla (Nolen Gur)      | ₹1100 | ₹1300 |\n+------------------------------+-------+-------+\n```\n\nWhich 500g pack would you like to order?",
+      "response": "All 500g Box Options (18 pcs / 12 pcs for Jolbhora):\n\n```\n+------------------------------+-------+-------+\n| Flavour / Variety (500g)     | Aamar | SigA2 |\n+------------------------------+-------+-------+\n| Classic / Rose               | ₹800  | ₹1100 |\n| Mango / Kesar                | ₹1000 | ₹1200 |\n| Real Vanilla / Dalchini      | —     | ₹1200 |\n| Nolen Gur                    | ₹1100 | ₹1300 |\n| Chocolate                    | —     | ₹1300 |\n| Mahua                        | —     | ₹1600 |\n| Jolbhora (Nolen Gur, liquid) | ₹1400 | ₹1600 |\n| Kanchagolla (Classic)        | ₹800  | —     |\n| Kanchagolla (Nolen Gur)      | ₹1100 | ₹1300 |\n+------------------------------+-------+-------+\n— means that collection does not offer it.\n```\n\nWhich 500g pack would you like to order?",
       "escalate": false,
-      "source_ref": "menu.json > 500g pack options"
+      "source_ref": "client menu cards, Aamar Mishti & Signature, April 2026"
     },
     {
       "id": "pack_size_1kg",
@@ -657,9 +657,9 @@
         "36 pieces",
         "box of 36"
       ],
-      "response": "All 1kg Box Options (36 pcs / 24 pcs for Jolbhora):\n\n```\n+------------------------------+-------+-------+\n| Flavour / Variety (1kg Box)  | Aamar | SigA2 |\n+------------------------------+-------+-------+\n| Classic / Rose Sondesh       | ₹1500 | ₹2000 |\n| Mango/Vanilla/Dalchini/Kesar | ₹1800 | ₹2200 |\n| Nolen Gur / Chocolate        | ₹2000 | ₹2500 |\n| Mahua Special                | —     | ₹2900 |\n| Jolbhora (24 pcs liquid fill)| ₹2500 | ₹2900 |\n| Kanchagolla (Classic)        | ₹1500 | ₹2000 |\n| Kanchagolla (Nolen Gur)      | ₹2000 | ₹2500 |\n+------------------------------+-------+-------+\n```\n\nWhich 1kg pack would you like to order?",
+      "response": "All 1kg Box Options (36 pcs / 24 pcs for Jolbhora):\n\n```\n+------------------------------+-------+-------+\n| Flavour / Variety (1kg)      | Aamar | SigA2 |\n+------------------------------+-------+-------+\n| Classic / Rose               | ₹1500 | ₹2000 |\n| Mango / Kesar                | ₹1800 | ₹2200 |\n| Real Vanilla / Dalchini      | —     | ₹2200 |\n| Nolen Gur                    | ₹2000 | ₹2500 |\n| Chocolate                    | —     | ₹2500 |\n| Mahua                        | —     | ₹2900 |\n| Jolbhora (Nolen Gur, liquid) | ₹2500 | ₹2900 |\n| Kanchagolla (Classic)        | ₹1500 | —     |\n| Kanchagolla (Nolen Gur)      | ₹2000 | ₹2500 |\n+------------------------------+-------+-------+\n— means that collection does not offer it.\n```\n\nWhich 1kg pack would you like to order?",
       "escalate": false,
-      "source_ref": "menu.json > 1kg pack options"
+      "source_ref": "client menu cards, Aamar Mishti & Signature, April 2026"
     },
     {
       "id": "weekly_menu_veg",
