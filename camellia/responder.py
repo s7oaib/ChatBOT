@@ -6,6 +6,7 @@ import time
 from dataclasses import dataclass
 from typing import Dict, Any, Tuple, Optional, List
 from camellia.config import config
+from camellia.ad_routing import product_for_ad
 from camellia.monitoring import get_logger, latency_monitor
 from camellia.ai_responder import ai_responder
 from camellia.session_memory import session_memory
@@ -574,8 +575,9 @@ class DeterministicResponder:
             r"(?:price|prices|cost|rate|how much|kitna|kitne ka|kitna padega|"
             r"kitne paise|iska price|what does it cost|what is the price|whats the price)", text)
         if price_question and not facts.get("last_topic"):
+            facts["awaiting_area_confirmation"] = False
             facts["awaiting_product_price"] = True
-            return finish("Would you like prices for Sondesh or Bengali meals?", "price_clarify_product")
+            return finish("Would you like prices for Sondesh or Bengali Meals?", "price_clarify_product")
         if facts.get("awaiting_product_price"):
             if text in {"meals", "meal", "food", "khana", "bengali meals"}:
                 facts["awaiting_product_price"] = False
@@ -671,7 +673,8 @@ class DeterministicResponder:
         user_id: str = None,
         channel: str = None,
         referral_source: str = None,
-        referral_ad_id: str = None
+        referral_ad_id: str = None,
+        referral_ad_title: str = None,
     ) -> Tuple[str, bool, Optional[str], Optional[Any]]:
         """
         Matches incoming message against qa_templates.json & menu.json.
@@ -686,7 +689,7 @@ class DeterministicResponder:
         started = time.perf_counter()
         try:
             response_text, was_matched, template_id, image_url = self._resolve_response(
-                user_message, user_id, channel, referral_source, referral_ad_id
+                user_message, user_id, channel, referral_source, referral_ad_id, referral_ad_title
             )
         finally:
             latency_monitor.record((time.perf_counter() - started) * 1000.0)
@@ -727,7 +730,8 @@ class DeterministicResponder:
         user_id: str = None,
         channel: str = None,
         referral_source: str = None,
-        referral_ad_id: str = None
+        referral_ad_id: str = None,
+        referral_ad_title: str = None,
     ) -> Tuple[str, bool, Optional[str], Optional[Any]]:
         """
         Matches incoming message against qa_templates.json & menu.json.
@@ -748,6 +752,28 @@ class DeterministicResponder:
             return self._generic_fallback(), False, None, None
 
         lowered_text = user_message.lower().strip()
+        facts = session_memory.get_facts(user_id, channel)
+        ad_product = product_for_ad(referral_ad_id, referral_ad_title) or facts.get("ad_product")
+        if ad_product:
+            facts["ad_product"] = ad_product
+
+        # A referral is a preference only for genuinely vague openings. It
+        # runs before conversational shorthand (such as a bare "price"), so
+        # a meal-ad click never receives the sweet-product price prompt.
+        vague_opening = re.fullmatch(r"(?:hi+|hello+|hey+|namaste|menu|show menu|send menu|price|prices|how much|cost|rate|available|is this available)[?!,. ]*", lowered_text)
+        explicit_product = re.search(r"\b(sondesh|mishti|mithai|sweet|bento|meal|savoury|savory|curry|veg|non[ -]?veg)\b", lowered_text)
+        if channel == "instagram" and ad_product and vague_opening and not explicit_product:
+            if ad_product == "sondesh":
+                template_id = "sondesh_price_detailed" if re.search(r"price|cost|rate|how much", lowered_text) else "know_more"
+            elif ad_product == "bento":
+                template_id = "bento_details"
+            else:
+                template_id = "savoury_food_intro"
+            template = self._template_by_id(template_id)
+            if template and template.get("response") and not template.get("escalate"):
+                response_text, images = self._format_dynamic_response(template_id, template["response"], user_id=user_id, channel=channel, user_message=user_message)
+                session_memory.add_turn(user_id, channel, user_message, response_text)
+                return response_text, True, f"ad_{ad_product}_{template_id}", images
 
         if config.CONVERSATION_IMPROVEMENTS_ENABLED:
             conversational = self._conversation_request(user_message, user_id, channel)
@@ -2301,11 +2327,12 @@ class DeterministicResponder:
         user_id: str = None,
         channel: str = None,
         referral_source: str = None,
-        referral_ad_id: str = None
+        referral_ad_id: str = None,
+        referral_ad_title: str = None,
     ) -> BotResponse:
         """Convenience wrapper returning a structured BotResponse object with .text attribute."""
         text, was_matched, tmpl_id, image_url = self.match_and_respond(
-            user_message, user_id, channel, referral_source, referral_ad_id
+            user_message, user_id, channel, referral_source, referral_ad_id, referral_ad_title
         )
         return BotResponse(text=text, was_matched=was_matched, template_id=tmpl_id, image_url=image_url)
 

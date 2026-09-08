@@ -171,6 +171,32 @@ def test_instagram_contact_must_be_confirmed_and_can_be_corrected():
     assert escalate.call_args.kwargs["context_data"]["customer_whatsapp_number"] == "+919902181650"
 
 
+def test_instagram_contact_decline_clears_the_phone_loop():
+    user_id = "client_instagram_contact_decline"
+    session_memory.clear_session(user_id, "instagram")
+    with patch.object(app.responder, "match_and_respond", return_value=("standard escalation", False, None, None)), patch.object(app, "send_instagram_reply") as send_reply:
+        app._process_instagram_event(user_id, "I need help with an unusual request", "ad-1")
+        app._process_instagram_event(user_id, "No thank you", "ad-1")
+        assert send_reply.call_args.args[1] == "No problem at all. If you need anything later, just message us here."
+    facts = session_memory.get_facts(user_id, "instagram")
+    assert facts["awaiting_instagram_contact"] is False
+    assert facts["pending_instagram_escalation"] is None
+
+
+def test_savoury_ad_context_routes_a_vague_opening_but_explicit_sweet_wins():
+    user_id = "client_savoury_ad"
+    session_memory.clear_session(user_id, "instagram")
+    with patch.object(app, "send_instagram_reply") as send_reply:
+        app._process_instagram_event(
+            user_id, "Hi", "ad-savoury",
+            app.EntryPoint(ad_id="ad-savoury", ad_title="Fresh Bengali Savoury Meals"),
+        )
+        assert "Bengali food" in send_reply.call_args.args[1]
+
+        app._process_instagram_event(user_id, "Sondesh price", "ad-savoury")
+        assert "Sondesh" in send_reply.call_args.args[1]
+
+
 def test_bare_price_question_with_no_topic_asks_which_product_instead_of_guessing_sondesh():
     # match_and_respond is the deterministic matcher itself (no ad gating) —
     # channel is whatsapp here purely to stay clear of the Instagram ad-gate

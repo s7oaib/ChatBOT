@@ -228,6 +228,11 @@ class Config:
     # AI Engine Config (Groq — fast inference, OpenAI-compatible chat API)
     GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
     GROQ_MODEL: str = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b")
+    # Instagram ads are mapped to a product deliberately by immutable Meta ad
+    # ID.  Example Railway value:
+    # {"12021000123456789":"savoury","12021000987654321":"sondesh"}
+    # Titles are only a conservative fallback because an ad name can change.
+    INSTAGRAM_AD_PRODUCT_MAP: str = os.getenv("INSTAGRAM_AD_PRODUCT_MAP", "{}")
     GROQ_TIMEOUT: float = float(os.getenv("GROQ_TIMEOUT", "20.0"))
     # Refinement only rewords an answer the bot already has, so the customer
     # must never wait long for it. Kept below SLOW_REPLY_THRESHOLD_MS on

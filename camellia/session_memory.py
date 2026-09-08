@@ -35,7 +35,10 @@ class SessionMemoryManager:
                     "awaiting_product_price": False,
                     "awaiting_area_confirmation": False,
                     "awaiting_instagram_contact": False,
+                    "awaiting_instagram_contact_confirmation": False,
+                    "pending_instagram_contact": None,
                     "pending_instagram_escalation": None,
+                    "ad_product": None,
                     "clarify_sent": False,
                     "last_topic": None,
                     "cart": [],
@@ -66,7 +69,10 @@ class SessionMemoryManager:
                 facts["awaiting_product_price"] = False
                 facts["awaiting_area_confirmation"] = False
                 facts["awaiting_instagram_contact"] = False
+                facts["awaiting_instagram_contact_confirmation"] = False
+                facts["pending_instagram_contact"] = None
                 facts["pending_instagram_escalation"] = None
+                facts["ad_product"] = None
                 facts["clarify_sent"] = False
                 facts["last_topic"] = None
                 facts["cart"] = []

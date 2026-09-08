@@ -32,6 +32,7 @@ from camellia.responder import responder
 from camellia.ai_responder import ai_responder
 from camellia.whatsapp_adapter import whatsapp_adapter
 from camellia.escalator import escalator
+from camellia.ad_routing import product_for_ad
 from camellia.sheet_sync import sheet_sync
 from camellia.menu_parser import menu_parser
 from camellia import weekly_flyer
@@ -365,6 +366,9 @@ def _process_instagram_event(
         }
         if entry.ad_title and not facts.get("ad_title"):
             facts["ad_title"] = entry.ad_title
+        ad_product = product_for_ad(trace["ad_id"], trace["ad_title"])
+        if ad_product:
+            facts["ad_product"] = ad_product
         log.info(
             "Instagram inbound from %s: source=%s ad_id=%s ad_title=%r payload=%r",
             sender_id, entry.source, trace["ad_id"], trace["ad_title"], entry.raw_payload,
@@ -384,6 +388,8 @@ def _process_instagram_event(
                 pending = facts.get("pending_instagram_escalation") or {}
                 facts["awaiting_instagram_contact_confirmation"] = False
                 facts["pending_instagram_contact"] = None
+                facts["awaiting_instagram_contact"] = False
+                facts["pending_instagram_escalation"] = None
                 response_text = pending.get("response_text") or _INSTAGRAM_CONTACT_REQUEST
                 was_matched = pending.get("was_matched", False)
                 template_id = pending.get("template_id")
@@ -416,6 +422,22 @@ def _process_instagram_event(
             send_instagram_reply(sender_id, response_text)
             return
 
+        # A customer is allowed to decline a callback.  Clearing all pending
+        # state prevents every later sentence from being treated as a missing
+        # phone number, while making no claim that staff were notified.
+        if awaiting_contact and re.search(
+            r"\b(?:no thanks?|not interested|don't need|do not need|nahi chahiye|nahin chahiye)\b",
+            " ".join((message_text or "").lower().split()),
+        ):
+            facts["awaiting_instagram_contact"] = False
+            facts["awaiting_instagram_contact_confirmation"] = False
+            facts["pending_instagram_contact"] = None
+            facts["pending_instagram_escalation"] = None
+            response_text = "No problem at all. If you need anything later, just message us here."
+            db.log_conversation(sender_id, "instagram", message_text, response_text, True, "instagram_contact_declined", **trace)
+            send_instagram_reply(sender_id, response_text)
+            return
+
         if awaiting_contact and not supplied_contact:
             response_text = _INSTAGRAM_CONTACT_REQUEST
             db.log_conversation(sender_id, "instagram", message_text, response_text, True, "instagram_contact_required", **trace)
@@ -433,7 +455,7 @@ def _process_instagram_event(
 
         response_text, was_matched, template_id, image_url = responder.match_and_respond(
             message_text, user_id=sender_id, channel="instagram",
-            referral_source="ADS", referral_ad_id=ad_id,
+            referral_source="ADS", referral_ad_id=trace["ad_id"], referral_ad_title=trace["ad_title"],
         )
 
         needs_escalation = awaiting_contact or not was_matched or template_id == "order_next_steps"

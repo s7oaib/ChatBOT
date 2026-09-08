@@ -97,3 +97,24 @@ For calibration, provide a JSONL file of **anonymized** human-scored examples:
 Then pass `--human-labels scratch/human-labels.jsonl`. The report includes mean
 absolute error and the proportion of judge scores within one point of the human
 score. Review the rubric/prompt before relying on a judge whose MAE exceeds 1.
+
+## Real-conversation review sample
+
+Export a local review-only sample with customer IDs excluded and phone numbers
+and emails replaced. Review it before it leaves the business, then let staff
+fill in `human_overall` and `human_notes`:
+
+```powershell
+python scripts/export_anonymized_conversations.py --output scratch/review.jsonl --limit 200
+```
+
+## Stronger-model trial
+
+This changes no Railway setting and cannot send Instagram or WhatsApp messages.
+It compares the named Groq model on the fixed regression benchmark. Compare
+pass rate, reply length, latency and token use before changing `GROQ_MODEL` in
+Railway:
+
+```powershell
+python scripts/conversation_benchmark.py --live --model openai/gpt-oss-120b --output scratch/gpt-oss-120b.json
+```

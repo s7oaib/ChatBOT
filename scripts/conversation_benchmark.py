@@ -67,7 +67,7 @@ def scenarios():
     return cases
 
 
-def evaluate(cases, improved, live=False, rates=None):
+def evaluate(cases, improved, live=False, rates=None, model=None):
     # Import config before redirecting its paths, then import all consumers
     # inside the isolated directory. No application lifespan or Meta adapters.
     from camellia.config import config
@@ -79,7 +79,7 @@ def evaluate(cases, improved, live=False, rates=None):
         menu["weekly_menus"][-1]["week_of"] = "1st January - 31st December, 2099"
         (tmp / "menu.json").write_text(json.dumps(menu), encoding="utf-8")
         (tmp / "qa.json").write_text(Path(config.QA_TEMPLATES_PATH).read_text(encoding="utf-8"), encoding="utf-8")
-        for key, value in {"DB_PATH": str(tmp / "test.db"), "MENU_JSON_PATH": str(tmp / "menu.json"), "QA_TEMPLATES_PATH": str(tmp / "qa.json"), "GROQ_ENABLED": live, "ROUTER_SHADOW_ENABLED": False, "CONVERSATION_IMPROVEMENTS_ENABLED": improved, "SLOW_REPLY_NOTICE_ENABLED": False}.items():
+        for key, value in {"DB_PATH": str(tmp / "test.db"), "MENU_JSON_PATH": str(tmp / "menu.json"), "QA_TEMPLATES_PATH": str(tmp / "qa.json"), "GROQ_ENABLED": live, "GROQ_MODEL": model or config.GROQ_MODEL, "ROUTER_SHADOW_ENABLED": False, "CONVERSATION_IMPROVEMENTS_ENABLED": improved, "SLOW_REPLY_NOTICE_ENABLED": False}.items():
             stack.enter_context(patch.object(config, key, value))
         from camellia.database import db
         from camellia.responder import responder
@@ -159,17 +159,18 @@ def evaluate(cases, improved, live=False, rates=None):
                 dollars = None
                 break
             dollars += (tokens["prompt_tokens"] * rate["input"] + tokens["completion_tokens"] * rate["output"]) / 1_000_000
-        return {"mode": "live" if live else "offline", "improved": improved, "conversations": len(cases), "turns": len(records), "failed_turns": failures, "pass_rate": round(1 - failures / len(records), 4), "repeated_questions": repeat_count, "handoff_routes": {"expected": handoffs_expected, "correct": handoffs_routed, "delivery_verified": False}, "latency_ms": {"p50": round(statistics.median(latencies), 2), "p95": round(sorted(latencies)[int(len(latencies) * .95)], 2)}, "mean_reply_words": round(statistics.mean(lengths), 1), "provider_usage": dict(usage), "provider_cost_usd": dollars, "records": records}
+        return {"mode": "live" if live else "offline", "model": model or config.GROQ_MODEL, "improved": improved, "conversations": len(cases), "turns": len(records), "failed_turns": failures, "pass_rate": round(1 - failures / len(records), 4), "repeated_questions": repeat_count, "handoff_routes": {"expected": handoffs_expected, "correct": handoffs_routed, "delivery_verified": False}, "latency_ms": {"p50": round(statistics.median(latencies), 2), "p95": round(sorted(latencies)[int(len(latencies) * .95)], 2)}, "mean_reply_words": round(statistics.mean(lengths), 1), "provider_usage": dict(usage), "provider_cost_usd": dollars, "records": records}
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--live", action="store_true")
+    parser.add_argument("--model", help="Groq model to benchmark; does not change production configuration.")
     parser.add_argument("--rates", type=Path)
     args = parser.parse_args()
     rates = json.loads(args.rates.read_text()) if args.rates else None
-    report = {"dataset": "120 synthetic scenarios; not sampled customer conversations", "limitations": "Route/content checks are proxies for answer quality. Repeated questions use exact normalized text. No real handoff delivery is attempted. Offline latency excludes provider/network latency.", "runs": [evaluate(scenarios(), improved, args.live, rates) for improved in (False, True)]}
+    report = {"dataset": "120 synthetic scenarios; not sampled customer conversations", "limitations": "Route/content checks are proxies for answer quality. Repeated questions use exact normalized text. No real handoff delivery is attempted. Offline latency excludes provider/network latency.", "runs": [evaluate(scenarios(), improved, args.live, rates, args.model) for improved in (False, True)]}
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
     print(json.dumps([{k: v for k, v in run.items() if k != "records"} for run in report["runs"]], indent=2))
