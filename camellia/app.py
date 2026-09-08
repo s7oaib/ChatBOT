@@ -2516,8 +2516,8 @@ def get_admin_dashboard():
 
             <div class="drop-zone" id="dropZone" onclick="document.getElementById('fileInput').click()">
                 <div class="drop-zone-icon">📷</div>
-                <h3>Drag & Drop Menu Card Image or Click to Browse</h3>
-                <p>Supports JPEG, PNG, WEBP (Flyer photo, WhatsApp image, Instagram banner)</p>
+                <h3>Drag & Drop, Paste, or Click to Add the Full Menu Photo</h3>
+                <p>Copy a menu image and press Ctrl+V here, or use JPEG, PNG, WEBP (flyer, WhatsApp image, Instagram banner).</p>
                 <input type="file" id="fileInput" class="file-input-hidden" accept="image/jpeg,image/png,image/webp" onchange="handleFileSelected(event)">
             </div>
 
@@ -3178,6 +3178,29 @@ Non-Veg:
                 const files = dt.files;
                 if (files && files[0]) {
                     processFile(files[0]);
+                }
+            });
+
+            // Clipboard images do not arrive through the file input. Listen at
+            // document level so Ctrl+V works after the operator copies a full
+            // menu screenshot, then reuse the same preview/upload path.
+            document.addEventListener('paste', (e) => {
+                const menuPanel = document.getElementById('tab-image');
+                if (!menuPanel || menuPanel.style.display === 'none') return;
+                const items = e.clipboardData && e.clipboardData.items;
+                if (!items) return;
+                for (const item of items) {
+                    if (!item.type || !item.type.startsWith('image/')) continue;
+                    const pasted = item.getAsFile();
+                    if (!pasted) continue;
+                    e.preventDefault();
+                    const extension = (pasted.type.split('/')[1] || 'png').replace('jpeg', 'jpg');
+                    processFile(new File([pasted], `pasted-menu.${extension}`, { type: pasted.type }));
+                    const resBox = document.getElementById('imageResult');
+                    resBox.style.display = 'block';
+                    resBox.className = 'result-box info';
+                    resBox.innerHTML = '📋 <b>Menu photo pasted.</b> Review the preview, then click “Scan Flyer & Update Menu” to save it and update the bot.';
+                    break;
                 }
             });
         }
