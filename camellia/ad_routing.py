@@ -11,12 +11,22 @@ _PRODUCTS = {"sondesh", "savoury", "bento"}
 
 def product_for_ad(ad_id: Optional[str], ad_title: Optional[str]) -> Optional[str]:
     """Prefer an admin-configured Meta ad ID; use titles only as a fallback."""
+    normalized_ad_id = str(ad_id or "").strip()
+    if normalized_ad_id:
+        # Kept as a local import so this small routing helper does not make
+        # database initialisation a requirement for tools that only import it.
+        from camellia.database import db
+
+        saved = db.get_ad_product_route(normalized_ad_id)
+        if saved in _PRODUCTS:
+            return saved
+
     try:
         configured = json.loads(config.INSTAGRAM_AD_PRODUCT_MAP or "{}")
     except json.JSONDecodeError:
         configured = {}
     if isinstance(configured, dict):
-        value = str(configured.get(str(ad_id), "")).lower().strip()
+        value = str(configured.get(normalized_ad_id, "")).lower().strip()
         if value in _PRODUCTS:
             return value
 

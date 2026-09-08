@@ -162,6 +162,19 @@ class Database:
             );
             """)
 
+            # Meta changes ad titles freely, so the stable ad ID is mapped by
+            # kitchen staff and kept on the same durable volume as the rest of
+            # the bot state. The environment JSON remains a deployment-time
+            # fallback for older installations.
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS ad_product_routes (
+                ad_id TEXT PRIMARY KEY,
+                product TEXT NOT NULL CHECK(product IN ('sondesh', 'savoury', 'bento')),
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+
             # Seed counters if empty
             cursor.execute("INSERT OR IGNORE INTO analytics (key, value) VALUES ('total_messages', 0);")
             cursor.execute("INSERT OR IGNORE INTO analytics (key, value) VALUES ('matched_responses', 0);")
@@ -170,6 +183,47 @@ class Database:
             self._create_indexes(cursor)
 
             conn.commit()
+
+    def set_ad_product_route(self, ad_id: str, product: str) -> Dict[str, Any]:
+        """Creates or updates the product shown first for one Meta ad ID."""
+        now = datetime.utcnow().isoformat()
+        with self.get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO ad_product_routes (ad_id, product, created_at, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(ad_id) DO UPDATE SET
+                    product = excluded.product,
+                    updated_at = excluded.updated_at
+                """,
+                (ad_id, product, now, now),
+            )
+            conn.commit()
+        return {"ad_id": ad_id, "product": product, "updated_at": now}
+
+    def get_ad_product_route(self, ad_id: str) -> Optional[str]:
+        """Returns an admin-managed product route for one ad, if configured."""
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT product FROM ad_product_routes WHERE ad_id = ?", (ad_id,)
+            ).fetchone()
+        return str(row["product"]) if row else None
+
+    def list_ad_product_routes(self) -> List[Dict[str, Any]]:
+        """Lists ad routes in most-recently-updated order for the portal."""
+        with self.get_connection() as conn:
+            rows = conn.execute(
+                "SELECT ad_id, product, created_at, updated_at "
+                "FROM ad_product_routes ORDER BY updated_at DESC, ad_id"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def delete_ad_product_route(self, ad_id: str) -> bool:
+        """Deletes one mapping without affecting conversations from that ad."""
+        with self.get_connection() as conn:
+            cursor = conn.execute("DELETE FROM ad_product_routes WHERE ad_id = ?", (ad_id,))
+            conn.commit()
+        return cursor.rowcount > 0
 
     @staticmethod
     def _create_indexes(cursor) -> None:

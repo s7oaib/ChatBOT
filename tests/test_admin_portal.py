@@ -127,6 +127,47 @@ def test_admin_auth_protection():
     assert resp.status_code == 200
     assert resp.json().get("status") == "success"
 
+
+def test_admin_can_create_update_list_and_remove_an_ad_route():
+    ad_id = "test-portal-ad-73491"
+    db_module.db.delete_ad_product_route(ad_id)
+    try:
+        created = client.post(
+            "/admin/ad-routes",
+            headers=ADMIN_HEADERS,
+            json={"ad_id": ad_id, "product": "savoury"},
+        )
+        assert created.status_code == 200
+        assert created.json()["route"]["product"] == "savoury"
+
+        updated = client.post(
+            "/admin/ad-routes",
+            headers=ADMIN_HEADERS,
+            json={"ad_id": ad_id, "product": "bento"},
+        )
+        assert updated.status_code == 200
+
+        listing = client.get("/admin/ad-routes", headers=ADMIN_HEADERS)
+        assert listing.status_code == 200
+        assert {"ad_id": ad_id, "product": "bento"} in [
+            {"ad_id": route["ad_id"], "product": route["product"]}
+            for route in listing.json()["routes"]
+        ]
+
+        removed = client.delete(f"/admin/ad-routes/{ad_id}", headers=ADMIN_HEADERS)
+        assert removed.status_code == 200
+        assert db_module.db.get_ad_product_route(ad_id) is None
+    finally:
+        db_module.db.delete_ad_product_route(ad_id)
+
+
+def test_ad_route_rejects_unknown_products_and_requires_admin():
+    payload = {"ad_id": "test-invalid-product", "product": "cakes"}
+    assert client.post("/admin/ad-routes", json=payload).status_code == 403
+    response = client.post("/admin/ad-routes", headers=ADMIN_HEADERS, json=payload)
+    assert response.status_code == 400
+    assert "Sondesh" in response.json()["detail"]
+
 def test_parse_menu_card_text():
     """Tests raw text parsing and hot-reloading through the admin API."""
     with open(config.MENU_JSON_PATH, "r", encoding="utf-8") as f:

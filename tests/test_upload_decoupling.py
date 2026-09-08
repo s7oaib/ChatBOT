@@ -80,6 +80,26 @@ def test_a_failed_reader_still_puts_the_photo_in_front_of_customers():
     assert weekly_flyer.get() is not None, "the upload did nothing at all"
 
 
+def test_hiding_current_menu_removes_its_flyer_and_stops_customer_menu_delivery():
+    _upload({"status": "failed", "error": "unreadable"})
+    assert weekly_flyer.get() is not None
+
+    hidden = client.post("/admin/menu/unpublish-current", headers=ADMIN)
+    assert hidden.status_code == 200
+    assert hidden.json()["status"] == "success"
+    assert weekly_flyer.get() is None
+
+    with open(config.MENU_JSON_PATH, "r", encoding="utf-8") as f:
+        assert json.load(f)["weekly_menus"][-1]["is_published"] is False
+
+    from camellia.responder import responder
+    with open(config.MENU_JSON_PATH, "r", encoding="utf-8") as f:
+        hidden_menu = json.load(f)
+    with mock.patch.object(responder, "menu_data", hidden_menu):
+        image, _caption = responder._current_weekly_image(today_weekday=0)
+        assert image is None
+
+
 def test_each_new_flyer_has_a_fresh_url_so_media_caches_cannot_send_the_old_one():
     _upload({"status": "failed", "error": "first"})
     first_url = weekly_flyer.get()["url"]

@@ -72,6 +72,16 @@ def test_each_upload_is_archived_and_the_newest_is_the_live_one():
     )
 
 
+def test_unpublishing_current_flyer_keeps_other_archives_but_removes_the_hidden_one():
+    _upload("21st August - 27th August, 2026")
+    current = _upload("28th August - 3rd September, 2026")
+
+    assert weekly_flyer.unpublish_current() is True
+    assert weekly_flyer.get() is None
+    assert current["id"] not in {entry["id"] for entry in weekly_flyer.list_archive()}
+    assert [entry["week_of"] for entry in weekly_flyer.list_archive()] == ["21st August - 27th August, 2026"]
+
+
 def test_two_uploads_in_the_same_second_do_not_overwrite_each_other():
     """
     The live flyer and archive both need immutable names. A fixed live URL can

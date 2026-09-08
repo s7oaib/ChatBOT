@@ -73,6 +73,11 @@ def test_the_dashboard_has_three_tabs(page):
     assert len(buttons) == 3, f"expected 3 tabs, found {len(buttons)}"
 
 
+def test_menu_dashboard_explains_how_to_hide_the_current_week(page):
+    assert "Hide this week's menu from customers" in page
+    assert "unpublishCurrentMenu" in page
+
+
 def test_every_panel_belongs_to_a_tab(page):
     """A panel with no group is invisible for good — no tab can ever show it."""
     panels = re.findall(r'<div [^>]*class="panel-card"[^>]*>', page)
@@ -113,6 +118,16 @@ def test_the_menu_tab_leads_with_the_weekly_job(page):
     assert ids.index("tab-candidates") < ids.index("tab-knowledge"), (
         "the hand-written form sits above the review queue"
     )
+
+
+def test_menu_tab_has_simple_ad_routing_controls(page):
+    assert 'id="tab-ad-routing"' in page
+    assert 'id="adRouteId"' in page
+    assert 'id="adRouteProduct"' in page
+    assert "saveAdRoute()" in page
+    assert "loadAdRoutes()" in page
+    for product in ("sondesh", "savoury", "bento"):
+        assert f'value="{product}"' in page
 
 
 def test_the_fake_flyer_test_button_is_gone(page):

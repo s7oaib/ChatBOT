@@ -306,6 +306,35 @@ def clear() -> None:
         log.warning("Could not clear flyer archive: %s", e)
 
 
+def unpublish_current() -> bool:
+    """Remove the active flyer without deleting unrelated archived menus."""
+    state = get()
+    if state is None:
+        return False
+    current_id = state.get("id")
+    filename = os.path.basename(state.get("url", ""))
+    try:
+        os.remove(_state_path())
+    except OSError:
+        pass
+    if filename:
+        try:
+            os.remove(os.path.join(uploads_dir(), filename))
+        except OSError:
+            pass
+
+    # The active upload is also stored in the archive. Removing that entry
+    # prevents a deliberately hidden menu being returned as a "previous menu".
+    _write_archive([entry for entry in _read_archive() if entry.get("id") != current_id])
+    try:
+        for archived in os.listdir(archive_dir()):
+            if archived.startswith(f"flyer-{current_id}."):
+                os.remove(os.path.join(archive_dir(), archived))
+    except OSError:
+        pass
+    return True
+
+
 def remove_from_archive(flyer_id: str) -> Optional[str]:
     """
     Deletes one archived flyer and its photo. Returns its label, or None.

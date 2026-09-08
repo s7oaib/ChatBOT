@@ -1909,7 +1909,11 @@ class DeterministicResponder:
         undated text never expires, so this stays False until a real flyer
         with a readable date range goes stale.
         """
-        return menu_dates.is_expired(self._current_week().get("week_of"))
+        current_week = self._current_week()
+        return (
+            not current_week.get("is_published", True)
+            or menu_dates.is_expired(current_week.get("week_of"))
+        )
 
     def _current_weekly_image(self, today_weekday: int) -> Tuple[Optional[str], Optional[str]]:
         """

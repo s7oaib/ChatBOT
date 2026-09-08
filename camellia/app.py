@@ -1443,6 +1443,53 @@ def get_active_menu(x_admin_key: Optional[str] = Header(None), x_admin_pin: Opti
         log.error("Failed to read menu.json: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
 
+
+@app.get("/admin/ad-routes")
+def get_ad_routes(
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """Lists the Instagram ads that have a kitchen-managed product route."""
+    require_admin(x_admin_key, x_admin_pin)
+    return {"status": "success", "routes": db.list_ad_product_routes()}
+
+
+@app.post("/admin/ad-routes")
+async def save_ad_route(
+    request: Request,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """Maps one Meta Ad ID to the product its conversation should lead with."""
+    require_admin(x_admin_key, x_admin_pin)
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    ad_id = str(payload.get("ad_id") or "").strip()
+    product = str(payload.get("product") or "").lower().strip()
+    if not ad_id or len(ad_id) > 200 or not re.fullmatch(r"[A-Za-z0-9_-]+", ad_id):
+        raise HTTPException(status_code=400, detail="Enter a valid Meta Ad ID.")
+    if product not in {"sondesh", "savoury", "bento"}:
+        raise HTTPException(status_code=400, detail="Choose Sondesh, Savoury, or Bento.")
+
+    route = db.set_ad_product_route(ad_id, product)
+    return {"status": "success", "route": route}
+
+
+@app.delete("/admin/ad-routes/{ad_id}")
+def remove_ad_route(
+    ad_id: str,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """Stops applying a saved product preference to one Instagram ad."""
+    require_admin(x_admin_key, x_admin_pin)
+    if not db.delete_ad_product_route(ad_id):
+        raise HTTPException(status_code=404, detail="Ad route not found.")
+    return {"status": "success", "ad_id": ad_id}
+
 @app.post("/admin/menu/upload-image")
 @limiter.limit("10/minute")
 async def upload_menu_image(
@@ -1514,6 +1561,15 @@ async def upload_menu_image(
             week_of=result.get("week_of"),
             service_window=result.get("service_window"),
         )
+        # A new flyer is an explicit instruction to make this week's menu
+        # visible again, including when OCR could not read the dish rows.
+        with open(config.MENU_JSON_PATH, "r", encoding="utf-8") as f:
+            menu_data = json.load(f)
+        if menu_data.get("weekly_menus"):
+            menu_data["weekly_menus"][-1]["is_published"] = True
+            with open(config.MENU_JSON_PATH, "w", encoding="utf-8") as f:
+                json.dump(menu_data, f, indent=2, ensure_ascii=False)
+            responder.reload_data()
         flyer_saved = True
     except Exception as e:
         log.warning("Could not save the uploaded flyer photo: %s", e)
@@ -1530,6 +1586,35 @@ async def upload_menu_image(
         )
 
     return result
+
+
+@app.post("/admin/menu/unpublish-current")
+def unpublish_current_menu(
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """Hide the active flyer and dishes until the kitchen publishes a replacement."""
+    require_admin(x_admin_key, x_admin_pin)
+    try:
+        with open(config.MENU_JSON_PATH, "r", encoding="utf-8") as f:
+            menu_data = json.load(f)
+        if not menu_data.get("weekly_menus"):
+            raise HTTPException(status_code=404, detail="No weekly menu is available to hide")
+        menu_data["weekly_menus"][-1]["is_published"] = False
+        with open(config.MENU_JSON_PATH, "w", encoding="utf-8") as f:
+            json.dump(menu_data, f, indent=2, ensure_ascii=False)
+        flyer_removed = weekly_flyer.unpublish_current()
+        responder.reload_data()
+        return {
+            "status": "success",
+            "flyer_removed": flyer_removed,
+            "message": "This week's menu is hidden from customers until a new menu is published.",
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        log.error("Could not unpublish current menu: %s", exc)
+        raise HTTPException(status_code=500, detail="Could not hide this week's menu")
 
 @app.post("/admin/menu/archive/{flyer_id}/remove")
 async def remove_archived_flyer(flyer_id: str, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
@@ -2158,6 +2243,8 @@ async def update_menu(request: Request, x_admin_key: Optional[str] = Header(None
 
         if "weekly_menus" in menu_data and menu_data["weekly_menus"]:
             current_week = menu_data["weekly_menus"][-1]
+            # Publishing a reviewed menu makes it customer-visible again.
+            current_week["is_published"] = True
             if "week" in body:
                 current_week["week"] = body["week"]
             if veg_items is not None:
@@ -2311,28 +2398,28 @@ def get_admin_dashboard():
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
     <style>
         :root {
-            --primary: #8B1E3F;
-            --primary-dark: #65122B;
-            --primary-light: #A8284F;
-            --gold: #D4AF37;
-            --gold-light: #FBF4E4;
-            --bg: #F8F9FA;
+            --primary: #524036;
+            --primary-dark: #1F1C1B;
+            --primary-light: #B8B0A8;
+            --gold: #B8B0A8;
+            --gold-light: #F3F0EC;
+            --bg: #E6E2DD;
             --surface: #FFFFFF;
-            --text-dark: #2B2D42;
-            --text-muted: #6C757D;
-            --border: #E8DFD8;
+            --text-dark: #1F1C1B;
+            --text-muted: #6F6965;
+            --border: #D9D3CE;
             --success: #10B981;
             --warning: #F59E0B;
             --danger: #EF4444;
-            --shadow: 0 10px 25px rgba(139, 30, 63, 0.08);
-            --shadow-lg: 0 20px 40px rgba(139, 30, 63, 0.12);
+            --shadow: 0 2px 8px rgba(31, 28, 27, 0.06);
+            --shadow-lg: 0 8px 24px rgba(31, 28, 27, 0.10);
         }
         * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Plus Jakarta Sans', sans-serif; }
         body { background: var(--bg); color: var(--text-dark); min-height: 100vh; display: flex; flex-direction: column; }
         
         /* PIN Lock Overlay */
         .auth-overlay {
-            position: fixed; inset: 0; background: linear-gradient(135deg, rgba(101,18,43,0.96), rgba(139,30,63,0.98));
+            position: fixed; inset: 0; background: rgba(31,28,27,0.96);
             backdrop-filter: blur(12px); display: flex; justify-content: center; align-items: center; z-index: 1000; padding: 20px;
         }
         .auth-card {
@@ -2365,7 +2452,7 @@ def get_admin_dashboard():
         
         /* Top Navigation */
         header {
-            background: linear-gradient(90deg, var(--primary-dark), var(--primary)); color: white;
+            background: var(--primary-dark); color: white;
             padding: 16px 28px; display: flex; justify-content: space-between; align-items: center;
             box-shadow: 0 4px 16px rgba(101,18,43,0.15);
         }
@@ -2406,6 +2493,28 @@ def get_admin_dashboard():
            able to tell at a glance that these values can be corrected. */
         .review-input { width: 100%; min-width: 90px; padding: 7px 9px; border: 1px solid var(--border); border-radius: 8px; font-size: 0.84rem; font-family: inherit; }
         .review-input:focus { outline: none; border-color: var(--primary); }
+        .ad-routing-form {
+            display: grid; grid-template-columns: minmax(180px, 1fr) minmax(160px, 220px) auto;
+            gap: 10px; align-items: end;
+        }
+        .field-label { display: block; font-size: 0.78rem; font-weight: 700; margin-bottom: 5px; }
+        .field-control {
+            width: 100%; padding: 11px 12px; border: 1px solid var(--border);
+            border-radius: 8px; background: #fff; color: var(--text-dark); font-size: 0.9rem;
+        }
+        .field-control:focus { outline: 2px solid var(--primary-light); border-color: var(--primary); }
+        .ad-route-list { display: grid; gap: 8px; margin-top: 16px; }
+        .ad-route-row {
+            display: grid; grid-template-columns: 1fr auto auto; align-items: center; gap: 12px;
+            padding: 10px 12px; background: #F7F5F3; border: 1px solid var(--border); border-radius: 8px;
+        }
+        .ad-route-id { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; overflow-wrap: anywhere; }
+        .product-chip { padding: 4px 9px; border-radius: 999px; background: var(--gold-light); font-size: 0.76rem; font-weight: 700; }
+        @media (max-width: 660px) {
+            .ad-routing-form { grid-template-columns: 1fr; }
+            .ad-route-row { grid-template-columns: 1fr auto; }
+            .ad-route-id { grid-column: 1 / -1; }
+        }
         
         /* Main Layout */
         .main-container { max-width: 1100px; width: 100%; margin: 24px auto; padding: 0 20px 40px; flex: 1; }
@@ -2626,9 +2735,40 @@ def get_admin_dashboard():
 
             <div class="action-bar">
                 <button class="btn-primary" id="uploadImageBtn" onclick="submitMenuImage()">🔍 Scan Flyer &amp; Update Menu</button>
+                <button class="btn-danger" type="button" onclick="unpublishCurrentMenu()">Hide this week's menu from customers</button>
             </div>
 
+            <p style="font-size: 0.78rem; color: #6C757D; margin-top: 10px; line-height: 1.45;">Use this only when the week is over or the menu is wrong. It hides the flyer and dishes from chatbot customers; upload or publish the next menu to restore them.</p>
+
             <div id="imageResult" class="result-box"></div>
+        </div>
+
+        <div id="tab-ad-routing" class="panel-card" data-group="menu" style="display: none;">
+            <div class="panel-header">
+                <h2>📣 Ad Routing</h2>
+                <p>Choose what the chatbot shows first when somebody arrives from an Instagram ad. You only need the Ad ID from Meta.</p>
+            </div>
+
+            <div class="ad-routing-form">
+                <div>
+                    <label class="field-label" for="adRouteId">Instagram Ad ID</label>
+                    <input class="field-control" id="adRouteId" inputmode="text" autocomplete="off" placeholder="Paste the Ad ID">
+                </div>
+                <div>
+                    <label class="field-label" for="adRouteProduct">Show this product first</label>
+                    <select class="field-control" id="adRouteProduct">
+                        <option value="sondesh">Sondesh</option>
+                        <option value="savoury">Savoury</option>
+                        <option value="bento">Bento</option>
+                    </select>
+                </div>
+                <button class="btn-primary" type="button" onclick="saveAdRoute()">Add ad</button>
+            </div>
+
+            <div id="adRouteResult" class="result-box"></div>
+            <div id="adRouteList" class="ad-route-list">
+                <p style="color: var(--text-muted); font-size: 0.84rem;">Loading saved ads...</p>
+            </div>
         </div>
 
         <!-- MENU tab, panel 3 of 4: same job again, from a shared sheet -->
@@ -2982,6 +3122,7 @@ THIS WEEK'S BENGAL SPECIALS
             if (currentAdminKey) {
                 document.getElementById('authOverlay').style.display = 'none';
                 loadActiveMenu();
+                loadAdRoutes();
                 loadAnalytics();
                 refreshCandidateBadge();
             } else {
@@ -3010,6 +3151,7 @@ THIS WEEK'S BENGAL SPECIALS
                     document.getElementById('authOverlay').style.display = 'none';
                     safeStorageSet('camellia_admin_pin', pin);
                     loadActiveMenu();
+                    loadAdRoutes();
                     loadAnalytics();
                     refreshCandidateBadge();
                 } else {
@@ -3081,9 +3223,81 @@ THIS WEEK'S BENGAL SPECIALS
 
             // Everything in the group is on screen at once, so everything in it
             // needs its data.
-            if (group === 'menu') loadActiveMenu();
+            if (group === 'menu') { loadActiveMenu(); loadAdRoutes(); }
             if (group === 'customers') { loadAnalytics(); loadConversations(); }
             if (group === 'answers') { loadCandidates(); loadKnowledge(); }
+        }
+
+        async function loadAdRoutes() {
+            const list = document.getElementById('adRouteList');
+            if (!list || !currentAdminKey) return;
+            try {
+                const resp = await fetch('/admin/ad-routes', { headers: getAuthHeaders() });
+                const data = await resp.json();
+                if (!resp.ok) throw new Error(data.detail || 'Could not load saved ads.');
+                const routes = data.routes || [];
+                if (!routes.length) {
+                    list.innerHTML = '<p style="color: var(--text-muted); font-size: 0.84rem;">No ads added yet.</p>';
+                    return;
+                }
+                const labels = { sondesh: 'Sondesh', savoury: 'Savoury', bento: 'Bento' };
+                list.innerHTML = routes.map(route => `
+                    <div class="ad-route-row">
+                        <span class="ad-route-id">${escapeHtml(route.ad_id)}</span>
+                        <span class="product-chip">${labels[route.product] || escapeHtml(route.product)}</span>
+                        <button class="btn-danger" style="padding: 6px 10px; font-size: 0.76rem;" type="button"
+                            onclick="removeAdRoute('${escapeHtml(route.ad_id)}')">Remove</button>
+                    </div>`).join('');
+            } catch (err) {
+                list.innerHTML = `<p style="color: var(--danger); font-size: 0.84rem;">${escapeHtml(err.message || err)}</p>`;
+            }
+        }
+
+        async function saveAdRoute() {
+            const adIdInput = document.getElementById('adRouteId');
+            const productInput = document.getElementById('adRouteProduct');
+            const result = document.getElementById('adRouteResult');
+            const adId = adIdInput.value.trim();
+            if (!adId) return alert('Paste the Instagram Ad ID first.');
+            result.style.display = 'block';
+            result.className = 'result-box info';
+            result.innerText = 'Saving...';
+            try {
+                const resp = await fetch('/admin/ad-routes', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+                    body: JSON.stringify({ ad_id: adId, product: productInput.value })
+                });
+                const data = await resp.json();
+                if (!resp.ok) throw new Error(data.detail || 'Could not save this ad.');
+                adIdInput.value = '';
+                result.className = 'result-box success';
+                result.innerText = 'Saved. New conversations from this ad will start with the selected product.';
+                loadAdRoutes();
+            } catch (err) {
+                result.className = 'result-box error';
+                result.innerText = err.message || String(err);
+            }
+        }
+
+        async function removeAdRoute(adId) {
+            if (!confirm(`Remove routing for ad ${adId}?`)) return;
+            const result = document.getElementById('adRouteResult');
+            try {
+                const resp = await fetch(`/admin/ad-routes/${encodeURIComponent(adId)}`, {
+                    method: 'DELETE', headers: getAuthHeaders()
+                });
+                const data = await resp.json();
+                if (!resp.ok) throw new Error(data.detail || 'Could not remove this ad.');
+                result.style.display = 'block';
+                result.className = 'result-box success';
+                result.innerText = 'Ad routing removed.';
+                loadAdRoutes();
+            } catch (err) {
+                result.style.display = 'block';
+                result.className = 'result-box error';
+                result.innerText = err.message || String(err);
+            }
         }
 
         // MENU tab: paste-text upload
@@ -3466,6 +3680,8 @@ Non-Veg:
                         : 0;
                     if (!weekLabel) {
                         activeFlyerWeekEl.innerText = '';
+                    } else if (labelWeek && labelWeek.is_published === false) {
+                        activeFlyerWeekEl.innerText = '🚫 Hidden from chatbot customers — upload or publish a replacement to make it live.';
                     } else if (liveDishCount > 0) {
                         activeFlyerWeekEl.innerText = `📅 Active menu: ${weekLabel}`;
                     } else {
@@ -3588,6 +3804,27 @@ Non-Veg:
                 }
             } catch (e) {
                 alert('Connection error - nothing was removed.');
+            }
+        }
+
+        async function unpublishCurrentMenu() {
+            const warning = 'Hide this week\'s menu from chatbot customers? The flyer and dishes will stop being shown until you upload or publish a replacement. Your saved kitchen data is kept.';
+            if (!confirm(warning)) return;
+            try {
+                const resp = await fetch('/admin/menu/unpublish-current', {
+                    method: 'POST',
+                    headers: getAuthHeaders()
+                });
+                const data = await resp.json();
+                if (resp.ok && data.status === 'success') {
+                    alert(data.message);
+                    clearFileSelection();
+                    loadActiveMenu();
+                } else {
+                    alert('Could not hide the menu: ' + (data.detail || 'please try again.'));
+                }
+            } catch (e) {
+                alert('Connection error - the menu was not hidden.');
             }
         }
 
