@@ -1018,7 +1018,15 @@ class DeterministicResponder:
                     # giving their delivery address, not asking for the kitchen's.
                     "GUARD_pickup_address_hours": {"pickup", "pick", "collect", "kitchen", "your address", "the address", "located", "location"},
                     "GUARD_shelf_life_storage": {"shelf", "storage", "refrigeration", "refrigerate", "unrefrigerated", "fridge", "expiry", "spoil", "heat", "store", "last", "room"},
-                    "GUARD_staff_names_manager_contact": {"owner", "founder", "chef", "somdeb", "manager", "staff", "guru", "email"}
+                    # "Who can I speak to?" is the commonest way a customer asks
+                    # for a human, and none of the name-shaped anchors caught
+                    # it, so the question fell through to escalation instead of
+                    # being answered with the manager's number.
+                    "GUARD_staff_names_manager_contact": {
+                        "owner", "founder", "chef", "somdeb", "manager", "staff", "guru", "email",
+                        "speak to", "talk to", "contact person", "point of contact",
+                        "who do i contact", "who should i contact", "connect me",
+                    }
                 }
                 anchors = guard_anchors.get(tmpl_id, set())
                 if anchors and not any(a in lowered_text for a in anchors):
@@ -1111,7 +1119,12 @@ class DeterministicResponder:
                     score += 150
                 elif tmpl_id == "subscription_booking_steps" and facts.get("awaiting_subscription_booking") and re.search(r'\b(how (do i|to|can i) (order|book)|how to get started|book|booking steps|next steps|how do i start)\b', lowered_text):
                     score += 120
-                elif tmpl_id == "subscription_booking_steps" and re.search(r'\b(how to book subscription|book subscription|start subscription|subscribe|how do i book subscription|booking steps for subscription|next steps for subscription|supscription)\b', lowered_text):
+                # The article was the whole difference: "how do i book the
+                # subscription" missed every alternative here, so it fell to
+                # subscription_details, which boosts on the bare word
+                # "subscription" and re-sent the price list instead of the
+                # steps the customer had just asked for.
+                elif tmpl_id == "subscription_booking_steps" and re.search(r'\b(how to book (the )?subscription|book (the )?subscription|start (the )?subscription|subscribe|how do i book (the )?subscription|booking steps for (the )?subscription|next steps for (the )?subscription|supscription)\b', lowered_text):
                     score += 100
                 elif tmpl_id == "subscription_details" and re.search(r'\b(subscription|subscriptions|meal plan|everyday meal|meal subscription|5 meals package|5 meals)\b', lowered_text):
                     score += 80

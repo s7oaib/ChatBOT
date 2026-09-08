@@ -108,7 +108,7 @@ class Test25AgentStressScenarios(unittest.TestCase):
         resp2 = self.responder.respond("Is your meat halal and which oil do you cook in?", user_id=user_id, channel=channel)
         self.assertTrue(resp2.was_matched)
         self.assertEqual(resp2.template_id, "GUARD_halal_ingredients_oil")
-        self.assertIn("Halal", resp2.text)
+        self.assertIn("mutton is halal", resp2.text)
         self.assertIn("mustard oil", resp2.text)
 
     def test_agent_05_strict_vegan_inquirer(self):
@@ -387,7 +387,7 @@ class Test25AgentStressScenarios(unittest.TestCase):
         resp1 = self.responder.respond("Do you have any lunch or dinner options today?", user_id=user_id, channel=channel)
         self.assertTrue(resp1.was_matched)
         self.assertEqual(resp1.template_id, "savoury_food_intro")
-        self.assertIn("3 ways to order", resp1.text)
+        self.assertIn("three ways to order", resp1.text)
 
         # Turn 2: Specific Bento box details (client-confirmed 2026-09-03 -> answers with the three tiers)
         resp2 = self.responder.respond("Tell me more about the Bengali Bento meal box", user_id=user_id, channel=channel)
@@ -412,7 +412,7 @@ class Test25AgentStressScenarios(unittest.TestCase):
         resp2 = self.responder.respond("How do I book the subscription plan?", user_id=user_id, channel=channel)
         self.assertTrue(resp2.was_matched)
         self.assertEqual(resp2.template_id, "subscription_booking_steps")
-        self.assertIn("Choose your plan", resp2.text)
+        self.assertIn("Choose Option 1, 2 or 3", resp2.text)
         self.assertNotIn("how_to_order", resp2.template_id)
 
     def test_agent_28_first_time_vs_returning_customer_savoury_intro(self):

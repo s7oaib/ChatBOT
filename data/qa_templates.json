@@ -1,5 +1,5 @@
 {
-  "seed_version": 6,
+  "seed_version": 10,
   "matching_rules": {
     "guard_precedence": "GUARD_ templates (id starting with GUARD_) have absolute precedence over any answer template. When matched, they escalate immediately with response: null to prevent unverified brand statements.",
     "how_it_works": "Each template has 'triggers' (keywords/phrases). If a customer message contains ANY trigger from a template's list, that template fires. If multiple templates match, the one with the MOST matched keywords wins. If nothing matches confidently, escalate to human — never guess.",
@@ -483,7 +483,7 @@
         "নলেন গুড়",
         "নলেন গুড়ের সন্দেশ"
       ],
-      "response": "Nolen Gur, Thandai, Medjool Dates & Chocolate Sondesh Table:\n\n```\n+-------------------------+-------+-------+-------+\n| Collection & Flavours   | 250g  | 500g  |  1kg  |\n+-------------------------+-------+-------+-------+\n| Aamar Mishti (Nolen Gur)| ₹600  | ₹1100 | ₹2000 |\n| Sig A2 (Gur/Thandai/..)| ₹700  | ₹1300 | ₹2500 |\n+-------------------------+-------+-------+-------+\n* Box count: 9 pcs (250g) | 18 pcs (500g) | 36 pcs (1kg)\n```\n\nWhich collection, flavour, and pack size would you like to order?",
+      "response": "Nolen Gur & Chocolate Sondesh Table:\n\n```\n+-------------------------+-------+-------+-------+\n| Collection & Flavours   | 250g  | 500g  |  1kg  |\n+-------------------------+-------+-------+-------+\n| Aamar Mishti (Nolen Gur)| ₹600  | ₹1100 | ₹2000 |\n| Sig A2 (Gur/Chocolate) | ₹700  | ₹1300 | ₹2500 |\n+-------------------------+-------+-------+-------+\n* Box count: 9 pcs (250g) | 18 pcs (500g) | 36 pcs (1kg)\n```\n\nWhich collection, flavour, and pack size would you like to order?",
       "escalate": false,
       "source_ref": "menu.json > Sondesh > Nolen Gur"
     },
@@ -611,9 +611,10 @@
         "collection 2 table",
         "signature collection menu"
       ],
-      "response": "Collection 2 — Signature Collection\nSpecial occasion & gifting mishti made using pure desi A2 cow milk, 100% handcrafted.\n\n*Price Breakdown Table:*\n```\n+-----------------------+-------+-------+-------+\n| Item / Flavour        | 250g  | 500g  |  1kg  |\n+-----------------------+-------+-------+-------+\n| Classic / Rose        | ₹600  | ₹1100 | ₹2000 |\n| Mango/Kesar/Van/Cin   | ₹650  | ₹1200 | ₹2200 |\n| NolenGur/Thandai/Date | ₹700  | ₹1300 | ₹2500 |\n| Mahua Sondesh         | ₹900  | ₹1600 | ₹2900 |\n| Jolbhora (Liquid)*    | ₹900  | ₹1600 | ₹2900 |\n| Kanchagolla (Classic) | ₹600  | ₹1100 | ₹2000 |\n| Kanchagolla (NolenGur)| ₹700  | ₹1300 | ₹2500 |\n+-----------------------+-------+-------+-------+\n* 250g(9pc) | 500g(18pc) | 1kg(36pc)\n* Jolbhora: 6pc | 12pc | 24pc\n```\n\nWhich item, flavour, and pack size would you like to order?",
+      "response": "Collection 2. Signature collection — mishti for special occasions, gifting & when you are in the mood to give yourself a treat. Made using desi A2 cow milk that has not been industrially processed. The mishti is completely hand crafted end to end. Sharing the menu for signature collection below.\n\n```\n+--------------------------------+-------+-------+-------+\n| Item / Flavour                 | 250g  | 500g  |  1kg  |\n+--------------------------------+-------+-------+-------+\n| Classic / Rose                 | ₹600  | ₹1100 | ₹2000 |\n| Mango / Real Vanilla /         |       |       |       |\n|   Dalchini / Kesar             | ₹650  | ₹1200 | ₹2200 |\n| Nolen Gur / Chocolate          | ₹700  | ₹1300 | ₹2500 |\n| Mahua                          | ₹900  | ₹1600 | ₹2900 |\n| Kanchagolla (Nolen Gur)        | ₹700  | ₹1300 | ₹2500 |\n| Jolbhora (Nolen Gur, liquid)   | ₹900  | ₹1600 | ₹2900 |\n+--------------------------------+-------+-------+-------+\n* Sondesh & Kanchagolla: 250g (9 pcs) | 500g (18 pcs) | 1kg (36 pcs)\n* Jolbhora: 250g (6 pcs) | 500g (12 pcs) | 1kg (24 pcs)\n```\n\nPorter charges are on actuals.\n\nPlease feel free to ask anything before confirming — I'll be happy to help.",
       "escalate": false,
-      "source_ref": "menu.json > Signature Collection"
+      "source_ref": "client menu card, Signature Collection, updated April 2026",
+      "client_confirmed_date": "2026-09-08"
     },
     {
       "id": "pack_size_250g",
@@ -626,7 +627,7 @@
         "9 pieces",
         "box of 9"
       ],
-      "response": "All 250g Box Options (9 pcs / 6 pcs for Jolbhora):\n\n```\n+------------------------------+-------+-------+\n| Flavour / Variety (250g Box) | Aamar | SigA2 |\n+------------------------------+-------+-------+\n| Classic / Rose Sondesh       | ₹450  | ₹600  |\n| Mango / Kesar / Vanilla..    | ₹550  | ₹650  |\n| Nolen Gur / Thandai / Dates  | ₹600  | ₹700  |\n| Mahua Special                | —     | ₹900  |\n| Jolbhora (6 pcs liquid fill) | ₹750  | ₹900  |\n| Kanchagolla (Classic)        | ₹450  | ₹600  |\n| Kanchagolla (Nolen Gur)      | ₹600  | ₹700  |\n+------------------------------+-------+-------+\n```\n\nWhich 250g pack would you like to order?",
+      "response": "All 250g Box Options (9 pcs / 6 pcs for Jolbhora):\n\n```\n+------------------------------+-------+-------+\n| Flavour / Variety (250g Box) | Aamar | SigA2 |\n+------------------------------+-------+-------+\n| Classic / Rose Sondesh       | ₹450  | ₹600  |\n| Mango/Vanilla/Dalchini/Kesar | ₹550  | ₹650  |\n| Nolen Gur / Chocolate        | ₹600  | ₹700  |\n| Mahua Special                | —     | ₹900  |\n| Jolbhora (6 pcs liquid fill) | ₹750  | ₹900  |\n| Kanchagolla (Classic)        | ₹450  | ₹600  |\n| Kanchagolla (Nolen Gur)      | ₹600  | ₹700  |\n+------------------------------+-------+-------+\n```\n\nWhich 250g pack would you like to order?",
       "escalate": false,
       "source_ref": "menu.json > 250g pack options"
     },
@@ -641,7 +642,7 @@
         "18 pieces",
         "box of 18"
       ],
-      "response": "All 500g Box Options (18 pcs / 12 pcs for Jolbhora):\n\n```\n+------------------------------+-------+-------+\n| Flavour / Variety (500g Box) | Aamar | SigA2 |\n+------------------------------+-------+-------+\n| Classic / Rose Sondesh       | ₹800  | ₹1100 |\n| Mango / Kesar / Vanilla..    | ₹1000 | ₹1200 |\n| Nolen Gur / Thandai / Dates  | ₹1100 | ₹1300 |\n| Mahua Special                | —     | ₹1600 |\n| Jolbhora (12 pcs liquid fill)| ₹1400 | ₹1600 |\n| Kanchagolla (Classic)        | ₹800  | ₹1100 |\n| Kanchagolla (Nolen Gur)      | ₹1100 | ₹1300 |\n+------------------------------+-------+-------+\n```\n\nWhich 500g pack would you like to order?",
+      "response": "All 500g Box Options (18 pcs / 12 pcs for Jolbhora):\n\n```\n+------------------------------+-------+-------+\n| Flavour / Variety (500g Box) | Aamar | SigA2 |\n+------------------------------+-------+-------+\n| Classic / Rose Sondesh       | ₹800  | ₹1100 |\n| Mango/Vanilla/Dalchini/Kesar | ₹1000 | ₹1200 |\n| Nolen Gur / Chocolate        | ₹1100 | ₹1300 |\n| Mahua Special                | —     | ₹1600 |\n| Jolbhora (12 pcs liquid fill)| ₹1400 | ₹1600 |\n| Kanchagolla (Classic)        | ₹800  | ₹1100 |\n| Kanchagolla (Nolen Gur)      | ₹1100 | ₹1300 |\n+------------------------------+-------+-------+\n```\n\nWhich 500g pack would you like to order?",
       "escalate": false,
       "source_ref": "menu.json > 500g pack options"
     },
@@ -656,7 +657,7 @@
         "36 pieces",
         "box of 36"
       ],
-      "response": "All 1kg Box Options (36 pcs / 24 pcs for Jolbhora):\n\n```\n+------------------------------+-------+-------+\n| Flavour / Variety (1kg Box)  | Aamar | SigA2 |\n+------------------------------+-------+-------+\n| Classic / Rose Sondesh       | ₹1500 | ₹2000 |\n| Mango / Kesar / Vanilla..    | ₹1800 | ₹2200 |\n| Nolen Gur / Thandai / Dates  | ₹2000 | ₹2500 |\n| Mahua Special                | —     | ₹2900 |\n| Jolbhora (24 pcs liquid fill)| ₹2500 | ₹2900 |\n| Kanchagolla (Classic)        | ₹1500 | ₹2000 |\n| Kanchagolla (Nolen Gur)      | ₹2000 | ₹2500 |\n+------------------------------+-------+-------+\n```\n\nWhich 1kg pack would you like to order?",
+      "response": "All 1kg Box Options (36 pcs / 24 pcs for Jolbhora):\n\n```\n+------------------------------+-------+-------+\n| Flavour / Variety (1kg Box)  | Aamar | SigA2 |\n+------------------------------+-------+-------+\n| Classic / Rose Sondesh       | ₹1500 | ₹2000 |\n| Mango/Vanilla/Dalchini/Kesar | ₹1800 | ₹2200 |\n| Nolen Gur / Chocolate        | ₹2000 | ₹2500 |\n| Mahua Special                | —     | ₹2900 |\n| Jolbhora (24 pcs liquid fill)| ₹2500 | ₹2900 |\n| Kanchagolla (Classic)        | ₹1500 | ₹2000 |\n| Kanchagolla (Nolen Gur)      | ₹2000 | ₹2500 |\n+------------------------------+-------+-------+\n```\n\nWhich 1kg pack would you like to order?",
       "escalate": false,
       "source_ref": "menu.json > 1kg pack options"
     },
@@ -784,7 +785,7 @@
     },
     {
       "id": "GUARD_halal_ingredients_oil",
-      "client_confirmed_date": "2026-08-21",
+      "client_confirmed_date": "2026-09-08",
       "triggers": [
         "halal",
         "halal certified",
@@ -807,9 +808,9 @@
         "desi ghee",
         "is your meat halal and which oil do you cook in"
       ],
-      "response": "Mutton is Halal. Cooking oil is mustard oil, sourced directly from a farmer in Bengal. Ingredients have no industrial processing.",
+      "response": "Our mutton is halal.\n\nWe cook in mustard oil that we buy from a farmer who grows mustard. No industrial processing. Just traditional wisdom.",
       "escalate": false,
-      "source_ref": "client confirmation (Somdeb Ji) > halal & ingredients sourcing"
+      "source_ref": "client confirmation 2026-09-08 (Somdeb Ji)"
     },
     {
       "id": "GUARD_payment_method",
@@ -1137,7 +1138,27 @@
         "nut allergens",
         "do your sweets contain nut allergens",
         "contain nut allergens",
-        "nut allergy options"
+        "nut allergy options",
+        "nut free",
+        "nut-free",
+        "nutfree",
+        "is it nut free",
+        "is it nut-free",
+        "are they nut free",
+        "does it have nuts",
+        "does it contain nuts",
+        "contains nuts",
+        "any nuts",
+        "any nut",
+        "no nuts",
+        "nuts in it",
+        "is there nuts",
+        "gluten free",
+        "gluten-free",
+        "is it gluten free",
+        "allergen info",
+        "allergen information",
+        "allergy info"
       ],
       "response": "Sondesh is made from milk & sugar only — no nuts.",
       "escalate": false,
@@ -1290,7 +1311,7 @@
     },
     {
       "id": "GUARD_staff_names_manager_contact",
-      "client_confirmed_date": "2026-08-21",
+      "client_confirmed_date": "2026-09-08",
       "triggers": [
         "who is the owner",
         "owner of camellia",
@@ -1314,15 +1335,33 @@
         "email address",
         "email id",
         "what is your email",
-        "email"
+        "email",
+        "who can i speak to",
+        "who can i talk to",
+        "speak to someone",
+        "talk to someone",
+        "speak to a person",
+        "talk to a person",
+        "speak to a human",
+        "talk to a human",
+        "who do i contact",
+        "who should i contact",
+        "contact person",
+        "point of contact",
+        "can i speak to someone",
+        "can i talk to someone",
+        "connect me to someone",
+        "put me through to someone",
+        "speak to your team",
+        "talk to your team"
       ],
-      "response": "Manager of Kitchens is Mr. Guru Dayal Singh (+91 87965 51990 — official WhatsApp line). Manager email details are currently CONFLICTED and pending client confirmation — please connect with us directly on WhatsApp or call +91 87965 51990!",
+      "response": "Our Manager of Kitchens, Mr. Guru Dayal Singh (+91 87965 51990), will be your single point of contact for this order and will be happy to assist you with any queries.\n\nYou can also reach the kitchen at camellia.artisanal.gurgaon@gmail.com.",
       "escalate": false,
       "source_ref": "client confirmation (Somdeb Ji) > kitchen manager (email camellia.artisanal.gurgaon@gmail.com confirmed Phase E-continued)"
     },
     {
       "id": "savoury_food_intro",
-      "client_confirmed_date": "2026-08-21",
+      "client_confirmed_date": "2026-09-08",
       "triggers": [
         "lunch menu",
         "dinner options",
@@ -1353,9 +1392,9 @@
         "what dishes do you have",
         "whats on the menu this week"
       ],
-      "response": "We offer 3 ways to order our freshly cooked Bengali meals: 🍱\n\n1. **À La Carte**: Choose individual dishes from our weekly rotating menu (Vegetarian & Non-Vegetarian curries, Basanti Polao & rice). No minimum order.\n2. **Bengali Bento**: Complete curated meal boxes with Mains, Luchi/Rice & Sondesh.\n3. **Everyday Meal Subscription (Gurgaon only)**: Convenient multi-meal plans with flexible scheduling.\n\nAll prices include GST, packaging, and portal charges; only Porter delivery is additional.\n\nEverything is cooked fresh in small batches, so pre-ordering is recommended as some dishes may run out!",
+      "response": "Hi! Thank you for reaching out to Camellia.artisanal.\n\nWe cook freshly prepared Bengali food in small batches, with three ways to order:\n\n1. À LA CARTE | Across Delhi NCR\nChoose any dish from this week's menu, in any quantity. No minimum order.\n\n2. BENGALI BENTO | Across Delhi NCR\nA compact, complete Bengali meal, available in Vegetarian, Chicken and Mutton options.\n\n3. EVERYDAY MEAL SUBSCRIPTION | Gurgaon only. Flexible 5 or 10 meal packages starting from ₹1,500 for 5 meals.\n\nAll prices mentioned in the menu include GST. Delivery charges are at actuals, with no other additional charges.\n\nEverything is cooked fresh and quantities are limited, so pre-ordering is recommended.\n\nThe weekly menu, including the BENGALI BENTO options, is attached below. If this is your first Camellia meal and the menu feels unfamiliar, I'll be happy to help you choose.",
       "escalate": false,
-      "source_ref": "client Q&A script > savoury food ordering"
+      "source_ref": "client confirmation 2026-09-08 (Somdeb Ji)"
     },
     {
       "id": "bento_details",
@@ -1379,7 +1418,13 @@
         "chholar dal bento",
         "chholar daal bento",
         "chholar dal option",
-        "chholar dal in place of aloo dom"
+        "chholar dal in place of aloo dom",
+        "bento price",
+        "whats in the bento",
+        "veg bento",
+        "chicken bento",
+        "mutton bento",
+        "mangsho bento"
       ],
       "response": "Hi, thanks for reaching out. Our Bengali Bentos are freshly made to order in small batches using traditional Bengali recipes.\nAll prices include GST, packaging charges, portal charges and everything else. Only the Porter delivery charge is additional, at actuals, depending on the delivery address.\n\nVegetarian Bento — ₹350\nAloo Dom (slow-cooked potato in the traditional prashad style), luchi (the Bengali version of poori), pre-dessert tomato aamsottwo khejur chatni and our handcrafted Norom Pak Sondesh.\nAlso available with Chholar Dal (Pooja style) instead of Aloo Dom.\n\nChicken Bento — ₹400\nSlow-cooked kolaghat Dhaba Chicken, luchi, pre-dessert tomato aamsottwo khejur chatni and our handcrafted Norom Pak Sondesh.\n\nMangsho Bento — ₹600\nSlow-cooked mutton, luchi, pre-dessert tomato aamsottwo khejur chatni and our handcrafted Norom Pak Sondesh.\n\nSharing our full menu for the week below.",
       "escalate": false,
@@ -1411,7 +1456,7 @@
     },
     {
       "id": "subscription_details",
-      "client_confirmed_date": "2026-08-21",
+      "client_confirmed_date": "2026-09-08",
       "triggers": [
         "subscription",
         "meal plan",
@@ -1432,13 +1477,13 @@
         "what subscriptions",
         "meal subscriptions"
       ],
-      "response": "Our Everyday Meal Subscription (Gurgaon only) offers fresh, homely Bengali meals delivered to your doorstep: 🍱\n\n**Plan Options (5 Meals Package):**\n• **Vegetarian Plan**: ₹1,500 for 5 meals (₹300/meal)\n• **Veg + Chicken Plan**: ₹1,750 for 5 meals (Combination of Veg & Chicken meals)\n• **Chicken Plan**: ₹2,000 for 5 meals (₹400/meal)\n\n**Subscription Highlights:**\n• **Polao / Luchi Rule**: You can choose Basanti Polao or Luchi once during your 5-meal cycle at no extra cost.\n• **No Fixed Schedule**: You don't have to take meals on consecutive days — order whenever you want lunch or dinner.\n• **Loyalty Reward**: For every 10 meals completed, your 11th meal is completely FREE!\n\nAll prices include GST, packaging, and portal charges; only Porter delivery is additional.\n\nWould you like to book?",
+      "response": "Hi! Thank you for asking about our Everyday Meal Subscription (Gurgaon only).\n\nFreshly cooked, home-style balanced food, using good-quality ingredients, home recipes and no shortcuts.\n\nPrice of 5 MEALS (including GST). Porter delivery charges at actuals, depending on fare from our Sushant Lok Gurgaon kitchen to your location\n\n• Option 1 Vegetarian — ₹1,500 for 5 meals\n(Rice/roti + 2 sabzis + chatni/mishti)\n• Option 2 Veg + Chicken — ₹1,750 (vegetarian on 3 days, chicken on 2 days) for 5 meals\n• Option 3 Chicken — ₹2,000 for 5 meals\n(Rice/roti + 1 sabzi + chicken + chatni/mishti)\n\nOnce during the package, you can opt for luchi or polao\n• No fixed schedule — have your meals over 5 days, 10 days or at your own pace\n• For every 10 meals, we gift you the 11th\n\nSimple, varied everyday food — as close as we can make it to a meal from a home kitchen.\n\nAttached below is our à la carte menu that changes every week. In case you don't want a subscription, you can just order a dish any day from here.\n\nWould you like to book?",
       "escalate": false,
-      "source_ref": "client Q&A script > savoury food ordering"
+      "source_ref": "client confirmation 2026-09-08 (Somdeb Ji)"
     },
     {
       "id": "subscription_booking_steps",
-      "client_confirmed_date": "2026-08-21",
+      "client_confirmed_date": "2026-09-08",
       "triggers": [
         "how to book subscription",
         "book subscription",
@@ -1449,15 +1494,24 @@
         "book meal plan",
         "booking steps for subscription",
         "next steps for subscription",
-        "how to subscribe"
+        "how to subscribe",
+        "how do i book the subscription",
+        "book the subscription",
+        "how to book the subscription",
+        "start the subscription",
+        "how do i start the subscription",
+        "next steps for the subscription",
+        "how do i subscribe",
+        "i want to subscribe",
+        "sign me up for the subscription"
       ],
-      "response": "Here are the Next Steps to activate your Everyday Meal Subscription:\n\n1. **Choose your plan** (Vegetarian ₹1,500 / Veg+Chicken ₹1,750 / Chicken ₹2,000 for 5 meals)\n2. **Pay** via UPI / bank transfer\n3. **Tell us your preferred dates**\n4. **Done — we deliver on those dates without you following up**\n\n(Please provide at least 5 hours advance notice for any schedule or date changes).",
+      "response": "NEXT STEPS\n\n1. Choose Option 1, 2 or 3 from the message above.\n2. Pay for your subscription.\n3. Let us know the dates you'd like your meals.\n4. That's it — we'll deliver on those dates without you having to follow up.\n\nIf you need to change a delivery date, please let us know at least 5 hours in advance.",
       "escalate": false,
-      "source_ref": "client Q&A script > savoury food ordering"
+      "source_ref": "client confirmation 2026-09-08 (Somdeb Ji)"
     },
     {
       "id": "alacarte_prebooking_steps",
-      "client_confirmed_date": "2026-08-21",
+      "client_confirmed_date": "2026-09-08",
       "triggers": [
         "how to order from menu",
         "how to order item from menu",
@@ -1479,13 +1533,13 @@
         "pre-order ala carte meals",
         "pre order ala carte"
       ],
-      "response": "To place or pre-book an À La Carte order from our weekly menu, please share: 📝\n\n1. **Items & Quantity** (e.g. 1 Robibarer Mangsho, 1 Basanti Polao)\n2. **Delivery Address** (used to calculate Porter delivery charges on actuals)\n3. **Receiver's Phone Number**\n4. **Preferred Delivery Slot / Day** (Lunch / Dinner)\n5. **Google Location Pin** (especially if delivering to a standalone house or villa)\n\nYou can share these details here, or call/WhatsApp our kitchen directly at 8796551990. We will verify availability and share your invoice before dispatch!",
+      "response": "To place an order, kindly let me know the following here or call / WhatsApp our kitchen at 8796551990.\n\n1. Your choice of items & the quantity\n2. Delivery address, so that I can tell you Porter charges\n3. Phone number of the person who will receive the package\n4. Which slot — example: Friday / Saturday / Sunday, lunch or dinner, or any day next week\n5. In case the delivery address is a standalone house, kindly share a Google location pin.",
       "escalate": false,
-      "source_ref": "client Q&A script > savoury food ordering"
+      "source_ref": "client confirmation 2026-09-08 (Somdeb Ji)"
     },
     {
       "id": "sondesh_dispatch_time",
-      "client_confirmed_date": "2026-08-21",
+      "client_confirmed_date": "2026-09-08",
       "triggers": [
         "how long to deliver",
         "dispatch time",
@@ -1502,9 +1556,9 @@
         "how fast can you dispatch",
         "dispatch time for sondesh"
       ],
-      "response": "Hi! Thank you for getting in touch.\n\nOnce your sondesh order is confirmed, we usually dispatch it from our kitchen in Sushant Lok, Gurgaon within 15 minutes. Kanchagolla takes about 30 minutes. Jolbhora takes about an hour.\n\nDelivery time after that depends on the Porter rider's travel time, which varies based on traffic and the time of day.\n\nOur kitchen is open 10:00 AM – 7:30 PM every day. We always request a pre-order so we can make and send exactly what you want — we make in small batches, so we sometimes run out of stock.",
+      "response": "Hi! Thank you for getting in touch.\n\nOnce your sondesh order is confirmed, we usually dispatch it from our kitchen in Sushant Lok, Gurgaon within 15 minutes. Kanchagolla takes about 30 minutes. Jolbhora takes about an hour.\n\nDelivery time after that depends on the Porter rider's travel time, which varies based on traffic and the time of day.\n\nOur kitchen is open 10:00 AM – 7:30 PM every day. We always request a pre order to ensure we are able to make & send exactly what you want. Else sometimes we might run out of stock that we make in small batches.",
       "escalate": false,
-      "source_ref": "client Q&A script > savoury food ordering"
+      "source_ref": "client confirmation 2026-09-08 (Somdeb Ji)"
     },
     {
       "id": "savoury_crosssell_sondesh",
@@ -1574,7 +1628,7 @@
     },
     {
       "id": "savoury_delivery_time",
-      "client_confirmed_date": "2026-08-24",
+      "client_confirmed_date": "2026-09-08",
       "triggers": [
         "savoury delivery time",
         "delivery time for food",
@@ -1587,15 +1641,27 @@
         "how long for dinner",
         "food delivery time",
         "when will meal arrive",
-        "dispatch time for food"
+        "dispatch time for food",
+        "delivery time for meals",
+        "delivery time for lunch",
+        "delivery time for dinner",
+        "how long for the meal",
+        "how long for my meal",
+        "how long does the food take",
+        "how long does food take",
+        "when will my food arrive",
+        "when will the food arrive",
+        "how soon can you deliver food",
+        "how soon can you deliver the meal",
+        "meal delivery"
       ],
-      "response": "Once your order is confirmed, we usually dispatch freshly prepared Bengali meals from our kitchen in Sushant Lok, Gurgaon within 45 minutes.\n\nDelivery time after that depends on the Porter rider's travel time, which varies based on traffic and the time of day.\n\nOur kitchen is open 10:00 AM – 7:30 PM every day. If you need any assistance with your order or delivery timing, feel free to message us here on DM or call/WhatsApp us directly at 8796551990.",
+      "response": "Hi! Thank you for getting in touch.\n\nWe request you to always pre order. So that way the delivery time can be at your convenience subject to our kitchen timings. If you are unable to pre order, once your order is confirmed, we usually dispatch it from our kitchen in Sushant Lok, Gurgaon within 45 minutes.\n\nDelivery time after that depends on the Porter rider's travel time, which varies based on traffic and the time of day.\n\nOur kitchen is open 10:00 AM – 7:30 PM every day. You may also DM to pre order or call/WhatsApp +918796551990.",
       "escalate": false,
-      "source_ref": "client Q&A script > savoury food delivery time"
+      "source_ref": "client confirmation 2026-09-08 (Somdeb Ji)"
     },
     {
       "id": "kolkata_expansion_info",
-      "client_confirmed_date": "2026-08-24",
+      "client_confirmed_date": "2026-09-08",
       "triggers": [
         "kolkata",
         "moving",
@@ -1610,9 +1676,9 @@
         "relocating to kolkata",
         "moving kitchen"
       ],
-      "response": "We are expanding our operations to Kolkata! While our team is transitioning and expanding, our Gurgaon kitchen operations remain unchanged. Our kitchen in Sushant Lok, Gurgaon continues to be managed on-site by our Kitchen Manager, Mr. Guru Dayal Singh, alongside our all-women kitchen team who have been trained with us for over 4 years. The founders remotely monitor quality and operations daily, so nothing changes for our guests in Delhi NCR — we continue to craft and deliver fresh Sondesh and Bengali meals every day with the exact same quality and standards.",
+      "response": "Over the past two months, we have personally run our Gurgaon kitchen to ensure every aspect of the operation met the standards we had envisioned.\n\nToday, we have a professional team in place, led by our Kitchen Manager, Guru Dayal Singh (+91 87965 51990 | camellia.artisanal.gurgaon@gmail.com). Our women kitchen team has been with us for the past four years and has been extensively trained by us. Together, they now run the kitchen through well-established systems, processes, quality checks and balances.\n\nOver the last few weeks, we have deliberately reduced our physical presence in the kitchen and have been monitoring operations remotely. The transition has gone exactly as planned, and the kitchen is now operating independently while consistently maintaining our standards.\n\nThis gives us the confidence to move to Kolkata, knowing that nothing changes for our guests in Delhi NCR. The same kitchen, the same team, the same recipes, the same ingredients, and the same goal of trying to be at uncompromising standards will continue — exactly as they do today.",
       "escalate": false,
-      "source_ref": "client Q&A script > kolkata expansion"
+      "source_ref": "client confirmation 2026-09-08 (Somdeb Ji)"
     }
   ],
   "escalation_triggers": {
