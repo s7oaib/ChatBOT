@@ -243,6 +243,57 @@ BARE_PRICE_RE = re.compile(
     re.IGNORECASE
 )
 
+# Delivery-time questions, not delivery-*area* ones — "how long", never
+# "do you deliver to X". Kept separate from BARE_PRICE_RE's exact-match
+# shape because a time question is asked in far more varied wording
+# ("when will my lunch arrive", "how fast is delivery") and still needs
+# disambiguating against product context, not treated as a single fixed phrase.
+TIME_INTENT_RE = re.compile(
+    r'\b(how (long|much time|soon|fast)|when will|what time|eta|dispatch time|'
+    r'delivery time|delivery hours|how fast)\b',
+    re.IGNORECASE
+)
+
+# A food-context word anywhere in a time question means the client's 45-minute
+# meals figure applies, not the 15/30/60-minute Sondesh dispatch numbers.
+FOOD_CONTEXT_WORDS = (
+    "food", "meal", "meals", "lunch", "dinner", "bento", "savoury", "savory",
+    "curry", "curries", "dish", "dishes", "à la carte", "a la carte", "alacarte",
+    "subscription",
+)
+
+# A Sondesh-context word means the 15/30/60-minute numbers do apply.
+SONDESH_CONTEXT_WORDS = (
+    "sondesh", "mishti", "kanchagolla", "jolbhora", "sweet", "sweets", "mithai",
+)
+
+# "Kolkata" alone, or a wording that names the business specifically
+# ("relocating", "shutting down"), is an unambiguous ask for the
+# reassurance answer. Everything else needs a relocation-shaped verb next
+# to a word naming what the customer is actually worried will change —
+# without that pairing, "who is the founder" or "is the kitchen open"
+# would wrongly pull in the Kolkata answer instead of their own template.
+KOLKATA_UNAMBIGUOUS_RE = re.compile(r'\b(kolkata|relocat\w*|shutting down|shut down)\b', re.IGNORECASE)
+KOLKATA_MOVE_VERB_RE = re.compile(r'\b(mov(e|ing)|leav(e|ing)|leaves|clos(e|ing))\b', re.IGNORECASE)
+KOLKATA_SUBJECT_RE = re.compile(
+    r'\b(kitchen|gurgaon|founder|founders|recipes|recipe|quality|standards|team|somdeb)\b',
+    re.IGNORECASE,
+)
+
+# Asking about shipping beyond Delhi NCR without naming a specific city —
+# "pan india", "internationally", "abroad", "another state" — has no city
+# keyword for delivery_out_of_area's own triggers to catch, so it fell to
+# delivery_area's generic "which area are you in?" instead of the approved
+# refusal. Deliberately excludes anything already handled as an NCR-zone
+# question ("outside Delhi NCR" itself resolves to delivery_area).
+OUT_OF_AREA_GENERIC_RE = re.compile(
+    r'\b(pan[\s-]?india|all over india|all of india|across india|'
+    r'internationally|international shipping|abroad|overseas|'
+    r'outside india|another state|other states|worldwide|world[\s-]?wide|'
+    r'outside the country|ship (it |this )?internationally)\b',
+    re.IGNORECASE,
+)
+
 BARE_VEG_RE = re.compile(
     r'^(is it veg|is this veg|is that veg|is it vegetarian|is this vegetarian|'
     r'veg or non.?veg|veg or nonveg)[\s\?\.\!]*$',
@@ -853,6 +904,73 @@ class DeterministicResponder:
             cleaned_business_text = f"{cleaned_business_text} {hint}".strip()
             cleaned_words = set(re.findall(r'\b\w+\b', cleaned_business_text))
 
+        # "How long / how soon / what time" delivery questions were matching
+        # on raw keyword overlap, which meant a food-context question could
+        # still land on delivery_time or sondesh_dispatch_time — both of
+        # which quote the 15/30/60-minute Sondesh dispatch numbers — simply
+        # because those two templates carry the broadest set of generic
+        # "how long / how soon" triggers. "When will my lunch arrive" and
+        # "how long does bento take" were both answered with Sondesh timing.
+        # This runs before trigger scoring, so context decides the template
+        # instead of whichever one happens to share the most words.
+        # "How long can I store the sondesh?" also matches TIME_INTENT_RE
+        # ("how long") and SONDESH_CONTEXT_WORDS ("sondesh"), which would
+        # steal it from the shelf-life guard and answer a storage question
+        # with a dispatch-speed one. Storage words take this out of scope
+        # entirely — that question already has its own, more specific match.
+        is_storage_question = re.search(
+            r'\b(store|storage|refrigerat|fridge|shelf life|room temperature|unrefrigerated|last (in|outside)|spoil)\b',
+            lowered_text,
+        )
+        if TIME_INTENT_RE.search(lowered_text) and not is_storage_question and not any(
+            w in lowered_text for w in ("out of delhi", "outside delhi", "outside ncr", "other city", "other cities")
+        ):
+            if any(w in lowered_text for w in FOOD_CONTEXT_WORDS):
+                tmpl = self._template_by_id("savoury_delivery_time")
+                if tmpl and tmpl.get("response"):
+                    response_text = tmpl["response"]
+                    if intro_greeting_prefix:
+                        response_text = intro_greeting_prefix + response_text
+                    session_memory.add_turn(user_id, channel, user_message, response_text)
+                    return response_text, True, "savoury_delivery_time", None
+            elif any(w in lowered_text for w in SONDESH_CONTEXT_WORDS):
+                tmpl = self._template_by_id("sondesh_dispatch_time")
+                if tmpl and tmpl.get("response"):
+                    response_text = tmpl["response"]
+                    if intro_greeting_prefix:
+                        response_text = intro_greeting_prefix + response_text
+                    session_memory.add_turn(user_id, channel, user_message, response_text)
+                    return response_text, True, "sondesh_dispatch_time", None
+
+        # The Kolkata reassurance question arrives in far more shapes than a
+        # trigger list can enumerate — "is gurgaon kitchen closing", "will
+        # the recipes change after you move", "who runs the kitchen after
+        # you leave" — and several of those share words with unrelated
+        # guards: "kitchen" with the pickup-address guard, "gurgaon" with
+        # the delivery-area answer, "founder" with the staff-contact guard.
+        # Whichever of those matched on raw overlap, so a customer worried
+        # about the move got an address or a name instead of the answer
+        # that actually addresses moving.
+        if KOLKATA_UNAMBIGUOUS_RE.search(lowered_text) or (
+            KOLKATA_MOVE_VERB_RE.search(lowered_text) and KOLKATA_SUBJECT_RE.search(lowered_text)
+        ):
+            tmpl = self._template_by_id("kolkata_expansion_info")
+            if tmpl and tmpl.get("response"):
+                response_text = tmpl["response"]
+                if intro_greeting_prefix:
+                    response_text = intro_greeting_prefix + response_text
+                session_memory.add_turn(user_id, channel, user_message, response_text)
+                return response_text, True, "kolkata_expansion_info", None
+
+        if OUT_OF_AREA_GENERIC_RE.search(lowered_text):
+            tmpl = self._template_by_id("delivery_out_of_area")
+            if tmpl and tmpl.get("response"):
+                response_text = tmpl["response"]
+                if intro_greeting_prefix:
+                    response_text = intro_greeting_prefix + response_text
+                session_memory.add_turn(user_id, channel, user_message, response_text)
+                return response_text, True, "delivery_out_of_area", None
+
         # Check if user message contains substantive business inquiry
         has_business_query = bool(
             (cleaned_words - STOP_WORDS) or
@@ -1273,10 +1391,30 @@ class DeterministicResponder:
                 "combo_bento", "alacarte_prebooking_steps",
                 "subscription_details", "subscription_booking_steps"
             }
-            if tmpl_id in savoury_templates and not facts.get("savoury_crosssell_sent"):
+            # The expired-menu fallback ("kitchen is finalising this week's
+            # menu") explicitly promises no photo and no price a customer
+            # could order against — the nudge's own Sondesh card would break
+            # that promise, so it is skipped whenever that fallback fired.
+            menu_is_being_updated = response_text.strip() == _WEEKLY_MENU_BEING_UPDATED.strip()
+            if tmpl_id in savoury_templates and not facts.get("savoury_crosssell_sent") and not menu_is_being_updated:
                 facts["savoury_crosssell_sent"] = True
-                crosssell_nudge = "\n\n*P.S.* We also handcraft Bengali mishti — mild sweet, subtle natural flavours. Say *Sondesh* for prices."
-                response_text = response_text.rstrip() + crosssell_nudge
+                # The client's own wording for this nudge — sent "after the
+                # conversation on their question is over, with menu" — is the
+                # savoury_crosssell_sondesh template's approved text, not a
+                # shortened paraphrase of it. Reusing that template's own
+                # copy keeps the two in sync rather than carrying the same
+                # message written out twice.
+                crosssell_tmpl = self._template_by_id("savoury_crosssell_sondesh")
+                crosssell_text = (crosssell_tmpl.get("response") or "").strip()
+                if crosssell_text:
+                    response_text = response_text.rstrip() + "\n\n" + crosssell_text
+                    aamar_card = "/images/AAMAR%20MISHTI.jpeg"
+                    if isinstance(image_url, list):
+                        image_url = image_url + [aamar_card]
+                    elif image_url:
+                        image_url = [image_url, aamar_card]
+                    else:
+                        image_url = [aamar_card]
             elif tmpl_id == "savoury_crosssell_sondesh":
                 facts["savoury_crosssell_sent"] = True
 
@@ -1556,16 +1694,20 @@ class DeterministicResponder:
         # the out-of-syllabus rule, rather than being redirected to a menu.
         return len(substantive) <= 1
 
+    def _template_by_id(self, template_id: str) -> Dict[str, Any]:
+        """The raw template dict for an id, or {} if it does not exist."""
+        return next(
+            (t for t in self.qa_data.get("templates", []) if t.get("id") == template_id),
+            {},
+        )
+
     def _with_captions(self, template_id: str, images: List[str]) -> List[Any]:
         """
         Pairs each card with its own caption from the template's `image_captions`,
         positionally. Any card without a caption stays a plain URL, so a template
         that defines fewer captions than cards still sends every card.
         """
-        tmpl = next(
-            (t for t in self.qa_data.get("templates", []) if t.get("id") == template_id),
-            {},
-        )
+        tmpl = self._template_by_id(template_id)
         captions = tmpl.get("image_captions") or []
         paired: List[Any] = []
         for index, url in enumerate(images):
@@ -1823,8 +1965,8 @@ class DeterministicResponder:
                 # each collection note and its matching menu card.
                 target_images = self._collection_cards_static(img_aamar_mishti, img_signature_sondesh)
 
-        # Savoury food intro & Sondesh->Savoury cross-sell — attach current weekly menu image card alongside text
-        elif template_id in ["savoury_food_intro", "sondesh_crosssell_savoury"]:
+        # Savoury food intro, Sondesh->Savoury cross-sell & Bento details — attach current weekly menu image card alongside text
+        elif template_id in ["savoury_food_intro", "sondesh_crosssell_savoury", "bento_details"]:
             target_images = current_weekly_img
             formatted_text = default_response
 

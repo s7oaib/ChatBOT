@@ -2042,10 +2042,12 @@ class TestCamelliaBot(unittest.TestCase):
         self.assertIn("Delivery charges are at actuals", resp)
         # Image attachment must be weekly menu card
         self.assertIsNotNone(imgs)
-        self.assertTrue("Thursday" in imgs or "Friday" in imgs)
-        # First savoury message gets savoury cross-sell nudge
-        self.assertIn("We also handcraft Bengali mishti", resp)
+        self.assertTrue(any("Thursday" in i or "Friday" in i for i in imgs))
+        # First savoury message gets savoury cross-sell nudge, plus its own
+        # Sondesh menu card alongside the weekly one.
+        self.assertIn("We also make & send Bengali mishti", resp)
         self.assertIn("subtle natural flavours", resp)
+        self.assertTrue(any("AAMAR" in i for i in imgs))
 
     def test_phase_b_bento_details_answers_with_confirmed_tiers(self):
         """bento_details is client-confirmed (2026-09-03): it answers with the three tiers instead of escalating."""
@@ -2150,7 +2152,7 @@ class TestCamelliaBot(unittest.TestCase):
         msg1 = "Show me the lunch options"
         resp1, matched1, tmpl1, _ = responder.match_and_respond(msg1, user_id=uid, channel="whatsapp")
         self.assertTrue(matched1)
-        self.assertIn("We also handcraft Bengali mishti", resp1)
+        self.assertIn("We also make & send Bengali mishti", resp1)
         self.assertIn("subtle natural flavours", resp1)
         self.assertTrue(session_memory.get_facts(uid, "whatsapp").get("savoury_crosssell_sent"))
 
@@ -2246,7 +2248,10 @@ class TestCamelliaBot(unittest.TestCase):
         self.assertEqual(tmpl, "subscription_details")
         self.assertIn("Would you like to book?", resp)
         # Verify it's at the end of the subscription response body
-        self.assertTrue(resp.strip().endswith("Would you like to book?") or "*P.S.*" in resp)
+        self.assertTrue(
+            resp.strip().endswith("Would you like to book?")
+            or "We also make & send Bengali mishti" in resp
+        )
 
     def test_phase_c_first_time_vs_returning_customer_detection(self):
         """Phase C: Test first-time vs returning customer detection on savoury_food_intro."""

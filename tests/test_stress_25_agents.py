@@ -468,7 +468,7 @@ class Test25AgentStressScenarios(unittest.TestCase):
         # changed and this assertion was never updated. Matching the part that
         # carries the meaning rather than the exact phrasing, so the next
         # wording tweak does not fail a test about cross-sell behaviour.
-        self.assertIn("*P.S.*", resp2.text)
+        self.assertIn("We also make & send Bengali mishti", resp2.text)
         self.assertIn("Bengali mishti", resp2.text)
 
 
