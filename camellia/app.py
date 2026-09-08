@@ -42,13 +42,19 @@ from camellia.monitoring import get_logger, delivery_monitor, latency_monitor
 log = get_logger("camellia.app")
 
 _INSTAGRAM_CONTACT_REQUEST = "Could you share your WhatsApp number so our team can reach you directly?"
-_INDIAN_MOBILE_RE = re.compile(r"(?<!\d)(?:\+?91[\s-]*)?([6-9]\d{9})(?!\d)")
+_INDIAN_MOBILE_RE = re.compile(
+    r"(?<!\d)(?:(?:\+|00)?91[\s-]*)?0?[\s-]*"
+    r"([6-9](?:[\s-]*\d){9})(?!\d)"
+)
 
 
 def _extract_whatsapp_number(text: str) -> Optional[str]:
     """Return a normalized Indian WhatsApp number from an Instagram reply."""
     match = _INDIAN_MOBILE_RE.search(text or "")
-    return f"+91{match.group(1)}" if match else None
+    if not match:
+        return None
+    digits = re.sub(r"\D", "", match.group(1))
+    return f"+91{digits}" if len(digits) == 10 else None
 
 
 def _prune_expired_weekly_menus() -> None:

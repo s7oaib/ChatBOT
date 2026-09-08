@@ -112,6 +112,24 @@ def test_instagram_escalation_requests_and_attaches_whatsapp_number():
         assert send_reply.call_args.args[1] == "standard escalation"
 
 
+def test_instagram_contact_accepts_leading_zero_and_spaced_indian_number():
+    user_id = "client_instagram_contact_local_format"
+    session_memory.clear_session(user_id, "instagram")
+
+    with patch.object(
+        app.responder,
+        "match_and_respond",
+        return_value=("standard escalation", False, None, None),
+    ), patch.object(app, "send_instagram_reply"), patch.object(
+        app.escalator, "handle_escalation"
+    ) as escalate:
+        app._process_instagram_event(user_id, "I need help with an unusual request", "ad-1")
+        app._process_instagram_event(user_id, "099021 81650", "ad-1")
+
+    assert escalate.call_args.kwargs["context_data"]["customer_whatsapp_number"] == "+919902181650"
+    assert session_memory.get_facts(user_id, "instagram")["awaiting_instagram_contact"] is False
+
+
 def test_bare_price_question_with_no_topic_asks_which_product_instead_of_guessing_sondesh():
     # match_and_respond is the deterministic matcher itself (no ad gating) —
     # channel is whatsapp here purely to stay clear of the Instagram ad-gate
