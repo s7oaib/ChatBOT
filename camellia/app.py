@@ -572,10 +572,19 @@ def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks
                 # contact-card picker. Meta delivers that as an attachment
                 # with no message.text, so treat it as the contact response
                 # instead of replying that we cannot read photos or voice notes.
-                if message.get("attachments") and session_memory.get_facts(sender_id, "instagram").get("awaiting_instagram_contact"):
-                    message_text = _extract_contact_number_from_event(messaging_event)
-                    if message_text:
+                contact_card_number = _extract_contact_number_from_event(messaging_event)
+                if contact_card_number:
+                    if session_memory.get_facts(sender_id, "instagram").get("awaiting_instagram_contact"):
+                        message_text = contact_card_number
                         log.info("Extracted WhatsApp contact card for Instagram sender %s.", sender_id)
+                    else:
+                        # The customer may have sent the number as text first;
+                        # Meta can then deliver the contact card as a second
+                        # event. It is already handled, so do not send the
+                        # misleading unreadable-attachment apology.
+                        _record_dropped_webhook_event("duplicate_contact_card", messaging_event, sender_id)
+                        results.append({"sender_id": sender_id, "action": "ignored_duplicate_contact_card"})
+                        continue
 
             if not message_text:
                 # Only record the events that represent a customer going
