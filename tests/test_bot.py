@@ -2068,7 +2068,7 @@ class TestCamelliaBot(unittest.TestCase):
         self.assertIn("Mangsho Bento — ₹600", resp)
 
     def test_phase_b_subscription_details_and_booking_steps_sequencing(self):
-        """Phase B: Test subscription_details (Gurgaon only) followed by 'how do I book' sequences to 4-step subscription_booking_steps."""
+        """Phase B: Test subscription_details followed by 'how do I book' sequences to 4-step subscription_booking_steps."""
         from camellia.session_memory import session_memory
         uid = "test_sub_seq_user"
         session_memory.clear_session(uid, "whatsapp")
@@ -2078,7 +2078,8 @@ class TestCamelliaBot(unittest.TestCase):
         resp1, matched1, tmpl1, _ = responder.match_and_respond(msg1, user_id=uid, channel="whatsapp")
         self.assertTrue(matched1)
         self.assertEqual(tmpl1, "subscription_details")
-        self.assertIn("Gurgaon only", resp1)
+        # The client's own copy names the kitchen, not a delivery restriction.
+        self.assertIn("Sushant Lok Gurgaon kitchen", resp1)
         self.assertIn("₹1,500", resp1)
         self.assertIn("₹1,750", resp1)
         self.assertIn("₹2,000", resp1)
