@@ -10,7 +10,7 @@ a separate OpenAI-compatible judge endpoint and model:
   $env:JUDGE_API_KEY = "..."
   $env:JUDGE_BASE_URL = "https://api.openai.com/v1"
   $env:JUDGE_MODEL = "your-independent-judge-model"
-  python scripts/judge_conversation_benchmark.py --judge --limit 160 \
+  python scripts/judge_conversation_benchmark.py --judge --limit 220 \
       --output scratch/judge-benchmark.json
 
 Human calibration labels are JSONL records with case, turn and overall (0-5).
@@ -198,7 +198,7 @@ def main() -> None:
     parser.add_argument("--judge-model", default=os.getenv("JUDGE_MODEL", ""))
     parser.add_argument("--judge-base-url", default=os.getenv("JUDGE_BASE_URL", ""))
     parser.add_argument("--judge-api-key", default=os.getenv("JUDGE_API_KEY", ""))
-    parser.add_argument("--limit", type=int, default=25, help="Turns to judge; set 160 for the full synthetic benchmark.")
+    parser.add_argument("--limit", type=int, default=25, help="Turns to judge; set 220 for the full synthetic benchmark.")
     parser.add_argument("--human-labels", type=Path, help="Anonymized JSONL labels for judge calibration.")
     args = parser.parse_args()
 

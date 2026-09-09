@@ -312,6 +312,8 @@ class AIResponder:
         is_refinement: bool = False,
         template_id: str = "",
         model: Optional[str] = None,
+        response_format: Optional[Dict[str, str]] = None,
+        max_tokens: Optional[int] = None,
     ) -> Tuple[str, bool, str]:
         """
         Queries Groq's OpenAI-compatible chat completions endpoint.
@@ -327,8 +329,10 @@ class AIResponder:
             "model": model or config.GROQ_MODEL,
             "messages": [{"role": "user", "content": prompt_text}],
             "temperature": 0.2 if is_refinement else 0.1,
-            "max_tokens": 1024 if is_refinement else 2048,
+            "max_tokens": max_tokens or (1024 if is_refinement else 2048),
         }
+        if response_format:
+            payload["response_format"] = response_format
 
         headers = {
             "Authorization": f"Bearer {config.GROQ_API_KEY}",
@@ -616,6 +620,14 @@ class AIResponder:
         resp_text, ok, _ = self._query_groq(prompt_text, is_refinement=True, template_id=template_id)
 
         if ok and resp_text:
+            # Prompt instructions are not enforcement. Reject refinements that
+            # introduce protected business claims or numbers absent from the
+            # approved template and known conversation context.
+            from camellia.rag_fallback import rag_fallback_engine
+            grounding_context = [template_text, user_context or "", history_str, user_message or ""]
+            if not rag_fallback_engine.is_grounded_in_context(resp_text, grounding_context):
+                log.warning("Discarded ungrounded Groq refinement for template %s.", template_id)
+                return template_text, False
             # Only successful refinements are cached. A failure is transient —
             # caching the template as if it were a refinement would keep the
             # bot un-refined long after the provider recovered.

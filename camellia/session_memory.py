@@ -1,97 +1,163 @@
 import re
+import time
 from collections import OrderedDict
-from typing import Dict, Any
+from typing import Dict, Any, Optional
+
+from camellia.config import config
+from camellia.monitoring import get_logger
+
+log = get_logger("camellia.session_memory")
 
 class SessionMemoryManager:
     """
-    Manages in-memory active chat sessions keyed by (user_id, channel).
+    Manages cached active chat sessions keyed by (user_id, channel).
     Extracts customer facts (Name) and maintains conversation turn history
     for multi-turn context and human escalation handoffs.
     """
-    def __init__(self, max_history_turns: int = 5, max_sessions: int = 5000):
+    def __init__(
+        self,
+        max_history_turns: int = 5,
+        max_sessions: int = 5000,
+        persistence_enabled: Optional[bool] = None,
+        database: Any = None,
+    ):
         self.max_history_turns = max_history_turns
         self.max_sessions = max_sessions
+        self.persistence_enabled = (
+            config.SESSION_PERSISTENCE_ENABLED
+            if persistence_enabled is None else persistence_enabled
+        )
+        self.database = database
         # Structure: {(user_id, channel): {"facts": {"name": str}, "turns": [...]}}
         # Ordered so the least-recently-touched session can be evicted at capacity.
         self._sessions: "OrderedDict[tuple, Dict[str, Any]]" = OrderedDict()
 
-    def get_session(self, user_id: str, channel: str) -> Dict[str, Any]:
-        import time
-        current_time = time.time()
-        key = (str(user_id), str(channel))
-        if key not in self._sessions:
-            self._sessions[key] = {
-                "last_updated": current_time,
-                "facts": {
-                    "name": None,
-                    "last_greeting_index": None,
-                    "image_card_sent": False,
-                    "awaiting_subscription_booking": False,
-                    "subscription_context": False,
-                    "savoury_crosssell_sent": False,
-                    "sondesh_crosssell_sent": False,
-                    "previous_menus_offered": False,
-                    "slow_notice_sent": False,
-                    "awaiting_menu_choice": False,
-                    "awaiting_product_price": False,
-                    "awaiting_area_confirmation": False,
-                    "awaiting_instagram_contact": False,
-                    "awaiting_instagram_contact_confirmation": False,
-                    "pending_instagram_contact": None,
-                    "pending_instagram_escalation": None,
-                    "ad_product": None,
-                    "clarify_sent": False,
-                    "last_topic": None,
-                    "cart": [],
-                    "order_draft": {
-                        "flavour": None,
-                        "collection": None,
-                        "size": None,
-                        "quantity": 1
-                    }
-                },
-                "turns": [] # List of {"role": "user"|"assistant", "content": str}
-            }
-            while len(self._sessions) > self.max_sessions:
-                self._sessions.popitem(last=False)
-        else:
-            session = self._sessions[key]
-            session.setdefault("facts", {}).setdefault("last_greeting_index", None)
-            last_updated = session.get("last_updated", current_time)
-            if current_time - last_updated > 86400:
-                facts = session.get("facts", {})
-                facts["image_card_sent"] = False
-                facts["awaiting_subscription_booking"] = False
-                facts["subscription_context"] = False
-                facts["last_greeting_index"] = None
-                facts["savoury_crosssell_sent"] = False
-                facts["sondesh_crosssell_sent"] = False
-                facts["slow_notice_sent"] = False
-                facts["awaiting_menu_choice"] = False
-                facts["awaiting_product_price"] = False
-                facts["awaiting_area_confirmation"] = False
-                facts["awaiting_instagram_contact"] = False
-                facts["awaiting_instagram_contact_confirmation"] = False
-                facts["pending_instagram_contact"] = None
-                facts["pending_instagram_escalation"] = None
-                facts["ad_product"] = None
-                facts["clarify_sent"] = False
-                facts["last_topic"] = None
-                facts["cart"] = []
-                facts["order_draft"] = {
+    @staticmethod
+    def _new_session(current_time: float) -> Dict[str, Any]:
+        return {
+            "last_updated": current_time,
+            "facts": {
+                "name": None,
+                "last_greeting_index": None,
+                "image_card_sent": False,
+                "awaiting_subscription_booking": False,
+                "subscription_context": False,
+                "savoury_crosssell_sent": False,
+                "sondesh_crosssell_sent": False,
+                "previous_menus_offered": False,
+                "slow_notice_sent": False,
+                "awaiting_menu_choice": False,
+                "awaiting_product_price": False,
+                "awaiting_area_confirmation": False,
+                "awaiting_instagram_contact": False,
+                "awaiting_instagram_contact_confirmation": False,
+                "pending_instagram_contact": None,
+                "pending_instagram_escalation": None,
+                "ad_product": None,
+                "clarify_sent": False,
+                "last_topic": None,
+                "last_intents": [],
+                "last_entities": {},
+                "last_actions": [],
+                "knowledge_sufficient": None,
+                "cart": [],
+                "order_draft": {
                     "flavour": None,
                     "collection": None,
                     "size": None,
-                    "quantity": 1
-                }
-            session["last_updated"] = current_time
-            self._sessions.move_to_end(key)
+                    "quantity": 1,
+                },
+            },
+            "turns": [],
+        }
+
+    def _database(self):
+        if self.database is not None:
+            return self.database
+        from camellia.database import db
+        return db
+
+    def _persist(self, user_id: str, channel: str) -> None:
+        if not self.persistence_enabled:
+            return
+        key = (str(user_id), str(channel))
+        session = self._sessions.get(key)
+        if session is not None:
+            try:
+                self._database().save_active_session(key[0], key[1], session, session["last_updated"])
+            except Exception as exc:
+                log.warning("Could not persist active session: %s", exc)
+
+    def _with_defaults(self, session: Dict[str, Any], current_time: float) -> Dict[str, Any]:
+        default = self._new_session(current_time)
+        if not isinstance(session.get("facts"), dict):
+            session["facts"] = {}
+        for key, value in default["facts"].items():
+            session["facts"].setdefault(key, value)
+        if not isinstance(session.get("turns"), list):
+            session["turns"] = []
+        session.setdefault("last_updated", current_time)
+        return session
+
+    def _reset_transient(self, session: Dict[str, Any], current_time: float) -> Dict[str, Any]:
+        """Expire active flow state while retaining identity and chat history."""
+        defaults = self._new_session(current_time)["facts"]
+        facts = session.setdefault("facts", {})
+        transient = {
+            "image_card_sent", "awaiting_subscription_booking", "subscription_context",
+            "last_greeting_index", "savoury_crosssell_sent", "sondesh_crosssell_sent",
+            "slow_notice_sent", "awaiting_menu_choice", "awaiting_product_price",
+            "awaiting_area_confirmation", "awaiting_instagram_contact",
+            "awaiting_instagram_contact_confirmation", "pending_instagram_contact",
+            "pending_instagram_escalation", "ad_product", "clarify_sent", "last_topic",
+            "last_intents", "last_entities", "last_actions", "knowledge_sufficient",
+            "cart", "order_draft",
+        }
+        for key in transient:
+            facts[key] = defaults[key]
+        session["last_updated"] = current_time
+        return session
+
+    def get_session(self, user_id: str, channel: str) -> Dict[str, Any]:
+        current_time = time.time()
+        key = (str(user_id), str(channel))
+        if key not in self._sessions:
+            persisted = None
+            if self.persistence_enabled:
+                try:
+                    persisted = self._database().load_active_session(key[0], key[1])
+                except Exception as exc:
+                    log.warning("Could not load active session: %s", exc)
+            self._sessions[key] = self._with_defaults(
+                persisted if persisted is not None else self._new_session(current_time),
+                current_time,
+            )
+            while len(self._sessions) > self.max_sessions:
+                self._sessions.popitem(last=False)
+        elif self.persistence_enabled:
+            try:
+                persisted = self._database().load_active_session(key[0], key[1])
+                if persisted and persisted.get("last_updated", 0) > self._sessions[key].get("last_updated", 0):
+                    self._sessions[key] = self._with_defaults(persisted, current_time)
+            except Exception as exc:
+                log.warning("Could not refresh active session: %s", exc)
+        session = self._sessions[key]
+        last_updated = session.get("last_updated", current_time)
+        if current_time - last_updated > config.SESSION_TTL_SECONDS:
+            session = self._reset_transient(session, current_time)
+            self._persist(key[0], key[1])
+        self._sessions.move_to_end(key)
         return self._sessions[key]
 
     def clear_session(self, user_id: str, channel: str) -> None:
         key = (str(user_id), str(channel))
         if key in self._sessions:
             del self._sessions[key]
+        if self.persistence_enabled:
+            try:
+                self._database().delete_active_session(key[0], key[1])
+            except Exception as exc:
+                log.warning("Could not delete active session: %s", exc)
 
     def get_facts(self, user_id: str, channel: str) -> Dict[str, Any]:
         """Returns the facts dictionary for a session."""
@@ -107,6 +173,8 @@ class SessionMemoryManager:
             "size": None,
             "quantity": 1
         }
+        session["last_updated"] = time.time()
+        self._persist(user_id, channel)
 
     def extract_and_update_facts(self, user_id: str, channel: str, text: str) -> Dict[str, Any]:
         """Extracts customer attributes (Name) & order preferences (Flavour, Collection, Size, Quantity) from user message."""
@@ -232,6 +300,8 @@ class SessionMemoryManager:
             except ValueError:
                 pass
 
+        session["last_updated"] = time.time()
+        self._persist(user_id, channel)
         return facts
 
     def has_prior_history(self, user_id: str, channel: str) -> bool:
@@ -264,6 +334,8 @@ class SessionMemoryManager:
         # Keep history bounded to max_history_turns * 2 (turns pair = user + assistant)
         if len(turns) > self.max_history_turns * 2:
             session["turns"] = turns[-(self.max_history_turns * 2):]
+        session["last_updated"] = time.time()
+        self._persist(user_id, channel)
 
     def get_context_summary(self, user_id: str, channel: str) -> str:
         """Generates a text summary of active customer facts for the AI system prompt."""

@@ -261,7 +261,8 @@ class Test25AgentStressScenarios(unittest.TestCase):
         resp2 = self.responder.respond("Tell me about Jolbhora with liquid filling", user_id=user_id, channel=channel)
         self.assertTrue(resp2.was_matched)
         self.assertIn("Jolbhora", resp2.text)
-        self.assertIn("pending client confirmation", resp2.text)
+        self.assertIn("₹750", resp2.text)
+        self.assertIn("₹900", resp2.text)
 
     def test_agent_16_weekly_rotation_dishes(self):
         """Agent 16: Inquiring about Bengali festive dishes (Veg & Non-Veg)."""

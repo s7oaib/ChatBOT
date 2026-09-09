@@ -1385,6 +1385,14 @@ def health_check():
             "instagram_token": instagram_token,
             "escalation_alerts_to": alert_destination,
             "router_shadow": router_shadow,
+            "language_understanding": {
+                "structured_nlu_enabled": config.STRUCTURED_NLU_ENABLED,
+                "rollout_percent": config.STRUCTURED_NLU_ROLLOUT_PERCENT,
+            },
+            "session_state": {
+                "persistent": config.SESSION_PERSISTENCE_ENABLED,
+                "ttl_seconds": config.SESSION_TTL_SECONDS,
+            },
             # Not just which provider is configured — whether it last worked.
             "ai": ai_responder.status(),
             "reply_latency": latency_monitor.snapshot(),
@@ -2142,6 +2150,41 @@ def get_candidate_templates(
     require_admin(x_admin_key, x_admin_pin)
     candidates = db.get_pending_candidates()
     return {"status": "success", "count": len(candidates), "candidates": candidates}
+
+@app.get("/admin/knowledge-gaps")
+def get_knowledge_gaps(
+    status: str = "OPEN",
+    limit: int = 100,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """Lists deduplicated missing facts/actions, separate from answer drafts."""
+    require_admin(x_admin_key, x_admin_pin)
+    normalized = status.strip().upper()
+    if normalized not in {"OPEN", "RESOLVED", "DISMISSED"}:
+        raise HTTPException(status_code=400, detail="status must be OPEN, RESOLVED, or DISMISSED")
+    gaps = db.get_knowledge_gaps(status=normalized, limit=max(1, min(limit, 200)))
+    return {"status": "success", "count": len(gaps), "knowledge_gaps": gaps}
+
+@app.post("/admin/knowledge-gaps/{gap_id}/status")
+async def set_knowledge_gap_status(
+    gap_id: int,
+    request: Request,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """Marks review state; publishing knowledge still uses the approval workflow."""
+    require_admin(x_admin_key, x_admin_pin)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    status = str(body.get("status", "")).strip().upper()
+    if status not in {"OPEN", "RESOLVED", "DISMISSED"}:
+        raise HTTPException(status_code=400, detail="status must be OPEN, RESOLVED, or DISMISSED")
+    if not db.update_knowledge_gap_status(gap_id, status):
+        raise HTTPException(status_code=404, detail="Knowledge gap not found")
+    return {"status": status, "knowledge_gap_id": gap_id}
 
 @app.post("/admin/candidates/{candidate_id}/approve")
 async def approve_candidate_template(

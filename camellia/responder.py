@@ -1,4 +1,5 @@
 import difflib
+import hashlib
 import json
 import random
 import re
@@ -19,8 +20,22 @@ from camellia.database import db
 from camellia.trigger_index import trigger_index
 from camellia import weekly_flyer
 from camellia import menu_dates
+from camellia.understanding import BusinessAction, Intent, understanding_engine
 
 log = get_logger("camellia.responder")
+
+
+def _structured_nlu_enabled_for(user_id: str, channel: str) -> bool:
+    """Stable rollout cohort: a customer never flips paths between messages."""
+    if not config.STRUCTURED_NLU_ENABLED:
+        return False
+    percent = config.STRUCTURED_NLU_ROLLOUT_PERCENT
+    if percent >= 100:
+        return True
+    if percent <= 0:
+        return False
+    digest = hashlib.sha256(f"{channel}:{user_id}".encode("utf-8")).digest()
+    return int.from_bytes(digest[:4], "big") % 100 < percent
 
 # --- Repeat-reply guard ----------------------------------------------------
 # A one-word answer to the bot's own closing question usually re-matches the
@@ -580,9 +595,14 @@ class DeterministicResponder:
                 return learned_answer, True, f"learned_{learned_match.get('id')}", None
         except Exception:
             pass
-        if (self.classify_unmatched_intent(message) in {"complaint", "bulk"}
+        if (self.classify_unmatched_intent(message) == "complaint"
                 or re.search(r"\b(cancel (?:my |the )?order|order is missing|(?:speak|talk) to (?:a |an )?(?:human|person))\b", text)):
             reply, _ = self.build_handover_response(message)
+            facts = session_memory.get_facts(user_id, channel)
+            facts["last_intents"] = [Intent.ESCALATION.value]
+            facts["last_entities"] = {}
+            facts["last_actions"] = [BusinessAction.ESCALATE_TO_TEAM.value, BusinessAction.SEND_RESPONSE.value]
+            facts["knowledge_sufficient"] = False
             session_memory.add_turn(user_id, channel, message, reply)
             return reply, False, "explicit_escalation", None
         if (re.search(r"https?://|www\.", text)
@@ -623,35 +643,6 @@ class DeterministicResponder:
                     return finish(reply, tmpl["id"], images)
             facts["awaiting_product_price"] = False
 
-        parts = re.split(r"\s+(?:and|also|aur)\s+|\?\s*", text)
-        parts = [p.strip(" ,") for p in parts if p.strip(" ,")]
-        if len(parts) != 2:
-            return None
-        menu_pattern = r"(?:(?:please|pls|send|show|share|me|the|your|can i get)\s+)*(?:(veg|vegetarian|non veg|non-veg|nonveg)\s+)?menu(?:\s+(?:please|pls|bhejo|dikhao|for today))*"
-        for menu_part, delivery_part in (parts, parts[::-1]):
-            menu_match = re.fullmatch(menu_pattern, menu_part)
-            area_match = re.fullmatch(r"(?:do you deliver to|can you deliver to|delivery to|deliver to)\s+([a-z ]+)|([a-z ]+)\s+delivery hai", delivery_part)
-            if not menu_match or not area_match:
-                continue
-            area = (area_match.group(1) or area_match.group(2)).strip()
-            # Unknown areas get the approved coverage answer, never a guessed
-            # promise. Exact equality prevents 'not Gurgaon' becoming Gurgaon.
-            delivery_id = "delivery_area" if area in NCR_SERVICEABLE_AREAS else "delivery_out_of_area"
-            known_outside = {"mumbai", "pune", "bangalore", "bengaluru", "kolkata", "chennai", "hyderabad", "jaipur", "lucknow"}
-            if area not in NCR_SERVICEABLE_AREAS and area not in known_outside:
-                return None
-            choice = menu_match.group(1)
-            menu_id = "weekly_menu_nonveg" if choice and choice.startswith("non") else "weekly_menu_veg" if choice else "know_more"
-            mt, dt = self._template_by_id(menu_id), self._template_by_id(delivery_id)
-            if any(not t.get("response") or t.get("escalate") for t in (mt, dt)):
-                return None
-            menu_reply, images = self._format_dynamic_response(menu_id, mt["response"], user_id=user_id, channel=channel, user_message=menu_part)
-            if menu_id == "know_more":
-                menu_reply = "Here are our menus. Would you like Sondesh or Bengali meals?"
-            delivery_reply, _ = self._format_dynamic_response(delivery_id, dt["response"], user_id=user_id, channel=channel, user_message=delivery_part)
-            facts["last_topic"] = "savoury" if choice else facts.get("last_topic")
-            facts["awaiting_area_confirmation"] = False
-            return finish(delivery_reply + "\n\n" + menu_reply, "compound_menu_delivery", images)
         return None
 
     def _semantic_fallback_template(
@@ -672,8 +663,38 @@ class DeterministicResponder:
         if not config.SEMANTIC_ROUTER_ENABLED:
             return None
 
+        # Prefer the typed contract. It captures entities and multiple intents;
+        # unlike the legacy router it cannot return an arbitrary template name.
+        facts = session_memory.get_facts(user_id, channel)
+        history = session_memory.get_session(user_id, channel).get("turns", [])
+        understood = (
+            understanding_engine.analyze(user_message, history_turns=history, state=facts)
+            if _structured_nlu_enabled_for(user_id, channel)
+            else None
+        )
+        if understood and understood.available and understood.confidence >= 0.65:
+            facts["last_intents"] = understood.intents
+            facts["last_entities"] = understood.entities
+            template_map = {
+                Intent.GREETING.value: "greeting",
+                Intent.MENU_REQUEST.value: "know_more",
+                Intent.PRODUCT_INFORMATION.value: "product_overview",
+                Intent.PRODUCT_PRICE.value: "sondesh_price_detailed",
+                Intent.DELIVERY_QUERY.value: "delivery_area",
+            }
+            if len(understood.intents) == 1:
+                template_id = template_map.get(understood.intents[0])
+                template = next((t for t in templates if t.get("id") == template_id), None)
+                if template and template.get("response") and not template.get("escalate"):
+                    facts["last_actions"] = [BusinessAction.SEND_RESPONSE.value]
+                    facts["knowledge_sufficient"] = True
+                    return template
+            # A valid UNKNOWN/human result is evidence, not provider failure.
+            # Do not let the legacy one-ID router coerce it into a nearby answer.
+            facts["knowledge_sufficient"] = False
+            return None
+
         try:
-            history = session_memory.get_session(user_id, channel).get("turns", [])
             template_id, detail = shadow_router.classify(user_message, templates, history)
         except Exception as exc:
             log.warning("Semantic router failed for %s: %s", channel, exc)
@@ -696,6 +717,166 @@ class DeterministicResponder:
 
         log.info("Semantic router matched %r to approved template %s.", user_message[:80], template_id)
         return template
+
+    def _structured_nlu_response(
+        self,
+        user_message: str,
+        user_id: str,
+        channel: str,
+        intro_greeting_prefix: str = "",
+    ) -> Optional[Tuple[str, bool, str, Optional[Any]]]:
+        """Plan compound/event requests from intent JSON, then execute approved code paths."""
+        if not _structured_nlu_enabled_for(user_id, channel) or not understanding_engine.should_analyze(user_message):
+            return None
+
+        facts = session_memory.get_facts(user_id, channel)
+        history = session_memory.get_session(user_id, channel).get("turns", [])
+        result = understanding_engine.analyze(user_message, history_turns=history, state=facts)
+        if not result.available:
+            result = understanding_engine.deterministic_fallback(user_message)
+        if result.confidence < 0.65:
+            return None
+
+        intents = list(dict.fromkeys(result.intents))
+        facts["last_intents"] = intents
+        facts["last_entities"] = dict(result.entities)
+
+        if any(intent in intents for intent in (Intent.EVENT_ORDER.value, Intent.BULK_ORDER.value, Intent.ESCALATION.value)):
+            reply, _ = self.build_handover_response(user_message)
+            # Event wording does not always carry the old bulk regex. The same
+            # approved quote policy applies: event pricing and logistics require staff.
+            if Intent.EVENT_ORDER.value in intents and self.classify_unmatched_intent(user_message) == "unknown":
+                # Reuse existing approved bulk/event handover copy; NLU changes
+                # classification, never customer-facing business wording.
+                reply, _ = self.build_handover_response("bulk order " + user_message)
+            actions = [BusinessAction.ESCALATE_TO_TEAM.value, BusinessAction.SEND_RESPONSE.value]
+            facts["last_actions"] = actions
+            facts["knowledge_sufficient"] = False
+            try:
+                db.record_knowledge_gap(
+                    user_message=user_message,
+                    intents=intents,
+                    entities=result.entities,
+                    reason="deterministic_human_action",
+                )
+            except Exception as exc:
+                log.warning("Could not record structured knowledge gap: %s", exc)
+            if intro_greeting_prefix:
+                reply = intro_greeting_prefix + reply
+            session_memory.add_turn(user_id, channel, user_message, reply)
+            return reply, False, "groq_structured_event_escalation", None
+
+        replies: List[str] = []
+        images: List[Any] = []
+        actions: List[str] = []
+        used_templates: List[str] = []
+        knowledge_sufficient = True
+
+        def add_template(template_id: str, action: BusinessAction) -> bool:
+            template = self._template_by_id(template_id)
+            if not template or template.get("escalate") or not template.get("response"):
+                return False
+            rendered, rendered_images = self._format_dynamic_response(
+                template_id, template["response"], user_id=user_id,
+                channel=channel, user_message=user_message,
+            )
+            replies.append(rendered)
+            used_templates.append(template_id)
+            actions.append(action.value)
+            if rendered_images:
+                images.extend(rendered_images if isinstance(rendered_images, list) else [rendered_images])
+                actions.append(BusinessAction.SEND_PRODUCT_IMAGE.value)
+            return True
+
+        product = str(result.entities.get("product", "")).lower()
+        location = str(result.entities.get("location", "")).strip()
+        menu_type = str(result.entities.get("menu_type", "")).lower()
+        if not menu_type:
+            if re.search(r"\b(non[ -]?veg|non vegetarian)\b", user_message, re.IGNORECASE):
+                menu_type = "non_vegetarian"
+            elif re.search(r"\b(veg|vegetarian)\b", user_message, re.IGNORECASE):
+                menu_type = "vegetarian"
+        for intent in intents:
+            if intent == Intent.MENU_REQUEST.value:
+                menu_template = (
+                    "weekly_menu_nonveg" if menu_type == "non_vegetarian" else
+                    "weekly_menu_veg" if menu_type == "vegetarian" else
+                    "know_more"
+                )
+                add_template(menu_template, BusinessAction.SEND_MENU)
+            elif intent == Intent.PRODUCT_INFORMATION.value:
+                product_template = (
+                    "jolbhora" if "jolbhora" in product else
+                    "aamar_mishti_collection" if "aamar" in product else
+                    "kanchagolla" if "kanchagolla" in product else
+                    "sondesh_nolen_gur" if "nolen gur" in product else
+                    "product_overview"
+                )
+                add_template(product_template, BusinessAction.SEND_RESPONSE)
+            elif intent == Intent.PRODUCT_PRICE.value:
+                if "jolbhora" in product:
+                    add_template("jolbhora", BusinessAction.SEND_PRICE_SEQUENCE)
+                    continue
+                price_template = (
+                    "kanchagolla" if "kanchagolla" in product else
+                    "sondesh_nolen_gur" if "nolen gur" in product else
+                    "sondesh_price_detailed"
+                )
+                add_template(price_template, BusinessAction.SEND_PRICE_SEQUENCE)
+            elif intent == Intent.DELIVERY_QUERY.value:
+                delivery_template = "delivery_area"
+                if location and not _is_serviceable_ncr_area(location):
+                    delivery_template = "delivery_out_of_area"
+                if add_template(delivery_template, BusinessAction.CONFIRM_DELIVERY_AREA if location else BusinessAction.ASK_DELIVERY_AREA):
+                    facts["awaiting_area_confirmation"] = not bool(location)
+            elif intent == Intent.STORAGE_QUESTION.value:
+                add_template("GUARD_shelf_life_storage", BusinessAction.SEND_RESPONSE)
+
+        if not replies:
+            facts["knowledge_sufficient"] = False
+            return None
+
+        facts["knowledge_sufficient"] = knowledge_sufficient
+        facts["last_actions"] = list(dict.fromkeys(actions + [BusinessAction.SEND_RESPONSE.value]))
+        if not knowledge_sufficient:
+            try:
+                db.record_knowledge_gap(
+                    user_message=user_message,
+                    intents=intents,
+                    entities=result.entities,
+                    reason="conflicting_or_unconfirmed_knowledge",
+                )
+            except Exception as exc:
+                log.warning("Could not record structured knowledge gap: %s", exc)
+        response_text = "\n\n".join(dict.fromkeys(reply.strip() for reply in replies if reply.strip()))
+        if intro_greeting_prefix:
+            response_text = intro_greeting_prefix + response_text
+        response_text = _strip_flower_emoji(response_text)
+        deduped_images: List[Any] = []
+        image_keys = set()
+        for item in images:
+            key = json.dumps(item, sort_keys=True, ensure_ascii=False) if isinstance(item, dict) else str(item)
+            if key not in image_keys:
+                image_keys.add(key)
+                deduped_images.append(item)
+        image_value: Optional[Any] = deduped_images or None
+        if image_value and len(image_value) == 1:
+            image_value = image_value[0]
+        session_memory.add_turn(user_id, channel, user_message, response_text)
+        if len(used_templates) == 1:
+            template_id = used_templates[0]
+        elif set(intents) == {Intent.MENU_REQUEST.value, Intent.DELIVERY_QUERY.value}:
+            # Preserve adapter/button compatibility while last_intents carries
+            # the complete structured result.
+            template_id = "delivery_area"
+        else:
+            template_id = "compound_" + "_".join(intents)
+        if len(used_templates) > 1:
+            log.info(
+                "COMPOUND_INTENT_CANDIDATE msg=%r resolved_intents=%s templates=%s",
+                user_message, intents, used_templates,
+            )
+        return response_text, True, template_id, image_value
 
     def match_and_respond(
         self,
@@ -933,6 +1114,15 @@ class DeterministicResponder:
                 )
                 session_memory.add_turn(user_id, channel, user_message, response_text)
                 return response_text, True, "acknowledgement", None
+
+        # Structured NLU handles compound and event requests before broad
+        # escalation keywords. Complaints/refunds are not eligible here and
+        # continue into the deterministic guard below.
+        structured = self._structured_nlu_response(
+            user_message, user_id, channel, intro_greeting_prefix,
+        )
+        if structured is not None:
+            return structured
 
         # 2. Check explicit escalation triggers first (refund, complaint, etc.)
         escalation_reason = self.check_explicit_escalation_triggers(user_message)
@@ -1839,21 +2029,19 @@ class DeterministicResponder:
                     user_context=user_ctx,
                     history_turns=history,
                 )
-                try:
-                    if ok and ai_resp:
-                        db.save_candidate_template(
-                            name=f"groq_grounded_{rag_res.proposed_intent}",
-                            response=ai_resp,
-                            user_message=user_message,
-                            source_refs=rag_res.source_refs or ["ai_responder"],
-                            confidence=rag_res.confidence_score,
-                            created_by="ai_responder",
-                        )
-                except Exception as ce:
-                    log.warning("Could not save the Groq candidate template: %s", ce)
-
                 if ok and ai_resp:
                     if rag_fallback_engine.is_grounded_in_context(ai_resp, rag_res.source_chunks):
+                        try:
+                            db.save_candidate_template(
+                                name=f"groq_grounded_{rag_res.proposed_intent}",
+                                response=ai_resp,
+                                user_message=user_message,
+                                source_refs=rag_res.source_refs or ["ai_responder"],
+                                confidence=rag_res.confidence_score,
+                                created_by="ai_responder",
+                            )
+                        except Exception as ce:
+                            log.warning("Could not save the grounded Groq candidate template: %s", ce)
                         if intro_greeting_prefix:
                             ai_resp = intro_greeting_prefix + ai_resp
                         db.log_rag_audit(
@@ -1920,6 +2108,15 @@ class DeterministicResponder:
             return clarifier, True, "clarify_request", None
 
         session_memory.add_turn(user_id, channel, user_message, fallback)
+        try:
+            db.record_knowledge_gap(
+                user_message=user_message,
+                intents=facts.get("last_intents") or [_intent or "unknown"],
+                entities=facts.get("last_entities") or {},
+                reason="unsupported_or_insufficient_knowledge",
+            )
+        except Exception as exc:
+            log.warning("Could not record unmatched knowledge gap: %s", exc)
         return fallback, False, None, None
 
     @staticmethod

@@ -1,5 +1,5 @@
 {
-  "seed_version": 16,
+  "seed_version": 17,
   "matching_rules": {
     "guard_precedence": "GUARD_ templates (id starting with GUARD_) have absolute precedence over any answer template. When matched, they escalate immediately with response: null to prevent unverified brand statements.",
     "how_it_works": "Each template has 'triggers' (keywords/phrases). If a customer message contains ANY trigger from a template's list, that template fires. If multiple templates match, the one with the MOST matched keywords wins. If nothing matches confidently, escalate to human — never guess.",
@@ -503,9 +503,9 @@
         "nolen gur jolbhora",
         "jolbhora sondesh"
       ],
-      "response": "Specific pricing and pack sizes for Jolbhora (Nolen Gur Sondesh with authentic liquid filling) are currently pending client confirmation — please connect with our team directly on WhatsApp or call +91 87965 51990 for custom packaging details!",
+      "response": "Jolbhora — Nolen Gur Sondesh with an authentic liquid filling:\n\n```\n+----------------------+-------------+-------+-------+-------+\n| Collection           | Piece Count | 250g  | 500g  |  1kg  |\n+----------------------+-------------+-------+-------+-------+\n| Aamar Mishti         | 6 / 12 / 24 | ₹750  | ₹1400 | ₹2500 |\n| Signature desi A2    | 6 / 12 / 24 | ₹900  | ₹1600 | ₹2900 |\n+----------------------+-------------+-------+-------+-------+\n```\n\nWhich collection and pack size would you like to order?",
       "escalate": false,
-      "source_ref": "menu.json > Jolbhora"
+      "source_ref": "existing collection cards and order calculator, aligned 2026-09-09"
     },
     {
       "id": "kanchagolla",
@@ -1237,9 +1237,9 @@
         "real liquid nolen gur",
         "liquid nolen gur inside"
       ],
-      "response": "Yes, absolutely! Our traditional Jolbhora Sondesh is crafted the authentic Kolkata way — featuring a delicate outer shell of artisanal Norom Pak Sondesh filled with pure, luscious liquid Nolen Gur (date palm jaggery) right in the center! Specific pricing and pack sizes for Jolbhora are currently pending client confirmation — please connect with our team directly on WhatsApp or call +91 87965 51990!",
+      "response": "Our traditional Jolbhora Sondesh has an outer shell of Norom Pak Sondesh filled with liquid Nolen Gur.\n\nJolbhora — Nolen Gur Sondesh with an authentic liquid filling:\n\n```\n+----------------------+-------------+-------+-------+-------+\n| Collection           | Piece Count | 250g  | 500g  |  1kg  |\n+----------------------+-------------+-------+-------+-------+\n| Aamar Mishti         | 6 / 12 / 24 | ₹750  | ₹1400 | ₹2500 |\n| Signature desi A2    | 6 / 12 / 24 | ₹900  | ₹1600 | ₹2900 |\n+----------------------+-------------+-------+-------+-------+\n```\n\nWhich collection and pack size would you like to order?",
       "escalate": false,
-      "source_ref": "menu.json > Jolbhora & Talgash"
+      "source_ref": "existing collection cards and order calculator, aligned 2026-09-09"
     },
     {
       "id": "sugar_free_options",

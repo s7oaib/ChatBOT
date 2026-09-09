@@ -8,6 +8,7 @@ order it — and any dish the catalogue did know was priced from the catalogue,
 not from the menu the customer had just been shown.
 """
 import json
+from datetime import date, timedelta
 
 import pytest
 
@@ -50,7 +51,17 @@ def _write_menu(week_of, veg=None, nonveg=None):
     responder.reload_templates()
 
 
-CURRENT = "2nd September - 8th September, 2026"
+def _ordinal(day):
+    suffix = "th" if 10 <= day % 100 <= 20 else {1: "st", 2: "nd", 3: "rd"}.get(day % 10, "th")
+    return f"{day}{suffix}"
+
+
+_today = date.today()
+_week_end = _today + timedelta(days=6)
+CURRENT = (
+    f"{_ordinal(_today.day)} {_today.strftime('%B')} - "
+    f"{_ordinal(_week_end.day)} {_week_end.strftime('%B')}, {_week_end.year}"
+)
 SHUKTO = {"item": "Shukto", "description": "Bitter-sweet medley", "price_inr": 280, "quantity": "250g"}
 MANGSHO = {"item": "Robibarer Mangsho", "description": "Sunday mutton", "price_inr": 640, "quantity": "200g"}
 

@@ -63,7 +63,36 @@ def scenarios():
     for msg in ("okay", "ok", "thanks", "thank you", "shukriya"):
         for opening in ("veg menu", "sondesh price"):
             add("closing", [turn(opening, "weekly_menu_veg|sondesh_price_detailed"), turn(msg, "acknowledgement|conversation_closing", max_words=20)])
-    assert len(cases) == 120
+    products = ("Jolbhora", "Kanchagolla", "Nolen Gur", "Aamar Mishti")
+    areas = ("Delhi", "Gurgaon", "Noida", "Mumbai", "Pune")
+    for product in products:
+        for area in areas:
+            for wording in (
+                f"What is the price of {product} and do you deliver to {area}?",
+                f"Could you tell me how much {product} costs, and can you ship to {area}?",
+            ):
+                add("structured", [turn(
+                    wording, "*", contains=["Delhi NCR"],
+                    intents=["product_price", "delivery_query"],
+                    entities={"product": product, "location": area},
+                    actions=["SEND_PRICE_SEQUENCE"],
+                    outside=area in {"Mumbai", "Pune"},
+                )])
+    for request in (
+        "Bengali sweets for an event",
+        "Sondesh for a wedding",
+        "Mishti for a party",
+        "100 sweet boxes for a function",
+        "Festive gifting for our company",
+    ):
+        for prefix in ("I need ", "Can you arrange ", "Please help with ", "We are looking for "):
+            add("structured", [turn(
+                prefix + request, "*", handoff=True,
+                intents=["event_order|bulk_order"],
+                actions=["ESCALATE_TO_TEAM"],
+                knowledge_sufficient=False,
+            )])
+    assert len(cases) == 180
     return cases
 
 
@@ -79,7 +108,7 @@ def evaluate(cases, improved, live=False, rates=None, model=None):
         menu["weekly_menus"][-1]["week_of"] = "1st January - 31st December, 2099"
         (tmp / "menu.json").write_text(json.dumps(menu), encoding="utf-8")
         (tmp / "qa.json").write_text(Path(config.QA_TEMPLATES_PATH).read_text(encoding="utf-8"), encoding="utf-8")
-        for key, value in {"DB_PATH": str(tmp / "test.db"), "MENU_JSON_PATH": str(tmp / "menu.json"), "QA_TEMPLATES_PATH": str(tmp / "qa.json"), "GROQ_ENABLED": live, "GROQ_MODEL": model or config.GROQ_MODEL, "ROUTER_SHADOW_ENABLED": False, "CONVERSATION_IMPROVEMENTS_ENABLED": improved, "SLOW_REPLY_NOTICE_ENABLED": False}.items():
+        for key, value in {"DB_PATH": str(tmp / "test.db"), "MENU_JSON_PATH": str(tmp / "menu.json"), "QA_TEMPLATES_PATH": str(tmp / "qa.json"), "GROQ_ENABLED": live, "GROQ_MODEL": model or config.GROQ_MODEL, "ROUTER_SHADOW_ENABLED": False, "CONVERSATION_IMPROVEMENTS_ENABLED": improved, "STRUCTURED_NLU_ENABLED": improved, "STRUCTURED_NLU_ROLLOUT_PERCENT": 100, "SLOW_REPLY_NOTICE_ENABLED": False}.items():
             stack.enter_context(patch.object(config, key, value))
         from camellia.database import db
         from camellia.responder import responder
@@ -123,6 +152,7 @@ def evaluate(cases, improved, live=False, rates=None, model=None):
                 start = time.perf_counter()
                 reply, matched, tid, images = responder.match_and_respond(expected["message"], user_id=case["id"], channel="whatsapp")
                 elapsed = (time.perf_counter() - start) * 1000
+                facts = session_memory.get_facts(case["id"], "whatsapp")
                 errors = []
                 if "*" not in expected["ids"] and tid not in expected["ids"]:
                     errors.append("wrong_route")
@@ -142,6 +172,18 @@ def evaluate(cases, improved, live=False, rates=None, model=None):
                     errors.append("missing_delivery_refusal")
                 if expected.get("images") and not images:
                     errors.append("missing_menu_image")
+                expected_intents = expected.get("intents", [])
+                for intent_options in expected_intents:
+                    if not any(option in facts.get("last_intents", []) for option in intent_options.split("|")):
+                        errors.append("missing_intent:" + intent_options)
+                for key, value in expected.get("entities", {}).items():
+                    if str(facts.get("last_entities", {}).get(key, "")).lower() != str(value).lower():
+                        errors.append("wrong_entity:" + key)
+                for action in expected.get("actions", []):
+                    if action not in facts.get("last_actions", []):
+                        errors.append("missing_action:" + action)
+                if "knowledge_sufficient" in expected and facts.get("knowledge_sufficient") is not expected["knowledge_sufficient"]:
+                    errors.append("wrong_knowledge_sufficiency")
                 if len(reply.split()) > expected.get("max_words", float("inf")):
                     errors.append("too_long")
                 questions = {q.strip().lower() for q in re.findall(r"[^.!?\n]+\?", reply)}
@@ -170,7 +212,7 @@ if __name__ == "__main__":
     parser.add_argument("--rates", type=Path)
     args = parser.parse_args()
     rates = json.loads(args.rates.read_text()) if args.rates else None
-    report = {"dataset": "120 synthetic scenarios; not sampled customer conversations", "limitations": "Route/content checks are proxies for answer quality. Repeated questions use exact normalized text. No real handoff delivery is attempted. Offline latency excludes provider/network latency.", "runs": [evaluate(scenarios(), improved, args.live, rates, args.model) for improved in (False, True)]}
+    report = {"dataset": "180 synthetic scenarios / 220 turns; not sampled customer conversations", "limitations": "Route/content/intent/entity/action checks are proxies for answer quality. Repeated questions use exact normalized text. No real handoff delivery is attempted. Offline latency excludes provider/network latency.", "runs": [evaluate(scenarios(), improved, args.live, rates, args.model) for improved in (False, True)]}
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
     print(json.dumps([{k: v for k, v in run.items() if k != "records"} for run in report["runs"]], indent=2))

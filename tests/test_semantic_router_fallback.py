@@ -7,6 +7,7 @@ from camellia.rag_fallback import RAGResult
 from camellia.responder import responder
 from camellia.router import shadow_router
 from camellia.session_memory import session_memory
+from camellia.understanding import UnderstandingResult, understanding_engine
 
 
 def _ask(message: str, user_id: str):
@@ -19,6 +20,7 @@ def test_semantic_fallback_routes_bengali_wording_to_an_approved_template():
     # The router may understand it, but the response must still be the approved
     # weekly-menu template and its existing dynamic menu renderer.
     with patch.object(config, "SEMANTIC_ROUTER_ENABLED", True), \
+         patch.object(understanding_engine, "analyze", return_value=UnderstandingResult(reason="provider_unavailable")), \
          patch.object(shadow_router, "classify", return_value=("weekly_menu_veg", "ok")) as classify:
         text, matched, template_id, _ = _ask("khana wala card bhejna", "semantic_hinglish")
 

@@ -86,8 +86,23 @@
         {
           "item": "Jolbhora",
           "description": "Nolen Gur sondesh with a liquid filling",
-          "status": "UNSOURCED (Pending Client Confirmation)",
-          "pricing_note": "Pricing pending client confirmation; contact team at +91 8796551990"
+          "prices": [
+            {
+              "pack_size": "250g",
+              "pieces": 6,
+              "price_inr": 750
+            },
+            {
+              "pack_size": "500g",
+              "pieces": 12,
+              "price_inr": 1400
+            },
+            {
+              "pack_size": "1kg",
+              "pieces": 24,
+              "price_inr": 2500
+            }
+          ]
         },
         {
           "item": "Kanchagolla",
@@ -197,8 +212,23 @@
         {
           "item": "Jolbhora",
           "description": "Nolen Gur, with a liquid filling",
-          "status": "UNSOURCED (Pending Client Confirmation)",
-          "pricing_note": "Pricing pending client confirmation; contact team at +91 8796551990"
+          "prices": [
+            {
+              "pack_size": "250g",
+              "pieces": 6,
+              "price_inr": 900
+            },
+            {
+              "pack_size": "500g",
+              "pieces": 12,
+              "price_inr": 1600
+            },
+            {
+              "pack_size": "1kg",
+              "pieces": 24,
+              "price_inr": 2900
+            }
+          ]
         }
       ]
     }

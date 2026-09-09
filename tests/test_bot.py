@@ -1580,7 +1580,8 @@ class TestCamelliaBot(unittest.TestCase):
         resp, match, tmpl, imgs = responder.match_and_respond("price of jolbhora", user_id="test_jol_user", channel="whatsapp")
         self.assertTrue(match)
         self.assertEqual(tmpl, "jolbhora")
-        self.assertIn("pending client confirmation", resp)
+        self.assertIn("₹750", resp)
+        self.assertIn("₹900", resp)
 
         # Pack sizes (250g, 500g, 1kg)
         resp250, match250, tmpl250, _ = responder.match_and_respond("250g box options", user_id="test_250_user", channel="whatsapp")

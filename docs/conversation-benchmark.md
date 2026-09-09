@@ -6,9 +6,10 @@ Run from the repository root:
 .\.venv\Scripts\python.exe scripts/conversation_benchmark.py --output scratch/conversation-benchmark.json
 ```
 
-The suite contains **120 synthetic scenarios / 160 customer turns**: 40 ordinary
+The suite contains **180 synthetic scenarios / 220 customer turns**: 40 ordinary
 questions, 30 menu-and-delivery requests, 20 conversations resolving ambiguous
-prices, 20 human-handoff cases, and 10 acknowledgement/sign-off conversations.
+prices, 20 human-handoff cases, 10 acknowledgement/sign-off conversations,
+40 product-price plus delivery requests, and 20 event/bulk requests.
 These are developer-authored regression scenarios with systematic paraphrases,
 not anonymized customer traffic or an independent accuracy evaluation.
 
@@ -18,11 +19,10 @@ setting is true. Set it false to roll back this conversation layer independently
 of the existing semantic router. Deployment is still required for local changes
 to reach customers.
 
-The implementation currently supports menu + delivery coverage as its compound
-intent pair. Unsupported combinations stay in the existing pipeline. It also
-remembers the answer to a product-price clarification, shortens acknowledgements
-and closings, and routes complaints/cancellation/human requests before sales
-matching. Existing approved menu and policy copy is retained.
+The candidate run enables structured intent/entity understanding and checks its
+deterministic action plan. The baseline disables it. The suite checks compound
+price/delivery requests, event handoffs, extracted product/location, knowledge
+sufficiency, price clarification, acknowledgements and existing approved copy.
 
 ## What the report measures
 
@@ -81,10 +81,10 @@ positions so a preference for the first answer does not decide the result.
 $env:JUDGE_API_KEY = "your-judge-key"
 $env:JUDGE_BASE_URL = "https://your-provider.example/v1"
 $env:JUDGE_MODEL = "your-independent-judge-model"
-.\.venv\Scripts\python.exe scripts/judge_conversation_benchmark.py --judge --limit 160 --output scratch/judge-benchmark.json
+.\.venv\Scripts\python.exe scripts/judge_conversation_benchmark.py --judge --limit 220 --output scratch/judge-benchmark.json
 ```
 
-`--limit 160` evaluates the full synthetic set. Start with the default 25
+`--limit 220` evaluates the full synthetic set. Start with the default 25
 turns while tuning the judge prompt, because each turn makes two point-wise and
 two pairwise judge calls.
 

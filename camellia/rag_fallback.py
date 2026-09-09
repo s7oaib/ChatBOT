@@ -111,11 +111,26 @@ class RAGFallbackEngine:
             return set(re.findall(r'\d+', collapsed))
 
         answer_numbers = digit_groups(answer)
-        if not answer_numbers:
-            return True
-
         context_numbers = digit_groups(" ".join(context_chunks or []))
-        return answer_numbers.issubset(context_numbers)
+        if not answer_numbers.issubset(context_numbers):
+            return False
+
+        # Numbers catch fabricated prices and times, but a model can still add
+        # a harmful qualitative claim: "free delivery", "nut-free", "available
+        # nationwide". Protected claims must be present in the source wording.
+        normalise = lambda value: " ".join(re.findall(r"[a-z0-9]+", (value or "").lower()))
+        answer_text = normalise(answer)
+        context_text = normalise(" ".join(context_chunks or []))
+        protected_claims = (
+            "free delivery", "complimentary delivery", "discount", "cash on delivery",
+            "same day", "next day", "nationwide", "all india", "outside delhi ncr",
+            "nut free", "gluten free", "sugar free", "dairy free", "vegan", "halal",
+            "no allergens", "refund", "return policy", "in stock", "out of stock",
+        )
+        return all(
+            claim not in answer_text or claim in context_text
+            for claim in protected_claims
+        )
 
     def retrieve(self, user_message: str) -> RAGResult:
         """

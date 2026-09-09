@@ -162,6 +162,34 @@ class Database:
             );
             """)
 
+            # Canonical missing-information queue. Unlike candidate_templates,
+            # this records what fact/action is absent rather than teaching one
+            # more spelling of the customer's question.
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS knowledge_gaps (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                canonical_key TEXT NOT NULL UNIQUE,
+                intents TEXT NOT NULL,
+                entities TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                example_message TEXT NOT NULL,
+                occurrences INTEGER DEFAULT 1,
+                status TEXT DEFAULT 'OPEN',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS active_conversation_sessions (
+                user_id TEXT NOT NULL,
+                channel TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                updated_at REAL NOT NULL,
+                PRIMARY KEY (user_id, channel)
+            );
+            """)
+
             # Meta changes ad titles freely, so the stable ad ID is mapped by
             # kitchen staff and kept on the same durable volume as the rest of
             # the bot state. The environment JSON remains a deployment-time
@@ -263,6 +291,8 @@ class Database:
             # get_learned_knowledge() reads the newest N; the primary key
             # already orders by id, so only the audit log needs help here.
             "CREATE INDEX IF NOT EXISTS idx_rag_audit_timestamp ON rag_audit_logs(timestamp DESC);",
+            "CREATE INDEX IF NOT EXISTS idx_knowledge_gaps_status_updated ON knowledge_gaps(status, updated_at DESC);",
+            "CREATE INDEX IF NOT EXISTS idx_active_sessions_updated ON active_conversation_sessions(updated_at);",
         )
         for statement in statements:
             cursor.execute(statement)
@@ -805,6 +835,126 @@ class Database:
             candidate_id = cursor.lastrowid
             conn.commit()
             return candidate_id
+
+    def record_knowledge_gap(
+        self,
+        user_message: str,
+        intents: List[str],
+        entities: Dict[str, Any],
+        reason: str,
+    ) -> int:
+        """Deduplicates missing knowledge by intent and meaningful entities."""
+        normalized_intents = sorted({str(value).strip().lower() for value in intents if str(value).strip()}) or ["unknown"]
+        normalized_entities = {
+            str(key).strip().lower(): str(value).strip().lower()
+            for key, value in (entities or {}).items()
+            if value not in (None, "", [], {})
+        }
+        key_parts = normalized_intents + [
+            f"{key}={normalized_entities[key]}" for key in sorted(normalized_entities)
+        ]
+        canonical_key = "|".join(key_parts)[:300]
+        now = datetime.utcnow().isoformat()
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO knowledge_gaps (
+                    canonical_key, intents, entities, reason, example_message,
+                    occurrences, status, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, 1, 'OPEN', ?, ?)
+                ON CONFLICT(canonical_key) DO UPDATE SET
+                    occurrences = knowledge_gaps.occurrences + 1,
+                    example_message = excluded.example_message,
+                    reason = excluded.reason,
+                    updated_at = excluded.updated_at
+            """, (
+                canonical_key,
+                json.dumps(normalized_intents),
+                json.dumps(normalized_entities, ensure_ascii=False),
+                reason,
+                user_message,
+                now,
+                now,
+            ))
+            row = cursor.execute(
+                "SELECT id FROM knowledge_gaps WHERE canonical_key = ?", (canonical_key,)
+            ).fetchone()
+            conn.commit()
+            return int(row["id"])
+
+    def save_active_session(
+        self, user_id: str, channel: str, payload: Dict[str, Any], updated_at: float
+    ) -> None:
+        """Upserts bounded active conversation state for restart continuity."""
+        with self.get_connection() as conn:
+            conn.execute("""
+                INSERT INTO active_conversation_sessions (user_id, channel, payload, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(user_id, channel) DO UPDATE SET
+                    payload = excluded.payload,
+                    updated_at = excluded.updated_at
+            """, (str(user_id), str(channel), json.dumps(payload, ensure_ascii=False), float(updated_at)))
+            conn.commit()
+
+    def load_active_session(self, user_id: str, channel: str) -> Optional[Dict[str, Any]]:
+        """Loads active state; the session layer expires transient fields."""
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT payload, updated_at FROM active_conversation_sessions WHERE user_id = ? AND channel = ?",
+                (str(user_id), str(channel)),
+            ).fetchone()
+        if not row:
+            return None
+        try:
+            payload = json.loads(row["payload"])
+        except (TypeError, json.JSONDecodeError):
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    def delete_active_session(self, user_id: str, channel: str) -> None:
+        with self.get_connection() as conn:
+            conn.execute(
+                "DELETE FROM active_conversation_sessions WHERE user_id = ? AND channel = ?",
+                (str(user_id), str(channel)),
+            )
+            conn.commit()
+
+    def purge_active_sessions(self, older_than: float) -> int:
+        with self.get_connection() as conn:
+            cursor = conn.execute(
+                "DELETE FROM active_conversation_sessions WHERE updated_at < ?", (float(older_than),)
+            )
+            conn.commit()
+        return cursor.rowcount
+
+    def get_knowledge_gaps(self, status: str = "OPEN", limit: int = 100) -> List[Dict[str, Any]]:
+        """Returns canonical information gaps for human review."""
+        with self.get_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM knowledge_gaps WHERE status = ? ORDER BY updated_at DESC LIMIT ?",
+                (status, limit),
+            ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["intents"] = json.loads(item.get("intents") or "[]")
+            item["entities"] = json.loads(item.get("entities") or "{}")
+            result.append(item)
+        return result
+
+    def update_knowledge_gap_status(self, gap_id: int, status: str) -> bool:
+        """Marks a canonical gap reviewed without publishing any answer."""
+        allowed = {"OPEN", "RESOLVED", "DISMISSED"}
+        normalized = str(status).strip().upper()
+        if normalized not in allowed:
+            return False
+        with self.get_connection() as conn:
+            cursor = conn.execute(
+                "UPDATE knowledge_gaps SET status = ?, updated_at = ? WHERE id = ?",
+                (normalized, datetime.utcnow().isoformat(), gap_id),
+            )
+            conn.commit()
+        return cursor.rowcount > 0
 
     def get_pending_candidates(self) -> List[Dict[str, Any]]:
         """Retrieves all candidate templates awaiting human approval."""

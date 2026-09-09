@@ -9,7 +9,8 @@ from camellia.session_memory import session_memory
 @pytest.fixture(autouse=True)
 def isolated():
     with patch.object(session_memory, "_sessions", type(session_memory._sessions)()), \
-         patch.object(config, "CONVERSATION_IMPROVEMENTS_ENABLED", True):
+         patch.object(config, "CONVERSATION_IMPROVEMENTS_ENABLED", True), \
+         patch.object(config, "STRUCTURED_NLU_ROLLOUT_PERCENT", 100):
         yield
 
 
@@ -19,10 +20,10 @@ def isolated():
     "Please share vegetarian menu? Can you deliver to Delhi?",
 ])
 def test_both_requests_use_live_menu_and_approved_delivery(message):
-    result = responder._conversation_request(message, "holdout", "whatsapp")
-    assert result and result[2] == "compound_menu_delivery"
+    result = responder.match_and_respond(message, "holdout", "whatsapp")
+    assert result and result[2] == "delivery_area"
     assert "Delhi NCR" in result[0]
-    assert "Menu" in result[0]
+    assert "menu" in result[0].lower()
     assert result[3]
     assert len(session_memory.get_session("holdout", "whatsapp")["turns"]) == 2
 
@@ -39,7 +40,7 @@ def test_unsupported_combinations_remain_in_existing_pipeline(message):
 
 def test_expired_menu_does_not_gain_fresh_dishes_through_compound_route():
     with patch.object(responder, "_weekly_menu_expired", return_value=True):
-        reply, _, _, _ = responder._conversation_request("veg menu and do you deliver to noida", "holdout", "whatsapp")
+        reply, _, _, _ = responder.match_and_respond("veg menu and do you deliver to noida", "holdout", "whatsapp")
     assert "finalising" in reply
     assert "₹" not in reply
 

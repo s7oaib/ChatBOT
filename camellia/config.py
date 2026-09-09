@@ -144,6 +144,24 @@ class Config:
     # The router selects only an existing approved template; it never writes
     # customer-facing facts. Set false to retain deterministic-only routing.
     SEMANTIC_ROUTER_ENABLED: bool = os.getenv("SEMANTIC_ROUTER_ENABLED", "true").lower() in ("true", "1", "t", "yes")
+    # Structured intent/entity analysis for compound requests and wording the
+    # deterministic matcher cannot place. The model returns no customer-facing
+    # prose; code validates its JSON and executes only approved actions.
+    STRUCTURED_NLU_ENABLED: bool = os.getenv("STRUCTURED_NLU_ENABLED", "true").lower() in ("true", "1", "t", "yes")
+    try:
+        STRUCTURED_NLU_ROLLOUT_PERCENT: int = max(
+            0, min(100, int(os.getenv("STRUCTURED_NLU_ROLLOUT_PERCENT", "10")))
+        )
+    except ValueError:
+        STRUCTURED_NLU_ROLLOUT_PERCENT: int = 10
+
+    # Active conversation state survives restarts and is shared by workers via
+    # the existing SQLite volume. The short TTL limits stale conversational state.
+    SESSION_PERSISTENCE_ENABLED: bool = os.getenv("SESSION_PERSISTENCE_ENABLED", "true").lower() in ("true", "1", "t", "yes")
+    try:
+        SESSION_TTL_SECONDS: int = max(300, int(os.getenv("SESSION_TTL_SECONDS", "86400")))
+    except ValueError:
+        SESSION_TTL_SECONDS: int = 86400
 
     # Conversations older than this are purged; stated in the privacy policy.
     DATA_RETENTION_DAYS: int = int(os.getenv("DATA_RETENTION_DAYS", "90"))
