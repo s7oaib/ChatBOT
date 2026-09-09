@@ -229,6 +229,17 @@ class RAGFallbackEngine:
         "welcome", "again", "back", "each", "every", "both", "very", "still",
         "same", "other", "another", "next", "please", "share", "ask", "asked",
         "confirm", "confirmed", "let's", "lets", "get", "got", "give", "made",
+        # Discourse words that frame an answer without adding a claim to it:
+        # "here are the pricing details" says nothing the approved copy did
+        # not already say. Words that name a property of the food, a time, a
+        # place or a policy are deliberately absent.
+        "details", "detail", "information", "info", "pricing", "list",
+        "options", "option", "below", "above", "following", "these", "those",
+        "note", "happy", "glad", "choose", "choice", "prefer", "would",
+        "like", "want", "know", "see", "send", "share", "reply", "ask",
+        "hello", "thanks", "welcome", "sure", "yes", "please",
+        # Question words ask, they do not assert.
+        "where", "when", "which", "what", "who", "whom", "whose", "why",
     })
 
     def _unsupported_content_word(

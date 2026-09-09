@@ -926,7 +926,13 @@ class TestCamelliaBot(unittest.TestCase):
         from camellia.responder import responder
         from camellia.ai_responder import ai_responder
 
-        refined = "Hello Shoaib! We deliver fresh across Delhi NCR every day."
+        # A refinement may rephrase the approved copy; it may not invent a
+        # customer name or any other fact the context never carried, which
+        # the grounding guard now enforces.
+        refined = (
+            "Yes — we deliver right across Delhi NCR: Delhi, Gurgaon, Noida, "
+            "Ghaziabad and Faridabad are all covered."
+        )
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = {
@@ -936,12 +942,17 @@ class TestCamelliaBot(unittest.TestCase):
 
         ai_responder._groq_cooldown_until = 0.0
         ai_responder._refinement_cache.clear()
-        with patch.object(config, "GROQ_ENABLED", True), patch.object(config, "GROQ_API_KEY", "fake_key"):
+        # Template refinement belongs to the deterministic path; the
+        # intent/entity path composes its reply from the selected knowledge
+        # instead (see compose_verified_response), so understanding is off here.
+        with patch.object(config, "GROQ_ENABLED", True), patch.object(
+            config, "GROQ_API_KEY", "fake_key",
+        ), patch.object(config, "STRUCTURED_NLU_ENABLED", False):
             resp, match, tmpl, _ = responder.match_and_respond(
                 "which areas do you deliver to", user_id="test_ai_refine", channel="whatsapp"
             )
             self.assertTrue(match)
-            self.assertIn("Hello Shoaib!", resp)
+            self.assertTrue(resp.startswith("Yes — we deliver right across Delhi NCR"))
 
     @patch("camellia.ai_responder.httpx.Client")
     def test_price_table_template_is_never_refined(self, mock_httpx_cls):
@@ -1148,7 +1159,7 @@ class TestCamelliaBot(unittest.TestCase):
 
         post = mock_httpx_cls.return_value.__enter__.return_value.post
         post.side_effect = [
-            _reply("We deliver right across Delhi NCR — whereabouts are you?"),
+            _reply("We deliver right across Delhi NCR. Where are you?"),
             _reply("Yes — Gurgaon is covered! We ship from Sushant Arcade."),
         ]
 
@@ -1159,7 +1170,15 @@ class TestCamelliaBot(unittest.TestCase):
 
         from camellia.understanding import UnderstandingResult
 
-        with patch.object(config, "GROQ_ENABLED", True), patch.object(config, "GROQ_API_KEY", "fake_key"), patch(
+        # Structured understanding is off for this customer, so both turns take
+        # the deterministic path — which is where a re-matched template needs
+        # refinement to read as an answer rather than a repeat. (With
+        # understanding on, the intent/entity path sets the area slot itself
+        # and the follow-up is answered by the confirmation handler; that is
+        # covered in tests/test_provider_outage_routing.py.)
+        with patch.object(config, "GROQ_ENABLED", True), patch.object(config, "GROQ_API_KEY", "fake_key"), patch.object(
+            config, "STRUCTURED_NLU_ENABLED", False,
+        ), patch(
             "camellia.responder.understanding_engine.analyze",
             return_value=UnderstandingResult(reason="provider_unavailable"),
         ):
@@ -1178,7 +1197,7 @@ class TestCamelliaBot(unittest.TestCase):
         # The follow-up refinement must have carried the prior exchange.
         second_prompt = post.call_args_list[-1].kwargs["json"]["messages"][0]["content"]
         self.assertIn("Recent Chat History:", second_prompt)
-        self.assertIn("whereabouts are you?", second_prompt)
+        self.assertIn("Where are you?", second_prompt)
         self.assertIn("do you deliver today", second_prompt)
 
         # And the two replies must not be the same text.
@@ -1195,7 +1214,7 @@ class TestCamelliaBot(unittest.TestCase):
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = {
-            "choices": [{"message": {"content": "Refined once."}}]
+            "choices": [{"message": {"content": "Yes — we deliver across Delhi NCR."}}]
         }
         post = mock_httpx_cls.return_value.__enter__.return_value.post
         post.return_value = mock_response
@@ -1213,8 +1232,8 @@ class TestCamelliaBot(unittest.TestCase):
 
         self.assertTrue(ok1)
         self.assertTrue(ok2)
-        self.assertEqual(first, "Refined once.")
-        self.assertEqual(second, "Refined once.")
+        self.assertEqual(first, "Yes — we deliver across Delhi NCR.")
+        self.assertEqual(second, "Yes — we deliver across Delhi NCR.")
         self.assertEqual(post.call_count, 1)
 
     @patch("camellia.ai_responder.httpx.Client")

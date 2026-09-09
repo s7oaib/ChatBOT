@@ -722,6 +722,11 @@ class DeterministicResponder:
         """
         if facts.get("last_knowledge_ids"):
             return
+        # An upstream layer that already found something insufficient is not
+        # overruled by whatever answered afterwards.
+        recorded = facts.get("last_knowledge_sufficiency") or {}
+        if recorded and not all(recorded.values()):
+            return
 
         if not was_matched or not template_id:
             intents = facts.get("last_intents") or [Intent.UNKNOWN.value]
@@ -740,15 +745,72 @@ class DeterministicResponder:
         facts["last_source_ref"] = (
             template.get("source_ref") or f"qa_templates.json#{template_id}"
         )
+        # Only an intent this very answer is the approved knowledge for may be
+        # recorded as satisfied: an allergen question answered with a product
+        # card is not a satisfied allergen question.
         intents = [
             intent for intent in (facts.get("last_intents") or [])
-            if intent != Intent.UNKNOWN.value
+            if intent not in {Intent.UNKNOWN.value, Intent.BUSINESS_POLICY_UNKNOWN.value}
+            and approved_knowledge.knowledge_id_for_intent(intent, template_id)
         ]
         keys = intents or [canonical_id.split(":")[0] if canonical_id else "compatibility_route"]
         facts["last_knowledge_sufficiency"] = {key: True for key in keys}
         facts["knowledge_sufficient"] = True
         if not facts.get("last_grounding"):
             facts["last_grounding"] = "deterministic_approved"
+
+    def _apply_crosssell_nudges(
+        self,
+        template_id: str,
+        response_text: str,
+        image_url: Any,
+        facts: Dict[str, Any],
+    ) -> Tuple[str, Any]:
+        """The once-per-session savoury/sondesh nudges, wherever the answer came from.
+
+        These belong to the answer, not to the layer that selected it, so the
+        intent/entity path and the deterministic path apply them identically.
+        """
+        savoury_templates = {
+            "savoury_food_intro", "weekly_menu_veg", "weekly_menu_nonveg",
+            "combo_bento", "bento_details", "alacarte_prebooking_steps",
+            "subscription_details", "subscription_booking_steps",
+            "savoury_best_time_to_book", "savoury_delivery_time",
+        }
+        # The expired-menu fallback ("kitchen is finalising this week's menu")
+        # explicitly promises no photo and no price a customer could order
+        # against — the nudge's own Sondesh card would break that promise.
+        menu_is_being_updated = response_text.strip() == _WEEKLY_MENU_BEING_UPDATED.strip()
+        if (
+            template_id in savoury_templates
+            and not facts.get("savoury_crosssell_sent")
+            and not menu_is_being_updated
+        ):
+            facts["savoury_crosssell_sent"] = True
+            crosssell_tmpl = self._template_by_id("savoury_crosssell_sondesh") or {}
+            crosssell_text = (crosssell_tmpl.get("response") or "").strip()
+            if crosssell_text:
+                response_text = response_text.rstrip() + '\n\n' + crosssell_text
+                image_url = self._append_sondesh_crosssell_images(image_url)
+        elif template_id == "savoury_crosssell_sondesh":
+            facts["savoury_crosssell_sent"] = True
+            image_url = self._append_sondesh_crosssell_images(image_url)
+
+        sondesh_templates = {
+            "sondesh_price_detailed", "sondesh_price_general",
+            "classic_collection_details", "signature_collection_details",
+            "aamar_mishti_details", "signature_sondesh_details",
+            "jolbhora_talgash_details", "shelf_life_storage",
+        }
+        if template_id in sondesh_templates and not facts.get("sondesh_crosssell_sent"):
+            facts["sondesh_crosssell_sent"] = True
+            response_text = response_text.rstrip() + (
+                '\n\n*P.S.* We also cook fresh Bengali meals for Delhi NCR — '
+                "say *Meals* for this week's menu."
+            )
+        elif template_id == "sondesh_crosssell_savoury":
+            facts["sondesh_crosssell_sent"] = True
+        return response_text, image_url
 
     def _answer_addresses_the_question(
         self, user_message: str, template: Dict[str, Any],
@@ -920,6 +982,12 @@ class DeterministicResponder:
             )
         )
         parking_gap = "parking" in str(result.entities.get("topic") or "").lower()
+        # A question that narrows a domain to one thing — gift wrapping, same-day
+        # delivery, cancellation — has to be resolved here, because only the
+        # knowledge layer can tell whether the approved copy covers that corner
+        # of the domain. Letting it fall through would answer "do you gift wrap"
+        # with the food-safe packaging copy.
+        subtopic_gap = bool(result.entities.get("subtopic"))
         central_compound = (
             Intent.DELIVERY_QUERY.value in fallback_intents
             and any(value in fallback_intents for value in (
@@ -928,53 +996,58 @@ class DeterministicResponder:
             ))
         )
         message_lower = user_message.lower().strip()
+
+        # The deterministic reader is a semantic reader now, not a phrase list,
+        # so what decides whether it may answer is the same thing that decides
+        # for the model: does its reading resolve, in full, to approved
+        # knowledge? If every intent it found has a record, the answer is the
+        # catalogue's, not a trigger's. If any part does not resolve, the older
+        # deterministic handlers still get their turn.
+        location_for_trial = str(result.entities.get("location", "")).strip()
+        trial = approved_knowledge.resolve(
+            result,
+            self.qa_data.get("templates", []),
+            serviceable_location=(
+                _is_serviceable_ncr_area(location_for_trial) if location_for_trial else None
+            ),
+        )
+        # The reading may answer when every part of it resolves, and also when
+        # part of it resolves and the rest is an honest gap — that is partial
+        # fulfilment, and dropping to the old matcher would answer the
+        # supported half while quietly losing the unsupported one.
         canonical_single = bool(
-            fallback_intents == [Intent.MENU_REQUEST.value]
-            and re.search(
-                r"\b(what can i order|what do you have|show me the menu|"
-                r"please (?:show|send|share)(?: me)? (?:your|the)? ?menu)\b",
-                message_lower,
-            )
+            trial.items
+            and (trial.fully_sufficient or trial.partially_sufficient)
+            and not result.requires_human
+            and fallback_intents
+            # A partly-read message stays with the older handlers: they may
+            # know the flavour, collection or pack size this reader missed.
+            and not result.unmapped_terms
         )
-        canonical_single = canonical_single or bool(
-            fallback_intents == [Intent.PRODUCT_INFORMATION.value]
-            and re.search(
-                r"\bwhat (?:products?|sweets?|mishti|mithai).*(?:have|offer|available)\b",
-                message_lower,
-            )
-        )
-        canonical_single = canonical_single or bool(
-            fallback_intents == [Intent.ORDER_PROCESS.value]
-            and re.fullmatch(r"how can i place an order\??", message_lower)
-        )
-        canonical_single = canonical_single or bool(
-            fallback_intents == [Intent.PRODUCT_PRICE.value]
-            and (
-                # A price question that names nothing else is answered by
-                # asking which product, which states no business fact. A live
-                # topic means the deterministic context handlers own it.
-                (
-                    BARE_PRICE_QUESTION_RE.fullmatch(
-                        " ".join(message_lower.split()).strip(" .?!,")
-                    )
-                    and not result.entities.get("product")
-                    and not facts.get("last_topic")
-                )
-                or (
-                    re.search(r"\b(?:aamar mishti|jolbhora)\b", message_lower)
-                    and re.search(r"\b(?:price|cost|how much)\b", message_lower)
-                )
-            )
-        )
-        canonical_single = canonical_single or bool(
-            fallback_intents == [Intent.DELIVERY_QUERY.value]
-            and re.fullmatch(r"do you deliver to delhi\??", message_lower)
-        )
-        canonical_single = canonical_single or bool(
-            fallback_intents == [Intent.ALLERGEN_QUESTION.value]
-            and "jolbhora" in message_lower
-            and re.search(r"\balmonds?\b", message_lower)
-        )
+        # Two things the later deterministic handlers own outright: a price
+        # question inside a live product topic, and any "how long / when will"
+        # question, whose 15-minute and 45-minute answers depend on a context
+        # this reader does not model.
+        if canonical_single and TIME_INTENT_RE.search(message_lower):
+            canonical_single = False
+        # "rose 250g" is an order line, not a question about Rose Sondesh: a
+        # flavour beside a pack size is the customer filling slots, which the
+        # order draft owns.
+        if (
+            canonical_single
+            and result.entities.get("product")
+            and result.entities.get("pack_size")
+            and not re.search(r"\b(what|which|how|do|does|is|are|can|tell)\b", message_lower)
+        ):
+            canonical_single = False
+        if (
+            canonical_single
+            and Intent.PRODUCT_PRICE.value in fallback_intents
+            and not result.entities.get("product")
+            and facts.get("last_topic")
+        ):
+            canonical_single = False
+
         # A validated "I do not know what this is" is not the same as an
         # unsupported request. The deterministic templates still hold answers
         # the canonical catalogue has not absorbed yet — subscriptions, weekly
@@ -986,6 +1059,7 @@ class DeterministicResponder:
             fallback_intents == [Intent.UNKNOWN.value]
             and not parking_gap
             and not explicit_gap
+            and not subtopic_gap
         )
         if unknown_meaning or (
             not model_result_available
@@ -993,6 +1067,7 @@ class DeterministicResponder:
             and not canonical_single
             and not explicit_gap
             and not parking_gap
+            and not subtopic_gap
         ):
             facts["last_intents"] = fallback_intents
             facts["last_entities"] = dict(result.entities)
@@ -1007,6 +1082,9 @@ class DeterministicResponder:
             return None
 
         intents = list(dict.fromkeys(result.intents))
+        facts["last_route_source"] = (
+            "deterministic_semantic_fallback" if fallback_used else "model_nlu"
+        )
         facts["last_intents"] = intents
         facts["last_entities"] = dict(result.entities)
         facts["last_nlu_confidence"] = result.confidence
@@ -1036,6 +1114,12 @@ class DeterministicResponder:
                 channel=channel,
                 user_message=user_message,
             )
+            # The once-per-session cross-sell belongs to the answer, not to the
+            # layer that chose it, so it is applied here too.
+            if item.template_id:
+                rendered, rendered_images = self._apply_crosssell_nudges(
+                    item.template_id, rendered, rendered_images, facts,
+                )
             replies.append(rendered)
             approved_facts.append(rendered)
             knowledge_ids.append(item.knowledge_id)
@@ -1126,6 +1210,21 @@ class DeterministicResponder:
                 grounding = f"fallback:{grounding_reason}"
         facts["last_grounding"] = grounding
 
+        # The same guard the deterministic path applies: a short follow-up that
+        # re-matches the answer just given gets an acknowledgement, not the
+        # identical message twice.
+        recent_replies = _recent_bot_replies(user_id, channel)
+        if (
+            _looks_like_a_short_answer(user_message)
+            and _bot_asked_a_question(recent_replies[0] if recent_replies else "")
+            and _normalise_reply(response_text) in {
+                _normalise_reply(reply) for reply in recent_replies
+            }
+        ):
+            log.info("Suppressed a duplicate structured reply for %s", channel)
+            response_text = _DUPLICATE_REPLY_NOTICE
+            images = []
+
         if intro_greeting_prefix:
             response_text = intro_greeting_prefix + response_text
         response_text = _strip_flower_emoji(response_text)
@@ -1137,13 +1236,22 @@ class DeterministicResponder:
                 image_keys.add(key)
                 deduped_images.append(item)
         image_value: Optional[Any] = deduped_images or None
-        if image_value and len(image_value) == 1:
-            image_value = image_value[0]
+        if image_value and len(image_value) == 1 and not isinstance(image_value[0], dict):
+            # One card from a single template keeps the list shape the
+            # deterministic path returns, so adapters and tests see the same
+            # thing whichever layer answered. A captioned card is already a
+            # dict and stays wrapped.
+            image_value = [image_value[0]]
         session_memory.add_turn(user_id, channel, user_message, response_text)
 
         if Intent.EVENT_ORDER.value in intents and missing:
             template_id = "groq_structured_event_escalation"
-        elif intents == [Intent.UNKNOWN.value] and not used_templates:
+        elif not used_templates and all(
+            intent in {Intent.UNKNOWN.value, Intent.BUSINESS_POLICY_UNKNOWN.value}
+            for intent in intents
+        ):
+            # Nothing was answered, so there is no route to name. The typed
+            # gap lives in last_intents and the audit row.
             template_id = None
         elif len(used_templates) == 1 and not missing:
             template_id = used_templates[0]
@@ -1218,6 +1326,13 @@ class DeterministicResponder:
         try:
             audit_facts = session_memory.get_facts(user_id, channel)
             self._record_answer_sufficiency(audit_facts, template_id, was_matched)
+            # Anything that answered before understanding ran did so from
+            # conversation state. Recording which layer decided lets the
+            # benchmark measure how much wording-driven routing is left.
+            if not audit_facts.get("last_route_source"):
+                audit_facts["last_route_source"] = (
+                    "state_handler" if was_matched else "escalation"
+                )
             actions = list(audit_facts.get("last_actions") or [])
             if response_text:
                 actions.append(BusinessAction.SEND_RESPONSE.value)
@@ -1261,9 +1376,10 @@ class DeterministicResponder:
                 escalation_status=escalation_status,
             )
             log.info(
-                "MESSAGE_ROUTE route=%s intents=%s entities=%s knowledge=%s actions=%s "
+                "MESSAGE_ROUTE route=%s source=%s intents=%s entities=%s knowledge=%s actions=%s "
                 "llm=%s fallback=%s grounding=%s gap=%s escalation=%s",
                 template_id,
+                audit_facts.get("last_route_source"),
                 audit_facts.get("last_intents") or [],
                 audit_facts.get("last_entities") or {},
                 audit_facts.get("last_knowledge_ids") or [],
@@ -1320,6 +1436,7 @@ class DeterministicResponder:
             "last_fallback_used": False,
             "last_grounding": None,
             "structured_nlu_provider_failed": False,
+            "last_route_source": None,
         })
         ad_product = product_for_ad(referral_ad_id, referral_ad_title) or facts.get("ad_product")
         if ad_product:
@@ -1354,7 +1471,14 @@ class DeterministicResponder:
             "subscription_context",
             "awaiting_instagram_contact", "awaiting_instagram_contact_confirmation",
             "pending_instagram_escalation",
-        ))
+        )) or bool(facts.get("cart")) or sum(
+            # An order already under way is a slot the customer is answering:
+            # "250g" or "Collection 1" completes a receipt rather than asking
+            # for a product page. One lone slot is not yet an order — a single
+            # product mention fills one on its own.
+            1 for slot in ("flavour", "collection", "pack_size", "quantity")
+            if (facts.get("order_draft") or {}).get(slot)
+        ) >= 2
 
         # Slot continuations and safety routing run before understanding. The
         # bare price clarification is the one branch the structured path owns
@@ -1514,7 +1638,8 @@ class DeterministicResponder:
         # topics here keeps the refusal true of the deterministic path as
         # well, not only of the intent/entity path.
         if OUT_OF_SCOPE_TOPIC_RE.search(lowered_text):
-            facts["last_intents"] = [Intent.UNKNOWN.value]
+            facts["last_route_source"] = "explicit_rule"
+            facts["last_intents"] = [Intent.BUSINESS_POLICY_UNKNOWN.value]
             facts["last_knowledge_sufficiency"] = {Intent.UNKNOWN.value: False}
             facts["knowledge_sufficient"] = False
             facts["last_actions"] = [
@@ -1538,6 +1663,7 @@ class DeterministicResponder:
         # 2. Check explicit escalation triggers first (refund, complaint, etc.)
         escalation_reason = self.check_explicit_escalation_triggers(user_message)
         if escalation_reason:
+            facts["last_route_source"] = "explicit_rule"
             fallback, _intent = self.build_handover_response(user_message)
             if intro_greeting_prefix:
                 fallback = intro_greeting_prefix + fallback
@@ -2181,6 +2307,7 @@ class DeterministicResponder:
             if semantic_template is not None:
                 best_template = semantic_template
                 best_score = 4
+                facts["last_route_source"] = "semantic_router"
 
         # An approved answer may only be sent when it is actually about what
         # the customer asked. Word similarity is evidence of a typo, never of
@@ -2199,6 +2326,8 @@ class DeterministicResponder:
         if best_template and best_score >= 4:
             tmpl_id = best_template.get("id", "")
             facts = session_memory.get_facts(user_id, channel)
+            if not facts.get("last_route_source"):
+                facts["last_route_source"] = "legacy_trigger"
             if tmpl_id == "greeting":
                 responses = best_template.get("responses", [])
                 last_index = facts.get("last_greeting_index")
@@ -2271,48 +2400,9 @@ class DeterministicResponder:
                 first_time_nudge = "\n\nIf this is your first Camellia meal and the menu feels unfamiliar, I'll be happy to help you choose!"
                 response_text = response_text.rstrip() + first_time_nudge
 
-            # One-time savoury cross-sell nudge logic
-            savoury_templates = {
-                "savoury_food_intro", "weekly_menu_veg", "weekly_menu_nonveg",
-                "combo_bento", "bento_details", "alacarte_prebooking_steps",
-                "subscription_details", "subscription_booking_steps",
-                "savoury_best_time_to_book", "savoury_delivery_time"
-            }
-            # The expired-menu fallback ("kitchen is finalising this week's
-            # menu") explicitly promises no photo and no price a customer
-            # could order against — the nudge's own Sondesh card would break
-            # that promise, so it is skipped whenever that fallback fired.
-            menu_is_being_updated = response_text.strip() == _WEEKLY_MENU_BEING_UPDATED.strip()
-            if tmpl_id in savoury_templates and not facts.get("savoury_crosssell_sent") and not menu_is_being_updated:
-                facts["savoury_crosssell_sent"] = True
-                # The client's own wording for this nudge — sent "after the
-                # conversation on their question is over, with menu" — is the
-                # savoury_crosssell_sondesh template's approved text, not a
-                # shortened paraphrase of it. Reusing that template's own
-                # copy keeps the two in sync rather than carrying the same
-                # message written out twice.
-                crosssell_tmpl = self._template_by_id("savoury_crosssell_sondesh")
-                crosssell_text = (crosssell_tmpl.get("response") or "").strip()
-                if crosssell_text:
-                    response_text = response_text.rstrip() + "\n\n" + crosssell_text
-                    image_url = self._append_sondesh_crosssell_images(image_url)
-            elif tmpl_id == "savoury_crosssell_sondesh":
-                facts["savoury_crosssell_sent"] = True
-                image_url = self._append_sondesh_crosssell_images(image_url)
-
-            # One-time sondesh cross-sell nudge logic (reverse direction: sondesh -> savoury)
-            sondesh_templates = {
-                "sondesh_price_detailed", "sondesh_price_general",
-                "classic_collection_details", "signature_collection_details",
-                "aamar_mishti_details", "signature_sondesh_details",
-                "jolbhora_talgash_details", "shelf_life_storage"
-            }
-            if tmpl_id in sondesh_templates and not facts.get("sondesh_crosssell_sent"):
-                facts["sondesh_crosssell_sent"] = True
-                crosssell_nudge = "\n\n*P.S.* We also cook fresh Bengali meals for Delhi NCR — say *Meals* for this week's menu."
-                response_text = response_text.rstrip() + crosssell_nudge
-            elif tmpl_id == "sondesh_crosssell_savoury":
-                facts["sondesh_crosssell_sent"] = True
+            response_text, image_url = self._apply_crosssell_nudges(
+                tmpl_id, response_text, image_url, facts,
+            )
 
             if tmpl_id not in {"greeting", "sondesh_price_detailed", "previous_menus"} and config.is_ai_enabled and ai_responder.get_active_provider() != "none":
                 try:

@@ -50,6 +50,23 @@ Subscriptions show the intended split: the plans, the booking steps and the
 five-hour change notice are canonical knowledge, while which turn of the
 booking conversation a customer is on stays deterministic state.
 
+## Reading meaning without the model
+
+`camellia/semantic_fallback.py` is what runs when the understanding provider is
+unreachable. It is concept-based, not phrase-based: lexical families for menu,
+price, delivery, ordering, storage, packaging, dietary, allergens, payment,
+contact, subscriptions and pack sizes, in the English and Hinglish customers
+actually write, plus entity extraction and clause-by-clause reading. A compound
+question keeps both halves; a clause with a subject and no concept becomes
+`unknown_business_query`, a typed gap rather than silence; and any word the
+reader cannot account for makes it defer to the older deterministic handlers
+rather than claim a message it only partly read.
+
+`last_route_source` records which layer decided each turn — `model_nlu`,
+`deterministic_semantic_fallback`, `state_handler`, `explicit_rule`,
+`legacy_trigger` or `escalation` — so trigger dependency is measurable rather
+than assumed.
+
 ## Relevance and sufficiency
 
 Two rules keep an approved answer from being sent to the wrong question:
@@ -62,6 +79,11 @@ Two rules keep an approved answer from being sent to the wrong question:
 * **Sufficiency** — every factual reply records which knowledge answered it and
   a per-intent sufficiency decision. Replies that assert nothing (a
   clarification, an acknowledgement, a handover) are exempt by design.
+* **Subtopic sufficiency** — a domain match does not imply every corner of that
+  domain. "Do you gift wrap?" is a packaging question, and the approved
+  packaging copy is about food-safe delivery boxes, so it is a gap. The
+  evidence is the approved copy itself: a subtopic counts as covered when the
+  copy mentions it, which means nothing has to be maintained twice.
 
 Retrieval-grounded generation runs only when the retrieved excerpts address the
 question and no detected intent is one the catalogue knows it cannot support.
@@ -78,7 +100,11 @@ model the bot fails closed to the deterministic path.
 ## Benchmarks
 
 * `scripts/conversation_benchmark.py` — 220-turn regression net over known wordings.
-* `scripts/generalization_benchmark.py` — adversarial set: paraphrases, unsupported
+* `scripts/generalization_benchmark_v2.py` — 208 turns: unseen paraphrases,
+  Hinglish, unsupported topics, multi-intent, mixed supported/unsupported,
+  state interruptions, hallucination probes and vague questions, with
+  route-source counts.
+* `scripts/generalization_benchmark.py` — the earlier 102-turn set: paraphrases, unsupported
   restaurant topics, compound asks, interruptions to an open flow, Hinglish, and
   probes that invite an invented fact. Both run offline and block network access.
 

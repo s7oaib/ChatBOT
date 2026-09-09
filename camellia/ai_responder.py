@@ -703,8 +703,19 @@ class AIResponder:
             # approved template and known conversation context.
             from camellia.rag_fallback import rag_fallback_engine
             grounding_context = [template_text, user_context or "", history_str, user_message or ""]
-            if not rag_fallback_engine.is_grounded_in_context(resp_text, grounding_context):
-                log.warning("Discarded ungrounded Groq refinement for template %s.", template_id)
+            # Strict: a refinement rewrites approved copy conversationally, so
+            # every word carrying meaning has to come from that copy, the
+            # customer's own message or the conversation so far. A refinement
+            # that introduces a claim of its own ("prepared fresh every
+            # morning") is discarded and the approved text is sent instead.
+            grounded, grounding_reason = rag_fallback_engine.grounding_report(
+                resp_text, grounding_context, strict=True,
+            )
+            if not grounded:
+                log.warning(
+                    "Discarded ungrounded Groq refinement for template %s (%s).",
+                    template_id, grounding_reason,
+                )
                 return template_text, False
             # Only successful refinements are cached. A failure is transient —
             # caching the template as if it were a refinement would keep the

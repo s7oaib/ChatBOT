@@ -262,7 +262,8 @@ class TestPartialMultiIntent:
         facts = session_memory.get_facts(user_id, "whatsapp")
 
         assert facts["last_knowledge_sufficiency"] == {
-            "product_price": True, "availability_query": False,
+            "product_information": True, "product_price": True,
+            "availability_query": False,
         }
         assert "available today" not in text.lower()
         assert "team" in text.lower()
