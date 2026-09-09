@@ -29,6 +29,11 @@ class Intent(str, Enum):
     CONTACT_QUESTION = "contact_question"
     AVAILABILITY_QUERY = "availability_query"
     DISCOUNT_REQUEST = "discount_request"
+    PACK_SIZE_QUESTION = "pack_size_question"
+    DELIVERY_TIME_QUESTION = "delivery_time_question"
+    SUBSCRIPTION_QUERY = "subscription_query"
+    SUBSCRIPTION_BOOKING = "subscription_booking"
+    SUBSCRIPTION_CHANGE = "subscription_change"
     ESCALATION = "escalation"
     UNKNOWN = "unknown"
 
@@ -72,7 +77,9 @@ def _json_object(text: str) -> Optional[Dict[str, Any]]:
 class UnderstandingEngine:
     """Uses Groq for meaning only. Returned prose never reaches customers."""
 
-    _entity_keys = {"product", "location", "quantity", "event", "menu_type", "topic"}
+    _entity_keys = {
+        "product", "location", "quantity", "event", "menu_type", "topic", "pack_size",
+    }
 
     @staticmethod
     def should_analyze(user_message: str) -> bool:
@@ -103,7 +110,13 @@ class UnderstandingEngine:
             intents.append(Intent.PRODUCT_PRICE.value)
         elif re.search(r"\b(jolbhora|sondesh|sweet|sweets|mishti|mithai|aamar mishti)\b", text):
             intents.append(Intent.PRODUCT_INFORMATION.value)
-        elif re.search(r"\b(products?|items?)\b.*\b(available|offer|have)\b|\bwhat products?\b", text):
+        elif re.search(
+            r"\b(products?|items?)\b.*\b(available|offer|have)\b|\bwhat products?\b|"
+            r"\b(sell|selling|offer|make|makes|prepare|speciality|specialty)\b[^.?!]*"
+            r"\b(sweets?|mishti|mithai|sondesh|items?|products?)\b|"
+            r"\b(sweets?|mishti|mithai)\b[^.?!]*\b(make|makes|prepare|sell|offer|speciality)\b",
+            text,
+        ):
             intents.append(Intent.PRODUCT_INFORMATION.value)
         if re.search(r"\b(deliver|delivery|courier|ship)\b", text):
             intents.append(Intent.DELIVERY_QUERY.value)
@@ -111,11 +124,26 @@ class UnderstandingEngine:
             intents.append(Intent.EVENT_ORDER.value)
         elif re.search(r"\b(bulk|corporate|festive)\b", text):
             intents.append(Intent.BULK_ORDER.value)
-        if re.search(r"\b(discount|discounted|percent off|% off|coupon|promo)\b", text):
+        if re.search(
+            r"\b(discount|discounted|percent off|% off|coupon|promo|"
+            r"free delivery|complimentary delivery|free shipping)\b",
+            text,
+        ):
             intents.append(Intent.DISCOUNT_REQUEST.value)
-        if re.search(r"\b(storage|store|shelf life|refrigerat\w*|fridge|expiry)\b", text):
+        if re.search(
+            r"\b(storage|store|storing|keep|keeping|shelf life|refrigerat\w*|"
+            r"fridge|freezer|expiry)\b",
+            text,
+        ):
             intents.append(Intent.STORAGE_QUESTION.value)
-        if re.search(r"\b(how (?:do|can) i (?:place an )?order|how to (?:place an )?order|ordering process)\b", text):
+        if re.search(
+            r"\b(how (?:do|can|would|should) i (?:place an |make an )?order|"
+            r"how to (?:place an |make an )?order|ordering process|"
+            r"procedure for (?:placing|making) an order|"
+            r"(?:go about|walk me through) (?:buying|ordering|placing)|"
+            r"how (?:do|can) i (?:buy|purchase)|buying from you)\b",
+            text,
+        ):
             intents = [value for value in intents if value != Intent.MENU_REQUEST.value]
             intents.append(Intent.ORDER_PROCESS.value)
         if re.search(r"\b(ingredient|ingredients|made of|made from|contain|contains)\b", text):
@@ -123,13 +151,42 @@ class UnderstandingEngine:
         if re.search(r"\b(allergen|allergy|allergic|almonds?|peanuts?|cashews?|pistachios?|gluten|nut|nuts)\b", text):
             intents = [value for value in intents if value != Intent.INGREDIENTS_QUESTION.value]
             intents.append(Intent.ALLERGEN_QUESTION.value)
-        if re.search(r"\b(packaging|package|food-safe|plastic-free|cornstarch)\b", text):
+        if re.search(
+            # "boxes" alone is a quantity noun ("50 boxes for a wedding"), so
+            # it only reads as packaging next to a packaging property.
+            r"\b(packaging|packed|packing|package|food-safe|plastic-free|"
+            r"cornstarch|eco.?friendly|environmentally friendly|gift wrap\w*)\b",
+            text,
+        ):
             intents.append(Intent.PACKAGING_QUESTION.value)
+        if re.search(r"\b(subscription|subscriptions|supscription|meal plan|everyday meal|meal subscription)\b", text):
+            subscription_intent = Intent.SUBSCRIPTION_QUERY.value
+            if re.search(r"\b(change|reschedul\w*|postpone|prepone|shift|move|skip)\b", text):
+                subscription_intent = Intent.SUBSCRIPTION_CHANGE.value
+            elif re.search(r"\b(book|booking|subscribe|sign me up|start|next steps?)\b", text):
+                subscription_intent = Intent.SUBSCRIPTION_BOOKING.value
+            intents = [
+                value for value in intents
+                if value not in (Intent.MENU_REQUEST.value, Intent.PRODUCT_INFORMATION.value)
+            ]
+            intents.append(subscription_intent)
+        if re.search(r"\b(250\s?gm?s?|500\s?gm?s?|1\s?kgs?|one kg)\b", text) and re.search(
+            r"\b(how many|pieces|pcs|box|pack|quantity|contains?)\b", text,
+        ):
+            intents = [value for value in intents if value != Intent.PRODUCT_INFORMATION.value]
+            intents.append(Intent.PACK_SIZE_QUESTION.value)
         if re.search(r"\b(payment|pay|upi|cod|cash on delivery|gpay|paytm|phonepe)\b", text):
             intents.append(Intent.PAYMENT_QUESTION.value)
             if re.search(r"\b(cod|cash on delivery)\b", text):
                 intents = [value for value in intents if value != Intent.DELIVERY_QUERY.value]
-        if re.search(r"\b(contact|phone|email|manager|owner|founder|chef|speak to|talk to)\b", text):
+        # Naming a person is not the same as asking how to reach one: "can I
+        # hire your chef for an evening" is a request the business has no
+        # approved answer for, and handing back the manager's contact card
+        # answers a question the customer did not ask.
+        if re.search(r"\b(contact|phone number|email|speak to|talk to|get in touch)\b", text) or (
+            re.search(r"\b(manager|owner|founder|chef|cook)\b", text)
+            and re.search(r"\b(who|name|contact|number|phone|email|reach)\b", text)
+        ):
             intents.append(Intent.CONTACT_QUESTION.value)
         if re.search(r"\b(in stock|out of stock|available today|availability)\b", text):
             intents.append(Intent.AVAILABILITY_QUERY.value)
@@ -156,6 +213,9 @@ class UnderstandingEngine:
             entities["event"] = next(
                 word for word in ("wedding", "event", "party", "function") if word in text
             )
+        pack_size = re.search(r"\b(250\s?gm?s?|500\s?gm?s?|1\s?kgs?)\b", text)
+        if pack_size:
+            entities["pack_size"] = pack_size.group(1).replace(" ", "")
         if "valet" in text or re.search(r"\bparking\b", text):
             entities["topic"] = "valet parking" if "valet" in text else "parking"
 
@@ -189,6 +249,23 @@ class UnderstandingEngine:
             reason="deterministic_fallback",
         )
 
+    @staticmethod
+    def _another_model_could_survive(reason: str) -> bool:
+        """Only capacity and provider-side errors are worth a second model.
+
+        A malformed body or a schema violation is about the answer, not the
+        model's availability, and repeating the call would be a retry loop
+        wearing a different name.
+        """
+        return (
+            reason in {"groq_no_choices"}
+            or reason.startswith("groq_exception_")
+            or (
+                reason.startswith("groq_http_")
+                and reason.split("_")[-1] in {"402", "413", "429", "500", "502", "503", "504"}
+            )
+        )
+
     def analyze(
         self,
         user_message: str,
@@ -218,9 +295,11 @@ class UnderstandingEngine:
             f"Allowed intents: {allowed}.\n"
             "Return every meaningful intent. Drop greeting when another intent exists. "
             "Use unknown only when no listed intent fits. Extract only text stated by the customer.\n"
+            "When the intent is unknown, name the subject of the question in topic "
+            "(for example \"washrooms\", \"wheelchair access\", \"pet policy\").\n"
             "Return exactly one JSON object with this schema:\n"
             '{"intents":["menu_request"],"entities":{"product":null,"location":null,'
-            '"quantity":null,"event":null,"menu_type":null,"topic":null},"confidence":0.0,'
+            '"quantity":null,"event":null,"menu_type":null,"pack_size":null,"topic":null},"confidence":0.0,'
             '"requires_human":false,"knowledge_gap":false}\n'
             f"ACTIVE STATE: {json.dumps(active_state, ensure_ascii=False)}\n"
             f"RECENT CONVERSATION:\n{recent or '(none)'}\n"
@@ -233,6 +312,22 @@ class UnderstandingEngine:
             response_format={"type": "json_object"},
             max_tokens=300,
         )
+        if not ok and self._another_model_could_survive(reason):
+            fallback_model = config.STRUCTURED_NLU_FALLBACK_MODEL
+            if fallback_model and fallback_model != config.GROQ_ROUTER_MODEL:
+                log.info(
+                    "Understanding model %s returned %s; trying the configured "
+                    "fallback model %s once.",
+                    config.GROQ_ROUTER_MODEL, reason, fallback_model,
+                )
+                raw, ok, fallback_reason = ai_responder._query_groq(
+                    prompt,
+                    is_refinement=True,
+                    model=fallback_model,
+                    response_format={"type": "json_object"},
+                    max_tokens=300,
+                )
+                reason = f"{reason}>{fallback_reason}" if not ok else "ok_fallback_model"
         if not ok:
             return UnderstandingResult(reason=reason)
         parsed = _json_object(raw)

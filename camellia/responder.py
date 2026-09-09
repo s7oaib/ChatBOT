@@ -21,7 +21,7 @@ from camellia.trigger_index import trigger_index
 from camellia import weekly_flyer
 from camellia import menu_dates
 from camellia.understanding import BusinessAction, Intent, understanding_engine
-from camellia.knowledge import approved_knowledge
+from camellia.knowledge import HUMAN_ONLY_INTENTS, approved_knowledge
 
 log = get_logger("camellia.responder")
 
@@ -286,6 +286,18 @@ BARE_PRICE_QUESTION_RE = re.compile(
     r"what.?s the price)",
     re.IGNORECASE,
 )
+
+# Words that carry no subject, so they cannot anchor an answer to a question.
+RELEVANCE_STOP_WORDS = frozenset({
+    "the", "and", "but", "for", "you", "your", "yours", "our", "ours", "are",
+    "can", "could", "would", "will", "shall", "should", "may", "any", "all",
+    "some", "have", "has", "had", "does", "did", "want", "need", "like",
+    "please", "pls", "tell", "give", "get", "got", "know", "let", "say",
+    "there", "here", "this", "that", "these", "those", "what", "whats",
+    "when", "where", "which", "who", "why", "how", "much", "many", "with",
+    "from", "into", "about", "also", "just", "then", "than", "hai", "hain",
+    "kya", "aap", "mujhe", "karo", "kar", "abhi", "yes", "not", "its",
+})
 
 # Topics with no approved answer anywhere in the business knowledge. They are
 # listed because near-miss matching is otherwise convincing: "parking" is one
@@ -688,6 +700,108 @@ class DeterministicResponder:
 
         return None
 
+    # Replies that carry no business fact: they ask a question, acknowledge, or
+    # hand over to a person. They need a route, not a knowledge source.
+    _CONVERSATIONAL_ROUTES = frozenset({
+        "greeting", "acknowledgement", "conversation_closing", "clarify_request",
+        "price_clarify_product", "context_meal_price_followup", "name_introduction",
+        "recall_name", "bot_identity", "bot_capabilities", "explicit_escalation",
+        "groq_structured_event_escalation", "ad_gate_blocked", "product_recommendation",
+    })
+
+    def _record_answer_sufficiency(
+        self, facts: Dict[str, Any], template_id: Optional[str], was_matched: bool,
+    ) -> None:
+        """Give every factual answer a traceable source and a sufficiency call.
+
+        The intent/entity path fills these in as it resolves knowledge. Answers
+        that came from the deterministic compatibility handlers had a route but
+        no recorded decision, which meant a customer-facing business fact could
+        be sent with nothing saying where it came from. Conversational replies
+        are exempt by design: "Sondesh or Meals?" asserts nothing.
+        """
+        if facts.get("last_knowledge_ids"):
+            return
+
+        if not was_matched or not template_id:
+            intents = facts.get("last_intents") or [Intent.UNKNOWN.value]
+            facts["last_knowledge_sufficiency"] = {intent: False for intent in intents}
+            facts["knowledge_sufficient"] = False
+            facts.setdefault("last_grounding", None)
+            return
+
+        if template_id in self._CONVERSATIONAL_ROUTES or template_id.startswith("ad_"):
+            return
+
+        canonical_id = approved_knowledge.knowledge_id_for_template(template_id)
+        template = self._template_by_id(template_id) or {}
+        facts["last_knowledge_ids"] = [canonical_id or f"approved:{template_id}"]
+        facts["last_knowledge_source"] = "canonical" if canonical_id else "approved_template"
+        facts["last_source_ref"] = (
+            template.get("source_ref") or f"qa_templates.json#{template_id}"
+        )
+        intents = [
+            intent for intent in (facts.get("last_intents") or [])
+            if intent != Intent.UNKNOWN.value
+        ]
+        keys = intents or [canonical_id.split(":")[0] if canonical_id else "compatibility_route"]
+        facts["last_knowledge_sufficiency"] = {key: True for key in keys}
+        facts["knowledge_sufficient"] = True
+        if not facts.get("last_grounding"):
+            facts["last_grounding"] = "deterministic_approved"
+
+    def _answer_addresses_the_question(
+        self, user_message: str, template: Dict[str, Any],
+    ) -> bool:
+        """True when the selected answer is on the subject the customer raised.
+
+        The test is lexical and deliberately simple: at least one content word
+        of the question has to appear in the answer's own approved text or in
+        the phrases it was written for. A question made entirely of content
+        words we have never seen ("do you have washrooms", "is there wheelchair
+        access", "can I bring pets") has nothing to anchor to and becomes a
+        knowledge gap instead of the nearest-sounding approved answer.
+
+        Conversational templates carry no subject of their own, so they are
+        exempt: a greeting or an acknowledgement is a reply to the shape of
+        the turn, not to a topic.
+        """
+        subject_free = {
+            "greeting", "name_introduction", "recall_name", "acknowledgement",
+            "conversation_closing", "bot_identity", "bot_capabilities",
+            "clarify_request", "price_clarify_product", "product_recommendation",
+            "recall_order_flavour", "order_status_tracking", "know_more",
+        }
+        template_id = template.get("id", "")
+        if template_id in subject_free:
+            return True
+
+        content_words = {
+            word for word in re.findall(r"\b[a-z]{3,}\b", user_message.lower())
+            if word not in RELEVANCE_STOP_WORDS
+        }
+        if not content_words:
+            return True
+
+        haystack = " ".join([
+            template_id.replace("_", " "),
+            " ".join(str(trigger) for trigger in template.get("triggers", [])),
+            str(template.get("response") or ""),
+            " ".join(str(item) for item in template.get("responses", []) or []),
+        ]).lower()
+        haystack_words = set(re.findall(r"\b[a-z]{3,}\b", haystack))
+
+        for word in content_words:
+            if word in haystack_words:
+                return True
+            stem = word[:-1] if word.endswith("s") else word
+            if len(stem) >= 4 and any(
+                candidate.startswith(stem) or stem.startswith(candidate[:5])
+                and len(candidate) >= 5 for candidate in haystack_words
+            ):
+                return True
+        return False
+
     def _semantic_fallback_template(
         self,
         user_message: str,
@@ -953,6 +1067,15 @@ class DeterministicResponder:
             facts["awaiting_product_price"] = True
         if Intent.DELIVERY_QUERY.value in intents:
             facts["awaiting_area_confirmation"] = not bool(location)
+        # The subscription business facts are canonical knowledge; where the
+        # customer is in the booking conversation stays deterministic state,
+        # and it is set the same way whichever path sent the plans.
+        if "subscription_details" in used_templates:
+            facts["awaiting_subscription_booking"] = True
+            facts["subscription_context"] = True
+        if "subscription_booking_steps" in used_templates:
+            facts["awaiting_subscription_booking"] = False
+            facts["subscription_context"] = True
 
         missing = list(dict.fromkeys(resolution.missing_intents))
         if result.requires_human and not missing:
@@ -1094,6 +1217,7 @@ class DeterministicResponder:
 
         try:
             audit_facts = session_memory.get_facts(user_id, channel)
+            self._record_answer_sufficiency(audit_facts, template_id, was_matched)
             actions = list(audit_facts.get("last_actions") or [])
             if response_text:
                 actions.append(BusinessAction.SEND_RESPONSE.value)
@@ -2058,6 +2182,20 @@ class DeterministicResponder:
                 best_template = semantic_template
                 best_score = 4
 
+        # An approved answer may only be sent when it is actually about what
+        # the customer asked. Word similarity is evidence of a typo, never of
+        # relevance: "parking" scored against the "packing" trigger, and the
+        # same shape would have answered a washroom, pet or wheelchair
+        # question with packaging, delivery or storage copy. This is generic —
+        # it needs no list of the topics we do not cover.
+        if best_template and not self._answer_addresses_the_question(user_message, best_template):
+            log.info(
+                "RELEVANCE_REJECT msg=%r template=%s score=%s",
+                user_message[:80], best_template.get("id"), best_score,
+            )
+            best_template = None
+            best_score = 0
+
         if best_template and best_score >= 4:
             tmpl_id = best_template.get("id", "")
             facts = session_memory.get_facts(user_id, channel)
@@ -2306,6 +2444,27 @@ class DeterministicResponder:
         # comprehension problem — those already have their own handover copy and
         # genuinely need a person, so the model does not get to answer them with
         # whatever generic passage retrieval happened to surface.
+        # Retrieval scoring says how well a passage matched, not whether it is
+        # about the question at all: an outdoor-seating question can retrieve
+        # packaging copy with a confident score. So the excerpts must address
+        # the subject the customer raised, and no intent may be answered here
+        # that the canonical layer already knows it cannot support.
+        retrieval_is_relevant = bool(
+            rag_res is not None
+            and rag_res.source_chunks
+            and self._answer_addresses_the_question(
+                user_message, {"id": "rag", "response": "\n".join(rag_res.source_chunks)},
+            )
+        )
+        unsupported_intents = [
+            intent for intent in (facts.get("last_intents") or [])
+            if intent in HUMAN_ONLY_INTENTS and intent != Intent.UNKNOWN.value
+        ]
+        if not retrieval_is_relevant and rag_res is not None and rag_res.source_chunks:
+            log.info(
+                "RAG_RELEVANCE_REJECT msg=%r sources=%s",
+                user_message[:80], rag_res.retrieved_sources,
+            )
         if (
             config.is_ai_enabled
             and ai_responder.get_active_provider() != "none"
@@ -2314,6 +2473,8 @@ class DeterministicResponder:
             and rag_res.source_chunks
             and rag_res.confidence_score >= MEDIUM_CONFIDENCE_THRESHOLD
             and not rag_res.has_conflict
+            and retrieval_is_relevant
+            and not unsupported_intents
         ):
             try:
                 user_ctx = f"Customer Name: {facts.get('name', 'Unknown')}"
@@ -2325,7 +2486,11 @@ class DeterministicResponder:
                     history_turns=history,
                 )
                 if ok and ai_resp:
-                    if rag_fallback_engine.is_grounded_in_context(ai_resp, rag_res.source_chunks):
+                    grounded, grounding_reason = rag_fallback_engine.grounding_report(
+                        ai_resp, rag_res.source_chunks,
+                    )
+                    facts["last_grounding"] = "pass" if grounded else f"rejected:{grounding_reason}"
+                    if grounded:
                         try:
                             db.save_candidate_template(
                                 name=f"groq_grounded_{rag_res.proposed_intent}",

@@ -139,6 +139,14 @@ class Config:
     # far too small to decide on — the shadow table records the model behind
     # every pick so the choice can be settled on real traffic instead.
     GROQ_ROUTER_MODEL: str = os.getenv("GROQ_ROUTER_MODEL", "") or "groq/compound-mini"
+    # Understanding runs on every substantive message, so it is the call that
+    # meets the per-day request ceiling first — and when it does, every
+    # customer drops to the deterministic path at once. One explicitly
+    # configured second model is tried, once, only for failures that a
+    # different model could actually survive (quota, rate limit, provider
+    # error). Never a retry of the same model, never a model the operator did
+    # not name, and the schema contract is identical for both.
+    STRUCTURED_NLU_FALLBACK_MODEL: str = os.getenv("STRUCTURED_NLU_FALLBACK_MODEL", "").strip()
     # A bounded, live semantic fallback for messages the deterministic trigger
     # matcher cannot confidently place (typos, Hinglish, and unusual wording).
     # The router selects only an existing approved template; it never writes

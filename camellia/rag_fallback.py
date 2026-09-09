@@ -87,7 +87,9 @@ class RAGFallbackEngine:
                 return True
         return False
 
-    def grounding_report(self, answer: str, context_chunks: List[str]) -> Tuple[bool, str]:
+    def grounding_report(
+        self, answer: str, context_chunks: List[str], strict: bool = True,
+    ) -> Tuple[bool, str]:
         """
         True when a generated answer states no number the approved excerpts
         did not already state.
@@ -194,10 +196,69 @@ class RAGFallbackEngine:
             if product in answer_text and product not in context_text:
                 return False, f"unsupported_product:{product}"
 
+        # Everything above names a category of claim in advance, which cannot
+        # cover the claim nobody thought of: "we prepare Jolbhora fresh every
+        # morning" contains no protected keyword and no number. So the last
+        # check is coverage — every word in the answer that carries meaning of
+        # its own has to be present in the approved excerpts. Paraphrasing is
+        # allowed; introducing a subject the sources never mentioned is not.
+        # Refinement rewrites one already-approved template into conversational
+        # wording, so it is checked for new claims but not for full coverage.
+        # Generation from retrieval has no such anchor and is checked strictly.
+        if strict:
+            unsupported = self._unsupported_content_word(answer, context_chunks)
+            if unsupported:
+                return False, f"unsupported_statement:{unsupported}"
+
         return True, "grounded"
 
-    def is_grounded_in_context(self, answer: str, context_chunks: List[str]) -> bool:
-        return self.grounding_report(answer, context_chunks)[0]
+    # Words that assert nothing on their own, so an answer may use them freely.
+    _CONVERSATIONAL_VOCABULARY = frozenset({
+        "hello", "hallo", "namaste", "thanks", "thank", "please", "happy",
+        "help", "would", "like", "love", "sure", "great", "here", "there",
+        "this", "that", "these", "those", "your", "yours", "ours", "with",
+        "from", "about", "also", "just", "when", "what", "which", "them",
+        "they", "have", "having", "been", "will", "shall", "should", "could",
+        "cannot", "does", "doesn", "don", "isn", "aren", "let", "tell",
+        "know", "need", "want", "were", "was", "are", "and", "the", "for",
+        "you", "our", "we", "us", "it", "is", "to", "of", "in", "on", "at",
+        "any", "all", "some", "more", "than", "then", "them", "their",
+        "message", "chat", "whatsapp", "team", "kitchen", "camellia",
+        "artisanal", "hi", "hey", "yes", "no", "not", "can", "may", "much",
+        "many", "how", "why", "who", "where", "well", "good", "sorry",
+        "welcome", "again", "back", "each", "every", "both", "very", "still",
+        "same", "other", "another", "next", "please", "share", "ask", "asked",
+        "confirm", "confirmed", "let's", "lets", "get", "got", "give", "made",
+    })
+
+    def _unsupported_content_word(
+        self, answer: str, context_chunks: List[str],
+    ) -> Optional[str]:
+        def words(text: str) -> set:
+            return {
+                token for token in re.findall(r"[a-z]+", (text or "").lower())
+                if len(token) >= 4
+            }
+
+        context_words = words(" ".join(context_chunks or []))
+        for word in sorted(words(answer) - self._CONVERSATIONAL_VOCABULARY):
+            if word in context_words:
+                continue
+            stem = word[:-1] if word.endswith("s") else word
+            stem = stem[:-1] if stem.endswith("e") else stem
+            if len(stem) >= 4 and any(
+                candidate.startswith(stem) or stem.startswith(candidate[:len(stem)])
+                for candidate in context_words
+                if len(candidate) >= 4
+            ):
+                continue
+            return word
+        return None
+
+    def is_grounded_in_context(
+        self, answer: str, context_chunks: List[str], strict: bool = False,
+    ) -> bool:
+        return self.grounding_report(answer, context_chunks, strict=strict)[0]
 
     def retrieve(self, user_message: str) -> RAGResult:
         """
