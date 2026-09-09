@@ -60,6 +60,14 @@ class SessionMemoryManager:
                 "last_entities": {},
                 "last_actions": [],
                 "knowledge_sufficient": None,
+                "last_nlu_confidence": None,
+                "last_nlu_reason": None,
+                "last_knowledge_sufficiency": {},
+                "last_knowledge_ids": [],
+                "last_llm_called": False,
+                "last_fallback_used": False,
+                "last_grounding": None,
+                "last_escalation_status": None,
                 "cart": [],
                 "order_draft": {
                     "flavour": None,
@@ -111,6 +119,9 @@ class SessionMemoryManager:
             "awaiting_instagram_contact_confirmation", "pending_instagram_contact",
             "pending_instagram_escalation", "ad_product", "clarify_sent", "last_topic",
             "last_intents", "last_entities", "last_actions", "knowledge_sufficient",
+            "last_knowledge_sufficiency", "last_knowledge_ids", "last_llm_called",
+            "last_fallback_used", "last_grounding", "last_escalation_status",
+            "last_nlu_confidence", "last_nlu_reason",
             "cart", "order_draft",
         }
         for key in transient:

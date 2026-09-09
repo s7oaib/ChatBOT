@@ -537,6 +537,84 @@ class AIResponder:
 
         return self._query_groq(prompt_text, is_refinement=False)
 
+    def compose_verified_response(
+        self,
+        user_message: str,
+        intents: List[str],
+        entities: Dict[str, Any],
+        approved_facts: List[str],
+        user_context: str = None,
+        history_turns: list = None,
+    ) -> Tuple[str, bool, str]:
+        """Phrase a resolved action plan from only its selected knowledge.
+
+        The model returns an explicit status so insufficient information is a
+        machine-readable result rather than prose that might accidentally be
+        sent. Deterministic approved copy remains the fallback for provider or
+        grounding failure.
+        """
+        if not approved_facts:
+            return "", False, "no_approved_facts"
+        if self.get_active_provider() == "none":
+            return "", False, "provider_unavailable"
+
+        facts = "\n\n".join(
+            f"[VERIFIED KNOWLEDGE {index + 1}]\n{fact}"
+            for index, fact in enumerate(approved_facts)
+        )[:_RAG_CONTEXT_CHAR_BUDGET]
+        history = ""
+        if history_turns:
+            history = "\n".join(
+                f"{turn.get('role', '').capitalize()}: "
+                f"{self._truncate(turn.get('content', ''), _HISTORY_LINE_CHARS)}"
+                for turn in history_turns[-_HISTORY_TURNS_IN_PROMPT:]
+            )
+        prompt = (
+            "Write one Camellia Artisanal customer reply from the verified knowledge below.\n"
+            "Return exactly one JSON object: "
+            '{"status":"ok","response":"..."} or '
+            '{"status":"insufficient","response":""}.\n\n'
+            "HARD RULES:\n"
+            "- Use only facts explicitly present in VERIFIED KNOWLEDGE.\n"
+            "- Never invent or infer a price, discount, availability, product, flavour, "
+            "ingredient, allergen, storage instruction, delivery charge or coverage, policy, "
+            "date, phone number, quantity, or packaging claim.\n"
+            "- Preserve the meaning of every approved policy and qualification.\n"
+            "- If the facts do not answer any detected intent, return status insufficient.\n"
+            "- Be concise, warm, and natural. Never use flower emoji.\n\n"
+            f"DETECTED INTENTS: {json.dumps(intents, ensure_ascii=False)}\n"
+            f"DETECTED ENTITIES: {json.dumps(entities, ensure_ascii=False)}\n"
+            f"VERIFIED KNOWLEDGE:\n{facts}\n"
+        )
+        if user_context:
+            prompt += f"\nACTIVE CUSTOMER PROFILE:\n{user_context}\n"
+        if history:
+            prompt += f"\nRECENT CONVERSATION:\n{history}\n"
+        prompt += f"\nCUSTOMER MESSAGE: {user_message}"
+
+        raw, ok, reason = self._query_groq(
+            prompt,
+            is_refinement=True,
+            model=config.GROQ_MODEL,
+            response_format={"type": "json_object"},
+            max_tokens=700,
+        )
+        if not ok:
+            return "", False, reason
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            return "", False, "invalid_json"
+        if not isinstance(parsed, dict) or parsed.get("status") != "ok":
+            return "", False, "insufficient"
+        response = str(parsed.get("response") or "").strip()
+        from camellia.rag_fallback import rag_fallback_engine
+        grounded, grounding_reason = rag_fallback_engine.grounding_report(response, approved_facts)
+        if not grounded:
+            log.warning("Discarded ungrounded verified response: %s", grounding_reason)
+            return "", False, grounding_reason
+        return response, True, "grounded"
+
     def refine_template_response(
         self,
         template_id: str,

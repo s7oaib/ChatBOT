@@ -32,7 +32,7 @@ def _reply(message, user_id, channel="whatsapp"):
         ("Hi, what is the price?", "price_clarify_product"),
         ("Hello, do you deliver to Delhi?", "delivery_area"),
         ("Can you tell me what products are available?", "product_overview"),
-        ("What can I order from you?", "how_to_order"),
+        ("What can I order from you?", "know_more"),
     ],
 )
 def test_natural_phrasings_are_understood_without_a_literal_trigger(message, expected_template):

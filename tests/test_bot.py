@@ -975,7 +975,9 @@ class TestCamelliaBot(unittest.TestCase):
             self.assertEqual(tmpl, "signature_collection")
             self.assertNotIn("REWORDED", resp)
             self.assertIn("Collection 2. Signature collection", resp)
-            mock_httpx_cls.return_value.__enter__.return_value.post.assert_not_called()
+            calls = mock_httpx_cls.return_value.__enter__.return_value.post.call_args_list
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0].kwargs["json"]["model"], config.GROQ_ROUTER_MODEL)
 
     def test_duplicate_reply_is_never_sent_twice_when_ai_is_down(self):
         """
@@ -1155,7 +1157,12 @@ class TestCamelliaBot(unittest.TestCase):
         ai_responder._groq_cooldown_until = 0.0
         ai_responder._refinement_cache.clear()
 
-        with patch.object(config, "GROQ_ENABLED", True), patch.object(config, "GROQ_API_KEY", "fake_key"):
+        from camellia.understanding import UnderstandingResult
+
+        with patch.object(config, "GROQ_ENABLED", True), patch.object(config, "GROQ_API_KEY", "fake_key"), patch(
+            "camellia.responder.understanding_engine.analyze",
+            return_value=UnderstandingResult(reason="provider_unavailable"),
+        ):
             first, _, tmpl1, _ = responder.match_and_respond(
                 "do you deliver today", user_id=uid, channel="whatsapp"
             )
@@ -1739,7 +1746,7 @@ class TestCamelliaBot(unittest.TestCase):
             channel="whatsapp",
         )
         self.assertFalse(matched)
-        self.assertTrue(template_id is None or template_id == "explicit_escalation")
+        self.assertTrue(template_id is None or template_id in {"explicit_escalation", "compound_discount_request"})
         self.assertIn("notified our team", response.lower())
 
     def test_approved_learned_answer_is_used_by_rag(self):
@@ -1943,7 +1950,7 @@ class TestCamelliaBot(unittest.TestCase):
             "choices": [
                 {
                     "message": {
-                        "content": "Hello Rahul! 🌸 Here are the pricing details for our Sondesh:\n• Box of 6: ₹450\n• Box of 9: ₹600"
+                        "content": "Hello Rahul! Here are the pricing details:\n• Box of 6: ₹450\n• Box of 9: ₹600"
                     }
                 }
             ]
@@ -2561,10 +2568,10 @@ class TestCompoundAndAreaAwareReplies(unittest.TestCase):
         msg = "hi can i get a menu for today and do you deliver to sector 90 gurgaon"
         with self.assertLogs("camellia.responder", level=logging_mod.INFO) as captured:
             self._respond(msg, user_id="test_tripwire")
-        compound_lines = [line for line in captured.output if "COMPOUND_INTENT_CANDIDATE" in line]
+        compound_lines = [line for line in captured.output if "STRUCTURED_ROUTE" in line]
         self.assertTrue(compound_lines, f"no tripwire log among: {captured.output}")
-        self.assertIn("delivery_area", compound_lines[0])
-        self.assertIn("know_more", compound_lines[0])
+        self.assertIn("approved:delivery_area", compound_lines[0])
+        self.assertIn("approved:know_more", compound_lines[0])
 
 
 class TestClarifyBeforeEscalating(unittest.TestCase):

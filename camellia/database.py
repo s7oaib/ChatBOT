@@ -162,6 +162,27 @@ class Database:
             );
             """)
 
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS message_route_audit (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT NOT NULL,
+                channel TEXT NOT NULL,
+                user_message TEXT NOT NULL,
+                route TEXT,
+                intents TEXT NOT NULL,
+                entities TEXT NOT NULL,
+                confidence REAL,
+                knowledge_ids TEXT NOT NULL,
+                actions TEXT NOT NULL,
+                llm_called INTEGER DEFAULT 0,
+                fallback_used INTEGER DEFAULT 0,
+                grounding_result TEXT,
+                knowledge_gap INTEGER DEFAULT 0,
+                escalation_status TEXT,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+
             # Canonical missing-information queue. Unlike candidate_templates,
             # this records what fact/action is absent rather than teaching one
             # more spelling of the customer's question.
@@ -293,6 +314,7 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_rag_audit_timestamp ON rag_audit_logs(timestamp DESC);",
             "CREATE INDEX IF NOT EXISTS idx_knowledge_gaps_status_updated ON knowledge_gaps(status, updated_at DESC);",
             "CREATE INDEX IF NOT EXISTS idx_active_sessions_updated ON active_conversation_sessions(updated_at);",
+            "CREATE INDEX IF NOT EXISTS idx_message_route_time ON message_route_audit(timestamp DESC);",
         )
         for statement in statements:
             cursor.execute(statement)
@@ -881,6 +903,42 @@ class Database:
             ).fetchone()
             conn.commit()
             return int(row["id"])
+
+    def log_message_route(
+        self,
+        *,
+        user_id: str,
+        channel: str,
+        user_message: str,
+        route: Optional[str],
+        intents: List[str],
+        entities: Dict[str, Any],
+        confidence: Optional[float],
+        knowledge_ids: List[str],
+        actions: List[str],
+        llm_called: bool,
+        fallback_used: bool,
+        grounding_result: Optional[str],
+        knowledge_gap: bool,
+        escalation_status: Optional[str],
+    ) -> int:
+        """Records why a customer-facing route was selected."""
+        with self.get_connection() as conn:
+            cursor = conn.execute("""
+                INSERT INTO message_route_audit (
+                    user_id, channel, user_message, route, intents, entities,
+                    confidence, knowledge_ids, actions, llm_called, fallback_used,
+                    grounding_result, knowledge_gap, escalation_status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                str(user_id), str(channel), user_message, route,
+                json.dumps(intents or []), json.dumps(entities or {}, ensure_ascii=False),
+                confidence, json.dumps(knowledge_ids or []), json.dumps(actions or []),
+                int(bool(llm_called)), int(bool(fallback_used)), grounding_result,
+                int(bool(knowledge_gap)), escalation_status,
+            ))
+            conn.commit()
+            return int(cursor.lastrowid)
 
     def save_active_session(
         self, user_id: str, channel: str, payload: Dict[str, Any], updated_at: float

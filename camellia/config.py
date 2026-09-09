@@ -150,10 +150,10 @@ class Config:
     STRUCTURED_NLU_ENABLED: bool = os.getenv("STRUCTURED_NLU_ENABLED", "true").lower() in ("true", "1", "t", "yes")
     try:
         STRUCTURED_NLU_ROLLOUT_PERCENT: int = max(
-            0, min(100, int(os.getenv("STRUCTURED_NLU_ROLLOUT_PERCENT", "10")))
+            0, min(100, int(os.getenv("STRUCTURED_NLU_ROLLOUT_PERCENT", "100")))
         )
     except ValueError:
-        STRUCTURED_NLU_ROLLOUT_PERCENT: int = 10
+        STRUCTURED_NLU_ROLLOUT_PERCENT: int = 100
 
     # Active conversation state survives restarts and is shared by workers via
     # the existing SQLite volume. The short TTL limits stale conversational state.

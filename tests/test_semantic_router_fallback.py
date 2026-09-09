@@ -15,19 +15,18 @@ def _ask(message: str, user_id: str):
     return responder.match_and_respond(message, user_id=user_id, channel="whatsapp")
 
 
-def test_semantic_fallback_routes_bengali_wording_to_an_approved_template():
-    # This Hinglish phrasing has no current keyword trigger.
-    # The router may understand it, but the response must still be the approved
-    # weekly-menu template and its existing dynamic menu renderer.
+def test_provider_failure_does_not_try_a_second_llm_router():
+    # A router-model failure must fail closed instead of retrying the same
+    # provider through a second classifier or using aggressive fuzzy matching.
     with patch.object(config, "SEMANTIC_ROUTER_ENABLED", True), \
          patch.object(understanding_engine, "analyze", return_value=UnderstandingResult(reason="provider_unavailable")), \
          patch.object(shadow_router, "classify", return_value=("weekly_menu_veg", "ok")) as classify:
         text, matched, template_id, _ = _ask("khana wala card bhejna", "semantic_hinglish")
 
-    assert classify.called
-    assert matched is True
-    assert template_id == "weekly_menu_veg"
-    assert "Vegetarian" in text
+    assert not classify.called
+    assert matched is False
+    assert template_id is None
+    assert "team" in text.lower()
 
 
 def test_semantic_fallback_refuses_to_auto_route_a_guarded_template():

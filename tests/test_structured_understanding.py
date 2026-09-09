@@ -35,7 +35,7 @@ def test_llm_contract_is_structured_json_and_validated():
         '{"intents":["greeting","product_price","delivery_query"],'
         '"entities":{"product":"Jolbhora","location":"Delhi","quantity":null,'
         '"event":null,"menu_type":null},"confidence":0.91,'
-        '"requires_human":false,"knowledge_gap":null}'
+        '"requires_human":false,"knowledge_gap":false}'
     )
     with patch.object(config, "STRUCTURED_NLU_ENABLED", True), patch(
         "camellia.ai_responder.ai_responder.get_active_provider", return_value="groq"
@@ -49,6 +49,23 @@ def test_llm_contract_is_structured_json_and_validated():
     assert result.entities == {"product": "Jolbhora", "location": "Delhi"}
     assert query.call_args.kwargs["response_format"] == {"type": "json_object"}
     assert query.call_args.kwargs["max_tokens"] == 300
+
+
+def test_llm_contract_rejects_non_boolean_gap_fields():
+    raw = (
+        '{"intents":["menu_request"],"entities":{},"confidence":0.9,'
+        '"requires_human":false,"knowledge_gap":"false"}'
+    )
+    with patch.object(config, "STRUCTURED_NLU_ENABLED", True), patch(
+        "camellia.ai_responder.ai_responder.get_active_provider", return_value="groq"
+    ), patch(
+        "camellia.ai_responder.ai_responder._query_groq",
+        return_value=(raw, True, "groq_rag"),
+    ):
+        result = understanding_engine.analyze("Show me the menu")
+
+    assert result.available is False
+    assert result.reason == "invalid_schema"
 
 
 def test_price_and_delivery_execute_two_approved_actions():

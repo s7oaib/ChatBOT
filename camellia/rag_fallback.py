@@ -87,8 +87,7 @@ class RAGFallbackEngine:
                 return True
         return False
 
-    @staticmethod
-    def is_grounded_in_context(answer: str, context_chunks: List[str]) -> bool:
+    def grounding_report(self, answer: str, context_chunks: List[str]) -> Tuple[bool, str]:
         """
         True when a generated answer states no number the approved excerpts
         did not already state.
@@ -104,7 +103,7 @@ class RAGFallbackEngine:
         still matches "₹1500" in the source.
         """
         if not answer:
-            return False
+            return False, "empty_answer"
 
         def digit_groups(text: str) -> set:
             collapsed = re.sub(r'(?<=\d)[,\s](?=\d)', '', text or "")
@@ -113,7 +112,7 @@ class RAGFallbackEngine:
         answer_numbers = digit_groups(answer)
         context_numbers = digit_groups(" ".join(context_chunks or []))
         if not answer_numbers.issubset(context_numbers):
-            return False
+            return False, "unsupported_number"
 
         # Numbers catch fabricated prices and times, but a model can still add
         # a harmful qualitative claim: "free delivery", "nut-free", "available
@@ -127,10 +126,78 @@ class RAGFallbackEngine:
             "nut free", "gluten free", "sugar free", "dairy free", "vegan", "halal",
             "no allergens", "refund", "return policy", "in stock", "out of stock",
         )
-        return all(
-            claim not in answer_text or claim in context_text
-            for claim in protected_claims
-        )
+        for claim in protected_claims:
+            if claim in answer_text and claim not in context_text:
+                return False, f"unsupported_claim:{claim}"
+
+        # Claim categories whose presence is itself meaningful. A generated
+        # reply may paraphrase approved prose, but it may not introduce a new
+        # ingredient, locality, policy, contact address, product, or packaging
+        # property that the selected knowledge never mentioned.
+        protected_terms = {
+            "location": {
+                "delhi", "new delhi", "gurgaon", "gurugram", "noida",
+                "greater noida", "ghaziabad", "faridabad", "kolkata",
+                "bangalore", "bengaluru", "mumbai", "pune", "hyderabad",
+                "chennai", "jaipur", "ahmedabad", "chandigarh", "lucknow",
+            },
+            "ingredient": {
+                "almond", "almonds", "cashew", "cashews", "pistachio",
+                "pistachios", "peanut", "peanuts", "gluten", "dairy",
+                "milk", "chhana", "sugar", "jaggery", "nolen gur", "ghee",
+                "mustard oil", "egg", "eggs",
+            },
+            "storage": {
+                "refrigerate", "refrigerated", "refrigeration", "fridge",
+                "room temperature", "shelf life", "expiry", "freeze", "frozen",
+            },
+            "availability": {
+                "available today", "currently available", "sold out",
+                "in stock", "out of stock", "limited stock",
+            },
+            "packaging": {
+                "plastic free", "cornstarch", "eco friendly", "food safe",
+                "vacuum packed", "gift wrapped", "gift wrapping",
+            },
+        }
+        for category, terms in protected_terms.items():
+            for term in terms:
+                if term in answer_text and term not in context_text:
+                    return False, f"unsupported_{category}:{term}"
+
+        answer_emails = set(re.findall(
+            r"[\w.+-]+@[\w.-]+\.[a-z]{2,}", (answer or "").lower()
+        ))
+        context_emails = set(re.findall(
+            r"[\w.+-]+@[\w.-]+\.[a-z]{2,}", " ".join(context_chunks or []).lower()
+        ))
+        if not answer_emails.issubset(context_emails):
+            return False, "unsupported_contact"
+
+        # Product names are drawn from the menu rather than maintained in a
+        # second allowlist. Only names actually mentioned by the generated
+        # answer need to be present in the retrieved excerpts.
+        product_names = set()
+        def collect(value: Any) -> None:
+            if isinstance(value, dict):
+                for key, child in value.items():
+                    if key in {"item", "flavour", "name"} and isinstance(child, str):
+                        normalized = normalise(child)
+                        if len(normalized) >= 4:
+                            product_names.add(normalized)
+                    collect(child)
+            elif isinstance(value, list):
+                for child in value:
+                    collect(child)
+        collect(self.menu_data)
+        for product in product_names:
+            if product in answer_text and product not in context_text:
+                return False, f"unsupported_product:{product}"
+
+        return True, "grounded"
+
+    def is_grounded_in_context(self, answer: str, context_chunks: List[str]) -> bool:
+        return self.grounding_report(answer, context_chunks)[0]
 
     def retrieve(self, user_message: str) -> RAGResult:
         """

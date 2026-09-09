@@ -31,8 +31,8 @@ for Railway and the test suite.
 6. Unsupported facts create a canonical `knowledge_gaps` record and use human handoff copy.
 
 `STRUCTURED_NLU_ROLLOUT_PERCENT` assigns a stable SHA-256 customer cohort from
-0 to 100. Set it to 10 for an initial production cohort, increase after reviewing
-knowledge gaps and handoffs, and set it to 0 for immediate rollback. Active
+0 to 100. The production target is 100 after the initial cohort validation;
+set it to 0 for immediate rollback. Active
 sessions use the existing `DB_PATH` volume when `SESSION_PERSISTENCE_ENABLED=true`.
 
 ## Runtime data rules
