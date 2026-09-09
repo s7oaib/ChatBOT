@@ -85,6 +85,19 @@ def test_structured_nlu_rollout_cohort_is_stable():
         assert _structured_nlu_enabled_for("customer", "whatsapp") is first
 
 
+def test_jolbhora_price_uses_specific_approved_table_without_nlu():
+    with patch.object(config, "STRUCTURED_NLU_ROLLOUT_PERCENT", 0):
+        text, matched, template_id, _ = responder.match_and_respond(
+            "What is the price of Jolbhora?",
+            user_id="deterministic-jolbhora-price",
+            channel="whatsapp",
+        )
+
+    assert matched is True
+    assert template_id == "jolbhora"
+    assert "₹750" in text and "₹900" in text
+
+
 def test_event_request_uses_deterministic_human_handoff():
     result = _result(
         ["product_information", "event_order"],

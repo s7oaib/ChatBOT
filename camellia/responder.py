@@ -1643,6 +1643,11 @@ class DeterministicResponder:
                     score += 150
                 elif tmpl_id == "nolen_gur_aamar" and re.search(r'\b(nolen gur)\b', lowered_text) and any(c in lowered_text for c in ["collection 1", "collection1", "aamar"]):
                     score += 150
+                elif tmpl_id == "jolbhora" and re.search(r'\bjol\s?bhora\b', lowered_text):
+                    # A product-specific price question must beat the broad
+                    # Sondesh price template, whose generic "price" triggers
+                    # otherwise hide the approved Jolbhora price table.
+                    score += 150
                 elif tmpl_id == "kanchagolla" and re.search(r'\b(kanchagolla|kancha golla)\b', lowered_text):
                     score += 150
                 elif tmpl_id == "pack_size_250g" and re.search(r'\b(250g|250 g)\b', lowered_text) and any(w in lowered_text for w in ["how many", "pieces", "pcs", "box", "pack", "quantity"]):
