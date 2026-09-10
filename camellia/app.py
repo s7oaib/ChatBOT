@@ -362,7 +362,11 @@ def _process_instagram_event(
         # number quoted as plain Instagram text.
         needs_escalation = (
             not was_matched
-            or template_id in ("order_next_steps", "GUARD_staff_names_manager_contact")
+            or template_id in (
+                "explicit_escalation",
+                "order_next_steps",
+                "GUARD_staff_names_manager_contact",
+            )
         )
         if needs_escalation:
             reason = (

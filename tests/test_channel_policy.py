@@ -227,6 +227,41 @@ def test_instagram_human_request_escalates_directly_without_an_unnecessary_faq()
     assert "wa.me" in reply_text
 
 
+def test_exact_production_human_request_uses_cam_whatsapp_continuation():
+    """The production wording must never leak the legacy callback promise."""
+    user_id = "policy_ig_exact_agent_" + uuid.uuid4().hex[:8]
+    session_memory.clear_session(user_id, "instagram")
+    with patch.object(app, "send_instagram_reply") as send_reply, patch.object(
+        app.escalator, "handle_escalation", return_value={"escalation_id": 1},
+    ) as escalate, patch.object(config, "WHATSAPP_BUSINESS_NUMBER", "919800000000"):
+        app._process_instagram_event(user_id, "I need an agent", "ad-1")
+
+    reply_text = send_reply.call_args.args[1]
+    assert re.search(r"https://wa\.me/919800000000\?text=", reply_text)
+    assert re.search(r"CAM-\d{5,6}", urllib.parse.unquote(reply_text))
+    assert escalate.call_count == 1
+    assert "continue" in reply_text.lower()
+    assert "we'll contact you" not in reply_text.lower()
+    assert "they'll connect with you" not in reply_text.lower()
+    assert "whatsapp/call shortly" not in reply_text.lower()
+
+
+def test_repeated_explicit_human_requests_reuse_cam_and_alert_once():
+    user_id = "policy_ig_exact_agent_repeat_" + uuid.uuid4().hex[:8]
+    session_memory.clear_session(user_id, "instagram")
+    with patch.object(app, "send_instagram_reply") as send_reply, patch.object(
+        app.escalator, "handle_escalation", return_value={"escalation_id": 1},
+    ) as escalate, patch.object(config, "WHATSAPP_BUSINESS_NUMBER", "919800000000"):
+        app._process_instagram_event(user_id, "I need an agent", "ad-1")
+        app._process_instagram_event(user_id, "I want to speak to someone", "ad-1")
+
+    replies = [urllib.parse.unquote(call.args[1]) for call in send_reply.call_args_list]
+    refs = {re.search(r"CAM-\d{5,6}", reply).group(0) for reply in replies}
+    assert len(refs) == 1
+    assert escalate.call_count == 1
+    assert all("whatsapp/call shortly" not in reply.lower() for reply in replies)
+
+
 def test_instagram_bulk_event_request_escalates():
     send_reply, escalate = _ask_instagram(
         "policy_ig_bulk", "I need 50 boxes of Jolbhora for my wedding in Delhi",
