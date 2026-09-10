@@ -219,23 +219,20 @@ class Config:
     # pending client sign-off; do not treat it as approved client wording.
     INSTAGRAM_HANDOFF_MESSAGE: str = os.getenv(
         "INSTAGRAM_HANDOFF_MESSAGE",
-        "Our team can assist you personally with this on WhatsApp. "
-        "Tap below to continue your enquiry — please send the pre-filled "
-        "message so our team can identify your Instagram enquiry.",
+        "Our team can assist you personally on WhatsApp. "
+        "Please continue your enquiry using the link below.",
     )
 
     # Human Escalation Contact
-    # Where the bot sends its escalation alerts. Distinct from the number
-    # customers are told to call, which stays +91 87965 51990 across the
-    # templates, the menu and the order summaries — this one is internal.
+    # Where the bot sends its internal escalation alerts. It is never printed
+    # in the customer reply; customers use the configured wa.me continuation.
     HUMAN_ESCALATION_PHONE: str = os.getenv("HUMAN_ESCALATION_PHONE", "+919902181650")
     HUMAN_ESCALATION_EMAIL: str = os.getenv("HUMAN_ESCALATION_EMAIL", "")
 
     # Slow-reply notice.
     # When the bot itself becomes slow to answer, the customer is sitting there
     # watching nothing happen. Rather than let them guess, we say so once per
-    # conversation and hand them the manager's direct line — they can switch to
-    # a human or carry on with the bot, whichever they prefer.
+    # conversation without exposing a direct number or promising a callback.
     SLOW_REPLY_NOTICE_ENABLED: bool = os.getenv("SLOW_REPLY_NOTICE_ENABLED", "true").lower() in ("true", "1", "t", "yes")
     # A reply slower than this (milliseconds) counts as slow. Parsed defensively:
     # a blank or malformed value must not take the whole bot down at import time.
@@ -243,19 +240,12 @@ class Config:
         SLOW_REPLY_THRESHOLD_MS: float = float(os.getenv("SLOW_REPLY_THRESHOLD_MS", "").strip() or 3000)
     except ValueError:
         SLOW_REPLY_THRESHOLD_MS: float = 3000.0
-    # The notice promises a limited period, so it must be able to expire —
-    # otherwise the bot keeps claiming "for a week" indefinitely. ISO date
-    # (YYYY-MM-DD); once past, the notice stops being sent. Empty = no expiry.
+    # Optional ISO date (YYYY-MM-DD); once past, the notice stops being sent.
     SLOW_REPLY_NOTICE_UNTIL: str = os.getenv("SLOW_REPLY_NOTICE_UNTIL", "")
     # `or` rather than a getenv default: an empty SLOW_REPLY_NOTICE_TEXT= line in
     # .env would otherwise blank the notice instead of falling back to the copy.
     SLOW_REPLY_NOTICE_TEXT: str = os.getenv("SLOW_REPLY_NOTICE_TEXT", "").strip() or (
-        "Hi thanks so much for connecting. I will slow in replying to the Instagram "
-        "messages for a week, due to unavoidable circumstances. Request you to connect "
-        "directly with Our Manager of Kitchens, Mr. Guru Dayal Singh (8796551990), on a "
-        "call or WhatsApp . He will help you in the selection & purchase process & also "
-        "and share your invoice. He will be your single point of contact for this order "
-        "and will be happy to assist you with any queries."
+        "Hi thanks so much for connecting. Replies to Instagram messages may be slower than usual."
     )
 
     @property

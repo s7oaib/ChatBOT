@@ -175,9 +175,9 @@ def test_an_unmatched_reply_carrying_the_slow_notice_does_not_also_promise_a_cal
             "something we cannot answer", user_id=user_id, channel="instagram"
         )
 
-    assert text == config.SLOW_REPLY_NOTICE_TEXT
+    assert text == "Our team can assist you personally on WhatsApp. Please continue your enquiry using the link below."
     assert "notified our team" not in text
-    assert "Guru Dayal" in text
+    assert "Guru Dayal" not in text
 
 
 def test_a_matched_reply_still_keeps_its_answer_under_the_slow_notice():
@@ -193,5 +193,5 @@ def test_a_matched_reply_still_keeps_its_answer_under_the_slow_notice():
             "do you deliver", user_id=user_id, channel="instagram"
         )
 
-    assert "Guru Dayal" in text
+    assert text.startswith(config.SLOW_REPLY_NOTICE_TEXT)
     assert "We deliver across Delhi NCR." in text

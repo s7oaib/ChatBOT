@@ -6,6 +6,12 @@ from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional
 from camellia.config import config
 from camellia.text_rules import strip_flower_emoji
+from camellia.candidate_safety import (
+    candidate_eligibility,
+    knowledge_key,
+    normalize_question,
+    validate_candidate_answer,
+)
 
 class Database:
     def __init__(self, db_path: str = None):
@@ -255,6 +261,49 @@ class Database:
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
             """)
+            for column, declaration in (
+                ("original_draft", "TEXT"),
+                ("edited", "INTEGER DEFAULT 0"),
+                ("edited_by", "TEXT"),
+                ("edited_at", "TIMESTAMP"),
+                ("candidate_kind", "TEXT DEFAULT 'knowledge'"),
+                ("normalized_question", "TEXT"),
+                ("knowledge_key", "TEXT"),
+            ):
+                self._ensure_column(cursor, "candidate_templates", column, declaration)
+
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS instagram_source_routes (
+                routing_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_type TEXT NOT NULL,
+                canonical_url TEXT UNIQUE,
+                shortcode TEXT,
+                media_id TEXT,
+                ad_id TEXT,
+                campaign_id TEXT,
+                routing_topic TEXT NOT NULL DEFAULT '',
+                knowledge_scope TEXT NOT NULL DEFAULT '[]',
+                escalation_policy TEXT NOT NULL DEFAULT 'human_if_unsupported',
+                priority_products TEXT NOT NULL DEFAULT '[]',
+                active INTEGER NOT NULL DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                archived_at TIMESTAMP
+            );
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_instagram_routes_ad ON instagram_source_routes(ad_id, active)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_instagram_routes_media ON instagram_source_routes(media_id, active)")
+
+            for column, declaration in (
+                ("source_routing_id", "INTEGER"),
+                ("source_match_method", "TEXT"),
+                ("source_type", "TEXT"),
+                ("shortcode", "TEXT"),
+                ("media_id", "TEXT"),
+                ("routing_topic", "TEXT"),
+                ("source_context_used", "INTEGER DEFAULT 0"),
+            ):
+                self._ensure_column(cursor, "conversations", column, declaration)
 
             # Seed counters if empty
             cursor.execute("INSERT OR IGNORE INTO analytics (key, value) VALUES ('total_messages', 0);")
@@ -303,6 +352,92 @@ class Database:
         """Deletes one mapping without affecting conversations from that ad."""
         with self.get_connection() as conn:
             cursor = conn.execute("DELETE FROM ad_product_routes WHERE ad_id = ?", (ad_id,))
+            conn.commit()
+        return cursor.rowcount > 0
+
+    def save_instagram_source_route(self, route: Dict[str, Any], routing_id: Optional[int] = None) -> Dict[str, Any]:
+        """Create/update one source route, deduplicating URL and identifiers."""
+        now = datetime.utcnow().isoformat()
+        values = (
+            route["source_type"], route.get("canonical_url"), route.get("shortcode"),
+            route.get("media_id"), route.get("ad_id"), route.get("campaign_id"),
+            route.get("routing_topic", ""), json.dumps(route.get("knowledge_scope", [])),
+            route.get("escalation_policy", "human_if_unsupported"),
+            json.dumps(route.get("priority_products", [])), int(bool(route.get("active", True))), now,
+        )
+        with self.get_connection() as conn:
+            if routing_id is None:
+                for field in ("canonical_url", "ad_id", "media_id"):
+                    if not route.get(field):
+                        continue
+                    existing = conn.execute(
+                        f"SELECT routing_id FROM instagram_source_routes WHERE {field} = ? AND archived_at IS NULL",
+                        (route[field],),
+                    ).fetchone()
+                    if existing:
+                        routing_id = int(existing["routing_id"])
+                        break
+            if routing_id is None:
+                cursor = conn.execute(
+                    """INSERT INTO instagram_source_routes
+                    (source_type, canonical_url, shortcode, media_id, ad_id, campaign_id,
+                     routing_topic, knowledge_scope, escalation_policy, priority_products,
+                     active, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    values[:-1] + (now, now),
+                )
+                routing_id = int(cursor.lastrowid)
+            else:
+                cursor = conn.execute(
+                    """UPDATE instagram_source_routes SET source_type=?, canonical_url=?, shortcode=?,
+                    media_id=?, ad_id=?, campaign_id=?, routing_topic=?, knowledge_scope=?,
+                    escalation_policy=?, priority_products=?, active=?, updated_at=?, archived_at=NULL
+                    WHERE routing_id=?""",
+                    values + (routing_id,),
+                )
+                if cursor.rowcount == 0:
+                    raise ValueError("Routing record not found.")
+            conn.commit()
+            row = conn.execute(
+                "SELECT * FROM instagram_source_routes WHERE routing_id = ?", (routing_id,)
+            ).fetchone()
+        return dict(row)
+
+    def list_instagram_source_routes(self, include_archived: bool = False) -> List[Dict[str, Any]]:
+        where = "" if include_archived else "WHERE archived_at IS NULL"
+        with self.get_connection() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM instagram_source_routes {where} ORDER BY updated_at DESC, routing_id DESC"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def find_instagram_source_route(self, field: str, value: str) -> Optional[Dict[str, Any]]:
+        if field not in ("ad_id", "media_id"):
+            raise ValueError("Unsupported route identifier.")
+        with self.get_connection() as conn:
+            row = conn.execute(
+                f"SELECT * FROM instagram_source_routes WHERE {field} = ? AND active = 1 "
+                "AND archived_at IS NULL ORDER BY updated_at DESC LIMIT 1",
+                (value,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def set_instagram_source_route_active(self, routing_id: int, active: bool) -> bool:
+        with self.get_connection() as conn:
+            cursor = conn.execute(
+                "UPDATE instagram_source_routes SET active=?, updated_at=? WHERE routing_id=? AND archived_at IS NULL",
+                (int(active), datetime.utcnow().isoformat(), routing_id),
+            )
+            conn.commit()
+        return cursor.rowcount > 0
+
+    def archive_instagram_source_route(self, routing_id: int) -> bool:
+        now = datetime.utcnow().isoformat()
+        with self.get_connection() as conn:
+            cursor = conn.execute(
+                "UPDATE instagram_source_routes SET active=0, archived_at=?, updated_at=? WHERE routing_id=?",
+                (now, now, routing_id),
+            )
             conn.commit()
         return cursor.rowcount > 0
 
@@ -585,6 +720,13 @@ class Database:
         message_source: Optional[str] = None,
         ad_id: Optional[str] = None,
         ad_title: Optional[str] = None,
+        source_routing_id: Optional[int] = None,
+        source_match_method: Optional[str] = None,
+        source_type: Optional[str] = None,
+        shortcode: Optional[str] = None,
+        media_id: Optional[str] = None,
+        routing_topic: Optional[str] = None,
+        source_context_used: bool = False,
     ):
         """Log message exchange and increment analytics counters."""
         with self.get_connection() as conn:
@@ -592,12 +734,14 @@ class Database:
             cursor.execute("""
             INSERT INTO conversations (
                 user_id, channel, user_message, bot_response, was_matched, template_id,
-                message_source, ad_id, ad_title
+                message_source, ad_id, ad_title, source_routing_id, source_match_method,
+                source_type, shortcode, media_id, routing_topic, source_context_used
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 user_id, channel, user_message, bot_response, 1 if was_matched else 0, template_id,
-                message_source, ad_id, ad_title,
+                message_source, ad_id, ad_title, source_routing_id, source_match_method,
+                source_type, shortcode, media_id, routing_topic, int(bool(source_context_used)),
             ))
             
             cursor.execute("UPDATE analytics SET value = value + 1 WHERE key = 'total_messages';")
@@ -801,7 +945,7 @@ class Database:
         verified_answer: str,
         source: str = "staff_resolution",
         confidence: float = 1.0
-    ) -> int:
+    ) -> Optional[int]:
         """Adds or updates a verified knowledge item in the self-healing knowledge base."""
         with self.get_connection() as conn:
             cursor = conn.cursor()
@@ -966,13 +1110,44 @@ class Database:
         the client owns — so it must never carry a flower in the first place.
         """
         response = strip_flower_emoji(response or "")
+        eligible, _ = candidate_eligibility(user_message or "", response)
+        valid, _ = validate_candidate_answer(response)
+        if not eligible or not valid:
+            return None
+        normalized = normalize_question(user_message or name)
+        stable_key = knowledge_key(name, user_message or name)
         sources_str = json.dumps(source_refs or [])
         with self.get_connection() as conn:
             cursor = conn.cursor()
+            duplicate_rows = cursor.execute("""
+                SELECT id, normalized_question FROM candidate_templates
+                WHERE status = 'PENDING_APPROVAL'
+                  AND (knowledge_key = ? OR normalized_question = ?)
+                ORDER BY id ASC
+            """, (stable_key, normalized)).fetchall()
+            if not duplicate_rows:
+                duplicate_rows = cursor.execute("""
+                    SELECT id, normalized_question FROM candidate_templates
+                    WHERE status = 'PENDING_APPROVAL' AND candidate_kind = 'knowledge'
+                    ORDER BY id ASC
+                """).fetchall()
+            incoming_words = set(normalized.split())
+            for duplicate in duplicate_rows:
+                existing_words = set((duplicate["normalized_question"] or "").split())
+                union = incoming_words | existing_words
+                similarity = len(incoming_words & existing_words) / len(union) if union else 1.0
+                if duplicate["normalized_question"] == normalized or similarity >= 0.88:
+                    return int(duplicate["id"])
             cursor.execute("""
-            INSERT INTO candidate_templates (name, status, user_message, response, source_refs, confidence, created_by, created_at)
-            VALUES (?, 'PENDING_APPROVAL', ?, ?, ?, ?, ?, ?)
-            """, (name, user_message, response, sources_str, confidence, created_by, datetime.utcnow().isoformat()))
+            INSERT INTO candidate_templates (
+                name, status, user_message, response, original_draft, source_refs,
+                confidence, created_by, created_at, candidate_kind,
+                normalized_question, knowledge_key
+            ) VALUES (?, 'PENDING_APPROVAL', ?, ?, ?, ?, ?, ?, ?, 'knowledge', ?, ?)
+            """, (
+                name, user_message, response, response, sources_str, confidence,
+                created_by, datetime.utcnow().isoformat(), normalized, stable_key,
+            ))
             candidate_id = cursor.lastrowid
             conn.commit()
             return candidate_id
@@ -1153,6 +1328,12 @@ class Database:
                 # Rows written before the save-time strip existed still carry
                 # flowers, so clean them on the way to the dashboard too.
                 item["response"] = strip_flower_emoji(item.get("response") or "")
+                eligible, _ = candidate_eligibility(item.get("user_message") or "", item["response"])
+                valid, _ = validate_candidate_answer(item["response"])
+                if not eligible or not valid:
+                    continue
+                item["original_draft"] = item.get("original_draft") or item["response"]
+                item["edited"] = bool(item.get("edited"))
                 try:
                     item["source_refs"] = json.loads(item.get("source_refs") or "[]")
                 except Exception:
@@ -1169,11 +1350,32 @@ class Database:
             if not row:
                 return None
             item = dict(row)
+            item["original_draft"] = item.get("original_draft") or item.get("response") or ""
+            item["edited"] = bool(item.get("edited"))
             try:
                 item["source_refs"] = json.loads(item.get("source_refs") or "[]")
             except Exception:
                 item["source_refs"] = []
             return item
+
+    def edit_candidate_template(
+        self, candidate_id: int, response: str, edited_by: str = "admin"
+    ) -> bool:
+        """Updates the current draft without changing its pending status."""
+        answer = strip_flower_emoji(response or "").strip()
+        valid, _ = validate_candidate_answer(answer)
+        if not valid:
+            return False
+        now = datetime.utcnow().isoformat()
+        with self.get_connection() as conn:
+            cursor = conn.execute("""
+                UPDATE candidate_templates
+                SET original_draft = COALESCE(original_draft, response),
+                    response = ?, edited = 1, edited_by = ?, edited_at = ?
+                WHERE id = ? AND status = 'PENDING_APPROVAL'
+            """, (answer, edited_by, now, candidate_id))
+            conn.commit()
+        return cursor.rowcount > 0
 
     def approve_candidate_template(self, candidate_id: int, approved_by: str = "admin") -> bool:
         """Marks a candidate template as APPROVED and returns candidate details."""

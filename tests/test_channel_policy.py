@@ -256,7 +256,7 @@ def test_repeated_explicit_human_requests_reuse_cam_and_alert_once():
         app._process_instagram_event(user_id, "I want to speak to someone", "ad-1")
 
     replies = [urllib.parse.unquote(call.args[1]) for call in send_reply.call_args_list]
-    refs = {re.search(r"CAM-\d{5,6}", reply).group(0) for reply in replies}
+    refs = {match.group(0) for reply in replies if (match := re.search(r"CAM-\d{5,6}", reply))}
     assert len(refs) == 1
     assert escalate.call_count == 1
     assert all("whatsapp/call shortly" not in reply.lower() for reply in replies)
@@ -269,17 +269,19 @@ def test_verified_order_receipt_adds_concise_order_handoff_and_reuses_cam():
         app.escalator, "handle_escalation", return_value={"escalation_id": 1},
     ) as escalate, patch.object(config, "WHATSAPP_BUSINESS_NUMBER", "919800000000"):
         app._process_instagram_event(user_id, "I want Jolbhora 250g", "ad-1")
-        receipt = send_reply.call_args.args[1]
+        receipt, order_link = [call.args[1] for call in send_reply.call_args_list[-2:]]
         app._process_instagram_event(user_id, "I need an agent", "ad-1")
-        agent_reply = send_reply.call_args.args[1]
+        agent_notice, agent_reply = [call.args[1] for call in send_reply.call_args_list[-2:]]
 
     assert "ORDER DRAFT RECEIPT" in receipt
     assert "Continue on WhatsApp" in receipt
+    assert "https://wa.me/" not in receipt
+    assert order_link.startswith("Continue on WhatsApp:\nhttps://wa.me/")
     assert "we'll contact you" not in receipt.lower()
     assert "they'll connect with you" not in receipt.lower()
     assert "whatsapp/call shortly" not in receipt.lower()
 
-    link = re.search(r"https://wa\.me/[^\s]+", receipt).group(0)
+    link = re.search(r"https://wa\.me/[^\s]+", order_link).group(0)
     decoded = urllib.parse.unquote(link)
     assert "Ref: CAM-" in decoded
     assert "Collection: Aamar Mishti Collection" in decoded
@@ -296,6 +298,7 @@ def test_verified_order_receipt_adds_concise_order_handoff_and_reuses_cam():
     first_ref = re.search(r"CAM-\d{5,6}", decoded).group(0)
     second_ref = re.search(r"CAM-\d{5,6}", urllib.parse.unquote(agent_reply)).group(0)
     assert first_ref == second_ref
+    assert agent_notice == "Our team can assist you personally on WhatsApp. Please continue your enquiry using the link below."
 
 
 def test_instagram_bulk_event_request_escalates():
@@ -359,8 +362,9 @@ def test_duplicate_instagram_escalation_does_not_create_duplicate_handoffs():
         app._process_instagram_event(user_id, "can I please speak to a human", "ad-1")
 
     refs = {
-        re.search(r"CAM-\d{5,6}", urllib.parse.unquote(call.args[1])).group(0)
+        match.group(0)
         for call in send_reply.call_args_list
+        if (match := re.search(r"CAM-\d{5,6}", urllib.parse.unquote(call.args[1])))
     }
     assert len(refs) == 1
     rows = [h for h in db.get_handoffs(limit=200) if h["source_user_id"] == user_id]

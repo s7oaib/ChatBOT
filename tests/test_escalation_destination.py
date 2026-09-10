@@ -39,17 +39,15 @@ def test_changing_the_setting_takes_effect_without_a_restart():
         assert escalator.human_phone == "+912222222222"
 
 
-def test_the_customer_facing_number_is_untouched_by_the_alert_setting():
-    # The templates tell customers to call the kitchen's public line. That is a
-    # different number from the internal alert destination and must not move
-    # with it.
+def test_customer_handoff_copy_never_exposes_the_internal_alert_setting():
     from camellia.responder import responder
 
     handover, _intent = responder.build_handover_response("i need a refund please")
     with patch.object(config, "HUMAN_ESCALATION_PHONE", "+919902181650"):
         still_handover, _ = responder.build_handover_response("i need a refund please")
 
-    assert "87965 51990" in handover
+    assert "assist you personally on WhatsApp" in handover
+    assert "87965 51990" not in handover
     assert still_handover == handover
     assert "9902181650" not in still_handover
 
