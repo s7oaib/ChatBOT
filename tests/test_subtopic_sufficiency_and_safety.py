@@ -383,3 +383,113 @@ class TestGroundingAcceptsStructuralParaphraseWithoutWeakeningSafety:
             answer, ["We deliver right across Delhi NCR."],
         )
         assert grounded is False
+
+
+class TestAmenityWordsOverrideACooccurringDomainKeyword:
+    """Benchmark V3 found this: "Is the delivery van wheelchair accessible?"
+    contains the word "delivery", so the reader answered it as a delivery-
+    coverage question. The customer's actual subject — wheelchair access —
+    was never wrong per se; it just lost to a co-occurring domain keyword
+    the same way "parking" once lost to "packing" by spelling. The fix is
+    the same shape: a small enumerated list of words this business has no
+    vocabulary for at all always wins the clause, regardless of what else
+    is mentioned beside it. It also must not defer to legacy trigger
+    matching once identified — the old matcher has no notion of the
+    override and would independently re-score the same borrowed word.
+
+    FAILED EXAMPLE: "Is the delivery van wheelchair accessible?" answered
+    with the approved delivery-coverage copy.
+    ROOT SEMANTIC CONCEPT: an enumerated off-domain amenity word (wheelchair,
+    parking, Wi-Fi, washroom, table booking, air conditioning, smoking,
+    phone charging, photography, dress code, loyalty program) means that
+    topic, not whatever business word happens to sit next to it in the same
+    sentence.
+    GENERAL FIX: camellia.semantic_fallback.AMENITY_TOPIC_PATTERN is the one
+    definition; responder.OUT_OF_SCOPE_TOPIC_RE imports it rather than
+    keeping a second list, and a message this pattern matches is excluded
+    from the "let legacy trigger matching try" compatibility path.
+    OTHER CASES THIS COVERS: any future phrasing pairing one of these
+    amenity words with any business keyword ("does the subscription include
+    Wi-Fi", "can the delivery boy validate my parking", "is the storage room
+    air conditioned") — not just the one example found.
+    """
+
+    @pytest.mark.parametrize("message", [
+        "Is the delivery van wheelchair accessible?",
+        "Is the delivery bike wheelchair friendly?",
+        "Does the subscription include a table booking?",
+        "Can I charge my phone while I wait for delivery?",
+        "Does the packaging come with Wi-Fi tracking?",
+        "Can I pay the parking fee with cash on delivery?",
+    ])
+    def test_an_amenity_word_wins_over_a_cooccurring_domain_keyword(self, message):
+        user_id = _fresh("amenity_override")
+        text, matched, _template_id, _images = _outage_reply(message, user_id)
+        facts = session_memory.get_facts(user_id, "whatsapp")
+
+        assert matched is False
+        assert facts.get("last_route_source") != "legacy_trigger"
+        # The generic handoff's own "ask me about..." menu may mention
+        # delivery/packaging in passing; what must never happen is the
+        # question being *answered* with that copy as if it responded to it.
+        assert "cornstarch" not in text.lower()
+        assert "team" in text.lower()
+
+    def test_a_genuine_reader_gap_still_defers_to_the_compatibility_floor(self):
+        """Not every unknown_business_query is an amenity override — a real
+        on-domain topic the reader simply has no concept for yet ("previous
+        menus" has no modelled concept, since only singular "menu" is a
+        token) must keep reaching the deterministic templates that already
+        answer it, or this fix would have widened into the same false
+        positive the earlier structured-relevance guard caused and was
+        reverted for."""
+        user_id = _fresh("genuine_gap")
+        _text, matched, template_id, _images = _outage_reply(
+            "show me previous menus", user_id,
+        )
+
+        assert matched is True
+        assert template_id == "previous_menus"
+
+
+class TestFlavourPriceQuestionsAreCanonical:
+    """Benchmark V3 found this: "Classic price" and "Kesar rate" name a real
+    flavour and a real price word, but the catalogue only wired
+    sondesh_classic_rose and sondesh_mango_kesar under product_information,
+    not product_price — so a price-worded question about a named flavour
+    fell through as an unanswered gap even though the exact template
+    already carries that flavour's price table.
+
+    FAILED EXAMPLE: "Classic price" resolved to no knowledge record.
+    ROOT SEMANTIC CONCEPT: a canonical knowledge record's intent coverage
+    should match what the template actually contains — these two templates
+    hold price tables, so a price question about the flavours they cover is
+    exactly as valid as a price question about the collections that already
+    had this pairing (Aamar Mishti, Signature).
+    GENERAL FIX: added price:classic_rose and price:mango_kesar records
+    pointing at the same two templates, entity-matched on the same flavour
+    names their product_information records already use (rose, classic,
+    mango, kesar, vanilla, cinnamon, dalchini).
+    OTHER CASES THIS COVERS: any price wording for these flavours —
+    "how much is Vanilla", "Dalchini rate", "Rose Sondesh price" — not just
+    the two examples found.
+    """
+
+    @pytest.mark.parametrize("product, expected_template", [
+        ("Classic", "sondesh_classic_rose"), ("Rose", "sondesh_classic_rose"),
+        ("Kesar", "sondesh_mango_kesar"), ("Vanilla", "sondesh_mango_kesar"),
+        ("Dalchini", "sondesh_mango_kesar"), ("Mango", "sondesh_mango_kesar"),
+    ])
+    def test_a_named_flavour_price_question_resolves_canonically(
+        self, product, expected_template,
+    ):
+        understood = UnderstandingResult(
+            intents=["product_price"], entities={"product": product},
+            confidence=0.9, available=True, reason="test",
+        )
+        resolution = approved_knowledge.resolve(
+            understood, responder.qa_data.get("templates", []),
+        )
+
+        assert [item.template_id for item in resolution.items] == [expected_template]
+        assert resolution.fully_sufficient is True

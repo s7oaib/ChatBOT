@@ -163,7 +163,8 @@ CATALOGUE: Tuple[KnowledgeRecord, ...] = (
     KnowledgeRecord("product:classic_rose", "flavours", (Intent.PRODUCT_INFORMATION.value,),
                     "sondesh_classic_rose", (SEND,), _product("rose", "classic"), priority=15),
     KnowledgeRecord("product:mango_kesar", "flavours", (Intent.PRODUCT_INFORMATION.value,),
-                    "sondesh_mango_kesar", (SEND,), _product("mango", "kesar", "vanilla", "cinnamon"), priority=15),
+                    "sondesh_mango_kesar", (SEND,),
+                    _product("mango", "kesar", "vanilla", "cinnamon", "dalchini"), priority=15),
     KnowledgeRecord("product:overview", "products", (Intent.PRODUCT_INFORMATION.value,),
                     "product_overview", (SEND,), _generic_product()),
 
@@ -187,6 +188,17 @@ CATALOGUE: Tuple[KnowledgeRecord, ...] = (
                     "aamar_mishti_collection", (PRICE,), _product("aamar"), priority=20),
     KnowledgeRecord("price:signature_collection", "prices", (Intent.PRODUCT_PRICE.value,),
                     "signature_collection", (PRICE,), _product("signature"), priority=20),
+    # A named flavour ("Classic price", "Kesar rate") is a price question the
+    # same way naming the collection is — these two templates already carry
+    # the price table for exactly these flavours; they were wired for
+    # product_information only, so a price-worded question about them fell
+    # through to the generic Sondesh catalogue matcher below, which does not
+    # accept a bare flavour name.
+    KnowledgeRecord("price:classic_rose", "flavours", (Intent.PRODUCT_PRICE.value,),
+                    "sondesh_classic_rose", (PRICE,), _product("rose", "classic"), priority=20),
+    KnowledgeRecord("price:mango_kesar", "flavours", (Intent.PRODUCT_PRICE.value,),
+                    "sondesh_mango_kesar", (PRICE,),
+                    _product("mango", "kesar", "vanilla", "cinnamon", "dalchini"), priority=20),
     KnowledgeRecord("price:bento", "bento", (Intent.PRODUCT_PRICE.value,),
                     "bento_details", (PRICE,), _product("bento"), priority=20),
     KnowledgeRecord("price:sondesh_catalogue", "prices", (Intent.PRODUCT_PRICE.value,),

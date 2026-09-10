@@ -20,6 +20,7 @@ from camellia.database import db
 from camellia.trigger_index import trigger_index
 from camellia import weekly_flyer
 from camellia import menu_dates
+from camellia import semantic_fallback
 from camellia.understanding import BusinessAction, Intent, understanding_engine
 from camellia.knowledge import HUMAN_ONLY_INTENTS, approved_knowledge
 
@@ -304,8 +305,7 @@ RELEVANCE_STOP_WORDS = frozenset({
 # edit from the "packing" trigger on the packaging answer, so a customer
 # asking where to park was told about cornstarch boxes.
 OUT_OF_SCOPE_TOPIC_RE = re.compile(
-    r"\b(valet|parking|wi-?fi|dine[- ]in|dining in|seating|sit[- ]in)\b",
-    re.IGNORECASE,
+    rf"\b(?:{semantic_fallback.AMENITY_TOPIC_PATTERN})\b", re.IGNORECASE,
 )
 
 # Delivery-time questions, not delivery-*area* ones — "how long", never
@@ -982,6 +982,18 @@ class DeterministicResponder:
             )
         )
         parking_gap = "parking" in str(result.entities.get("topic") or "").lower()
+        # A message naming one of the enumerated off-domain amenities (the
+        # same list OUT_OF_SCOPE_TOPIC_RE refuses on the deterministic path)
+        # must not defer to legacy trigger matching just because it also
+        # contains a real business word ("is the delivery van wheelchair
+        # accessible?" contains "delivery"). The old fuzzy matcher has no
+        # notion of the topic already being ruled out and would re-score the
+        # same word from scratch. This is deliberately narrower than "every
+        # unknown_business_query": a topic the reader simply does not
+        # recognize YET (a real gap in its concept vocabulary, not a ruled-
+        # out amenity) must keep deferring to legacy, which is exactly the
+        # compatibility floor this migration has not finished retiring.
+        amenity_gap = bool(OUT_OF_SCOPE_TOPIC_RE.search(user_message.lower()))
         # A question that narrows a domain to one thing — gift wrapping, same-day
         # delivery, cancellation — has to be resolved here, because only the
         # knowledge layer can tell whether the approved copy covers that corner
@@ -1068,6 +1080,7 @@ class DeterministicResponder:
             and not explicit_gap
             and not parking_gap
             and not subtopic_gap
+            and not amenity_gap
         ):
             facts["last_intents"] = fallback_intents
             facts["last_entities"] = dict(result.entities)

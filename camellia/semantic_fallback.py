@@ -488,6 +488,29 @@ def _mapped_words(clause: str, found: Set[str], entities: Dict[str, Any]) -> Set
     return mapped
 
 
+# Physical-space and amenity words this business has no vocabulary for at
+# all — wheelchairs, parking, Wi-Fi, washrooms, table bookings, air
+# conditioning, smoking, phone charging, photography. A clause naming one of
+# these always means that, whatever domain word happens to sit beside it:
+# "is the delivery van wheelchair accessible" is a wheelchair-access question
+# wearing a delivery word, not a delivery question. Without this, the same
+# keyword-presence reading that lets "menu bhejo" mean menu_request also lets
+# an unrelated amenity question borrow whichever domain word it mentions in
+# passing. This exact word list is also what responder.OUT_OF_SCOPE_TOPIC_RE
+# refuses on the deterministic path (imported from here, not duplicated), so
+# a message this reader overrides can never fall through to legacy trigger
+# matching, which has no notion of the override and would re-score the same
+# borrowed word from scratch.
+AMENITY_TOPIC_PATTERN = (
+    r"valet|parking|wi-?fi|dine[- ]in|dining in|seating|sit[- ]in|"
+    r"wheelchair|accessib\w*|washroom|toilet|restroom|"
+    r"table (?:booking|reservation)|reserve a table|book(?:ing)? a table|"
+    r"air.?condition\w*|smoking|charging point|charge my phone|"
+    r"photograph\w*|dress code|loyalty (?:card|program)|lift accessible"
+)
+_AMENITY_OVERRIDE_RE = re.compile(rf"\b(?:{AMENITY_TOPIC_PATTERN})\b", re.IGNORECASE)
+
+
 def read(message: str) -> Dict[str, Any]:
     """Return validated intents and entities for a message, clause by clause.
 
@@ -501,7 +524,8 @@ def read(message: str) -> Dict[str, Any]:
 
     unmapped: List[str] = []
     for clause in _clauses(normalised):
-        found = _concepts_in(clause)
+        amenity_override = _AMENITY_OVERRIDE_RE.search(clause)
+        found = set() if amenity_override else _concepts_in(clause)
         # Every concept the clause matched, including the ones precedence
         # rules drop below — their words are still read, so they must not
         # count as terms the reader failed to account for.
