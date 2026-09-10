@@ -207,7 +207,7 @@ class TestCamelliaBot(unittest.TestCase):
             response, was_matched, tmpl_id, img_url = responder.match_and_respond("What is the weather forecast in Tokyo today?")
             self.assertFalse(was_matched)
             self.assertIsNone(tmpl_id)
-            self.assertTrue("notified our team" in response or "connect you with our team" in response)
+            self.assertIn("assist you personally on WhatsApp", response)
 
     def test_product_overview_queries(self):
         """Product inquiries must match product_overview and return 3 menu cards."""
@@ -470,7 +470,7 @@ class TestCamelliaBot(unittest.TestCase):
             resp_text, was_matched, tmpl_id, img_url = responder.match_and_respond("Can you provide a historical overview of traditional dairy techniques in ancient India?")
         # Controlled Architecture: Unmatched queries NEVER send raw AI responses to customers; customer gets human escalation fallback while candidate is logged
         self.assertFalse(was_matched)
-        self.assertIn("notified our team", resp_text.lower())
+        self.assertIn("assist you personally", resp_text.lower())
 
     @patch("httpx.Client.post")
     def test_groq_out_of_context_refusal(self, mock_post):
@@ -487,7 +487,7 @@ class TestCamelliaBot(unittest.TestCase):
         with patch.object(config, "GROQ_ENABLED", True), patch.object(config, "GROQ_API_KEY", "test_key"):
             resp_text, was_matched, tmpl_id, img_url = responder.match_and_respond("What is the capital of France?")
         self.assertFalse(was_matched)
-        self.assertTrue("notified our team" in resp_text.lower() or "connect you with our team" in resp_text.lower())
+        self.assertIn("assist you personally", resp_text.lower())
 
     @patch("httpx.Client.post")
     def test_groq_offline_fallback(self, mock_post):
@@ -1832,7 +1832,7 @@ class TestCamelliaBot(unittest.TestCase):
         )
         self.assertFalse(matched)
         self.assertTrue(template_id is None or template_id in {"explicit_escalation", "compound_discount_request"})
-        self.assertIn("notified our team", response.lower())
+        self.assertIn("assist you personally", response.lower())
 
     def test_approved_learned_answer_is_used_by_rag(self):
         """A staff-approved learned answer is retrievable and safe to activate."""
@@ -2088,7 +2088,8 @@ class TestCamelliaBot(unittest.TestCase):
         resp2, matched2, tmpl2, imgs2 = responder.match_and_respond(msg2, user_id=uid2, channel="whatsapp")
         self.assertFalse(matched2)
         self.assertEqual(tmpl2, "GUARD_customization_flavour_mixing")
-        self.assertIn("+91 87965 51990", resp2)
+        self.assertIn("assist you personally", resp2.lower())
+        self.assertNotIn("87965 51990", resp2)
 
         # Scenario 3: Dietary, Halal & Cooking oil inquiries (Confirmed: Mutton is Halal, Mustard oil from farmer)
         uid3 = "sim_user_dietary_3"
@@ -2117,7 +2118,8 @@ class TestCamelliaBot(unittest.TestCase):
         resp5, matched5, tmpl5, imgs5 = responder.match_and_respond(msg5, user_id=uid5, channel="whatsapp")
         self.assertFalse(matched5)
         self.assertEqual(tmpl5, "explicit_escalation")
-        self.assertIn("+91 87965 51990", resp5)
+        self.assertIn("assist you personally", resp5.lower())
+        self.assertNotIn("87965 51990", resp5)
 
     def test_phase_b_savoury_food_intro_and_image(self):
         """Phase B: Test savoury_food_intro returns 3 ways to order, No minimum order, and attaches weekly menu image."""
@@ -2206,12 +2208,12 @@ class TestCamelliaBot(unittest.TestCase):
         resp, matched, tmpl, _ = responder.match_and_respond(msg, user_id="test_alacarte_user", channel="whatsapp")
         self.assertTrue(matched)
         self.assertEqual(tmpl, "alacarte_prebooking_steps")
-        self.assertIn("Your choice of items & the quantity", resp)
-        self.assertIn("Delivery address", resp)
-        self.assertIn("Phone number of the person who will receive the package", resp)
-        self.assertIn("Which slot", resp)
-        self.assertIn("Google location pin", resp)
-        self.assertIn("8796551990", resp)
+        self.assertIn("choice of items", resp)
+        self.assertIn("quantity", resp)
+        self.assertNotIn("phone number", resp.lower())
+        self.assertIn("preferred day or meal slot", resp)
+        self.assertNotIn("Google location pin", resp)
+        self.assertNotIn("8796551990", resp)
 
     def test_phase_b_sondesh_dispatch_time(self):
         """Phase B: Test sondesh_dispatch_time returns standard dispatch timings."""
@@ -2321,7 +2323,7 @@ class TestCamelliaBot(unittest.TestCase):
         self.assertTrue(matched)
         self.assertEqual(tmpl, "savoury_delivery_time")
         self.assertIn("within 45 minutes", resp)
-        self.assertIn("8796551990", resp)
+        self.assertNotIn("8796551990", resp)
 
     def test_phase_e_kolkata_expansion_info(self):
         """Phase E: Test kolkata_expansion_info template response."""
