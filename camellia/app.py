@@ -32,7 +32,7 @@ from camellia.responder import responder
 from camellia.ai_responder import ai_responder
 from camellia.whatsapp_adapter import whatsapp_adapter
 from camellia.escalator import escalator
-from camellia.handoff import customer_facing_message, get_or_create_handoff, mark_referred
+from camellia.handoff import customer_facing_message, get_or_create_handoff, mark_referred, staff_summary
 from camellia.ad_routing import product_for_ad
 from camellia.sheet_sync import sheet_sync
 from camellia.menu_parser import menu_parser
@@ -367,17 +367,23 @@ def _process_instagram_event(
                 "Order Confirmation & Intake Request" if was_matched
                 else "Unmatched Instagram Query / Sensitive Request"
             )
-            escalation = escalator.handle_escalation(
+            # Created before the staff alert (not after) so the alert can name
+            # the CAM reference and the known-entities summary the customer
+            # never has to repeat, instead of a second, disconnected message.
+            handoff = get_or_create_handoff(
+                user_id=sender_id, channel="instagram", reason=reason,
+                user_message=message_text, facts=facts,
+            )
+            escalator.handle_escalation(
                 user_id=sender_id,
                 channel="instagram",
                 user_message=message_text,
                 reason=reason,
-                context_data={"ad_id": ad_id, "sender_id": sender_id, "template_id": template_id},
-            )
-            handoff = get_or_create_handoff(
-                user_id=sender_id, channel="instagram", reason=reason,
-                user_message=message_text, facts=facts,
-                escalation_id=escalation.get("escalation_id"),
+                context_data={
+                    "ad_id": ad_id, "sender_id": sender_id, "template_id": template_id,
+                    "handoff_ref": handoff["handoff_ref"],
+                    "handoff_summary": staff_summary(handoff),
+                },
             )
             response_text = customer_facing_message(handoff["handoff_ref"])
             mark_referred(handoff["handoff_ref"])

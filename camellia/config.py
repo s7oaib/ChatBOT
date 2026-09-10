@@ -199,6 +199,12 @@ class Config:
     # turns it on implicitly.
     INSTAGRAM_CHATBOT_ENABLED: bool = os.getenv("INSTAGRAM_CHATBOT_ENABLED", "true").lower() in ("true", "1", "t", "yes")
     WHATSAPP_CHATBOT_ENABLED: bool = os.getenv("WHATSAPP_CHATBOT_ENABLED", "false").lower() in ("true", "1", "t", "yes")
+    # A single flipped boolean (a copy-pasted .env, a typo'd override) must not
+    # be enough to put the AI back on WhatsApp. Restoring the old behaviour
+    # requires this second, differently-named flag as well — whatsapp_adapter
+    # treats WHATSAPP_CHATBOT_ENABLED alone as a misconfiguration and fails
+    # safe to human-only, logging an error instead of guessing intent.
+    WHATSAPP_CHATBOT_ENABLE_CONFIRM: bool = os.getenv("WHATSAPP_CHATBOT_ENABLE_CONFIRM", "false").lower() in ("true", "1", "t", "yes")
     WHATSAPP_HUMAN_HANDOFF_ENABLED: bool = os.getenv("WHATSAPP_HUMAN_HANDOFF_ENABLED", "true").lower() in ("true", "1", "t", "yes")
     # The client's own WhatsApp Business number that customers are sent to,
     # digits only with country code (e.g. "9198XXXXXXXX") — NOT the Meta Cloud

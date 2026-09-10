@@ -1269,6 +1269,8 @@ class DeterministicResponder:
             template_id = used_templates[0]
         elif set(intents) == {Intent.MENU_REQUEST.value, Intent.DELIVERY_QUERY.value} and not missing:
             template_id = "delivery_area"
+        elif intents == [Intent.ESCALATION.value]:
+            template_id = "explicit_escalation"
         elif intents:
             template_id = "compound_" + "_".join(intents)
         else:
