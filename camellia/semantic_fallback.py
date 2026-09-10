@@ -65,6 +65,28 @@ FILLER = frozenset({
     "let", "see", "look", "looking", "love", "would", "wanted", "possible",
     "much", "many", "very", "really", "still", "again", "back", "now", "today",
     "one", "two", "three", "us", "guys", "team", "there",
+    # Hindi interrogatives and verb-form variants alongside their English
+    # counterparts already above ("how"/"what"/"kaise" and "kar"/"sakta").
+    # One member of a family already being filler is the reason its siblings
+    # belong here too, not a one-off sentence fix.
+    "kaisi", "kaisa", "sakti", "karte", "karti", "karta", "bare", "aaj",
+    # Hedge phrasing that wraps a real question without narrowing it —
+    # "the best way to X", "what sort of X", "give me an idea of X", "are you
+    # able to X" — appears across every intent family, not one message.
+    "able", "bring", "across", "come", "out", "far", "best", "way",
+    "sort", "idea", "days", "kal", "collection",
+    # Normalization folds "bhejte"/"bhejna"/"bhejte" to "bhejo" (see
+    # _SPELLING), so a delivery phrase written with the original verb form
+    # never matches its own now-rewritten phrase list; the fallback verb
+    # regex already reads "bhejo" directly, so it needs no separate mapping
+    # here — this only keeps it from counting as an unread word.
+    "bhejo",
+    # "order" is deliberately NOT filler. A bare "order" left unmapped is
+    # what keeps "I want to order 2 veg bento" — an order-placement attempt
+    # with a quantity — deferred to the deterministic order-slot/cart flow
+    # instead of being answered as a generic product question. That flow is
+    # state-owned by design; the word staying "unread" here is the mechanism
+    # that protects it, not an oversight.
 })
 
 # --- concepts --------------------------------------------------------------
@@ -85,7 +107,8 @@ CONCEPTS: Dict[str, Tuple[Set[str], Tuple[str, ...]]] = {
     "product_information": (
         {"sweets", "sweet", "mishti", "sondesh", "dessert", "desserts",
          "products", "product", "items", "item", "speciality", "specialty",
-         "bento", "jolbhora", "kanchagolla", "mahua"},
+         "bento", "jolbhora", "kanchagolla", "mahua", "flavour", "flavours",
+         "flavor", "flavors"},
         ("what do you sell", "what are you selling", "what you sell",
          "what do you make", "what you make", "what do you prepare",
          "tell me about", "more about", "know more",
@@ -97,7 +120,7 @@ CONCEPTS: Dict[str, Tuple[Set[str], Tuple[str, ...]]] = {
         # delivery charge as it is a price, and both have better homes.
         {"price", "prices", "pricing", "cost", "costs", "rate", "rates",
          "amount", "expensive", "mrp", "kitna", "paise", "padega", "daam",
-         "rupees"},
+         "rupees", "money"},
         ("how much", "set me back", "price wise", "price-wise", "what does it cost",
          "how expensive", "kitna hai", "kitna padega", "kya rate"),
     ),
