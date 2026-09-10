@@ -1,5 +1,46 @@
 # Architecture
 
+## Channel policy: Instagram AI, WhatsApp human-only
+
+Instagram is the only AI chatbot channel. WhatsApp is reserved for the
+client's own human team — customers reach it only after Instagram creates a
+handoff, and no automated reply is ever composed for a WhatsApp message.
+
+```
+INSTAGRAM                                  WHATSAPP
+   |                                          |
+   v                                          v
+AI chatbot (full architecture,          human-only
+unchanged from prior phases)            (camellia/whatsapp_adapter.py:
+   |                                     process_incoming_message does not
+   +-- can answer -> answer             call responder/understanding/RAG
+   |                                     by default; WHATSAPP_CHATBOT_ENABLED,
+   +-- can't / human / order / -->      off by default, is the only escape
+       complaint / bulk enquiry          hatch, and it is logged when used)
+       -> camellia/handoff.py                |
+          creates an opaque reference         v
+          ("CAM-48371") and a wa.me      A message naming a handoff reference
+          click-to-chat link ->          is recorded and marked
+          customer taps it themselves    WHATSAPP_CONNECTED for staff
+                                          tracking — still no bot reply.
+```
+
+`camellia/handoff.py` owns the opaque reference, deduplication (a repeated
+"human please" reuses the active handoff instead of minting a new one), the
+click-to-chat link (`WHATSAPP_BUSINESS_NUMBER`, manually configured — see the
+manual-configuration report), and the staff-facing summary — built from
+whatever Instagram's own structured understanding already extracted this
+session (`facts["last_entities"]`, order-draft slots), never re-asked of the
+customer. Staff notification continues to go through the existing
+`escalator.handle_escalation` mechanism unchanged.
+
+`INSTAGRAM_CHATBOT_ENABLED` (default true), `WHATSAPP_CHATBOT_ENABLED`
+(default false), and `WHATSAPP_HUMAN_HANDOFF_ENABLED` (default true) are the
+explicit config knobs; the human-only behaviour is enforced in code, not by
+configuration defaults alone — `WHATSAPP_CHATBOT_ENABLED` is the one flag
+that would restore the old auto-reply behaviour, and the code path it gates
+is not reachable any other way.
+
 ## Runtime boundaries
 
 | Area | Responsibility |
