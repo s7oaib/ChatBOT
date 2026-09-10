@@ -106,7 +106,19 @@ class WhatsAppAdapter:
         ("Ref: CAM-48371"), that reference is marked connected purely for
         staff-side tracking; the customer still gets no bot reply for it.
         """
-        if config.WHATSAPP_CHATBOT_ENABLED:
+        if config.WHATSAPP_CHATBOT_ENABLED and not config.WHATSAPP_CHATBOT_ENABLE_CONFIRM:
+            # A lone WHATSAPP_CHATBOT_ENABLED=true is treated as an accidental
+            # flip, not a decision — restoring the old behaviour requires the
+            # separate WHATSAPP_CHATBOT_ENABLE_CONFIRM flag too. Fail safe to
+            # human-only rather than silently answering as a bot.
+            log.error(
+                "WHATSAPP_CHATBOT_ENABLED is true but WHATSAPP_CHATBOT_ENABLE_CONFIRM "
+                "is not set; refusing to run WhatsApp as a chatbot for %s. This is the "
+                "client's explicit channel policy: WhatsApp is human-only. Set both "
+                "flags to true if this is a deliberate policy change.",
+                sender_phone,
+            )
+        elif config.WHATSAPP_CHATBOT_ENABLED:
             # Explicit, logged escape hatch for a future policy change only —
             # off by default, and not exercised by any default configuration.
             log.warning(

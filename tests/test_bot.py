@@ -892,9 +892,13 @@ class TestCamelliaBot(unittest.TestCase):
     def test_whatsapp_chatbot_escape_hatch_still_sends_buttons_when_explicitly_enabled(self):
         """The old auto-reply behaviour survives, but only behind the explicit
         WHATSAPP_CHATBOT_ENABLED flag — off by default, and this test turns it
-        on deliberately to prove the code path was not deleted, only gated."""
+        on deliberately to prove the code path was not deleted, only gated.
+        WHATSAPP_CHATBOT_ENABLE_CONFIRM must also be set: a single flipped
+        boolean is treated as an accident, not a decision."""
         from camellia.whatsapp_adapter import whatsapp_adapter
         with patch.object(config, "WHATSAPP_CHATBOT_ENABLED", True), patch.object(
+            config, "WHATSAPP_CHATBOT_ENABLE_CONFIRM", True,
+        ), patch.object(
             whatsapp_adapter, "send_message"
         ) as mock_send:
             whatsapp_adapter.process_incoming_message("919876543210", "Hi")

@@ -126,7 +126,9 @@ class UnderstandingEngine:
             confidence=0.75,
             requires_human=any(
                 intent in intents
-                for intent in (Intent.EVENT_ORDER.value, Intent.BULK_ORDER.value)
+                for intent in (
+                    Intent.EVENT_ORDER.value, Intent.BULK_ORDER.value, Intent.ESCALATION.value,
+                )
             ),
             knowledge_gap=any(
                 intent in intents
