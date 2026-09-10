@@ -188,7 +188,36 @@ class Config:
     # Instagram Config — uses its own Page token (may differ from WhatsApp token)
     INSTAGRAM_PAGE_ID: str = os.getenv("INSTAGRAM_PAGE_ID", "")
     INSTAGRAM_ACCESS_TOKEN: str = os.getenv("INSTAGRAM_ACCESS_TOKEN", "") or os.getenv("WHATSAPP_ACCESS_TOKEN", "")
-    
+
+    # --- Channel policy: Instagram is the only AI chatbot channel -----------
+    # The client does not want customers talking to an AI on WhatsApp at all.
+    # WHATSAPP_CHATBOT_ENABLED defaults false and is the one flag that would
+    # restore the old auto-reply behaviour; camellia/whatsapp_adapter.py only
+    # consults it as an explicit, logged escape hatch for a future policy
+    # change — the code path that calls the understanding/RAG/template stack
+    # for WhatsApp does not run by default, and nothing else in this file
+    # turns it on implicitly.
+    INSTAGRAM_CHATBOT_ENABLED: bool = os.getenv("INSTAGRAM_CHATBOT_ENABLED", "true").lower() in ("true", "1", "t", "yes")
+    WHATSAPP_CHATBOT_ENABLED: bool = os.getenv("WHATSAPP_CHATBOT_ENABLED", "false").lower() in ("true", "1", "t", "yes")
+    WHATSAPP_HUMAN_HANDOFF_ENABLED: bool = os.getenv("WHATSAPP_HUMAN_HANDOFF_ENABLED", "true").lower() in ("true", "1", "t", "yes")
+    # The client's own WhatsApp Business number that customers are sent to,
+    # digits only with country code (e.g. "9198XXXXXXXX") — NOT the Meta Cloud
+    # API sender number above, which never faces the customer directly here.
+    # Left blank until the client provides it; see the manual-configuration
+    # report for what happens while it is unset.
+    WHATSAPP_BUSINESS_NUMBER: str = os.getenv("WHATSAPP_BUSINESS_NUMBER", "")
+    # How long an Instagram -> WhatsApp handoff reference stays valid/active
+    # for deduplication before a repeated "human please" creates a new one.
+    CROSS_CHANNEL_HANDOFF_EXPIRY_HOURS: int = int(os.getenv("CROSS_CHANNEL_HANDOFF_EXPIRY_HOURS", "72"))
+    # Placeholder copy — the manual-configuration report flags this as
+    # pending client sign-off; do not treat it as approved client wording.
+    INSTAGRAM_HANDOFF_MESSAGE: str = os.getenv(
+        "INSTAGRAM_HANDOFF_MESSAGE",
+        "Our team can assist you personally with this on WhatsApp. "
+        "Tap below to continue your enquiry — please send the pre-filled "
+        "message so our team can identify your Instagram enquiry.",
+    )
+
     # Human Escalation Contact
     # Where the bot sends its escalation alerts. Distinct from the number
     # customers are told to call, which stays +91 87965 51990 across the

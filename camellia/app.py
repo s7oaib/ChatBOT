@@ -32,6 +32,7 @@ from camellia.responder import responder
 from camellia.ai_responder import ai_responder
 from camellia.whatsapp_adapter import whatsapp_adapter
 from camellia.escalator import escalator
+from camellia.handoff import customer_facing_message, get_or_create_handoff, mark_referred
 from camellia.ad_routing import product_for_ad
 from camellia.sheet_sync import sheet_sync
 from camellia.menu_parser import menu_parser
@@ -41,35 +42,6 @@ from camellia.session_memory import session_memory
 from camellia.monitoring import get_logger, delivery_monitor, latency_monitor
 
 log = get_logger("camellia.app")
-
-_INSTAGRAM_CONTACT_REQUEST = "Could you share your WhatsApp number so our team can reach you directly?"
-_INSTAGRAM_CONTACT_CONFIRM = "I have your WhatsApp number as {number}. Is this correct? Reply yes or no."
-_INDIAN_MOBILE_RE = re.compile(
-    r"(?<!\d)(?:(?:\+|00)?91[\s-]*)?0?[\s-]*"
-    r"([6-9](?:[\s-]*\d){9})(?!\d)"
-)
-
-
-def _extract_whatsapp_number(text: str) -> Optional[str]:
-    """Return a normalized Indian WhatsApp number from an Instagram reply."""
-    match = _INDIAN_MOBILE_RE.search(text or "")
-    if not match:
-        return None
-    digits = re.sub(r"\D", "", match.group(1))
-    return f"+91{digits}" if len(digits) == 10 else None
-
-
-def _extract_contact_number_from_event(messaging_event: dict) -> Optional[str]:
-    """Read a phone number from an Instagram contact-card attachment, if present."""
-    message = messaging_event.get("message") or {}
-    attachments = message.get("attachments") or []
-    if not attachments:
-        return None
-    # Meta has used more than one attachment shape for shared/contact cards.
-    # Searching the serialized attachment is deliberately limited to the
-    # contact-collection state by the caller, so image URLs from normal chats
-    # cannot accidentally become phone numbers.
-    return _extract_whatsapp_number(json.dumps(attachments, ensure_ascii=False))
 
 
 def _prune_expired_weekly_menus() -> None:
@@ -348,9 +320,6 @@ def _process_instagram_event(
     """
     try:
         facts = session_memory.get_facts(sender_id, "instagram")
-        awaiting_contact = facts.get("awaiting_instagram_contact", False)
-        awaiting_contact_confirmation = facts.get("awaiting_instagram_contact_confirmation", False)
-        supplied_contact = _extract_whatsapp_number(message_text)
 
         # How this message was composed, and which ad it came from, recorded on
         # every row this function writes. Phase 1 of the router rollout: until
@@ -374,123 +343,46 @@ def _process_instagram_event(
             sender_id, entry.source, trace["ad_id"], trace["ad_title"], entry.raw_payload,
         )
 
-        if awaiting_contact_confirmation:
-            candidate = facts.get("pending_instagram_contact")
-            lowered = " ".join((message_text or "").lower().split())
-            if supplied_contact:
-                candidate = supplied_contact
-                facts["pending_instagram_contact"] = candidate
-                response_text = _INSTAGRAM_CONTACT_CONFIRM.format(number=candidate)
-                db.log_conversation(sender_id, "instagram", message_text, response_text, True, "instagram_contact_confirmation", **trace)
-                send_instagram_reply(sender_id, response_text)
-                return
-            if re.search(r"\b(?:yes|yeah|yep|correct|right|haan|confirm|ok|okay)\b", lowered) and candidate:
-                pending = facts.get("pending_instagram_escalation") or {}
-                facts["awaiting_instagram_contact_confirmation"] = False
-                facts["pending_instagram_contact"] = None
-                facts["awaiting_instagram_contact"] = False
-                facts["pending_instagram_escalation"] = None
-                response_text = pending.get("response_text") or _INSTAGRAM_CONTACT_REQUEST
-                was_matched = pending.get("was_matched", False)
-                template_id = pending.get("template_id")
-                user_message_for_escalation = pending.get("user_message", message_text)
-                reason = pending.get("reason", "Unmatched Instagram Query / Sensitive Request")
-                session_memory.add_turn(sender_id, "instagram", message_text, response_text)
-                escalator.handle_escalation(
-                    user_id=sender_id,
-                    channel="instagram",
-                    user_message=user_message_for_escalation,
-                    reason=reason,
-                    context_data={
-                        "ad_id": ad_id,
-                        "sender_id": sender_id,
-                        "template_id": template_id,
-                        "customer_whatsapp_number": candidate,
-                    },
-                )
-                db.log_conversation(sender_id, "instagram", message_text, response_text, was_matched, template_id, **trace)
-                send_instagram_reply(sender_id, response_text)
-                return
-            if re.search(r"\b(?:no|nope|wrong|incorrect|गलत)\b", lowered):
-                facts["awaiting_instagram_contact_confirmation"] = False
-                facts["pending_instagram_contact"] = None
-                facts["awaiting_instagram_contact"] = True
-                response_text = _INSTAGRAM_CONTACT_REQUEST
-            else:
-                response_text = _INSTAGRAM_CONTACT_CONFIRM.format(number=candidate or "the number you sent")
-            db.log_conversation(sender_id, "instagram", message_text, response_text, True, "instagram_contact_confirmation", **trace)
-            send_instagram_reply(sender_id, response_text)
-            return
-
-        # A customer is allowed to decline a callback.  Clearing all pending
-        # state prevents every later sentence from being treated as a missing
-        # phone number, while making no claim that staff were notified.
-        if awaiting_contact and re.search(
-            r"\b(?:no thanks?|not interested|don't need|do not need|nahi chahiye|nahin chahiye)\b",
-            " ".join((message_text or "").lower().split()),
-        ):
-            facts["awaiting_instagram_contact"] = False
-            facts["awaiting_instagram_contact_confirmation"] = False
-            facts["pending_instagram_contact"] = None
-            facts["pending_instagram_escalation"] = None
-            response_text = "No problem at all. If you need anything later, just message us here."
-            db.log_conversation(sender_id, "instagram", message_text, response_text, True, "instagram_contact_declined", **trace)
-            send_instagram_reply(sender_id, response_text)
-            return
-
-        if awaiting_contact and not supplied_contact:
-            response_text = _INSTAGRAM_CONTACT_REQUEST
-            db.log_conversation(sender_id, "instagram", message_text, response_text, True, "instagram_contact_required", **trace)
-            send_instagram_reply(sender_id, response_text)
-            return
-
-        if awaiting_contact and supplied_contact:
-            facts["awaiting_instagram_contact"] = False
-            facts["awaiting_instagram_contact_confirmation"] = True
-            facts["pending_instagram_contact"] = supplied_contact
-            response_text = _INSTAGRAM_CONTACT_CONFIRM.format(number=supplied_contact)
-            db.log_conversation(sender_id, "instagram", message_text, response_text, True, "instagram_contact_confirmation", **trace)
-            send_instagram_reply(sender_id, response_text)
-            return
-
         response_text, was_matched, template_id, image_url = responder.match_and_respond(
             message_text, user_id=sender_id, channel="instagram",
             referral_source="ADS", referral_ad_id=trace["ad_id"], referral_ad_title=trace["ad_title"],
         )
 
-        needs_escalation = awaiting_contact or not was_matched or template_id == "order_next_steps"
-        if needs_escalation and not supplied_contact and not awaiting_contact:
-            facts["awaiting_instagram_contact"] = True
-            facts["awaiting_instagram_contact_confirmation"] = False
-            facts["pending_instagram_contact"] = None
-            facts["pending_instagram_escalation"] = {
-                "response_text": response_text,
-                "was_matched": was_matched,
-                "template_id": template_id,
-                "user_message": message_text,
-                "reason": "Order Confirmation & Intake Request" if was_matched else "Unmatched Instagram Query / Sensitive Request",
-            }
-            response_text = _INSTAGRAM_CONTACT_REQUEST
-            session_memory.add_turn(sender_id, "instagram", message_text, response_text)
-            db.log_conversation(sender_id, "instagram", message_text, response_text, True, "instagram_contact_required", **trace)
-            send_instagram_reply(sender_id, response_text)
-            return
-
+        # Channel policy: Instagram is the only AI chatbot channel. When it
+        # cannot answer — an unsupported question, or an order/event ask that
+        # genuinely needs a person — the customer continues on WhatsApp with
+        # a human, never with more bot. No phone number is collected here any
+        # more: the customer opens WhatsApp themselves via the link below, so
+        # nothing is typed, mistyped, or stored on Instagram along the way.
+        # An explicit human-contact request (matched by its own approved
+        # template) is also a handoff, not just an unmatched question: the
+        # client wants a clickable WhatsApp continuation here, not a phone
+        # number quoted as plain Instagram text.
+        needs_escalation = (
+            not was_matched
+            or template_id in ("order_next_steps", "GUARD_staff_names_manager_contact")
+        )
         if needs_escalation:
-            facts["awaiting_instagram_contact"] = False
-            facts["pending_instagram_escalation"] = None
-            escalator.handle_escalation(
+            reason = (
+                "Order Confirmation & Intake Request" if was_matched
+                else "Unmatched Instagram Query / Sensitive Request"
+            )
+            escalation = escalator.handle_escalation(
                 user_id=sender_id,
                 channel="instagram",
                 user_message=message_text,
-                reason="Order Confirmation & Intake Request" if was_matched else "Unmatched Instagram Query / Sensitive Request",
-                context_data={
-                    "ad_id": ad_id,
-                    "sender_id": sender_id,
-                    "template_id": template_id,
-                    **({"customer_whatsapp_number": supplied_contact} if supplied_contact else {}),
-                },
+                reason=reason,
+                context_data={"ad_id": ad_id, "sender_id": sender_id, "template_id": template_id},
             )
+            handoff = get_or_create_handoff(
+                user_id=sender_id, channel="instagram", reason=reason,
+                user_message=message_text, facts=facts,
+                escalation_id=escalation.get("escalation_id"),
+            )
+            response_text = customer_facing_message(handoff["handoff_ref"])
+            mark_referred(handoff["handoff_ref"])
+            template_id = "instagram_whatsapp_handoff"
+            image_url = None
 
         db.log_conversation(sender_id, "instagram", message_text, response_text, was_matched, template_id, **trace)
 
@@ -622,24 +514,13 @@ def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks
                 results.append({"action": "ignored_no_sender"})
                 continue
 
-            if not message_text:
-                # A customer may send the WhatsApp number using Instagram's
-                # contact-card picker. Meta delivers that as an attachment
-                # with no message.text, so treat it as the contact response
-                # instead of replying that we cannot read photos or voice notes.
-                contact_card_number = _extract_contact_number_from_event(messaging_event)
-                if contact_card_number:
-                    if session_memory.get_facts(sender_id, "instagram").get("awaiting_instagram_contact"):
-                        message_text = contact_card_number
-                        log.info("Extracted WhatsApp contact card for Instagram sender %s.", sender_id)
-                    else:
-                        # The customer may have sent the number as text first;
-                        # Meta can then deliver the contact card as a second
-                        # event. It is already handled, so do not send the
-                        # misleading unreadable-attachment apology.
-                        _record_dropped_webhook_event("duplicate_contact_card", messaging_event, sender_id)
-                        results.append({"sender_id": sender_id, "action": "ignored_duplicate_contact_card"})
-                        continue
+            # A contact-card attachment used to be read as a WhatsApp number
+            # the customer was asked to share. Channel policy retired that
+            # flow — Instagram no longer asks for or collects a phone number,
+            # the customer opens WhatsApp themselves via the handoff link —
+            # so a contact card with no message text now falls through to the
+            # same "cannot read this attachment" handling as a photo or a
+            # voice note, just below.
 
             if not message_text:
                 # Only record the events that represent a customer going
@@ -4412,7 +4293,7 @@ def get_web_chat():
                 <select id="channelSelect" class="channel-select" onchange="resetSession()">
                     <option value="instagram_ad">Instagram DM (Ad-Originated) ✅ Auto-Reply Enabled</option>
                     <option value="instagram_organic">Instagram DM (Organic) 🛑 Auto-Reply Blocked</option>
-                    <option value="whatsapp">WhatsApp Business ✅ Auto-Reply Enabled</option>
+                    <option value="whatsapp">WhatsApp Business 🛑 Human-Only in Production (engine preview only)</option>
                 </select>
             </div>
             

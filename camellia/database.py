@@ -191,6 +191,30 @@ class Database:
                     "ALTER TABLE message_route_audit ADD COLUMN route_source TEXT"
                 )
 
+            # Instagram -> WhatsApp handoff references. handoff_ref is the
+            # opaque customer-facing token ("CAM-48371"); nothing else in this
+            # row is ever shown to a customer. One active (non-expired,
+            # non-resolved) row per (source_channel, source_user_id) is the
+            # dedup key — a repeated "human please" reuses it instead of
+            # minting a new reference.
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS cross_channel_handoffs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                handoff_ref TEXT NOT NULL UNIQUE,
+                source_channel TEXT NOT NULL,
+                source_user_id TEXT NOT NULL,
+                reason TEXT,
+                summary TEXT,
+                known_entities TEXT,
+                unresolved_topic TEXT,
+                status TEXT NOT NULL DEFAULT 'CREATED',
+                escalation_id INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                expires_at TIMESTAMP
+            );
+            """)
+
             # Canonical missing-information queue. Unlike candidate_templates,
             # this records what fact/action is absent rather than teaching one
             # more spelling of the customer's question.
@@ -323,6 +347,8 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_knowledge_gaps_status_updated ON knowledge_gaps(status, updated_at DESC);",
             "CREATE INDEX IF NOT EXISTS idx_active_sessions_updated ON active_conversation_sessions(updated_at);",
             "CREATE INDEX IF NOT EXISTS idx_message_route_time ON message_route_audit(timestamp DESC);",
+            "CREATE INDEX IF NOT EXISTS idx_handoffs_ref ON cross_channel_handoffs(handoff_ref);",
+            "CREATE INDEX IF NOT EXISTS idx_handoffs_active ON cross_channel_handoffs(source_channel, source_user_id, status);",
         )
         for statement in statements:
             cursor.execute(statement)
@@ -603,6 +629,91 @@ class Database:
             else:
                 cursor.execute("SELECT * FROM escalations ORDER BY id DESC LIMIT ?", (limit,))
             rows = cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    # --- Instagram -> WhatsApp cross-channel handoffs -----------------------
+
+    def create_handoff(
+        self,
+        *,
+        handoff_ref: str,
+        source_channel: str,
+        source_user_id: str,
+        reason: Optional[str],
+        summary: Optional[str],
+        known_entities: Optional[Dict[str, Any]],
+        unresolved_topic: Optional[str],
+        escalation_id: Optional[int],
+        expires_at: Optional[str],
+    ) -> Dict[str, Any]:
+        """Records a new opaque handoff reference. Never overwrites one."""
+        with self.get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO cross_channel_handoffs (
+                    handoff_ref, source_channel, source_user_id, reason, summary,
+                    known_entities, unresolved_topic, status, escalation_id, expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'CREATED', ?, ?)
+                """,
+                (
+                    handoff_ref, source_channel, source_user_id, reason, summary,
+                    json.dumps(known_entities or {}, ensure_ascii=False), unresolved_topic,
+                    escalation_id, expires_at,
+                ),
+            )
+            conn.commit()
+        return self.get_handoff_by_ref(handoff_ref)
+
+    def get_handoff_by_ref(self, handoff_ref: str) -> Optional[Dict[str, Any]]:
+        """Looks up a handoff by its customer-facing reference."""
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM cross_channel_handoffs WHERE handoff_ref = ?", (handoff_ref,)
+            ).fetchone()
+            return dict(row) if row else None
+
+    def get_active_handoff(
+        self, source_channel: str, source_user_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """The one non-expired, non-resolved handoff for this customer, if any.
+
+        This is the dedup check: a customer repeating "human please" reuses
+        this row instead of minting a second reference for the same enquiry.
+        """
+        with self.get_connection() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM cross_channel_handoffs
+                WHERE source_channel = ? AND source_user_id = ?
+                  AND status NOT IN ('RESOLVED', 'EXPIRED')
+                  AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
+                ORDER BY id DESC LIMIT 1
+                """,
+                (source_channel, source_user_id),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def update_handoff_status(self, handoff_ref: str, status: str) -> None:
+        with self.get_connection() as conn:
+            conn.execute(
+                "UPDATE cross_channel_handoffs SET status = ?, updated_at = CURRENT_TIMESTAMP "
+                "WHERE handoff_ref = ?",
+                (status, handoff_ref),
+            )
+            conn.commit()
+
+    def get_handoffs(self, limit: int = 50, status: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Staff-facing listing, newest first."""
+        with self.get_connection() as conn:
+            if status:
+                rows = conn.execute(
+                    "SELECT * FROM cross_channel_handoffs WHERE status = ? ORDER BY id DESC LIMIT ?",
+                    (status, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM cross_channel_handoffs ORDER BY id DESC LIMIT ?", (limit,)
+                ).fetchall()
             return [dict(row) for row in rows]
 
     def get_conversations(self, limit: int = 50, offset: int = 0, channel: Optional[str] = None, user_id: Optional[str] = None) -> List[Dict[str, Any]]:

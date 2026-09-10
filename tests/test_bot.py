@@ -304,7 +304,20 @@ class TestCamelliaBot(unittest.TestCase):
             self.assertEqual(resp4, expected_fallback, "Deterministic fallback message must match exact fallback_response text")
 
     def test_whatsapp_adapter_flow(self):
-        """PRD Requirement #2: WhatsApp integration handling."""
+        """
+        OLD REQUIREMENT (PRD #2): WhatsApp ran the same chatbot as every other
+        channel — a price question there was matched and answered like an
+        Instagram or web-tester message.
+
+        NEW REQUIREMENT: the client decided WhatsApp must be human-only.
+        Instagram is the only AI chatbot channel; WhatsApp customers reach a
+        person, never a bot reply. Webhook parsing is unchanged and still
+        tested here — that part of the pipeline is shared infrastructure —
+        but process_incoming_message no longer matches or answers.
+
+        WHY CHANGED: explicit client channel-policy requirement, not a
+        regression. See camellia/whatsapp_adapter.py and camellia/handoff.py.
+        """
         payload = {
             "entry": [{
                 "changes": [{
@@ -326,12 +339,17 @@ class TestCamelliaBot(unittest.TestCase):
         self.assertEqual(msg_id, "wamid.HBgLMTIzNDU2Nzg5MA==")
         self.assertEqual(body, "Hi, what is the price of Sondesh?")
 
-        # Process through adapter
-        with patch.object(whatsapp_adapter, "send_message"):
+        # Process through adapter — human-only by default, no bot reply.
+        with patch.object(whatsapp_adapter, "send_message") as send_message, patch(
+            "camellia.whatsapp_adapter.responder.match_and_respond"
+        ) as match_and_respond:
             result = whatsapp_adapter.process_incoming_message(sender, body)
-        self.assertEqual(result["status"], "processed")
-        self.assertTrue(result["was_matched"])
-        self.assertEqual(result["template_id"], "sondesh_price_detailed")
+        self.assertEqual(result["status"], "human_only")
+        self.assertFalse(result["was_matched"])
+        self.assertFalse(result["bot_replied"])
+        self.assertIsNone(result["response_text"])
+        match_and_respond.assert_not_called()
+        send_message.assert_not_called()
 
         initial = db.get_analytics()
         # Log 1 matched and 1 escalated
@@ -746,10 +764,20 @@ class TestCamelliaBot(unittest.TestCase):
         )
         self.assertIn("READY FOR VERIFICATION & INVOICING", res2)
 
-        # 3. Test WhatsApp order_next_steps triggers escalation alert
-        with patch.object(escalator, "handle_escalation") as mock_esc, patch.object(whatsapp_adapter, "send_message"):
+        # 3. OLD REQUIREMENT: confirming an order over WhatsApp triggered a
+        #    staff escalation alert from inside the WhatsApp chatbot flow.
+        #    NEW REQUIREMENT: WhatsApp is human-only, so there is no bot flow
+        #    left to trigger an escalation from — a human is already reading
+        #    every WhatsApp message directly. The verification-status helper
+        #    itself (tested above) is unchanged and still used by the
+        #    Instagram-originated escalation path.
+        #    WHY CHANGED: explicit client channel-policy requirement.
+        with patch.object(escalator, "handle_escalation") as mock_esc, patch.object(
+            whatsapp_adapter, "send_message"
+        ), patch("camellia.whatsapp_adapter.responder.match_and_respond") as match_and_respond:
             whatsapp_adapter.process_incoming_message("919999888877", "confirm my order here is my address Sector 43 Gurgaon")
-            self.assertTrue(mock_esc.called)
+            self.assertFalse(mock_esc.called)
+            match_and_respond.assert_not_called()
 
     def test_order_calculator_integration(self):
         """Verify OrderCalculator correctly parses quantities and generates itemized draft receipts."""
@@ -843,9 +871,32 @@ class TestCamelliaBot(unittest.TestCase):
         self.assertNotIn("ORDER DRAFT RECEIPT", resp2)
 
     def test_whatsapp_quick_reply_buttons(self):
-        """Verify WhatsAppAdapter includes quick reply interactive buttons for greetings and menu requests."""
+        """
+        OLD REQUIREMENT: a WhatsApp greeting got the same quick-reply buttons
+        Instagram/the web tester show ("See Menu", "Place Order").
+
+        NEW REQUIREMENT: WhatsApp sends no automated reply at all, so it
+        sends no buttons either. The button-selection logic itself
+        (_get_contextual_buttons) is unchanged and still exercised by the
+        chatbot-enabled escape hatch, covered separately below.
+
+        WHY CHANGED: explicit client channel-policy requirement — WhatsApp
+        is human-only.
+        """
         from camellia.whatsapp_adapter import whatsapp_adapter
         with patch.object(whatsapp_adapter, "send_message") as mock_send:
+            result = whatsapp_adapter.process_incoming_message("919876543210", "Hi")
+            mock_send.assert_not_called()
+            self.assertFalse(result["bot_replied"])
+
+    def test_whatsapp_chatbot_escape_hatch_still_sends_buttons_when_explicitly_enabled(self):
+        """The old auto-reply behaviour survives, but only behind the explicit
+        WHATSAPP_CHATBOT_ENABLED flag — off by default, and this test turns it
+        on deliberately to prove the code path was not deleted, only gated."""
+        from camellia.whatsapp_adapter import whatsapp_adapter
+        with patch.object(config, "WHATSAPP_CHATBOT_ENABLED", True), patch.object(
+            whatsapp_adapter, "send_message"
+        ) as mock_send:
             whatsapp_adapter.process_incoming_message("919876543210", "Hi")
             self.assertTrue(mock_send.called)
             _, kwargs = mock_send.call_args
@@ -1705,21 +1756,32 @@ class TestCamelliaBot(unittest.TestCase):
 
     @patch("camellia.whatsapp_adapter.WhatsAppAdapter.send_message")
     def test_whatsapp_process_incoming_message(self, mock_send):
-        """Tests end-to-end processing of WhatsApp message and contextual quick replies."""
+        """
+        OLD REQUIREMENT: WhatsApp end-to-end processed a greeting and a
+        pricing query the same way Instagram does, replying with contextual
+        quick-reply buttons for each.
+
+        NEW REQUIREMENT: WhatsApp is human-only. Neither message gets an
+        automated reply or buttons — a human reads both directly. The
+        underlying responder/template matching this used to exercise is
+        unchanged and covered on its own throughout this file with
+        channel="whatsapp" as a label; what changed is that the WhatsApp
+        *adapter* no longer calls it.
+
+        WHY CHANGED: explicit client channel-policy requirement.
+        """
         mock_send.return_value = {"mock": True, "status": "sent"}
         from camellia.whatsapp_adapter import whatsapp_adapter
 
-        # Greeting
         result = whatsapp_adapter.process_incoming_message("919876543210", "Hello")
-        self.assertEqual(result["status"], "processed")
-        self.assertTrue(result["was_matched"])
-        self.assertEqual(result["template_id"], "greeting")
-        self.assertIn("See Menu", result["buttons"])
+        self.assertEqual(result["status"], "human_only")
+        self.assertFalse(result["was_matched"])
+        self.assertFalse(result["bot_replied"])
 
-        # Pricing query
         pricing_res = whatsapp_adapter.process_incoming_message("919876543210", "How much is nolen gur sondesh?")
-        self.assertTrue(pricing_res["was_matched"])
-        self.assertIn("🛍️ Place Order", pricing_res["buttons"])
+        self.assertFalse(pricing_res["was_matched"])
+        self.assertFalse(pricing_res["bot_replied"])
+        mock_send.assert_not_called()
 
     def test_greeting_variations_do_not_repeat_immediately(self):
         """Greeting replies rotate randomly without leaving the approved response bank."""
