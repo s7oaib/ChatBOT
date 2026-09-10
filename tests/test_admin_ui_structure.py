@@ -64,13 +64,28 @@ def test_dashboard_javascript_brackets_balance(script, opener, closer):
     )
 
 
-def test_the_dashboard_has_three_tabs(page):
+def test_the_dashboard_has_four_tabs(page):
     """
-    Eight tabs needed 1655px of nav on a 347px phone, so most of the portal was
-    unreachable on the handset the kitchen actually uses.
+    The grouped navigation stays compact enough for the handset the kitchen
+    actually uses while giving collection building a direct entry point.
     """
     buttons = re.findall(r'<button class="tab-btn[^"]*" onclick="switchTab\(', page)
-    assert len(buttons) == 3, f"expected 3 tabs, found {len(buttons)}"
+    assert len(buttons) == 4, f"expected 4 tabs, found {len(buttons)}"
+
+
+def test_collection_builder_sits_between_menu_and_customers(page):
+    nav = page[page.index('<div class="tabs-nav">'):]
+    nav = nav[:nav.index('</div>')]
+    assert nav.index("tab-image") < nav.index("tab-collections") < nav.index("tab-stats")
+
+
+def test_collection_builder_can_review_and_replace_compatible_items(page):
+    assert 'id="collectionMenuSelect"' in page
+    assert 'id="collectionChoices"' in page
+    assert 'id="collectionCatalogue"' in page
+    assert "loadCollectionBuilder()" in page
+    assert "replaceCollectionChoice(index, optionId)" in page
+    assert "option.group === selected.group" in page
 
 
 def test_menu_dashboard_explains_how_to_hide_the_current_week(page):
