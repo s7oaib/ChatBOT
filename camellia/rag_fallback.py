@@ -240,6 +240,15 @@ class RAGFallbackEngine:
         "hello", "thanks", "welcome", "sure", "yes", "please",
         # Question words ask, they do not assert.
         "where", "when", "which", "what", "who", "whom", "whose", "why",
+        # Structural/enumeration words caught rejecting real live-Groq
+        # paraphrases of already-approved coverage lists ("this includes
+        # Delhi, Gurgaon...", "charges are applied"): the word itself names
+        # no fact. Each specific place, price or policy an enumeration
+        # actually lists is still checked on its own — a location, a number,
+        # a protected claim — so loosening these cannot let a new one in.
+        "product", "products", "including", "include", "includes", "included",
+        "covers", "covered", "covering", "applied", "apply", "applies",
+        "reach", "reaches", "reached", "order", "orders", "ordering",
     })
 
     def _unsupported_content_word(

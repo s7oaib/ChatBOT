@@ -341,3 +341,45 @@ class TestRefinementAuditAgainstNamedApprovedSources:
         )
         assert refined is False
         assert text == "Please consume the sondesh within the day for the best taste."
+
+
+class TestGroundingAcceptsStructuralParaphraseWithoutWeakeningSafety:
+    """A live Groq generation call was observed rejecting its own faithful
+    paraphrase of the delivery-area answer purely because it used the words
+    "includes"/"applied"/"reach" — structural framing, not a new fact — that
+    were not yet in the harmless-word list. Each place, price and policy an
+    enumeration actually names is still checked independently, so widening
+    this list cannot let a genuinely new claim through.
+
+    FAILED EXAMPLE: "We deliver right across Delhi NCR. This includes Delhi,
+    Gurgaon... Courier charges are applied on actuals." rejected as
+    unsupported_statement:includes against the approved delivery_area copy.
+    ROOT SEMANTIC CONCEPT: a structural/enumeration word ("includes",
+    "covers", "applied", "reach", "order") names no fact by itself; rejecting
+    it is a false positive regardless of which template or claim it dresses.
+    GENERAL FIX: add the word family to _CONVERSATIONAL_VOCABULARY once.
+    OTHER CASES THIS COVERS: any future generated answer that restates an
+    existing coverage/price/policy list using "includes/covers/applies to/
+    reaches" instead of the approved copy's own wording — not just delivery.
+    """
+
+    def test_a_faithful_enumeration_paraphrase_is_accepted(self):
+        grounded, reason = rag_fallback_engine.grounding_report(
+            "We deliver right across Delhi NCR. This includes Delhi, Gurgaon, "
+            "Noida, Ghaziabad and Faridabad. Courier charges are applied on actuals.",
+            ["We deliver right across Delhi NCR — that means Delhi, Gurgaon, "
+             "Noida, Ghaziabad and Faridabad are all covered. Courier charges "
+             "are on actuals."],
+        )
+        assert (grounded, reason) == (True, "grounded")
+
+    @pytest.mark.parametrize("answer", [
+        "This includes free delivery.",
+        "This includes a 20% discount.",
+        "Orders reach you within 30 minutes, guaranteed.",
+    ])
+    def test_the_same_widened_vocabulary_still_rejects_a_real_new_claim(self, answer):
+        grounded, reason = rag_fallback_engine.grounding_report(
+            answer, ["We deliver right across Delhi NCR."],
+        )
+        assert grounded is False
