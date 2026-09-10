@@ -2660,6 +2660,19 @@ def get_admin_dashboard():
         }
         .badge-veg { background: #D1FAE5; color: #065F46; }
         .badge-nonveg { background: #FEE2E2; color: #991B1B; }
+
+        /* Collection builder */
+        .collection-toolbar { display: flex; gap: 10px; align-items: end; flex-wrap: wrap; margin: 14px 0 18px; }
+        .collection-toolbar > div { flex: 1 1 260px; }
+        .collection-select { width: 100%; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; background: #fff; color: var(--text-dark); }
+        .collection-choice { display: grid; grid-template-columns: minmax(150px, 0.8fr) minmax(220px, 1.5fr) auto; gap: 12px; align-items: center; padding: 12px 0; border-bottom: 1px solid var(--border); }
+        .collection-choice:last-child { border-bottom: none; }
+        .collection-choice-label { font-size: 0.8rem; color: var(--text-muted); }
+        .catalogue-section { margin-top: 18px; }
+        .catalogue-items { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+        .catalogue-item { border: 1px solid var(--border); background: #FCFBF9; color: var(--text-dark); padding: 8px 10px; border-radius: 9px; cursor: pointer; text-align: left; }
+        .catalogue-item:hover { border-color: var(--primary); background: #F5EEF0; }
+        .catalogue-item small { display: block; color: var(--text-muted); margin-top: 2px; }
         
         /* Analytics Table */
         table.data-table { width: 100%; border-collapse: collapse; margin-top: 16px; font-size: 0.86rem; }
@@ -2685,6 +2698,7 @@ def get_admin_dashboard():
             .tabs-nav { justify-content: flex-start; gap: 4px; padding: 4px; }
             .tab-btn { padding: 10px 8px; font-size: 0.8rem; gap: 4px; }
             .panel-card { padding: 20px 16px; }
+            .collection-choice { grid-template-columns: 1fr; gap: 6px; }
         }
     </style>
 </head>
@@ -2747,6 +2761,7 @@ def get_admin_dashboard():
         <!-- Tab Navigation Bar -->
         <div class="tabs-nav">
             <button class="tab-btn active" onclick="switchTab('tab-image', this)">🍱 Menu</button>
+            <button class="tab-btn" onclick="switchTab('tab-collections', this)">🎁 Collections</button>
             <button class="tab-btn" onclick="switchTab('tab-stats', this)">💬 Customers</button>
             <button class="tab-btn" onclick="switchTab('tab-candidates', this)">✅ Answers <span id="candidateBadge" style="display:none; background: var(--danger); color: #fff; border-radius: 10px; padding: 1px 7px; font-size: 0.72rem; margin-left: 4px;"></span></button>
         </div>
@@ -2909,6 +2924,34 @@ THIS WEEK'S BENGAL SPECIALS
 
             <div id="activeMenuContent">
                 <p style="color: #666; font-size: 0.9rem;">Loading current menu...</p>
+            </div>
+        </div>
+
+        <!-- COLLECTIONS tab: browse every available item and assemble a
+             customer-facing selection without changing the live kitchen menu. -->
+        <div id="tab-collections" class="panel-card" data-group="collections" style="display: none;">
+            <div class="panel-header">
+                <h2>🎁 Build a customer collection</h2>
+                <p>Start with any available menu, review every selection, and replace an item with another option of the same kind. These choices are a working draft and do not change the live menu.</p>
+            </div>
+
+            <div class="collection-toolbar">
+                <div>
+                    <label class="field-label" for="collectionMenuSelect">Start from a menu</label>
+                    <select id="collectionMenuSelect" class="collection-select" onchange="startCollectionFromMenu(this.value)">
+                        <option value="">Loading available menus...</option>
+                    </select>
+                </div>
+                <button class="btn-secondary" type="button" onclick="loadCollectionBuilder()">🔄 Refresh menus</button>
+            </div>
+
+            <h3 style="color: var(--primary); font-size: 1rem;">Review this collection</h3>
+            <p style="font-size: 0.82rem; color: var(--text-muted); margin-top: 3px;">Use each dropdown to substitute a compatible option, or add an item from the full catalogue below.</p>
+            <div id="collectionChoices"><p style="color: var(--text-muted);">Choose a menu to begin.</p></div>
+
+            <div class="catalogue-section">
+                <h3 style="color: var(--primary); font-size: 1rem;">All available menus &amp; items</h3>
+                <div id="collectionCatalogue"><p style="color: var(--text-muted);">Loading catalogue...</p></div>
             </div>
         </div>
 
@@ -3242,11 +3285,12 @@ THIS WEEK'S BENGAL SPECIALS
 
         // Eight tabs needed 1655px of nav on a 347px phone, so six of them were
         // simply invisible to a kitchen working off a handset. Panels are now
-        // grouped three ways and a tab shows its whole group stacked. Each tab
+        // grouped by jobs and a tab shows its whole group stacked. Each tab
         // is named after the panel it leads with, so the panels themselves did
         // not have to move.
         const TAB_GROUPS = {
             'tab-image': 'menu',
+            'tab-collections': 'collections',
             'tab-stats': 'customers',
             'tab-candidates': 'answers'
         };
@@ -3267,8 +3311,172 @@ THIS WEEK'S BENGAL SPECIALS
             // Everything in the group is on screen at once, so everything in it
             // needs its data.
             if (group === 'menu') { loadActiveMenu(); loadAdRoutes(); }
+            if (group === 'collections') { loadCollectionBuilder(); }
             if (group === 'customers') { loadAnalytics(); loadConversations(); }
             if (group === 'answers') { loadCandidates(); loadKnowledge(); }
+        }
+
+        // COLLECTIONS tab: a browser-only working draft. The catalogue comes
+        // from the same endpoint as the live-menu view, so it cannot drift from
+        // what the kitchen has actually made available.
+        let collectionOptions = [];
+        let collectionDraft = [];
+        let collectionSourceMenu = '';
+
+        function priceSummary(prices) {
+            if (!Array.isArray(prices) || prices.length === 0) return '';
+            return prices.map(price => {
+                const size = price.pack_size || price.quantity || '';
+                const pieces = price.pieces ? ` · ${price.pieces} pcs` : '';
+                return `${size}${pieces} · ₹${price.price_inr}`;
+            }).join(' | ');
+        }
+
+        function addCollectionOption(menuName, group, label, detail) {
+            collectionOptions.push({
+                id: String(collectionOptions.length),
+                menuName: menuName,
+                group: group,
+                label: label,
+                detail: detail || ''
+            });
+        }
+
+        function buildCollectionCatalogue(menu) {
+            collectionOptions = [];
+            Object.values(menu.collections || {}).forEach(collection => {
+                const menuName = collection.collection_name || 'Sondesh collection';
+                (collection.products || []).forEach(product => {
+                    if (Array.isArray(product.flavours) && product.flavours.length) {
+                        product.flavours.forEach(flavour => {
+                            if (typeof flavour === 'string') {
+                                addCollectionOption(menuName, product.item, `${product.item} — ${flavour}`, product.pricing_note || '');
+                            } else {
+                                addCollectionOption(menuName, product.item, `${product.item} — ${flavour.flavour}`, priceSummary(flavour.prices) || flavour.note || '');
+                            }
+                        });
+                    } else {
+                        addCollectionOption(menuName, product.item, product.item, priceSummary(product.prices) || product.description || product.pricing_note || '');
+                    }
+                });
+            });
+
+            const weeks = menu.weekly_menus || [];
+            if (weeks.length && weeks[weeks.length - 1].is_published !== false) {
+                const week = weeks[weeks.length - 1];
+                const menuName = week.week_of || week.week || 'Current weekly menu';
+                (week.vegetarian || []).forEach(item => addCollectionOption(
+                    menuName, 'Vegetarian dish', item.item, `${item.quantity || ''} · ₹${item.price_inr}`
+                ));
+                (week.non_vegetarian || []).forEach(item => addCollectionOption(
+                    menuName, 'Non-vegetarian dish', item.item, `${item.quantity || ''} · ₹${item.price_inr}`
+                ));
+                (week.bengali_bento || []).forEach(item => addCollectionOption(
+                    menuName, 'Bengali bento', item.name, `₹${item.price_inr} · ${(item.includes || []).join(', ')}`
+                ));
+                (week.norom_pak_sondesh || []).forEach(item => addCollectionOption(
+                    menuName, 'Sondesh', `Sondesh — ${item.flavour}`, item.price_inr ? `${item.pack_size || ''} · ${item.pieces || ''} pcs · ₹${item.price_inr}` : (item.pricing_note || item.status || '')
+                ));
+            }
+
+            Object.values(menu.order_types || {}).forEach(orderType => {
+                if (String(orderType.status || '').startsWith('pending_')) return;
+                const menuName = orderType.type_name || 'Order options';
+                (orderType.tiers || []).forEach(tier => addCollectionOption(
+                    menuName, 'Bengali bento', tier.tier_name, `₹${tier.price_inr} · ${(tier.includes || []).join(', ')}`
+                ));
+                (orderType.plans || []).forEach(plan => addCollectionOption(
+                    menuName, 'Meal plan', plan.plan_name, `${plan.meals_count || ''} meals · ₹${plan.price_inr}`
+                ));
+            });
+        }
+
+        async function loadCollectionBuilder() {
+            const catalogue = document.getElementById('collectionCatalogue');
+            if (!catalogue || !currentAdminKey) return;
+            try {
+                const resp = await fetch('/admin/menu/active', { headers: getAuthHeaders() });
+                const data = await resp.json();
+                if (!resp.ok) throw new Error(data.detail || 'Could not load menus.');
+                buildCollectionCatalogue(data.menu || {});
+                renderCollectionMenuSelect();
+                renderCollectionCatalogue();
+                const menus = collectionMenuNames();
+                startCollectionFromMenu(menus.includes(collectionSourceMenu) ? collectionSourceMenu : (menus[0] || ''));
+            } catch (err) {
+                catalogue.innerHTML = `<p style="color: var(--danger);">${escapeHtml(err.message || err)}</p>`;
+            }
+        }
+
+        function collectionMenuNames() {
+            return [...new Set(collectionOptions.map(option => option.menuName))];
+        }
+
+        function renderCollectionMenuSelect() {
+            const select = document.getElementById('collectionMenuSelect');
+            const selectedMenu = collectionSourceMenu;
+            select.innerHTML = collectionMenuNames().map(menuName =>
+                `<option value="${escapeHtml(menuName)}"${menuName === selectedMenu ? ' selected' : ''}>${escapeHtml(menuName)}</option>`
+            ).join('');
+        }
+
+        function startCollectionFromMenu(menuName) {
+            collectionSourceMenu = menuName;
+            collectionDraft = collectionOptions.filter(option => option.menuName === menuName).map(option => ({ ...option }));
+            renderCollectionMenuSelect();
+            renderCollectionDraft();
+        }
+
+        function replaceCollectionChoice(index, optionId) {
+            const selected = collectionDraft[index];
+            const replacement = collectionOptions.find(option => option.id === String(optionId));
+            if (!selected || !replacement || replacement.group !== selected.group) return;
+            collectionDraft[index] = { ...replacement };
+            renderCollectionDraft();
+        }
+
+        function addCollectionChoice(optionId) {
+            const option = collectionOptions.find(item => item.id === String(optionId));
+            if (!option) return;
+            collectionDraft.push({ ...option });
+            renderCollectionDraft();
+        }
+
+        function removeCollectionChoice(index) {
+            collectionDraft.splice(index, 1);
+            renderCollectionDraft();
+        }
+
+        function renderCollectionDraft() {
+            const container = document.getElementById('collectionChoices');
+            if (!container) return;
+            if (!collectionDraft.length) {
+                container.innerHTML = '<p style="color: var(--text-muted);">This collection is empty. Add an item from the catalogue below.</p>';
+                return;
+            }
+            container.innerHTML = collectionDraft.map((selected, index) => {
+                const alternatives = collectionOptions.filter(option => option.group === selected.group);
+                const choices = alternatives.map(option =>
+                    `<option value="${option.id}"${option.id === selected.id ? ' selected' : ''}>${escapeHtml(option.menuName)} — ${escapeHtml(option.label)}</option>`
+                ).join('');
+                return `<div class="collection-choice">
+                    <div><b>${escapeHtml(selected.group)}</b><div class="collection-choice-label">${escapeHtml(selected.detail)}</div></div>
+                    <select class="collection-select" aria-label="Replace ${escapeHtml(selected.label)}" onchange="replaceCollectionChoice(${index}, this.value)">${choices}</select>
+                    <button class="btn-danger" type="button" onclick="removeCollectionChoice(${index})">Remove</button>
+                </div>`;
+            }).join('');
+        }
+
+        function renderCollectionCatalogue() {
+            const container = document.getElementById('collectionCatalogue');
+            if (!container) return;
+            container.innerHTML = collectionMenuNames().map(menuName => {
+                const options = collectionOptions.filter(option => option.menuName === menuName);
+                const buttons = options.map(option =>
+                    `<button class="catalogue-item" type="button" onclick="addCollectionChoice('${option.id}')"><b>+ ${escapeHtml(option.label)}</b><small>${escapeHtml(option.detail)}</small></button>`
+                ).join('');
+                return `<div class="catalogue-section"><h4>${escapeHtml(menuName)}</h4><div class="catalogue-items">${buttons}</div></div>`;
+            }).join('') || '<p style="color: var(--text-muted);">No available menu items found.</p>';
         }
 
         async function loadAdRoutes() {
