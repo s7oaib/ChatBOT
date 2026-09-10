@@ -262,6 +262,42 @@ def test_repeated_explicit_human_requests_reuse_cam_and_alert_once():
     assert all("whatsapp/call shortly" not in reply.lower() for reply in replies)
 
 
+def test_verified_order_receipt_adds_concise_order_handoff_and_reuses_cam():
+    user_id = "policy_ig_order_handoff_" + uuid.uuid4().hex[:8]
+    session_memory.clear_session(user_id, "instagram")
+    with patch.object(app, "send_instagram_reply") as send_reply, patch.object(
+        app.escalator, "handle_escalation", return_value={"escalation_id": 1},
+    ) as escalate, patch.object(config, "WHATSAPP_BUSINESS_NUMBER", "919800000000"):
+        app._process_instagram_event(user_id, "I want Jolbhora 250g", "ad-1")
+        receipt = send_reply.call_args.args[1]
+        app._process_instagram_event(user_id, "I need an agent", "ad-1")
+        agent_reply = send_reply.call_args.args[1]
+
+    assert "ORDER DRAFT RECEIPT" in receipt
+    assert "Continue on WhatsApp" in receipt
+    assert "we'll contact you" not in receipt.lower()
+    assert "they'll connect with you" not in receipt.lower()
+    assert "whatsapp/call shortly" not in receipt.lower()
+
+    link = re.search(r"https://wa\.me/[^\s]+", receipt).group(0)
+    decoded = urllib.parse.unquote(link)
+    assert "Ref: CAM-" in decoded
+    assert "Collection: Aamar Mishti Collection" in decoded
+    assert "Item: Jolbhora Sondesh" in decoded
+    assert "Pack: 250g" in decoded
+    assert "Quantity: 1 box" in decoded
+    assert "Estimated Item Total: ₹750" in decoded
+    assert "Courier" not in decoded
+    assert "Final Total" not in decoded
+    assert user_id not in decoded
+    assert "address" not in decoded.lower()
+    assert escalate.call_count == 1
+
+    first_ref = re.search(r"CAM-\d{5,6}", decoded).group(0)
+    second_ref = re.search(r"CAM-\d{5,6}", urllib.parse.unquote(agent_reply)).group(0)
+    assert first_ref == second_ref
+
+
 def test_instagram_bulk_event_request_escalates():
     send_reply, escalate = _ask_instagram(
         "policy_ig_bulk", "I need 50 boxes of Jolbhora for my wedding in Delhi",
