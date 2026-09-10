@@ -279,7 +279,11 @@ def test_handoff_link_does_not_expose_the_instagram_transcript():
 
 
 def test_duplicate_instagram_escalation_does_not_create_duplicate_handoffs():
-    user_id = "policy_ig_dedup"
+    # Suffixed for the same reason as _ask_instagram above: handoffs persist
+    # across suite runs in the shared sqlite file, and a literal fixed id
+    # would eventually collide with an already-active handoff from an
+    # earlier run.
+    user_id = "policy_ig_dedup_" + uuid.uuid4().hex[:8]
     session_memory.clear_session(user_id, "instagram")
     with patch.object(app, "send_instagram_reply") as send_reply, patch.object(
         app.escalator, "handle_escalation", return_value={"escalation_id": 1},

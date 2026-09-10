@@ -73,19 +73,22 @@ def test_the_dashboard_has_four_tabs(page):
     assert len(buttons) == 4, f"expected 4 tabs, found {len(buttons)}"
 
 
-def test_collection_builder_sits_between_menu_and_customers(page):
+def test_menu_manager_sits_between_menu_and_customers(page):
     nav = page[page.index('<div class="tabs-nav">'):]
     nav = nav[:nav.index('</div>')]
-    assert nav.index("tab-image") < nav.index("tab-collections") < nav.index("tab-stats")
+    assert nav.index("tab-image") < nav.index("tab-menu-manager") < nav.index("tab-stats")
+    assert "Menu Manager" in nav
 
 
-def test_collection_builder_can_review_and_replace_compatible_items(page):
-    assert 'id="collectionMenuSelect"' in page
-    assert 'id="collectionChoices"' in page
-    assert 'id="collectionCatalogue"' in page
-    assert "loadCollectionBuilder()" in page
-    assert "replaceCollectionChoice(index, optionId)" in page
-    assert "option.group === selected.group" in page
+def test_menu_manager_can_edit_preview_publish_and_restore(page):
+    assert 'id="mmMenuList"' in page
+    assert 'id="mmEditorItems"' in page
+    assert 'id="mmPreviewText"' in page
+    assert "mmLoadMenuList()" in page
+    assert "mmSaveDraft()" in page
+    assert "mmPreview()" in page
+    assert "mmPublish()" in page
+    assert "mmRestoreVersion(" in page
 
 
 def test_menu_dashboard_explains_how_to_hide_the_current_week(page):

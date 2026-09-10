@@ -243,6 +243,32 @@ class Database:
             );
             """)
 
+            # Menu Manager: one row per unpublished edit in progress. A menu_key
+            # ("collections.aamar_mishti", "weekly.vegetarian", ...) has at most
+            # one draft — a second save overwrites it rather than accumulating.
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS menu_drafts (
+                menu_key TEXT PRIMARY KEY,
+                draft_json TEXT NOT NULL,
+                updated_by TEXT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+
+            # Menu Manager: one row per publish/restore, holding the full
+            # resulting item list for that menu_key — the lightweight version
+            # history the client can review or roll back to.
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS menu_versions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                menu_key TEXT NOT NULL,
+                snapshot_json TEXT NOT NULL,
+                action TEXT NOT NULL DEFAULT 'publish',
+                changed_by TEXT,
+                changed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+
             # Meta changes ad titles freely, so the stable ad ID is mapped by
             # kitchen staff and kept on the same durable volume as the rest of
             # the bot state. The environment JSON remains a deployment-time
@@ -349,6 +375,7 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_message_route_time ON message_route_audit(timestamp DESC);",
             "CREATE INDEX IF NOT EXISTS idx_handoffs_ref ON cross_channel_handoffs(handoff_ref);",
             "CREATE INDEX IF NOT EXISTS idx_handoffs_active ON cross_channel_handoffs(source_channel, source_user_id, status);",
+            "CREATE INDEX IF NOT EXISTS idx_menu_versions_key ON menu_versions(menu_key, id DESC);",
         )
         for statement in statements:
             cursor.execute(statement)
@@ -715,6 +742,67 @@ class Database:
                     "SELECT * FROM cross_channel_handoffs ORDER BY id DESC LIMIT ?", (limit,)
                 ).fetchall()
             return [dict(row) for row in rows]
+
+    # --- Menu Manager: drafts and version history -------------------------
+
+    def save_menu_draft(self, menu_key: str, draft_json: str, updated_by: Optional[str] = None) -> None:
+        with self.get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO menu_drafts (menu_key, draft_json, updated_by, updated_at)
+                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(menu_key) DO UPDATE SET
+                    draft_json = excluded.draft_json,
+                    updated_by = excluded.updated_by,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (menu_key, draft_json, updated_by),
+            )
+            conn.commit()
+
+    def get_menu_draft(self, menu_key: str) -> Optional[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM menu_drafts WHERE menu_key = ?", (menu_key,)
+            ).fetchone()
+            return dict(row) if row else None
+
+    def clear_menu_draft(self, menu_key: str) -> None:
+        with self.get_connection() as conn:
+            conn.execute("DELETE FROM menu_drafts WHERE menu_key = ?", (menu_key,))
+            conn.commit()
+
+    def record_menu_version(
+        self, menu_key: str, snapshot_json: str, action: str = "publish",
+        changed_by: Optional[str] = None,
+    ) -> int:
+        with self.get_connection() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO menu_versions (menu_key, snapshot_json, action, changed_by)
+                VALUES (?, ?, ?, ?)
+                """,
+                (menu_key, snapshot_json, action, changed_by),
+            )
+            conn.commit()
+            return cursor.lastrowid
+
+    def get_menu_versions(self, menu_key: str, limit: int = 20) -> List[Dict[str, Any]]:
+        """Newest first — the version a client wants to inspect or restore is
+        almost always a recent one."""
+        with self.get_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM menu_versions WHERE menu_key = ? ORDER BY id DESC LIMIT ?",
+                (menu_key, limit),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def get_menu_version(self, version_id: int) -> Optional[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM menu_versions WHERE id = ?", (version_id,)
+            ).fetchone()
+            return dict(row) if row else None
 
     def get_conversations(self, limit: int = 50, offset: int = 0, channel: Optional[str] = None, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """Retrieve paginated conversation logs."""

@@ -135,7 +135,10 @@ def test_instagram_escalation_offers_a_whatsapp_link_instead_of_asking_for_a_num
 def test_repeated_human_requests_reuse_the_same_handoff_reference():
     """A customer saying "human" three times gets ONE reference, not three —
     the active handoff is looked up and reused rather than re-created."""
-    user_id = "client_instagram_repeat_handoff"
+    # Suffixed: handoffs persist across suite runs in the shared sqlite file,
+    # so a literal fixed id would eventually collide with an already-active
+    # handoff left over from an earlier run.
+    user_id = "client_instagram_repeat_handoff_" + uuid.uuid4().hex[:8]
     session_memory.clear_session(user_id, "instagram")
 
     with patch.object(
