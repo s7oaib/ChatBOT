@@ -33,13 +33,22 @@ from camellia.ai_responder import ai_responder
 from camellia.whatsapp_adapter import whatsapp_adapter
 from camellia.escalator import escalator
 from camellia.handoff import (
-    customer_facing_message,
+    customer_facing_link_message,
+    customer_facing_notice,
     get_or_create_handoff,
     mark_referred,
     staff_summary,
     verified_order_summary,
 )
 from camellia.ad_routing import product_for_ad
+from camellia.instagram_routing import (
+    decode_route,
+    lookup_instagram_media,
+    normalize_instagram_url,
+    product_catalogue,
+    route_for_inbound,
+    validate_route_payload,
+)
 from camellia.sheet_sync import sheet_sync
 from camellia.menu_parser import menu_parser
 from camellia import weekly_flyer
@@ -48,6 +57,8 @@ from camellia import menu_manager
 from camellia import menu_images
 from camellia.session_memory import session_memory
 from camellia.monitoring import get_logger, delivery_monitor, latency_monitor
+from camellia.knowledge import SOURCE_MAP
+from camellia.candidate_safety import candidate_eligibility, validate_candidate_answer
 
 log = get_logger("camellia.app")
 
@@ -340,12 +351,29 @@ def _process_instagram_event(
             # The ad on this event, else the one this session arrived on.
             "ad_id": entry.ad_id or ad_id,
             "ad_title": entry.ad_title or facts.get("ad_title"),
+            "media_id": entry.media_id,
         }
         if entry.ad_title and not facts.get("ad_title"):
             facts["ad_title"] = entry.ad_title
         ad_product = product_for_ad(trace["ad_id"], trace["ad_title"])
         if ad_product:
             facts["ad_product"] = ad_product
+        source_route, source_match_method = route_for_inbound(
+            ad_id=trace["ad_id"], media_id=trace["media_id"],
+        )
+        if source_route:
+            facts["source_route"] = source_route
+        elif isinstance(facts.get("source_route"), dict):
+            source_route = facts["source_route"]
+            source_match_method = "session"
+        facts["source_context_used"] = False
+        trace.update({
+            "source_routing_id": (source_route or {}).get("routing_id"),
+            "source_match_method": source_match_method,
+            "source_type": (source_route or {}).get("source_type"),
+            "shortcode": (source_route or {}).get("shortcode"),
+            "routing_topic": (source_route or {}).get("routing_topic"),
+        })
         log.info(
             "Instagram inbound from %s: source=%s ad_id=%s ad_title=%r payload=%r",
             sender_id, entry.source, trace["ad_id"], trace["ad_title"], entry.raw_payload,
@@ -368,6 +396,7 @@ def _process_instagram_event(
         # number quoted as plain Instagram text.
         needs_escalation = (
             not was_matched
+            or (source_route or {}).get("escalation_policy") == "always_human"
             or template_id in (
                 "explicit_escalation",
                 "order_draft_receipt",
@@ -404,19 +433,23 @@ def _process_instagram_event(
                 )
             order_summary = verified_order_summary(facts)
             if template_id == "order_draft_receipt":
-                response_text = (
-                    f"{response_text.rstrip()}\n\n"
-                    f"{customer_facing_message(handoff['handoff_ref'], order_summary, order_receipt=True)}"
-                )
+                response_text = response_text.rstrip()
             else:
-                response_text = customer_facing_message(handoff["handoff_ref"], order_summary)
+                response_text = customer_facing_notice()
+            link_message = customer_facing_link_message(handoff["handoff_ref"], order_summary)
             mark_referred(handoff["handoff_ref"])
             template_id = "instagram_whatsapp_handoff"
             image_url = None
 
-        db.log_conversation(sender_id, "instagram", message_text, response_text, was_matched, template_id, **trace)
+        trace["source_context_used"] = bool(facts.get("source_context_used"))
+        logged_response = response_text
+        if needs_escalation:
+            logged_response = f"{response_text}\n\n{link_message}"
+        db.log_conversation(sender_id, "instagram", message_text, logged_response, was_matched, template_id, **trace)
 
         send_instagram_reply(sender_id, response_text, image_url=image_url)
+        if needs_escalation:
+            send_instagram_reply(sender_id, link_message)
     except Exception:
         # A background task that raises disappears silently, and the customer
         # is left with no reply and nothing in the logs explaining why.
@@ -435,8 +468,7 @@ _UNREADABLE_ATTACHMENT_REPLY = (
     "Thanks for sending that! I can't open photos or voice notes here — "
     "could you type your question instead?\n\n"
     "I can help with our Sondesh flavours & prices, this week's Bengali meals, "
-    "or delivery across Delhi NCR. If you'd rather speak to someone, our team "
-    "is on +91 87965 51990."
+    "or delivery across Delhi NCR. If you'd rather speak to someone, reply “human”."
 )
 
 
@@ -1409,6 +1441,103 @@ def remove_ad_route(
         raise HTTPException(status_code=404, detail="Ad route not found.")
     return {"status": "success", "ad_id": ad_id}
 
+
+@app.post("/admin/instagram-routes/identify")
+async def identify_instagram_route(
+    request: Request,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """Normalize an operator-friendly post/reel URL without inventing metadata."""
+    require_admin(x_admin_key, x_admin_pin)
+    try:
+        body = await request.json()
+        identity = normalize_instagram_url(body.get("url"))
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    existing = next((
+        decode_route(row) for row in db.list_instagram_source_routes()
+        if row.get("canonical_url") == identity["canonical_url"]
+    ), None)
+    lookup = lookup_instagram_media(identity)
+    verified_media_id = lookup.get("verified_media_identifier") or (existing or {}).get("media_id")
+    return {
+        "status": "success",
+        **identity,
+        "verified_media_identifier": verified_media_id,
+        "thumbnail_url": lookup.get("thumbnail_url"),
+        "caption": lookup.get("caption"),
+        "metadata_status": (
+            lookup.get("metadata_status") if lookup.get("metadata_status") == "verified_graph_api"
+            else "saved_mapping" if existing and existing.get("media_id")
+            else lookup.get("metadata_status") or "not_retrievable_from_webhook"
+        ),
+    }
+
+
+@app.get("/admin/instagram-routes")
+def list_instagram_routes(
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    require_admin(x_admin_key, x_admin_pin)
+    routes = [decode_route(row) for row in db.list_instagram_source_routes()]
+    return {
+        "status": "success",
+        "routes": routes,
+        "legacy_ad_routes": db.list_ad_product_routes(),
+        "product_catalogue": product_catalogue(),
+        "knowledge_scopes": sorted(SOURCE_MAP),
+        "inbound_identifiers": ["ad_id", "story_media_id"],
+    }
+
+
+@app.post("/admin/instagram-routes")
+async def save_instagram_route(
+    request: Request,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    require_admin(x_admin_key, x_admin_pin)
+    try:
+        body = await request.json()
+        route = validate_route_payload(body)
+        routing_id = body.get("routing_id")
+        if routing_id is not None:
+            routing_id = int(routing_id)
+        saved = decode_route(db.save_instagram_source_route(route, routing_id))
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"status": "success", "route": saved}
+
+
+@app.patch("/admin/instagram-routes/{routing_id}/active")
+async def set_instagram_route_active(
+    routing_id: int,
+    request: Request,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    require_admin(x_admin_key, x_admin_pin)
+    body = await request.json()
+    if not isinstance(body.get("active"), bool):
+        raise HTTPException(status_code=400, detail="active must be true or false.")
+    if not db.set_instagram_source_route_active(routing_id, body["active"]):
+        raise HTTPException(status_code=404, detail="Routing record not found.")
+    return {"status": "success", "routing_id": routing_id, "active": body["active"]}
+
+
+@app.delete("/admin/instagram-routes/{routing_id}")
+def archive_instagram_route(
+    routing_id: int,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    require_admin(x_admin_key, x_admin_pin)
+    if not db.archive_instagram_source_route(routing_id):
+        raise HTTPException(status_code=404, detail="Routing record not found.")
+    return {"status": "success", "routing_id": routing_id, "archived": True}
+
 @app.post("/admin/menu/upload-image")
 @limiter.limit("10/minute")
 async def upload_menu_image(
@@ -2117,10 +2246,14 @@ async def approve_candidate_template(
     if candidate.get("status") != "PENDING_APPROVAL":
         raise HTTPException(status_code=409, detail="Candidate template is no longer pending")
 
-    approved_by = body.get("approved_by", "admin")
-    if not db.approve_candidate_template(candidate_id, approved_by=approved_by):
-        raise HTTPException(status_code=409, detail="Candidate template could not be approved")
+    eligible, eligibility_error = candidate_eligibility(
+        candidate.get("user_message") or "", candidate.get("response") or ""
+    )
+    valid, validation_error = validate_candidate_answer(candidate.get("response") or "")
+    if not eligible or not valid:
+        raise HTTPException(status_code=422, detail=eligibility_error or validation_error)
 
+    approved_by = body.get("approved_by", "admin")
     knowledge_id = db.add_learned_knowledge(
         topic=candidate.get("name") or "Approved candidate",
         question_pattern=candidate.get("user_message") or candidate.get("name") or "",
@@ -2128,12 +2261,45 @@ async def approve_candidate_template(
         source=f"approved_candidate#{candidate_id}",
         confidence=max(float(candidate.get("confidence") or 0.0), 0.90),
     )
+    if not db.approve_candidate_template(candidate_id, approved_by=approved_by):
+        raise HTTPException(status_code=409, detail="Candidate template could not be approved")
     return {
         "status": "approved",
         "candidate_id": candidate_id,
         "learned_knowledge_id": knowledge_id,
         "message": "Candidate approved and added to the reviewed knowledge base.",
     }
+
+@app.patch("/admin/candidates/{candidate_id}")
+async def edit_candidate_template(
+    candidate_id: int,
+    request: Request,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """Edits the current answer while leaving it in the approval queue."""
+    require_admin(x_admin_key, x_admin_pin)
+    candidate = db.get_candidate_template(candidate_id)
+    if not candidate:
+        raise HTTPException(status_code=404, detail="Candidate template not found")
+    if candidate.get("status") != "PENDING_APPROVAL":
+        raise HTTPException(status_code=409, detail="Candidate template is no longer pending")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    response = str(body.get("response") or "")
+    valid, error = validate_candidate_answer(response)
+    if not valid:
+        raise HTTPException(status_code=422, detail=error)
+    eligible, error = candidate_eligibility(candidate.get("user_message") or "", response)
+    if not eligible:
+        raise HTTPException(status_code=422, detail=error)
+    if not db.edit_candidate_template(
+        candidate_id, response, edited_by=str(body.get("edited_by") or "admin")
+    ):
+        raise HTTPException(status_code=409, detail="Candidate template could not be edited")
+    return {"status": "pending", "candidate_id": candidate_id}
 
 @app.post("/admin/candidates/{candidate_id}/reject")
 def reject_candidate_template(
@@ -2897,30 +3063,44 @@ def get_admin_dashboard():
 
         <div id="tab-ad-routing" class="panel-card" data-group="menu" style="display: none;">
             <div class="panel-header">
-                <h2>📣 Ad Routing</h2>
-                <p>Choose what the chatbot shows first when somebody arrives from an Instagram ad. You only need the Ad ID from Meta.</p>
+                <h2>📣 Instagram Post &amp; Ad Routing</h2>
+                <p>Paste the Instagram post or reel link customers see, then choose the approved products the conversation should introduce first.</p>
             </div>
-
             <div class="ad-routing-form">
                 <div>
-                    <label class="field-label" for="adRouteId">Instagram Ad ID</label>
-                    <input class="field-control" id="adRouteId" inputmode="text" autocomplete="off" placeholder="Paste the Ad ID">
+                    <label class="field-label" for="igRouteUrl">Instagram Post/Reel Link</label>
+                    <input class="field-control" id="igRouteUrl" autocomplete="off" placeholder="https://www.instagram.com/reel/…/">
+                </div>
+                <button class="btn-secondary" type="button" onclick="identifyInstagramRoute()">Identify</button>
+            </div>
+            <div id="igRouteIdentity" style="font-size:0.82rem; margin:10px 0; color:var(--text-muted);"></div>
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+                <div>
+                    <label class="field-label" for="igRoutingTopic">Topic</label>
+                    <input class="field-control" id="igRoutingTopic" maxlength="160" placeholder="What this post is about">
                 </div>
                 <div>
-                    <label class="field-label" for="adRouteProduct">Show this product first</label>
-                    <select class="field-control" id="adRouteProduct">
-                        <option value="sondesh">Sondesh</option>
-                        <option value="savoury">Savoury</option>
-                        <option value="bento">Bento</option>
-                    </select>
+                    <label class="field-label" for="igEscalationPolicy">Escalation policy</label>
+                    <select class="field-control" id="igEscalationPolicy"><option value="human_if_unsupported">Human if unsupported</option><option value="canonical">Normal canonical rules</option><option value="always_human">Always offer human help</option></select>
                 </div>
-                <button class="btn-primary" type="button" onclick="saveAdRoute()">Add ad</button>
             </div>
-
+            <div style="margin-top:12px;">
+                <label class="field-label">Priority Products <span style="font-weight:normal;">(ordered, optional)</span></label>
+                <div style="display:flex; gap:8px;"><select class="field-control" id="igProductPicker"></select><button class="btn-secondary" type="button" onclick="addIgPriorityProduct()">+ Add Product</button></div>
+                <div id="igPriorityProducts" class="ad-route-list" style="margin-top:8px;"></div>
+            </div>
+            <details style="margin-top:12px;"><summary><b>Advanced</b> — Media ID, Ad ID, Campaign ID and knowledge scope</summary>
+                <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:10px; margin-top:10px;">
+                    <input class="field-control" id="igMediaId" placeholder="Verified Media / Story ID">
+                    <input class="field-control" id="igAdId" placeholder="Meta Ad ID">
+                    <input class="field-control" id="igCampaignId" placeholder="Campaign ID (reference only)">
+                    <select class="field-control" id="igKnowledgeScope" multiple title="Optional canonical knowledge scope"></select>
+                </div>
+                <p style="font-size:0.76rem;color:var(--text-muted);">Runtime webhooks provide Ad ID or Story Media ID—not the pasted URL or shortcode. Add an identifier here when Meta supplies one.</p>
+            </details>
+            <div class="action-bar"><button class="btn-primary" type="button" onclick="saveInstagramRoute()">Save route</button><button class="btn-secondary" type="button" onclick="resetInstagramRouteForm()">Cancel edit</button></div>
             <div id="adRouteResult" class="result-box"></div>
-            <div id="adRouteList" class="ad-route-list">
-                <p style="color: var(--text-muted); font-size: 0.84rem;">Loading saved ads...</p>
-            </div>
+            <div id="adRouteList" class="ad-route-list"><p style="color:var(--text-muted);font-size:0.84rem;">Loading saved routes...</p></div>
         </div>
 
         <!-- MENU tab, panel 3 of 4: same job again, from a shared sheet -->
@@ -3156,7 +3336,7 @@ THIS WEEK'S BENGAL SPECIALS
                         <tr>
                             <th>Customer Asked</th>
                             <th>Draft Answer — read it before approving</th>
-                            <th>Confidence</th>
+                            <th>AI Draft Confidence</th>
                             <th>Drafted By</th>
                             <th>Action</th>
                         </tr>
@@ -3649,26 +3829,99 @@ THIS WEEK'S BENGAL SPECIALS
             }
         }
 
+        let igProducts = [];
+        let igPriority = [];
+        let igEditingId = null;
+
+        function renderIgPriorityProducts() {
+            const box = document.getElementById('igPriorityProducts');
+            if (!box) return;
+            if (!igPriority.length) { box.innerHTML = '<small>No priority products. Normal conversation routing will apply.</small>'; return; }
+            box.innerHTML = igPriority.map((id, index) => {
+                const product = igProducts.find(item => item.id === id);
+                const label = product ? product.label : `${id} (currently unavailable)`;
+                return `<div class="ad-route-row"><span><b>${index + 1}.</b> ${escapeHtml(label)}</span><span>
+                    <button class="btn-secondary" type="button" onclick="moveIgPriority(${index},-1)" ${index === 0 ? 'disabled' : ''}>↑</button>
+                    <button class="btn-secondary" type="button" onclick="moveIgPriority(${index},1)" ${index === igPriority.length - 1 ? 'disabled' : ''}>↓</button>
+                    <button class="btn-danger" type="button" onclick="removeIgPriority(${index})">Remove</button></span></div>`;
+            }).join('');
+        }
+
+        function addIgPriorityProduct() {
+            const id = document.getElementById('igProductPicker').value;
+            if (!id || igPriority.includes(id)) return;
+            igPriority.push(id); renderIgPriorityProducts();
+        }
+        function moveIgPriority(index, change) { const target=index+change; if(target<0||target>=igPriority.length)return; [igPriority[index],igPriority[target]]=[igPriority[target],igPriority[index]]; renderIgPriorityProducts(); }
+        function removeIgPriority(index) { igPriority.splice(index,1); renderIgPriorityProducts(); }
+
+        function resetInstagramRouteForm() {
+            igEditingId = null; igPriority = [];
+            ['igRouteUrl','igRoutingTopic','igMediaId','igAdId','igCampaignId'].forEach(id => { const el=document.getElementById(id); if(el)el.value=''; });
+            document.getElementById('igEscalationPolicy').value='human_if_unsupported';
+            Array.from(document.getElementById('igKnowledgeScope').options).forEach(option => option.selected=false);
+            document.getElementById('igRouteIdentity').innerHTML=''; renderIgPriorityProducts();
+        }
+
+        async function identifyInstagramRoute() {
+            const url=document.getElementById('igRouteUrl').value.trim();
+            const box=document.getElementById('igRouteIdentity');
+            const resp=await fetch('/admin/instagram-routes/identify',{method:'POST',headers:{...getAuthHeaders(),'Content-Type':'application/json'},body:JSON.stringify({url})});
+            const data=await resp.json().catch(()=>({}));
+            if(!resp.ok){box.innerHTML=`<span style="color:var(--danger);">${escapeHtml(data.detail||'Could not identify link.')}</span>`;return;}
+            document.getElementById('igRouteUrl').value=data.canonical_url;
+            if(data.verified_media_identifier) document.getElementById('igMediaId').value=data.verified_media_identifier;
+            const metadata = data.thumbnail_url || data.caption
+                ? ` · Thumbnail: ${data.thumbnail_url ? `<a href="${escapeHtml(data.thumbnail_url)}" target="_blank">available</a>` : 'not available'} · Caption: ${escapeHtml(data.caption || 'not available')}`
+                : ' · Thumbnail/caption: not retrievable';
+            box.innerHTML=`Canonical: <b>${escapeHtml(data.canonical_url)}</b> · Type: ${escapeHtml(data.source_type)} · Shortcode: ${escapeHtml(data.shortcode)} · Verified Media ID: ${escapeHtml(data.verified_media_identifier||'not available')}${metadata}`;
+        }
+
+        function editInstagramRoute(id) {
+            const route=(window.igRoutes||[]).find(item=>item.routing_id===id); if(!route)return;
+            igEditingId=id; igPriority=[...(route.priority_products||[])];
+            document.getElementById('igRouteUrl').value=route.canonical_url||'';
+            document.getElementById('igRoutingTopic').value=route.routing_topic||'';
+            document.getElementById('igMediaId').value=route.media_id||'';
+            document.getElementById('igAdId').value=route.ad_id||'';
+            document.getElementById('igCampaignId').value=route.campaign_id||'';
+            document.getElementById('igEscalationPolicy').value=route.escalation_policy||'human_if_unsupported';
+            Array.from(document.getElementById('igKnowledgeScope').options).forEach(option=>option.selected=(route.knowledge_scope||[]).includes(option.value));
+            renderIgPriorityProducts(); document.getElementById('igRouteUrl').scrollIntoView({behavior:'smooth'});
+        }
+
+        async function saveInstagramRoute() {
+            const result=document.getElementById('adRouteResult');
+            const payload={routing_id:igEditingId,url:document.getElementById('igRouteUrl').value.trim(),routing_topic:document.getElementById('igRoutingTopic').value.trim(),media_id:document.getElementById('igMediaId').value.trim(),ad_id:document.getElementById('igAdId').value.trim(),campaign_id:document.getElementById('igCampaignId').value.trim(),escalation_policy:document.getElementById('igEscalationPolicy').value,priority_products:igPriority,knowledge_scope:Array.from(document.getElementById('igKnowledgeScope').selectedOptions).map(o=>o.value),active:true};
+            const resp=await fetch('/admin/instagram-routes',{method:'POST',headers:{...getAuthHeaders(),'Content-Type':'application/json'},body:JSON.stringify(payload)});
+            const data=await resp.json().catch(()=>({})); result.style.display='block';
+            if(!resp.ok){result.className='result-box error';result.innerText=data.detail||'Could not save route.';return;}
+            result.className='result-box success';result.innerText='Instagram source route saved.'; resetInstagramRouteForm(); loadAdRoutes();
+        }
+
+        async function setInstagramRouteActive(id, active) {
+            await fetch(`/admin/instagram-routes/${id}/active`,{method:'PATCH',headers:{...getAuthHeaders(),'Content-Type':'application/json'},body:JSON.stringify({active})}); loadAdRoutes();
+        }
+        async function archiveInstagramRoute(id) { if(!confirm('Archive this Instagram route?'))return; await fetch(`/admin/instagram-routes/${id}`,{method:'DELETE',headers:getAuthHeaders()}); loadAdRoutes(); }
+
         async function loadAdRoutes() {
             const list = document.getElementById('adRouteList');
             if (!list || !currentAdminKey) return;
             try {
-                const resp = await fetch('/admin/ad-routes', { headers: getAuthHeaders() });
+                const resp = await fetch('/admin/instagram-routes', { headers: getAuthHeaders() });
                 const data = await resp.json();
-                if (!resp.ok) throw new Error(data.detail || 'Could not load saved ads.');
+                if (!resp.ok) throw new Error(data.detail || 'Could not load saved routes.');
                 const routes = data.routes || [];
-                if (!routes.length) {
-                    list.innerHTML = '<p style="color: var(--text-muted); font-size: 0.84rem;">No ads added yet.</p>';
-                    return;
-                }
-                const labels = { sondesh: 'Sondesh', savoury: 'Savoury', bento: 'Bento' };
+                window.igRoutes=routes; igProducts=data.product_catalogue||[];
+                document.getElementById('igProductPicker').innerHTML='<option value="">Choose an approved product…</option>'+igProducts.map(item=>`<option value="${escapeHtml(item.id)}">${escapeHtml(item.label)}</option>`).join('');
+                document.getElementById('igKnowledgeScope').innerHTML=(data.knowledge_scopes||[]).map(id=>`<option value="${escapeHtml(id)}">${escapeHtml(id)}</option>`).join('');
+                renderIgPriorityProducts();
+                if (!routes.length && !(data.legacy_ad_routes||[]).length) { list.innerHTML='<p style="color:var(--text-muted);font-size:0.84rem;">No Instagram routes added yet.</p>'; return; }
                 list.innerHTML = routes.map(route => `
                     <div class="ad-route-row">
-                        <span class="ad-route-id">${escapeHtml(route.ad_id)}</span>
-                        <span class="product-chip">${labels[route.product] || escapeHtml(route.product)}</span>
-                        <button class="btn-danger" style="padding: 6px 10px; font-size: 0.76rem;" type="button"
-                            onclick="removeAdRoute('${escapeHtml(route.ad_id)}')">Remove</button>
-                    </div>`).join('');
+                        <span><b>${escapeHtml(route.canonical_url||route.ad_id||route.media_id)}</b><br><small>${escapeHtml(route.source_type)} · ${escapeHtml(route.shortcode||'no shortcode')} · ${escapeHtml(route.routing_topic||'no topic')} · priorities: ${escapeHtml((route.priority_products||[]).join(', ')||'none')}</small></span>
+                        <span><button class="btn-secondary" type="button" onclick="editInstagramRoute(${route.routing_id})">Edit</button> <button class="btn-secondary" type="button" onclick="setInstagramRouteActive(${route.routing_id},${!route.active})">${route.active?'Disable':'Enable'}</button> <button class="btn-danger" type="button" onclick="archiveInstagramRoute(${route.routing_id})">Archive</button></span>
+                    </div>`).join('') + (data.legacy_ad_routes||[]).map(route=>`<div class="ad-route-row"><span><b>Legacy Ad ID ${escapeHtml(route.ad_id)}</b><br><small>Priority: ${escapeHtml(route.product)} · managed under Advanced compatibility</small></span></div>`).join('');
             } catch (err) {
                 list.innerHTML = `<p style="color: var(--danger); font-size: 0.84rem;">${escapeHtml(err.message || err)}</p>`;
             }
@@ -4442,11 +4695,18 @@ Non-Veg:
                     rows += `
                     <tr>
                         <td style="max-width: 200px;"><b>${escapeHtml(c.user_message || '—')}</b></td>
-                        <td style="max-width: 340px; white-space: pre-wrap; font-size: 0.82rem;">${escapeHtml(c.response)}</td>
+                        <td style="max-width: 340px; font-size: 0.82rem;">
+                            <div id="candidateText-${c.id}" style="white-space:pre-wrap;">${escapeHtml(c.response)}</div>
+                            <textarea id="candidateEdit-${c.id}" style="display:none;width:100%;min-height:110px;">${escapeHtml(c.response)}</textarea>
+                            ${c.edited ? `<small>Edited by ${escapeHtml(c.edited_by || 'admin')} · ${escapeHtml(c.edited_at || '')}</small>` : ''}
+                        </td>
                         <td style="color: ${confColour}; font-weight: 600;">${confidence}%</td>
                         <td><span class="badge badge-veg">${escapeHtml(c.created_by || 'bot')}</span></td>
                         <td style="white-space: nowrap;">
                             <button class="btn-primary" style="padding: 4px 10px; font-size: 0.75rem;" onclick="approveCandidate(${c.id})">✅ Approve</button>
+                            <button class="btn-secondary" style="padding:4px 10px;font-size:0.75rem;" id="candidateEditButton-${c.id}" onclick="beginCandidateEdit(${c.id})">✏️ Edit</button>
+                            <button class="btn-primary" style="display:none;padding:4px 10px;font-size:0.75rem;" id="candidateSaveButton-${c.id}" onclick="saveCandidateEdit(${c.id})">Save draft</button>
+                            <button class="btn-secondary" style="display:none;padding:4px 10px;font-size:0.75rem;" id="candidateCancelButton-${c.id}" onclick="cancelCandidateEdit(${c.id})">Cancel</button>
                             <button class="btn-secondary" style="padding: 4px 10px; font-size: 0.75rem; color: var(--danger);" onclick="rejectCandidate(${c.id})">✕ Reject</button>
                         </td>
                     </tr>`;
@@ -4497,6 +4757,28 @@ Non-Veg:
             } catch (err) {
                 alert('Could not approve: ' + err);
             }
+        }
+
+        function beginCandidateEdit(id) {
+            document.getElementById(`candidateText-${id}`).style.display = 'none';
+            document.getElementById(`candidateEdit-${id}`).style.display = 'block';
+            document.getElementById(`candidateEditButton-${id}`).style.display = 'none';
+            document.getElementById(`candidateSaveButton-${id}`).style.display = 'inline-block';
+            document.getElementById(`candidateCancelButton-${id}`).style.display = 'inline-block';
+        }
+
+        function cancelCandidateEdit(id) { loadCandidates(); }
+
+        async function saveCandidateEdit(id) {
+            const response = document.getElementById(`candidateEdit-${id}`).value.trim();
+            if (!response) return alert('Draft answer cannot be empty.');
+            const resp = await fetch(`/admin/candidates/${id}`, {
+                method: 'PATCH', headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+                body: JSON.stringify({ response, edited_by: 'admin_dashboard' })
+            });
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok) return alert('Could not save draft: ' + (data.detail || resp.status));
+            loadCandidates();
         }
 
         async function rejectCandidate(id) {

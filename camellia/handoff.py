@@ -246,6 +246,29 @@ def customer_facing_message(
     return f"{body}\n\nPlease quote reference {handoff_ref} when you message us."
 
 
+def customer_facing_notice(*, order_receipt: bool = False) -> str:
+    """First Instagram message: the CTA copy, with no URL embedded in it."""
+    if order_receipt:
+        return "Continue on WhatsApp to send this order draft to our team."
+    # Keep the customer promise deterministic even if an older deployment
+    # still carries legacy callback wording in INSTAGRAM_HANDOFF_MESSAGE.
+    return (
+        "Our team can assist you personally on WhatsApp. "
+        "Please continue your enquiry using the link below."
+    )
+
+
+def customer_facing_link_message(
+    handoff_ref: str,
+    order_summary: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Second Instagram message: a raw URL on its own line when configured."""
+    link = whatsapp_link(handoff_ref, order_summary)
+    if link:
+        return f"Continue on WhatsApp:\n{link}"
+    return f"Please quote reference {handoff_ref} when you message us on WhatsApp."
+
+
 def staff_summary(handoff: Dict[str, Any]) -> str:
     """The internal 'CAMELLIA HANDOFF' block for the human team."""
     lines = [

@@ -285,7 +285,8 @@ class TestUnreadableAttachments:
 
         sent = send.call_args.args[1]
         assert "type your question" in sent
-        assert "87965 51990" in sent
+        assert "reply “human”" in sent
+        assert "87965 51990" not in sent
 
     def test_it_is_sent_once_not_once_per_photo(self):
         session_memory.clear_session("att_repeat", "instagram")

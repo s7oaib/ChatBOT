@@ -416,9 +416,10 @@ class RAGFallbackEngine:
                     confidence=result.confidence_score,
                     created_by="rag_fallback"
                 )
-                result.candidate_id = candidate_id
-                result.approval_status = "PENDING_APPROVAL"
-                log.info("RAG Candidate Template #%d created for '%s' (status: PENDING_APPROVAL, confidence: %.2f)", candidate_id, user_message, result.confidence_score)
+                if candidate_id is not None:
+                    result.candidate_id = candidate_id
+                    result.approval_status = "PENDING_APPROVAL"
+                    log.info("RAG Candidate Template #%d created for '%s' (status: PENDING_APPROVAL, confidence: %.2f)", candidate_id, user_message, result.confidence_score)
             except Exception as e:
                 log.error("Failed to save RAG candidate template: %s", e)
 

@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Dict, Any, Tuple, Optional, List
 from camellia.config import config
 from camellia.ad_routing import product_for_ad
+from camellia.instagram_routing import route_template_id
 from camellia.monitoring import get_logger, latency_monitor
 from camellia.ai_responder import ai_responder
 from camellia.session_memory import session_memory
@@ -79,8 +80,7 @@ _WEEKLY_MENU_BEING_UPDATED = (
     "Our kitchen is finalising this week's menu right now — I'd rather not "
     "send you last week's by mistake.\n\n"
     "It'll be ready shortly! In the meantime, say *Sondesh* to see our sweet "
-    "collections, or message our team on +91 87965 51990 and they'll confirm "
-    "this week's dishes for you directly."
+    "collections."
 )
 
 _DUPLICATE_REPLY_NOTICE = (
@@ -530,16 +530,10 @@ class DeterministicResponder:
         return None
 
     def _generic_fallback(self) -> str:
-        """The scripted 'we've handed this to a human' notice from qa_templates.json."""
-        return self.qa_data.get("escalation_triggers", {}).get(
-            "fallback_response",
-            "Thank you for getting in touch! I've notified our team (+91 87965 51990) regarding "
-            "your request and they'll connect with you directly on WhatsApp/call shortly.\n\n"
-            "In the meantime, feel free to ask me about:\n"
-            "• Our fresh Sondesh, Kanchagolla & Jolbhora (Aamar Mishti & Signature Collections)\n"
-            "• 🍱 This week's fresh Bengali Lunch & Dinner Bento menu\n"
-            "• 🚚 Delivery details across Delhi NCR\n\n"
-            "Or reply 'menu' to see our complete price list!"
+        """Safe first message; the Instagram caller appends the CAM link separately."""
+        return (
+            "Our team can assist you personally on WhatsApp. "
+            "Please continue your enquiry using the link below."
         )
 
     def classify_unmatched_intent(self, text: str) -> str:
@@ -572,41 +566,6 @@ class DeterministicResponder:
         Returns: (response_text, intent_tag)
         """
         intent = self.classify_unmatched_intent(user_message or "")
-
-        if intent == "complaint":
-            return (
-                "I'm really sorry that happened — that is not the experience we want you to have. 🙏\n\n"
-                "I've flagged this to our team (+91 87965 51990) along with this chat, and they will "
-                "reach out to you personally to put it right.\n\n"
-                "If you can share your order date and what went wrong, it helps us fix it faster.",
-                intent,
-            )
-
-        if intent == "bulk":
-            return (
-                "Wonderful — we would love to make this for you!\n\n"
-                "Bulk, corporate and festive orders are quoted personally so we can work out pricing, "
-                "packaging and delivery dates around your date.\n\n"
-                "I've passed this to our team (+91 87965 51990) and they will connect with you shortly. "
-                "To speed things up, do share:\n"
-                "• Approximate quantity\n"
-                "• Delivery date\n"
-                "• Delhi NCR area, or if you'd prefer kitchen pickup",
-                intent,
-            )
-
-        if intent == "order_intent":
-            return (
-                "Lovely — let's get this order placed!\n\n"
-                "Our team (+91 87965 51990) has your chat and will confirm on WhatsApp/call shortly.\n\n"
-                "To make it quick, please share:\n"
-                "1. Item & flavour\n"
-                "2. Pack size (250g / 500g / 1kg)\n"
-                "3. Delivery address & phone number\n"
-                "4. Preferred delivery date\n\n"
-                "Payment is UPI / bank transfer once the order is confirmed.",
-                intent,
-            )
 
         return self._generic_fallback(), intent
 
@@ -1329,14 +1288,7 @@ class DeterministicResponder:
             if was_matched:
                 response_text = f"{config.SLOW_REPLY_NOTICE_TEXT}\n\n{response_text}"
             else:
-                # The handover copy underneath says we have notified the team and
-                # they will call back. The notice above it says the opposite —
-                # replies are slow this week, please call the manager yourself.
-                # Sending both hands the customer two contradictory instructions
-                # and two phone numbers. The notice already names Guru Dayal as
-                # the single point of contact, which is the whole content of the
-                # handover message, so on an unmatched reply it stands alone.
-                response_text = config.SLOW_REPLY_NOTICE_TEXT
+                response_text = self._generic_fallback()
 
         try:
             audit_facts = session_memory.get_facts(user_id, channel)
@@ -1480,20 +1432,59 @@ class DeterministicResponder:
         # A referral is a preference only for genuinely vague openings. It
         # runs before conversational shorthand (such as a bare "price"), so
         # a meal-ad click never receives the sweet-product price prompt.
-        vague_opening = re.fullmatch(r"(?:hi+|hello+|hey+|namaste|menu|show menu|send menu|price|prices|how much|cost|rate|available|is this available)[?!,. ]*", lowered_text)
-        explicit_product = re.search(r"\b(sondesh|mishti|mithai|sweet|bento|meal|savoury|savory|curry|veg|non[ -]?veg)\b", lowered_text)
-        if channel == "instagram" and ad_product and vague_opening and not explicit_product:
-            if ad_product == "sondesh":
-                template_id = "sondesh_price_detailed" if re.search(r"price|cost|rate|how much", lowered_text) else "know_more"
-            elif ad_product == "bento":
-                template_id = "bento_details"
-            else:
-                template_id = "savoury_food_intro"
+        vague_opening = re.fullmatch(
+            r"(?:hi+|hello+|hey+|namaste|menu|show menu|send menu|tell me more|interested|"
+            r"price|prices|how much|cost|rate|available|is this available|what about this|"
+            r"can i order this|i saw this|what is this|what else(?: do you have)?)[?!,. ]*",
+            lowered_text,
+        )
+        explicit_product = re.search(
+            r"\b(sondesh|mishti|mithai|sweet|jolbhora|kanchagolla|nolen gur|mahua|"
+            r"aamar|signature|bento|meal|savoury|savory|curry|veg|non[ -]?veg)\b",
+            lowered_text,
+        )
+        source_route = facts.get("source_route") if isinstance(facts.get("source_route"), dict) else None
+        priorities = [
+            product for product in (source_route or {}).get("priority_products", [])
+            if route_template_id(product)
+        ]
+        active_flow = any(facts.get(flag) for flag in (
+            "awaiting_subscription_booking", "awaiting_menu_choice", "awaiting_product_price",
+            "awaiting_area_confirmation",
+        ))
+        source_product = priorities[0] if priorities else ad_product
+        what_else = bool(re.fullmatch(r"what else(?: do you have)?[?!,. ]*", lowered_text))
+        can_use_source = not active_flow and (not facts.get("last_topic") or what_else)
+        if channel == "instagram" and source_product and vague_opening and not explicit_product and can_use_source:
+            cursor = int(facts.get("source_priority_cursor") or 0)
+            if what_else and priorities:
+                source_product = priorities[min(cursor, len(priorities) - 1)]
+            wants_price = bool(re.search(r"price|cost|rate|how much", lowered_text))
+            template_id = route_template_id(source_product, price=wants_price) or route_template_id(source_product)
             template = self._template_by_id(template_id)
             if template and template.get("response") and not template.get("escalate"):
                 response_text, images = self._format_dynamic_response(template_id, template["response"], user_id=user_id, channel=channel, user_message=user_message)
+                facts["source_context_used"] = True
+                facts["source_priority_cursor"] = min(cursor + 1, len(priorities)) if priorities else 1
                 session_memory.add_turn(user_id, channel, user_message, response_text)
-                return response_text, True, f"ad_{ad_product}_{template_id}", images
+                return response_text, True, f"source_{source_product}_{template_id}", images
+
+        # A topic-only route may frame a vague opening, but the body still
+        # comes from the approved overview template. The admin label is not
+        # allowed to supply a price, promise, availability, or other fact.
+        if channel == "instagram" and source_route and vague_opening and not explicit_product and can_use_source:
+            template = self._template_by_id("know_more")
+            if template and template.get("response"):
+                response_text, images = self._format_dynamic_response(
+                    "know_more", template["response"], user_id=user_id, channel=channel,
+                    user_message=user_message,
+                )
+                topic = str(source_route.get("routing_topic") or "").strip()
+                if topic:
+                    response_text = f"About {topic}:\n\n{response_text}"
+                facts["source_context_used"] = True
+                session_memory.add_turn(user_id, channel, user_message, response_text)
+                return response_text, True, "source_topic_know_more", images
 
         # An open flow is an answer the bot itself asked for: "which area are
         # you in", "Sondesh or Meals", "Option 1, 2 or 3". Those turns are
