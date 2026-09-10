@@ -526,7 +526,7 @@ _ESCALATION_INTENT_RE = re.compile(
     r"(?:someone|person|human|agent|representative)\b"
     r"|\bcustomer\s+support\b"
     r"|\b(?:can|could)\s+(?:someone|somebody|anyone)\s+help\b"
-    r"|\bi\s+need\s+(?:a\s+)?(?:real\s+)?(?:person|human)\b"
+    r"|\bi\s+need\s+(?:a\s+|an\s+)?(?:real\s+)?(?:person|human|agent|representative|someone)\b"
     r"|\bneed\s+(?:a\s+)?real\s+(?:person|human)\b"
     r"|\breal\s+(?:human|person)\b"
     r"|\blive\s+agent\b"

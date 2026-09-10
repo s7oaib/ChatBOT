@@ -104,6 +104,7 @@ def get_or_create_handoff(
     """
     existing = db.get_active_handoff(channel, user_id)
     if existing:
+        existing["newly_created"] = False
         return existing
 
     known_entities = _known_entities(facts)
@@ -131,6 +132,7 @@ def get_or_create_handoff(
         expires_at=expires_at,
     )
     log.info("Created handoff %s for %s/%s (%s).", reference, channel, user_id, reason)
+    handoff["newly_created"] = True
     return handoff
 
 

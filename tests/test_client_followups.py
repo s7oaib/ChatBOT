@@ -1,6 +1,7 @@
 import json
 import re
 import urllib.parse
+import uuid
 from unittest.mock import patch
 
 from camellia import app
@@ -104,7 +105,11 @@ def test_instagram_escalation_offers_a_whatsapp_link_instead_of_asking_for_a_num
     WhatsApp human-only, connected by a handoff link rather than a collected
     phone number.
     """
-    user_id = "client_instagram_handoff"
+    # Suffixed so a fresh handoff (and staff alert) is created regardless of
+    # what an earlier test run already wrote to the persistent handoffs table
+    # for this literal id — app.py now skips re-alerting staff for a handoff
+    # that's already active, which a leftover row from a prior run would be.
+    user_id = "client_instagram_handoff_" + uuid.uuid4().hex[:8]
     session_memory.clear_session(user_id, "instagram")
 
     with patch.object(

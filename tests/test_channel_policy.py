@@ -17,6 +17,7 @@ verified here too, briefly, as a regression guard.
 import json
 import re
 import urllib.parse
+import uuid
 from unittest.mock import patch
 
 import pytest
@@ -163,6 +164,13 @@ def test_whatsapp_webhook_route_never_reaches_the_chatbot_stack(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def _ask_instagram(user_id, message, ad_id="ad-1"):
+    # Suffixed so a fresh handoff is created every run regardless of what an
+    # earlier test run already wrote to the persistent handoffs table for
+    # this literal id — otherwise a leftover active handoff from a prior run
+    # would be silently reused, and app.py now (correctly) skips re-alerting
+    # staff for a reused handoff, making these single-call tests order- and
+    # run-dependent instead of a fresh escalation each time.
+    user_id = f"{user_id}_{uuid.uuid4().hex[:8]}"
     session_memory.clear_session(user_id, "instagram")
     with patch.object(app, "send_instagram_reply") as send_reply, patch.object(
         app.escalator, "handle_escalation", return_value={"escalation_id": 1},

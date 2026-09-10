@@ -374,17 +374,21 @@ def _process_instagram_event(
                 user_id=sender_id, channel="instagram", reason=reason,
                 user_message=message_text, facts=facts,
             )
-            escalator.handle_escalation(
-                user_id=sender_id,
-                channel="instagram",
-                user_message=message_text,
-                reason=reason,
-                context_data={
-                    "ad_id": ad_id, "sender_id": sender_id, "template_id": template_id,
-                    "handoff_ref": handoff["handoff_ref"],
-                    "handoff_summary": staff_summary(handoff),
-                },
-            )
+            # A repeated "human"/"can someone help" against an already-active
+            # handoff reuses the reference (above) and must not re-alert
+            # staff a second time for the same open enquiry.
+            if handoff.get("newly_created", True):
+                escalator.handle_escalation(
+                    user_id=sender_id,
+                    channel="instagram",
+                    user_message=message_text,
+                    reason=reason,
+                    context_data={
+                        "ad_id": ad_id, "sender_id": sender_id, "template_id": template_id,
+                        "handoff_ref": handoff["handoff_ref"],
+                        "handoff_summary": staff_summary(handoff),
+                    },
+                )
             response_text = customer_facing_message(handoff["handoff_ref"])
             mark_referred(handoff["handoff_ref"])
             template_id = "instagram_whatsapp_handoff"
