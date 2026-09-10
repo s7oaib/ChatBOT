@@ -69,11 +69,12 @@ def list_menus() -> list[Dict[str, Any]]:
     for key, definition in MENU_IMAGE_DEFINITIONS.items():
         current = db.get_menu_image_current(key)
         draft = db.get_menu_image_draft(key)
+        archived = db.has_menu_image_archive(key)
         result.append({
             "menu_key": key,
             "title": definition["title"],
-            "image_url": (current or {}).get("image_path") or (None if current is not None else _fallback(key)),
-            "status": "Archived" if current is None and db.has_menu_image_archive(key) else ("Active" if current else "Active (built-in)"),
+            "image_url": (current or {}).get("image_path") or (None if archived else _fallback(key)),
+            "status": "Archived" if current is None and archived else ("Active" if current else "Active (built-in)"),
             "version": (current or {}).get("version"),
             "published_at": (current or {}).get("published_at"),
             "draft": draft,
@@ -87,7 +88,9 @@ def card(menu_key: str) -> Dict[str, Any]:
         raise KeyError(menu_key)
     current = db.get_menu_image_current(key)
     draft = db.get_menu_image_draft(key)
-    return {"menu_key": menu_key, "image_url": (current or {}).get("image_path") or (None if current is not None else _fallback(key)), "image_status": "Archived" if current is None and db.has_menu_image_archive(key) else ("Published" if current else "Built-in"), "image_version": (current or {}).get("version"), "published_at": (current or {}).get("published_at"), "image_draft": draft}
+    archived = db.has_menu_image_archive(key)
+    image_url = (current or {}).get("image_path") or (None if archived else _fallback(key))
+    return {"menu_key": menu_key, "image_url": image_url, "image_status": "Archived" if current is None and archived else ("Published" if current else "Built-in"), "image_version": (current or {}).get("version"), "published_at": (current or {}).get("published_at"), "image_draft": draft}
 
 
 def save_draft(menu_key: str, data: bytes, content_type: str, uploaded_by: str = "admin") -> Dict[str, Any]:
