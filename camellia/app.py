@@ -39,6 +39,7 @@ from camellia.menu_parser import menu_parser
 from camellia import weekly_flyer
 from camellia import menu_dates
 from camellia import menu_manager
+from camellia import menu_images
 from camellia.session_memory import session_memory
 from camellia.monitoring import get_logger, delivery_monitor, latency_monitor
 
@@ -2212,14 +2213,17 @@ async def update_menu(request: Request, x_admin_key: Optional[str] = Header(None
 @app.get("/admin/menu-manager/menus")
 def list_manageable_menus(x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
     require_admin(x_admin_key, x_admin_pin)
-    return {"status": "success", "menus": menu_manager.list_menus()}
+    menus = menu_manager.list_menus()
+    for menu in menus:
+        menu.update(menu_images.card(menu["menu_key"]))
+    return {"status": "success", "menus": menus}
 
 
 @app.get("/admin/menu-manager/menus/{menu_key}")
 def get_manageable_menu(menu_key: str, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
     require_admin(x_admin_key, x_admin_pin)
     try:
-        return {"status": "success", **menu_manager.get_menu(menu_key)}
+        return {"status": "success", **menu_manager.get_menu(menu_key), "image": menu_images.card(menu_key)}
     except KeyError:
         raise HTTPException(status_code=404, detail=f"No manageable menu '{menu_key}'")
 
@@ -2302,6 +2306,75 @@ def restore_menu_version(menu_key: str, version_id: int, x_admin_key: Optional[s
     except menu_manager.MenuValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return {"status": "success", **result}
+
+
+# Visual image workflow.  Structured item editing above remains available as
+# an advanced capability, while these routes keep image bytes in the durable
+# upload directory and SQLite holds metadata only.
+@app.post("/admin/menu-manager/menus/{menu_key}/image/draft")
+async def save_menu_image_draft(menu_key: str, file: Optional[UploadFile] = File(None), x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    if file is None:
+        raise HTTPException(status_code=400, detail="No image file provided.")
+    data = await file.read()
+    if len(data) > MAX_UPLOAD_SIZE:
+        raise HTTPException(status_code=413, detail="File too large (maximum 10MB allowed).")
+    try:
+        return {"status": "success", "draft": menu_images.save_draft(menu_key, data, file.content_type or "", x_admin_key or "admin")}
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"No manageable menu '{menu_key}'")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/admin/menu-manager/menus/{menu_key}/image/preview")
+def preview_menu_image(menu_key: str, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    try:
+        return {"status": "success", **menu_images.preview(menu_key)}
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"No manageable menu '{menu_key}'")
+
+
+@app.post("/admin/menu-manager/menus/{menu_key}/image/publish")
+def publish_menu_image(menu_key: str, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    try:
+        return {"status": "success", "image": menu_images.publish(menu_key)}
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"No manageable menu '{menu_key}'")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/admin/menu-manager/menus/{menu_key}/image/history")
+def menu_image_history(menu_key: str, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    try:
+        return {"status": "success", "versions": menu_images.history(menu_key)}
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"No manageable menu '{menu_key}'")
+
+
+@app.post("/admin/menu-manager/menus/{menu_key}/image/archive")
+def archive_menu_image(menu_key: str, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    try:
+        return {"status": "success", "image": menu_images.archive(menu_key)}
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"No manageable menu '{menu_key}'")
+
+
+@app.post("/admin/menu-manager/menus/{menu_key}/image/restore/{version_id}")
+def restore_menu_image(menu_key: str, version_id: int, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    try:
+        restored = menu_images.restore(menu_key, version_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"No manageable menu '{menu_key}'")
+    if not restored:
+        raise HTTPException(status_code=404, detail="Image version not found")
+    return {"status": "success", "image": restored}
 
 
 @app.post("/admin/parse-menu-card")
@@ -2669,6 +2742,13 @@ def get_admin_dashboard():
         .catalogue-item { border: 1px solid var(--border); background: #FCFBF9; color: var(--text-dark); padding: 8px 10px; border-radius: 9px; cursor: pointer; text-align: left; }
         .catalogue-item:hover { border-color: var(--primary); background: #F5EEF0; }
         .catalogue-item small { display: block; color: var(--text-muted); margin-top: 2px; }
+        .visual-menu-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; margin-bottom: 20px; }
+        .visual-menu-card { border: 1px solid var(--border); border-radius: 14px; overflow: hidden; background: #fff; }
+        .visual-menu-card h3 { margin: 0; padding: 14px 14px 6px; color: var(--primary); font-size: 1rem; }
+        .visual-menu-card img { width: 100%; height: 210px; object-fit: contain; background: #f6f3ef; display: block; }
+        .visual-menu-meta { padding: 8px 14px; color: var(--text-muted); font-size: .8rem; }
+        .visual-menu-actions { display: flex; flex-wrap: wrap; gap: 7px; padding: 0 14px 14px; }
+        .visual-menu-actions button { font-size: .78rem; padding: 7px 9px; }
         
         /* Analytics Table */
         table.data-table { width: 100%; border-collapse: collapse; margin-top: 16px; font-size: 0.86rem; }
@@ -2932,6 +3012,8 @@ THIS WEEK'S BENGAL SPECIALS
                 <h2>📋 Menu Manager</h2>
                 <p>Edit any menu the chatbot uses. Changes are a draft until you press Save &amp; Publish — the bot keeps answering with the current live menu until then.</p>
             </div>
+
+            <div id="mmImageGrid" class="visual-menu-grid"><p style="color: var(--text-muted);">Loading menu images...</p></div>
 
             <div class="collection-layout">
                 <div class="collection-box">
@@ -3337,6 +3419,7 @@ THIS WEEK'S BENGAL SPECIALS
                 const data = await resp.json();
                 if (!resp.ok) throw new Error(data.detail || 'Could not load menus.');
                 mmMenus = data.menus || [];
+                mmRenderImageGallery();
                 list.innerHTML = mmMenus.map(m => `
                     <button class="catalogue-item" type="button" style="display:block; width:100%; text-align:left; margin-bottom:8px;" onclick="mmOpenMenu('${m.menu_key}')">
                         <b>${escapeHtml(m.label)}</b>
@@ -3347,6 +3430,23 @@ THIS WEEK'S BENGAL SPECIALS
                 list.innerHTML = `<p style="color: var(--danger);">${escapeHtml(err.message || err)}</p>`;
             }
         }
+
+        function mmRenderImageGallery() {
+            const grid = document.getElementById('mmImageGrid');
+            if (!grid) return;
+            grid.innerHTML = mmMenus.map(m => {
+                const image = m.image_url ? `<img src="${escapeHtml(m.image_url)}" alt="${escapeHtml(m.label)}">` : '<div style="height:210px;display:grid;place-items:center;background:#f6f3ef;color:#888">No image published</div>';
+                const key = encodeURIComponent(m.menu_key);
+                return `<article class="visual-menu-card"><h3>${escapeHtml(m.label)}</h3>${image}<div class="visual-menu-meta"><b>${escapeHtml(m.image_status || 'Active')}</b>${m.published_at ? ` · ${escapeHtml(m.published_at)}` : ''}</div><div class="visual-menu-actions"><button class="btn-primary" onclick="mmReplaceImage('${key}')">Replace Menu</button><button class="btn-secondary" onclick="mmPreviewImage('${key}')">Preview</button><button class="btn-secondary" onclick="mmHistoryImage('${key}')">History</button><button class="btn-danger" onclick="mmArchiveImage('${key}')">Archive</button></div><div id="mm-image-history-${key}" style="padding:0 14px 12px"></div></article>`;
+            }).join('');
+        }
+
+        function mmReplaceImage(key) { const input=document.createElement('input'); input.type='file'; input.accept='image/jpeg,image/png,image/webp'; input.onchange=async()=>{const file=input.files&&input.files[0];if(!file)return;const form=new FormData();form.append('file',file);const response=await fetch(`/admin/menu-manager/menus/${key}/image/draft`,{method:'POST',headers:getAuthHeaders(),body:form});const data=await response.json();const msg=document.getElementById('mmMessage');msg.style.display='block';msg.className=response.ok?'result-box info':'result-box error';msg.innerText=response.ok?'Draft image saved. Preview it, then publish when ready.':(data.detail||'Upload failed.');if(response.ok)mmLoadMenuList();};input.click(); }
+        async function mmPreviewImage(key){const response=await fetch(`/admin/menu-manager/menus/${key}/image/preview`,{headers:getAuthHeaders()});const data=await response.json();const msg=document.getElementById('mmMessage');msg.style.display='block';msg.className='result-box info';msg.innerHTML=response.ok?`<b>Current</b><br><img src="${escapeHtml(data.current||'')}" style="max-width:220px;max-height:260px"><br><b>New draft</b><br>${data.draft?`<img src="${escapeHtml(data.draft.image_path)}" style="max-width:220px;max-height:260px">`:'No draft saved.'}`:escapeHtml(data.detail||'Preview failed');}
+        async function mmPublishImage(key){const response=await fetch(`/admin/menu-manager/menus/${key}/image/publish`,{method:'POST',headers:getAuthHeaders()});const data=await response.json();const msg=document.getElementById('mmMessage');msg.style.display='block';msg.className=response.ok?'result-box success':'result-box error';msg.innerText=response.ok?'Published. Customers receive the new image immediately.':(data.detail||'Publish failed.');if(response.ok)mmLoadMenuList();}
+        async function mmArchiveImage(key){if(!confirm('Are you sure you want to remove this menu from customer view?'))return;const response=await fetch(`/admin/menu-manager/menus/${key}/image/archive`,{method:'POST',headers:getAuthHeaders()});const data=await response.json();const msg=document.getElementById('mmMessage');msg.style.display='block';msg.className='result-box info';msg.innerText=response.ok?'Menu archived; it remains in History.':(data.detail||'Archive failed.');if(response.ok)mmLoadMenuList();}
+        async function mmHistoryImage(key){const response=await fetch(`/admin/menu-manager/menus/${key}/image/history`,{headers:getAuthHeaders()});const data=await response.json();const box=document.getElementById(`mm-image-history-${key}`);box.innerHTML=(data.versions||[]).map(v=>`<div style="margin:7px 0"><img src="${escapeHtml(v.image_path)}" style="width:70px;height:50px;object-fit:cover;vertical-align:middle;border-radius:4px"><span style="font-size:.78rem">Version ${v.version} — ${escapeHtml(v.status)}</span>${v.status!=='current'?` <button class="btn-secondary" onclick="mmRestoreImage('${key}',${v.id})">Restore</button>`:''}</div>`).join('')||'<small>No image history yet.</small>';}
+        async function mmRestoreImage(key,versionId){const response=await fetch(`/admin/menu-manager/menus/${key}/image/restore/${versionId}`,{method:'POST',headers:getAuthHeaders()});const data=await response.json();const msg=document.getElementById('mmMessage');msg.style.display='block';msg.className=response.ok?'result-box success':'result-box error';msg.innerText=response.ok?'Previous menu restored.':(data.detail||'Restore failed.');if(response.ok)mmLoadMenuList();}
 
         async function mmOpenMenu(menuKey) {
             const msg = document.getElementById('mmMessage');
