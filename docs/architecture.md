@@ -195,3 +195,14 @@ sessions use the existing `DB_PATH` volume when `SESSION_PERSISTENCE_ENABLED=tru
 mount persistent runtime state separately; do not place SQLite databases,
 uploaded flyers, `.env`, benchmark output, or customer exports in version
 control. Those paths are ignored by `.gitignore`.
+
+## Backlog
+
+* Before promoting shadow router, require explicit product/entity scope for
+  specific product-price routes. Vague price requests must clarify product
+  rather than assume one. (Found via `/admin/router-shadow`: a bare "What is
+  the price?" with no named product was routed by the shadow model straight to
+  a specific product's price instead of asking which product — the kind of
+  invented specificity the source-context rules are meant to block. The
+  router stays shadow-only/inert on customer replies until this is hardened
+  and re-evaluated.)
