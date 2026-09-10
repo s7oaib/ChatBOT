@@ -510,6 +510,38 @@ AMENITY_TOPIC_PATTERN = (
 )
 _AMENITY_OVERRIDE_RE = re.compile(rf"\b(?:{AMENITY_TOPIC_PATTERN})\b", re.IGNORECASE)
 
+# A direct request for a human, read as meaning — not as restaurant FAQ
+# knowledge. This is deliberately its own check rather than a token in the
+# generic CONCEPTS table: "human"/"person"/"someone" bare or in a short
+# escalation-shaped phrase always means "connect me to a person", but the
+# same word inside a longer sentence usually does not ("are you human",
+# "I need a person to receive the package" further down in an order
+# template). Requiring either the whole clause to BE the word, or one of a
+# small set of unambiguous phrase shapes, is what keeps "are you human?"
+# (three words, no escalation phrase) from firing this by accident, with no
+# separate exclusion list to maintain.
+_ESCALATION_INTENT_RE = re.compile(
+    r"^(?:human|person|someone|agent|representative|support)$"
+    r"|\b(?:talk|speak|chat)\s*(?:to|with)\s*(?:an?\s+)?"
+    r"(?:someone|person|human|agent|representative)\b"
+    r"|\bcustomer\s+support\b"
+    r"|\b(?:can|could)\s+(?:someone|somebody|anyone)\s+help\b"
+    r"|\bi\s+need\s+(?:a\s+|an\s+)?(?:real\s+)?(?:person|human|agent|representative|someone)\b"
+    r"|\bneed\s+(?:a\s+)?real\s+(?:person|human)\b"
+    r"|\breal\s+(?:human|person)\b"
+    r"|\blive\s+agent\b"
+    r"|\bconnect\s+me\s+(?:to|with)\s+(?:someone|an?\s+agent|a\s+person)\b"
+    r"|\bput\s+me\s+through\s+to\s+(?:someone|a\s+person|an?\s+agent)\b",
+    re.IGNORECASE,
+)
+
+# "Are you a real person?" and "is this a human?" ask about the bot's own
+# nature — the client's approved bot_identity answer covers exactly this —
+# and must not be read as a request to leave the bot for a person, even
+# though they share the words "real person"/"human" with genuine escalation
+# phrases above.
+_IDENTITY_QUESTION_RE = re.compile(r"^(?:are|is)\s+(?:you|this|it|u)\b", re.IGNORECASE)
+
 
 def read(message: str) -> Dict[str, Any]:
     """Return validated intents and entities for a message, clause by clause.
@@ -524,8 +556,17 @@ def read(message: str) -> Dict[str, Any]:
 
     unmapped: List[str] = []
     for clause in _clauses(normalised):
-        amenity_override = _AMENITY_OVERRIDE_RE.search(clause)
-        found = set() if amenity_override else _concepts_in(clause)
+        escalation_request = (
+            not _IDENTITY_QUESTION_RE.match(clause.strip())
+            and _ESCALATION_INTENT_RE.search(clause.strip())
+        )
+        amenity_override = (not escalation_request) and _AMENITY_OVERRIDE_RE.search(clause)
+        if escalation_request:
+            found = {"escalation"}
+        elif amenity_override:
+            found = set()
+        else:
+            found = _concepts_in(clause)
         # Every concept the clause matched, including the ones precedence
         # rules drop below — their words are still read, so they must not
         # count as terms the reader failed to account for.

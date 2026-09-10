@@ -188,19 +188,51 @@ class Config:
     # Instagram Config — uses its own Page token (may differ from WhatsApp token)
     INSTAGRAM_PAGE_ID: str = os.getenv("INSTAGRAM_PAGE_ID", "")
     INSTAGRAM_ACCESS_TOKEN: str = os.getenv("INSTAGRAM_ACCESS_TOKEN", "") or os.getenv("WHATSAPP_ACCESS_TOKEN", "")
-    
+
+    # --- Channel policy: Instagram is the only AI chatbot channel -----------
+    # The client does not want customers talking to an AI on WhatsApp at all.
+    # WHATSAPP_CHATBOT_ENABLED defaults false and is the one flag that would
+    # restore the old auto-reply behaviour; camellia/whatsapp_adapter.py only
+    # consults it as an explicit, logged escape hatch for a future policy
+    # change — the code path that calls the understanding/RAG/template stack
+    # for WhatsApp does not run by default, and nothing else in this file
+    # turns it on implicitly.
+    INSTAGRAM_CHATBOT_ENABLED: bool = os.getenv("INSTAGRAM_CHATBOT_ENABLED", "true").lower() in ("true", "1", "t", "yes")
+    WHATSAPP_CHATBOT_ENABLED: bool = os.getenv("WHATSAPP_CHATBOT_ENABLED", "false").lower() in ("true", "1", "t", "yes")
+    # A single flipped boolean (a copy-pasted .env, a typo'd override) must not
+    # be enough to put the AI back on WhatsApp. Restoring the old behaviour
+    # requires this second, differently-named flag as well — whatsapp_adapter
+    # treats WHATSAPP_CHATBOT_ENABLED alone as a misconfiguration and fails
+    # safe to human-only, logging an error instead of guessing intent.
+    WHATSAPP_CHATBOT_ENABLE_CONFIRM: bool = os.getenv("WHATSAPP_CHATBOT_ENABLE_CONFIRM", "false").lower() in ("true", "1", "t", "yes")
+    WHATSAPP_HUMAN_HANDOFF_ENABLED: bool = os.getenv("WHATSAPP_HUMAN_HANDOFF_ENABLED", "true").lower() in ("true", "1", "t", "yes")
+    # The client's own WhatsApp Business number that customers are sent to,
+    # digits only with country code (e.g. "9198XXXXXXXX") — NOT the Meta Cloud
+    # API sender number above, which never faces the customer directly here.
+    # Left blank until the client provides it; see the manual-configuration
+    # report for what happens while it is unset.
+    WHATSAPP_BUSINESS_NUMBER: str = os.getenv("WHATSAPP_BUSINESS_NUMBER", "")
+    # How long an Instagram -> WhatsApp handoff reference stays valid/active
+    # for deduplication before a repeated "human please" creates a new one.
+    CROSS_CHANNEL_HANDOFF_EXPIRY_HOURS: int = int(os.getenv("CROSS_CHANNEL_HANDOFF_EXPIRY_HOURS", "72"))
+    # Placeholder copy — the manual-configuration report flags this as
+    # pending client sign-off; do not treat it as approved client wording.
+    INSTAGRAM_HANDOFF_MESSAGE: str = os.getenv(
+        "INSTAGRAM_HANDOFF_MESSAGE",
+        "Our team can assist you personally on WhatsApp. "
+        "Please continue your enquiry using the link below.",
+    )
+
     # Human Escalation Contact
-    # Where the bot sends its escalation alerts. Distinct from the number
-    # customers are told to call, which stays +91 87965 51990 across the
-    # templates, the menu and the order summaries — this one is internal.
+    # Where the bot sends its internal escalation alerts. It is never printed
+    # in the customer reply; customers use the configured wa.me continuation.
     HUMAN_ESCALATION_PHONE: str = os.getenv("HUMAN_ESCALATION_PHONE", "+919902181650")
     HUMAN_ESCALATION_EMAIL: str = os.getenv("HUMAN_ESCALATION_EMAIL", "")
 
     # Slow-reply notice.
     # When the bot itself becomes slow to answer, the customer is sitting there
     # watching nothing happen. Rather than let them guess, we say so once per
-    # conversation and hand them the manager's direct line — they can switch to
-    # a human or carry on with the bot, whichever they prefer.
+    # conversation without exposing a direct number or promising a callback.
     SLOW_REPLY_NOTICE_ENABLED: bool = os.getenv("SLOW_REPLY_NOTICE_ENABLED", "true").lower() in ("true", "1", "t", "yes")
     # A reply slower than this (milliseconds) counts as slow. Parsed defensively:
     # a blank or malformed value must not take the whole bot down at import time.
@@ -208,19 +240,12 @@ class Config:
         SLOW_REPLY_THRESHOLD_MS: float = float(os.getenv("SLOW_REPLY_THRESHOLD_MS", "").strip() or 3000)
     except ValueError:
         SLOW_REPLY_THRESHOLD_MS: float = 3000.0
-    # The notice promises a limited period, so it must be able to expire —
-    # otherwise the bot keeps claiming "for a week" indefinitely. ISO date
-    # (YYYY-MM-DD); once past, the notice stops being sent. Empty = no expiry.
+    # Optional ISO date (YYYY-MM-DD); once past, the notice stops being sent.
     SLOW_REPLY_NOTICE_UNTIL: str = os.getenv("SLOW_REPLY_NOTICE_UNTIL", "")
     # `or` rather than a getenv default: an empty SLOW_REPLY_NOTICE_TEXT= line in
     # .env would otherwise blank the notice instead of falling back to the copy.
     SLOW_REPLY_NOTICE_TEXT: str = os.getenv("SLOW_REPLY_NOTICE_TEXT", "").strip() or (
-        "Hi thanks so much for connecting. I will slow in replying to the Instagram "
-        "messages for a week, due to unavoidable circumstances. Request you to connect "
-        "directly with Our Manager of Kitchens, Mr. Guru Dayal Singh (8796551990), on a "
-        "call or WhatsApp . He will help you in the selection & purchase process & also "
-        "and share your invoice. He will be your single point of contact for this order "
-        "and will be happy to assist you with any queries."
+        "Hi thanks so much for connecting. Replies to Instagram messages may be slower than usual."
     )
 
     @property

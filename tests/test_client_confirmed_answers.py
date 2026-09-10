@@ -35,7 +35,10 @@ def reply_to(message):
     ("can i pay cash on delivery", "GUARD_payment_method"),
     ("where is your kitchen", "GUARD_pickup_address_hours"),
     ("who can i speak to directly", "GUARD_staff_names_manager_contact"),
-    ("can i talk to someone", "GUARD_staff_names_manager_contact"),
+    # "can i talk to someone" is deliberately excluded here: it now resolves
+    # to the direct human-escalation intent (semantic_fallback's
+    # _ESCALATION_INTENT_RE) rather than this template, so the customer gets
+    # a WhatsApp handoff instead of a text answer — see test_channel_policy.py.
     ("difference between aamar mishti and signature", "GUARD_collection_differentiation"),
     ("tell me about the subscription", "subscription_details"),
     ("how do i book the subscription", "subscription_booking_steps"),

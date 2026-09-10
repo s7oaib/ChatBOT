@@ -25,7 +25,7 @@ def _ask(message):
 
 
 def _escalated(text):
-    return "notified our team" in (text or "").lower()
+    return "assist you personally on whatsapp" in (text or "").lower()
 
 
 def test_the_confirmed_substitution_is_answered():

@@ -122,12 +122,12 @@ def test_the_menu_tab_leads_with_the_weekly_job(page):
 
 def test_menu_tab_has_simple_ad_routing_controls(page):
     assert 'id="tab-ad-routing"' in page
-    assert 'id="adRouteId"' in page
-    assert 'id="adRouteProduct"' in page
-    assert "saveAdRoute()" in page
+    assert 'id="igRouteUrl"' in page
+    assert 'id="igProductPicker"' in page
+    assert "saveInstagramRoute()" in page
     assert "loadAdRoutes()" in page
-    for product in ("sondesh", "savoury", "bento"):
-        assert f'value="{product}"' in page
+    assert "product_catalogue" in page
+    assert "igProducts.map" in page
 
 
 def test_the_fake_flyer_test_button_is_gone(page):

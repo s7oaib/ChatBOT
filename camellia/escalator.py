@@ -101,15 +101,26 @@ class Escalator:
 
         verif_status = self._evaluate_order_verification(user_message, chat_history)
 
+        # A cross-channel handoff (camellia/handoff.py) attaches its own
+        # CAM-XXXXX reference and known-entities summary here so staff see, in
+        # the same alert, the reference the customer will quote on WhatsApp —
+        # not a second, disconnected notification.
+        handoff_ref = context.get("handoff_ref")
+        handoff_block = f"\n🔗 *Handoff Reference:* {handoff_ref}\n" if handoff_ref else ""
+        handoff_summary = context.get("handoff_summary")
+        summary_block = f"\n{handoff_summary}\n" if handoff_summary else ""
+
         alert_body = (
-            f"🚨 *NEW CAMELLIA BOT ORDER / ESCALATION #{escalation_id}*\n\n"
+            f"🚨 *NEW CAMELLIA BOT ORDER / ESCALATION #{escalation_id}*\n"
+            f"{handoff_block}"
             f"• *Verification Status:* {verif_status}\n"
             f"• *Channel:* {channel.upper()}\n"
             f"• *Customer ID/Phone:* {user_id}\n"
             f"• *Customer Name:* {cust_name}\n"
             f"• *Reason:* {reason}\n"
             f"• *Last Message:* \"{user_message}\"\n\n"
-            f"📋 *Recent Conversation History:*\n{chat_history or 'None'}\n\n"
+            f"📋 *Recent Conversation History:*\n{chat_history or 'None'}\n"
+            f"{summary_block}\n"
             f"Please verify order details & send invoice via WhatsApp/Call to customer before cooking/dispatching."
         )
 
