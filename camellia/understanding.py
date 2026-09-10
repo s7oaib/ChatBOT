@@ -7,6 +7,7 @@ from enum import Enum
 from typing import Any, Dict, List, Optional
 
 from camellia import semantic_fallback
+from camellia.semantic_fallback import normalize_menu_type, normalize_pack_size
 from camellia.config import config
 from camellia.monitoring import get_logger
 
@@ -272,6 +273,23 @@ class UnderstandingEngine:
                 entities[key] = value.strip()[:120]
             elif key == "quantity" and isinstance(value, int) and not isinstance(value, bool) and 0 < value <= 100000:
                 entities[key] = value
+
+        # The model is asked for one of a few named values here, but nothing
+        # enforces that at the API boundary: it can say "veg" where the
+        # catalogue matches on "vegetarian". Normalizing at the boundary means
+        # a raw model value can never silently fail every record and fall
+        # through to a generic answer — the same vocabulary the offline
+        # reader uses decides both paths.
+        if "menu_type" in entities:
+            normalized_menu_type = normalize_menu_type(entities["menu_type"])
+            if normalized_menu_type:
+                entities["menu_type"] = normalized_menu_type
+            else:
+                del entities["menu_type"]
+        if "pack_size" in entities:
+            normalized_pack_size = normalize_pack_size(entities["pack_size"])
+            if normalized_pack_size:
+                entities["pack_size"] = normalized_pack_size
 
         try:
             confidence = min(1.0, max(0.0, float(parsed.get("confidence", 0.0))))

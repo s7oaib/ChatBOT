@@ -191,3 +191,153 @@ class TestRefinementCannotIntroduceFacts:
 
         assert grounded is False
         assert reason.startswith("unsupported_")
+
+
+class TestModelSuppliedTopicCannotEstablishTruth:
+    """A model's `topic` guess is evidence for a human, never a lookup key.
+
+    No catalogue record is keyed on `topic` — records are keyed on intent and
+    on `product`/`location`/`menu_type`/`pack_size`/`subtopic`. So even a
+    wrong or adversarial topic value (the model says "packaging" for a
+    washroom question) cannot select an answer, because `unknown` and
+    `unknown_business_query` have no catalogue entry to select in the first
+    place. This test pins that structural guarantee down directly, rather
+    than relying on it staying true by accident.
+    """
+
+    @pytest.mark.parametrize("fake_topic", [
+        "packaging", "delivery", "storage", "menu", "subscriptions", "payment",
+    ])
+    def test_a_topic_naming_a_real_domain_still_resolves_to_nothing(self, fake_topic):
+        for intent in ("unknown", "unknown_business_query"):
+            understood = UnderstandingResult(
+                intents=[intent], entities={"topic": fake_topic}, confidence=0.95,
+                available=True, reason="test",
+            )
+            resolution = approved_knowledge.resolve(
+                understood, responder.qa_data.get("templates", []),
+            )
+
+            assert resolution.items == [], (
+                f"topic={fake_topic!r} let {intent} resolve to an answer"
+            )
+            assert resolution.sufficient_by_intent == {intent: False}
+
+    def test_no_catalogue_record_is_keyed_on_the_unknown_intents(self):
+        from camellia.knowledge import CATALOGUE
+        from camellia.understanding import Intent
+
+        keyed_intents = {value for record in CATALOGUE for value in record.intents}
+        assert Intent.UNKNOWN.value not in keyed_intents
+        assert Intent.BUSINESS_POLICY_UNKNOWN.value not in keyed_intents
+
+
+class TestModelEntitiesAreNormalizedAtTheBoundary:
+    """A real live-Groq run surfaced this: the model returned menu_type="veg",
+    not the "vegetarian" the catalogue matcher expects, and every record for
+    menu_request silently failed to match — the customer got the generic
+    "Sondesh or Meals?" prompt instead of the vegetarian menu they asked for.
+
+    The fix normalizes at the boundary so the vocabulary a raw model value
+    uses can never silently defeat every matcher — this is the model-output
+    cannot establish untrusted structure through raw strings.
+    """
+
+    @pytest.mark.parametrize("raw_value, expected", [
+        ("veg", "vegetarian"), ("Veg", "vegetarian"), ("vegetarian", "vegetarian"),
+        ("VEGETARIAN", "vegetarian"), ("niramish", "vegetarian"),
+        ("non veg", "non_vegetarian"), ("non-veg", "non_vegetarian"),
+        ("nonveg", "non_vegetarian"), ("Non Vegetarian", "non_vegetarian"),
+        ("chicken", "non_vegetarian"), ("mutton", "non_vegetarian"),
+    ])
+    def test_menu_type_normalizes_to_the_catalogue_vocabulary(self, raw_value, expected):
+        from camellia.semantic_fallback import normalize_menu_type
+
+        assert normalize_menu_type(raw_value) == expected
+
+    @pytest.mark.parametrize("raw_value, expected", [
+        ("250g", "250g"), ("250 grams", "250g"), ("quarter kilo", "250g"),
+        ("500gm", "500g"), ("half kilo", "500g"),
+        ("1 kg", "1kg"), ("1000g", "1kg"), ("one kg", "1kg"),
+    ])
+    def test_pack_size_normalizes_to_the_catalogue_vocabulary(self, raw_value, expected):
+        from camellia.semantic_fallback import normalize_pack_size
+
+        assert normalize_pack_size(raw_value) == expected
+
+    def test_a_raw_model_menu_type_still_resolves_the_right_menu(self):
+        """The exact failure reproduced: model says "veg", not "vegetarian"."""
+        understood = UnderstandingResult(
+            intents=["menu_request"], entities={"menu_type": "veg"},
+            confidence=0.95, available=True, reason="test",
+        )
+        raw_understood = UnderstandingResult(
+            intents=["menu_request"], entities={"menu_type": "veg"},
+            confidence=0.95, available=True, reason="ok",
+        )
+        # Simulates what analyze() does at the API boundary before resolve()
+        # ever sees the entity.
+        from camellia.semantic_fallback import normalize_menu_type
+
+        normalized = normalize_menu_type(raw_understood.entities["menu_type"])
+        raw_understood.entities["menu_type"] = normalized
+
+        resolution = approved_knowledge.resolve(
+            raw_understood, responder.qa_data.get("templates", []),
+        )
+
+        assert [item.template_id for item in resolution.items] == ["weekly_menu_veg"]
+        assert resolution.fully_sufficient is True
+
+
+class TestRefinementAuditAgainstNamedApprovedSources:
+    """The exact cases requested for a refinement-safety audit: given a
+    specific approved source sentence, a specific model rewrite that adds a
+    fact must be rejected, using that source's own vocabulary as the only
+    permitted context — not the delivery template above.
+    """
+
+    def _refine_against(self, template_id, approved_text, model_text, message="tell me more"):
+        with patch.object(ai_responder, "get_active_provider", return_value="groq"), patch.object(
+            config, "GROQ_ENABLED", True,
+        ), patch.object(ai_responder, "_query_groq", return_value=(model_text, True, "groq")):
+            ai_responder._refinement_cache.clear()
+            return ai_responder.refine_template_response(
+                template_id, approved_text, message, user_context="Customer Name: Unknown",
+            )
+
+    def test_packaging_rewrite_cannot_upgrade_to_gift_wrapping(self):
+        text, refined = self._refine_against(
+            "packaging",
+            "We use food-safe packaging.",
+            "We use premium biodegradable gift wrapping.",
+        )
+        assert refined is False
+        assert text == "We use food-safe packaging."
+
+    def test_delivery_fee_rewrite_cannot_invent_a_flat_rate(self):
+        text, refined = self._refine_against(
+            "delivery_area",
+            "Courier charges are on actuals.",
+            "We usually charge around \u20b9150.",
+        )
+        assert refined is False
+        assert text == "Courier charges are on actuals."
+
+    def test_product_rewrite_cannot_invent_a_freshness_claim(self):
+        text, refined = self._refine_against(
+            "jolbhora",
+            "Jolbhora has liquid filling.",
+            "Jolbhora is freshly prepared every morning.",
+        )
+        assert refined is False
+        assert text == "Jolbhora has liquid filling."
+
+    def test_storage_rewrite_cannot_invent_a_shelf_life_number(self):
+        text, refined = self._refine_against(
+            "GUARD_shelf_life_storage",
+            "Please consume the sondesh within the day for the best taste.",
+            "Refrigerate for up to 7 days.",
+        )
+        assert refined is False
+        assert text == "Please consume the sondesh within the day for the best taste."

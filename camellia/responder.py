@@ -1099,7 +1099,6 @@ class DeterministicResponder:
             self.qa_data.get("templates", []),
             serviceable_location=serviceable,
         )
-
         replies: List[str] = []
         approved_facts: List[str] = []
         images: List[Any] = []

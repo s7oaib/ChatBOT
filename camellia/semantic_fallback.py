@@ -322,6 +322,45 @@ def _intent_order(intent: str) -> int:
     return _INTENT_ORDER.index(intent) if intent in _INTENT_ORDER else len(_INTENT_ORDER)
 
 
+def normalize_menu_type(value: Optional[str]) -> Optional[str]:
+    """Canonical "vegetarian"/"non_vegetarian" for whatever wording named it.
+
+    A model is asked for one of a few named values, but nothing enforces
+    that at the API boundary — it can say "veg" where the catalogue matches
+    on "vegetarian". An unnormalized value fails every matcher silently and
+    falls through to the generic menu overview. This is the single place
+    either path (model or offline reader) turns wording into the value the
+    catalogue actually matches on.
+    """
+    text = (value or "").lower().replace("-", " ").replace("_", " ")
+    if not text.strip():
+        return None
+    if re.search(r"\bnon\s*veg\w*\b", text) or re.search(r"\b(chicken|mutton|fish)\b", text):
+        return "non_vegetarian"
+    if re.search(r"\b(veg\w*|niramish)\b", text):
+        return "vegetarian"
+    return None
+
+
+def normalize_pack_size(value: Optional[str]) -> Optional[str]:
+    """Canonical "250g"/"500g"/"1kg" for whatever wording named a size.
+
+    The knowledge-record matchers do substring containment ("250" in value),
+    so a model returning "250 grams" already matches — this only closes the
+    cases substring matching cannot reach: word forms like "half kilo".
+    """
+    text = (value or "").lower().strip()
+    if not text:
+        return None
+    if re.search(r"\bquarter\s*kilo\b", text) or "250" in text:
+        return "250g"
+    if re.search(r"\bhalf\s*kilo\b", text) or "500" in text:
+        return "500g"
+    if re.search(r"\b1\s*kg\b|\bone\s*kg\b", text) or "1000" in text or "1kg" in text:
+        return "1kg"
+    return text or None
+
+
 def _normalise(message: str) -> str:
     text = " ".join((message or "").lower().split())
     text = re.sub(r"[^\w%₹\s\-/]", " ", text)
@@ -371,13 +410,12 @@ def _entities_in(clause: str, whole: str) -> Dict[str, Any]:
         if re.search(rf"\b{re.escape(location)}\b", clause):
             entities["location"] = location.title()
             break
-    if re.search(r"\bnon veg|non vegetarian|chicken|mutton|fish\b", clause):
-        entities["menu_type"] = "non_vegetarian"
-    elif re.search(r"\b(veg|vegetarian|niramish)\b", clause):
-        entities["menu_type"] = "vegetarian"
+    menu_type = normalize_menu_type(clause)
+    if menu_type:
+        entities["menu_type"] = menu_type
     pack_size = re.search(r"\b(250\s?gm?s?|500\s?gm?s?|1\s?kgs?)\b", clause)
     if pack_size:
-        entities["pack_size"] = pack_size.group(1).replace(" ", "")
+        entities["pack_size"] = normalize_pack_size(pack_size.group(1)) or pack_size.group(1).replace(" ", "")
     quantity = re.search(r"\b(\d{1,5})\s*(boxes|box|packs?|kg|pieces|pcs)\b", clause)
     if quantity:
         entities["quantity"] = int(quantity.group(1))
