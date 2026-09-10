@@ -97,9 +97,44 @@ runs for that turn. `STRUCTURED_NLU_FALLBACK_MODEL`, when the operator sets it,
 is tried exactly once and only for capacity-shaped failures; with no configured
 model the bot fails closed to the deterministic path.
 
+## Production observability and metrics
+
+Every reply writes one row to `message_route_audit` (`camellia/database.py`):
+route, intents, entities, confidence, knowledge ids, actions, grounding
+result, knowledge-gap flag, escalation status, and `route_source` — which
+layer actually decided the turn (`model_nlu`, `deterministic_semantic_fallback`,
+`state_handler`, `explicit_rule`, `legacy_trigger`, or `escalation`).
+`route_source` is the metric this migration exists to drive toward zero for
+`legacy_trigger`: grouping the table by it and dividing by the day's row count
+gives % model NLU, % semantic fallback, % state-owned, % legacy-trigger and
+% escalation without re-deriving anything from the route name after the fact.
+The same grouping over `knowledge_gap` and `grounding_result` gives % knowledge
+gap and % grounding rejection; grouping over `entities.topic` for gapped rows
+surfaces the top unknown topics customers actually ask about — the input to
+the canonical-learning queue below, never raw sentences.
+
+## Candidate learning stays fact-shaped, not sentence-shaped
+
+`db.record_knowledge_gap` records what is missing (an intent plus its
+entities/topic), not a new spelling of a question already answered. Ten
+different ways of asking about gift wrapping should produce one gap entry for
+"packaging: gift wrapping", reviewed and approved by staff once, not ten QA
+templates. The model never gets to decide a gap is answered — only an
+approved template or catalogue record does that, and this migration's
+sufficiency rules mean nothing ships until one exists.
+
 ## Benchmarks
 
 * `scripts/conversation_benchmark.py` — 220-turn regression net over known wordings.
+* `scripts/generalization_benchmark_v3.py` — 296 turns built to be difficult
+  for a semantic system by construction: lexical/entity ambiguity, negation,
+  correction, topic switching, ellipsis, pronouns, mixed-language
+  code-switching, spelling errors, an unsupported clause riding on a
+  supported one, implied requests, misleading vocabulary overlap,
+  hallucination bait, false premises, 3+ intent compounds, and stateful
+  chains. Every turn is checked for a stated wrong or invented fact
+  regardless of category; ambiguous categories are graded on safety
+  (a clean escalation passes) rather than one fixed wording.
 * `scripts/generalization_benchmark_v2.py` — 208 turns: unseen paraphrases,
   Hinglish, unsupported topics, multi-intent, mixed supported/unsupported,
   state interruptions, hallucination probes and vague questions, with

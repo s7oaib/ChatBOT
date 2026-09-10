@@ -179,9 +179,17 @@ class Database:
                 grounding_result TEXT,
                 knowledge_gap INTEGER DEFAULT 0,
                 escalation_status TEXT,
+                route_source TEXT,
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
             """)
+            # An existing deployment's table predates route_source; add it
+            # without disturbing rows already written.
+            cursor.execute("PRAGMA table_info(message_route_audit)")
+            if "route_source" not in {row[1] for row in cursor.fetchall()}:
+                cursor.execute(
+                    "ALTER TABLE message_route_audit ADD COLUMN route_source TEXT"
+                )
 
             # Canonical missing-information queue. Unlike candidate_templates,
             # this records what fact/action is absent rather than teaching one
@@ -921,21 +929,29 @@ class Database:
         grounding_result: Optional[str],
         knowledge_gap: bool,
         escalation_status: Optional[str],
+        route_source: Optional[str] = None,
     ) -> int:
-        """Records why a customer-facing route was selected."""
+        """Records why a customer-facing route was selected.
+
+        route_source is the production metric this migration exists to
+        drive down over time: model_nlu, deterministic_semantic_fallback,
+        state_handler, explicit_rule, legacy_trigger, or escalation. A
+        query grouping by it is "% of traffic still on the compatibility
+        floor" without re-deriving it from route/intents after the fact.
+        """
         with self.get_connection() as conn:
             cursor = conn.execute("""
                 INSERT INTO message_route_audit (
                     user_id, channel, user_message, route, intents, entities,
                     confidence, knowledge_ids, actions, llm_called, fallback_used,
-                    grounding_result, knowledge_gap, escalation_status
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    grounding_result, knowledge_gap, escalation_status, route_source
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 str(user_id), str(channel), user_message, route,
                 json.dumps(intents or []), json.dumps(entities or {}, ensure_ascii=False),
                 confidence, json.dumps(knowledge_ids or []), json.dumps(actions or []),
                 int(bool(llm_called)), int(bool(fallback_used)), grounding_result,
-                int(bool(knowledge_gap)), escalation_status,
+                int(bool(knowledge_gap)), escalation_status, route_source,
             ))
             conn.commit()
             return int(cursor.lastrowid)

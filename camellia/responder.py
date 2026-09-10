@@ -1386,6 +1386,7 @@ class DeterministicResponder:
                 grounding_result=audit_facts.get("last_grounding"),
                 knowledge_gap=knowledge_gap,
                 escalation_status=escalation_status,
+                route_source=audit_facts.get("last_route_source"),
             )
             log.info(
                 "MESSAGE_ROUTE route=%s source=%s intents=%s entities=%s knowledge=%s actions=%s "

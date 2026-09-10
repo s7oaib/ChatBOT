@@ -119,6 +119,10 @@ def test_route_observability_is_written_after_the_reply():
     assert fields["knowledge_ids"] == ["conversation:price_clarification"]
     assert fields["grounding_result"].startswith("fallback:")
     assert fields["knowledge_gap"] is False
+    # route_source is the production metric measuring compatibility-floor
+    # dependency (% model_nlu vs. % legacy_trigger etc.) — it must reach the
+    # persisted audit row, not stay a session-local fact only.
+    assert fields["route_source"] == "model_nlu"
 
 
 @pytest.mark.parametrize(
