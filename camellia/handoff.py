@@ -40,6 +40,62 @@ _SUMMARY_ENTITY_LABELS = {
 }
 
 
+def verified_order_summary(facts: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Return only the already-calculated order fields safe for a handoff.
+
+    The order calculator writes these values into ``facts["cart"]`` after it
+    has matched a product, pack and price.  A handoff must never reconstruct
+    an order from prose or ask the language model to fill gaps, so incomplete
+    cart rows are ignored entirely.
+    """
+    items = facts.get("cart") or []
+    verified = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        required = ("collection", "flavour", "size", "quantity", "total_price")
+        if any(item.get(key) in (None, "") for key in required):
+            continue
+        try:
+            quantity = int(item["quantity"])
+            total_price = int(item["total_price"])
+        except (TypeError, ValueError):
+            continue
+        if quantity < 1 or total_price < 0:
+            continue
+        verified.append({
+            "collection": str(item["collection"]),
+            "flavour": str(item["flavour"]),
+            "size": str(item["size"]),
+            "quantity": quantity,
+            "total_price": total_price,
+            "type": str(item.get("type") or "sweet"),
+        })
+    if not verified:
+        return None
+    return {"items": verified, "estimated_item_total": sum(i["total_price"] for i in verified)}
+
+
+def _order_item_lines(summary: Dict[str, Any]) -> List[str]:
+    lines = []
+    collection_names = {
+        "aamar_mishti": "Aamar Mishti Collection",
+        "signature": "Signature Collection",
+    }
+    for item in summary.get("items", []):
+        collection = collection_names.get(item["collection"], item["collection"])
+        flavour = item["flavour"].title()
+        item_name = flavour if item.get("type") == "meal" else f"{flavour} Sondesh"
+        lines.extend([
+            f"Collection: {collection}",
+            f"Item: {item_name}",
+            f"Pack: {item['size']}",
+            f"Quantity: {item['quantity']} box" + ("es" if item["quantity"] != 1 else ""),
+        ])
+    lines.append(f"Estimated Item Total: ₹{summary['estimated_item_total']:,}")
+    return lines
+
+
 def _generate_reference() -> str:
     """A short opaque token, retried on the rare collision."""
     for _ in range(10):
@@ -102,12 +158,16 @@ def get_or_create_handoff(
     `db.get_active_handoff` is the single source of truth for "is there
     already an open enquiry for this customer".
     """
+    order_summary = verified_order_summary(facts)
     existing = db.get_active_handoff(channel, user_id)
     if existing:
         existing["newly_created"] = False
+        existing["verified_order"] = order_summary
         return existing
 
     known_entities = _known_entities(facts)
+    if order_summary:
+        known_entities["verified_order"] = order_summary
     unresolved_topic = str((facts.get("last_entities") or {}).get("topic") or "").strip() or None
     summary_lines = [f"Reason: {reason}"]
     summary_lines.extend(_summarize_known_entities(known_entities))
@@ -133,10 +193,11 @@ def get_or_create_handoff(
     )
     log.info("Created handoff %s for %s/%s (%s).", reference, channel, user_id, reason)
     handoff["newly_created"] = True
+    handoff["verified_order"] = order_summary
     return handoff
 
 
-def whatsapp_link(handoff_ref: str) -> Optional[str]:
+def whatsapp_link(handoff_ref: str, order_summary: Optional[Dict[str, Any]] = None) -> Optional[str]:
     """A wa.me click-to-chat link to the client's own WhatsApp number.
 
     Returns None when WHATSAPP_BUSINESS_NUMBER is not yet configured — the
@@ -148,11 +209,24 @@ def whatsapp_link(handoff_ref: str) -> Optional[str]:
     number = re.sub(r"\D", "", config.WHATSAPP_BUSINESS_NUMBER or "")
     if not number:
         return None
-    message = f"Hi, I'm continuing my Camellia Instagram enquiry. Ref: {handoff_ref}"
+    if order_summary:
+        message = (
+            "Hi, I'm continuing my Camellia Instagram order.\n\n"
+            f"Ref: {handoff_ref}\n\n"
+            "Order:\n" + "\n".join(_order_item_lines(order_summary)) +
+            "\n\nPlease help me confirm the delivery details and final invoice."
+        )
+    else:
+        message = f"Hi, I'm continuing my Camellia Instagram enquiry. Ref: {handoff_ref}"
     return f"https://wa.me/{number}?text={urllib.parse.quote(message)}"
 
 
-def customer_facing_message(handoff_ref: str) -> str:
+def customer_facing_message(
+    handoff_ref: str,
+    order_summary: Optional[Dict[str, Any]] = None,
+    *,
+    order_receipt: bool = False,
+) -> str:
     """The Instagram-side copy offering the WhatsApp continuation.
 
     config.INSTAGRAM_HANDOFF_MESSAGE is a placeholder pending client sign-off
@@ -160,8 +234,11 @@ def customer_facing_message(handoff_ref: str) -> str:
     link/reference to whatever wording is configured, it never invents the
     lead sentence itself.
     """
-    link = whatsapp_link(handoff_ref)
-    body = config.INSTAGRAM_HANDOFF_MESSAGE.rstrip()
+    link = whatsapp_link(handoff_ref, order_summary)
+    body = (
+        "Continue on WhatsApp to send this order draft to our team."
+        if order_receipt else config.INSTAGRAM_HANDOFF_MESSAGE.rstrip()
+    )
     if link:
         return f"{body}\n\n{link}"
     # No business number configured yet — degrade to naming the reference so
@@ -180,6 +257,11 @@ def staff_summary(handoff: Dict[str, Any]) -> str:
     if handoff.get("summary"):
         lines.append("")
         lines.append(handoff["summary"])
+    if handoff.get("verified_order"):
+        lines.append("")
+        lines.append("Known order:")
+        lines.extend(_order_item_lines(handoff["verified_order"]))
+        lines.append("Pending: Delivery address verification; final invoice")
     lines.append("")
     lines.append("Customer moved to: WhatsApp")
     return "\n".join(lines)

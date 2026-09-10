@@ -32,7 +32,13 @@ from camellia.responder import responder
 from camellia.ai_responder import ai_responder
 from camellia.whatsapp_adapter import whatsapp_adapter
 from camellia.escalator import escalator
-from camellia.handoff import customer_facing_message, get_or_create_handoff, mark_referred, staff_summary
+from camellia.handoff import (
+    customer_facing_message,
+    get_or_create_handoff,
+    mark_referred,
+    staff_summary,
+    verified_order_summary,
+)
 from camellia.ad_routing import product_for_ad
 from camellia.sheet_sync import sheet_sync
 from camellia.menu_parser import menu_parser
@@ -364,6 +370,7 @@ def _process_instagram_event(
             not was_matched
             or template_id in (
                 "explicit_escalation",
+                "order_draft_receipt",
                 "order_next_steps",
                 "GUARD_staff_names_manager_contact",
             )
@@ -395,7 +402,14 @@ def _process_instagram_event(
                         "handoff_summary": staff_summary(handoff),
                     },
                 )
-            response_text = customer_facing_message(handoff["handoff_ref"])
+            order_summary = verified_order_summary(facts)
+            if template_id == "order_draft_receipt":
+                response_text = (
+                    f"{response_text.rstrip()}\n\n"
+                    f"{customer_facing_message(handoff['handoff_ref'], order_summary, order_receipt=True)}"
+                )
+            else:
+                response_text = customer_facing_message(handoff["handoff_ref"], order_summary)
             mark_referred(handoff["handoff_ref"])
             template_id = "instagram_whatsapp_handoff"
             image_url = None

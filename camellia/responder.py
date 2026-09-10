@@ -1458,6 +1458,25 @@ class DeterministicResponder:
         if ad_product:
             facts["ad_product"] = ad_product
 
+        # A direct human request always outranks an active order slot.  Without
+        # this guard, "I need an agent" after a receipt could be treated as a
+        # vague answer to the order flow and never reach the CAM handoff.
+        if (
+            channel == "instagram"
+            and semantic_fallback._ESCALATION_INTENT_RE.search(lowered_text)
+            and not semantic_fallback._IDENTITY_QUESTION_RE.search(lowered_text)
+        ):
+            fallback, _intent = self.build_handover_response(user_message)
+            facts["last_route_source"] = "explicit_rule"
+            facts["last_intents"] = [Intent.ESCALATION.value]
+            facts["last_actions"] = [
+                BusinessAction.ESCALATE_TO_TEAM.value,
+                BusinessAction.SEND_RESPONSE.value,
+            ]
+            facts["knowledge_sufficient"] = False
+            session_memory.add_turn(user_id, channel, user_message, fallback)
+            return fallback, False, "explicit_escalation", None
+
         # A referral is a preference only for genuinely vague openings. It
         # runs before conversational shorthand (such as a bare "price"), so
         # a meal-ad click never receives the sweet-product price prompt.
