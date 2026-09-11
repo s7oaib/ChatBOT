@@ -64,15 +64,16 @@ def test_dashboard_javascript_brackets_balance(script, opener, closer):
     )
 
 
-def test_the_dashboard_has_four_tabs(page):
+def test_the_dashboard_has_five_tabs(page):
     """
     Eight tabs needed 1655px of nav on a 347px phone, so most of the portal was
     unreachable on the handset the kitchen actually uses. Menu Manager is its
     own tab rather than folded into Menu, so it does not disturb the existing
-    Instagram Post & Ad Routing panel that already lives there.
+    Instagram Post & Ad Routing panel that already lives there. AI Resolution &
+    Answers is a fifth, merged read of candidates/escalations/knowledge-gaps.
     """
     buttons = re.findall(r'<button class="tab-btn[^"]*" onclick="switchTab\(', page)
-    assert len(buttons) == 4, f"expected 4 tabs, found {len(buttons)}"
+    assert len(buttons) == 5, f"expected 5 tabs, found {len(buttons)}"
 
 
 def test_menu_manager_sits_between_menu_and_customers(page):
@@ -232,3 +233,26 @@ def test_both_dashboard_routes_send_the_same_no_cache_headers():
     """/admin and /admin/dashboard are the same page; one must not be stale."""
     for path in ("/admin", "/admin/dashboard"):
         assert "no-store" in client.get(path).headers.get("cache-control", ""), path
+
+
+def test_ai_resolution_tab_exists_and_reuses_existing_endpoints(page):
+    """
+    AI Resolution & Answers merges candidate_templates, escalations and
+    knowledge_gaps into one queue. It must not introduce a parallel workflow:
+    every action it offers has to call the same endpoints the older Answers
+    and Customers tabs already use to approve/reject/edit/resolve.
+    """
+    assert 'id="tab-ai-resolution"' in page
+    assert "AI Resolution &amp; Answers" in page
+    assert "'tab-ai-resolution': 'ai_resolution'" in page
+
+    script = page[page.index("async function loadAiResolution"):]
+    assert "fetch('/admin/candidates'" in script
+    assert "fetch('/admin/escalations?status=pending" in script
+    assert "fetch('/admin/knowledge-gaps?status=OPEN" in script
+
+    assert "fetch(`/admin/candidates/${id}/approve`" in page
+    assert "fetch(`/admin/candidates/${id}`" in page
+    assert "fetch(`/admin/candidates/${id}/reject`" in page
+    assert "fetch(`/admin/knowledge-gaps/${gapId}/status`" in page
+    assert "onclick=\"openResolveModal(" in script, "gap/escalation rows must reuse the existing resolve modal"

@@ -3653,6 +3653,7 @@ def get_admin_dashboard():
             <button class="tab-btn" onclick="switchTab('tab-menu-manager', this)">📋 Menu Manager</button>
             <button class="tab-btn" onclick="switchTab('tab-stats', this)">💬 Customers</button>
             <button class="tab-btn" onclick="switchTab('tab-candidates', this)">✅ Answers <span id="candidateBadge" style="display:none; background: var(--danger); color: #fff; border-radius: 10px; padding: 1px 7px; font-size: 0.72rem; margin-left: 4px;"></span></button>
+            <button class="tab-btn" onclick="switchTab('tab-ai-resolution', this)">🤖 AI Resolution &amp; Answers <span id="aiResolutionBadge" style="display:none; background: var(--danger); color: #fff; border-radius: 10px; padding: 1px 7px; font-size: 0.72rem; margin-left: 4px;"></span></button>
         </div>
 
         <!-- MENU tab, panel 2 of 4: same job, for when there is no photo -->
@@ -4009,6 +4010,65 @@ THIS WEEK'S BENGAL SPECIALS
             </div>
         </div>
 
+        <!-- AI RESOLUTION & ANSWERS: one queue combining what used to be two
+             screens (Customers waiting on a person, and Answers) plus the
+             knowledge-gaps queue that already existed as an API but had no
+             screen at all. It reads the same three tables through the same
+             endpoints those older screens already use — approving, rejecting,
+             editing, and resolving here call the exact same backend actions,
+             so nothing about how an answer reaches a customer changes. This
+             is a merged view, not a new workflow. -->
+        <div id="tab-ai-resolution" class="panel-card" data-group="ai_resolution" style="display: none;">
+            <div class="panel-header">
+                <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+                    <div>
+                        <h2>🤖 AI Resolution &amp; Answers</h2>
+                        <p>Everything the bot could not answer on its own, in one queue: drafts it wrote and is waiting on you to approve, questions it has no knowledge of yet, and customers waiting on a person. <b>Nothing here has been shown to a customer</b> except items already marked resolved/approved elsewhere.</p>
+                    </div>
+                    <button class="btn-secondary" onclick="loadAiResolution()">🔄 Refresh</button>
+                </div>
+            </div>
+
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px; margin-bottom: 18px;">
+                <div style="background: #FFF7ED; border: 1px solid #FED7AA; padding: 16px; border-radius: 14px; text-align: center;">
+                    <span style="font-size: 0.78rem; color: #9A3412; font-weight: 600;">AI SUGGESTED (needs approval)</span>
+                    <h3 id="aiStatSuggested" style="font-size: 1.7rem; color: #9A3412; margin-top: 4px;">0</h3>
+                </div>
+                <div style="background: #EFF6FF; border: 1px solid #BFDBFE; padding: 16px; border-radius: 14px; text-align: center;">
+                    <span style="font-size: 0.78rem; color: #1E40AF; font-weight: 600;">NEEDS TEACHING (no answer yet)</span>
+                    <h3 id="aiStatTeach" style="font-size: 1.7rem; color: #1E40AF; margin-top: 4px;">0</h3>
+                </div>
+                <div style="background: #FEF2F2; border: 1px solid #FECACA; padding: 16px; border-radius: 14px; text-align: center;">
+                    <span style="font-size: 0.78rem; color: #991B1B; font-weight: 600;">WAITING ON A HUMAN</span>
+                    <h3 id="aiStatHuman" style="font-size: 1.7rem; color: var(--danger); margin-top: 4px;">0</h3>
+                </div>
+            </div>
+
+            <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:14px;">
+                <button class="tab-btn active" type="button" id="aiFilterBtn-all" onclick="setAiResolutionFilter('all')">All</button>
+                <button class="tab-btn" type="button" id="aiFilterBtn-ai_suggested" onclick="setAiResolutionFilter('ai_suggested')">AI Suggested</button>
+                <button class="tab-btn" type="button" id="aiFilterBtn-teach_required" onclick="setAiResolutionFilter('teach_required')">Needs Teaching</button>
+                <button class="tab-btn" type="button" id="aiFilterBtn-human_required" onclick="setAiResolutionFilter('human_required')">Waiting on a Human</button>
+            </div>
+
+            <div style="overflow-x: auto;">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>Type</th>
+                            <th>Customer Asked / Situation</th>
+                            <th>Draft Answer / Detail</th>
+                            <th>Confidence / Seen</th>
+                            <th>Action</th>
+                        </tr>
+                    </thead>
+                    <tbody id="aiResolutionTableBody">
+                        <tr><td colspan="5" style="text-align: center; color: #888;">Loading...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
         <!-- Writing an answer by hand used to be a collapsed form inside the
              panel below, opened by a button the client never pressed: the list
              of existing answers filled the screen and the button went with it.
@@ -4309,7 +4369,8 @@ THIS WEEK'S BENGAL SPECIALS
             'tab-image': 'menu',
             'tab-menu-manager': 'menu_manager',
             'tab-stats': 'customers',
-            'tab-candidates': 'answers'
+            'tab-candidates': 'answers',
+            'tab-ai-resolution': 'ai_resolution'
         };
 
         function showGroup(group) {
@@ -4331,6 +4392,7 @@ THIS WEEK'S BENGAL SPECIALS
             if (group === 'menu_manager') { mmLoadMenuList(); }
             if (group === 'customers') { loadAnalytics(); loadConversations(); }
             if (group === 'answers') { loadCandidates(); loadKnowledge(); }
+            if (group === 'ai_resolution') { loadAiResolution(); }
         }
 
         // MENU MANAGER tab: every menu is edited as a draft (server-side, in
@@ -5950,6 +6012,7 @@ Non-Veg:
                     alert('Escalation resolved and taught to bot successfully!');
                     closeResolveModal();
                     loadAnalytics();
+                    refreshAiResolutionIfVisible();
                 } else {
                     alert('Failed: ' + (data.detail || 'Could not resolve escalation.'));
                 }
@@ -5970,10 +6033,206 @@ Non-Veg:
                     alert('Escalation marked as resolved.');
                     closeResolveModal();
                     loadAnalytics();
+                    refreshAiResolutionIfVisible();
                 }
             } catch (e) {
                 alert('Error resolving escalation.');
             }
+        }
+
+        // AI RESOLUTION & ANSWERS: a merged read of three existing queues
+        // (candidate_templates, escalations, knowledge_gaps) through their
+        // existing endpoints. It introduces no new table and no new
+        // customer-facing behaviour — approve/reject/edit/resolve here call
+        // the identical endpoints the Answers and Customers tabs already use.
+        let aiResolutionFilter = 'all';
+        let aiResolutionItems = [];
+
+        function refreshAiResolutionIfVisible() {
+            const panel = document.getElementById('tab-ai-resolution');
+            if (panel && panel.style.display !== 'none') loadAiResolution();
+        }
+
+        function setAiResolutionFilter(filter) {
+            aiResolutionFilter = filter;
+            ['all', 'ai_suggested', 'teach_required', 'human_required'].forEach(f => {
+                const btn = document.getElementById(`aiFilterBtn-${f}`);
+                if (btn) btn.classList.toggle('active', f === filter);
+            });
+            renderAiResolution();
+        }
+
+        async function loadAiResolution() {
+            const tbody = document.getElementById('aiResolutionTableBody');
+            tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: #888;">Loading...</td></tr>';
+            try {
+                const [candResp, escResp, gapResp] = await Promise.all([
+                    fetch('/admin/candidates', { headers: getAuthHeaders() }),
+                    fetch('/admin/escalations?status=pending&limit=100', { headers: getAuthHeaders() }),
+                    fetch('/admin/knowledge-gaps?status=OPEN&limit=100', { headers: getAuthHeaders() }),
+                ]);
+                const candData = candResp.ok ? await candResp.json() : { candidates: [] };
+                const escData = escResp.ok ? await escResp.json() : { escalations: [] };
+                const gapData = gapResp.ok ? await gapResp.json() : { knowledge_gaps: [] };
+
+                const candidates = candData.candidates || [];
+                const escalations = escData.escalations || [];
+                const gaps = gapData.knowledge_gaps || [];
+
+                aiResolutionItems = [
+                    ...candidates.map(c => ({ kind: 'candidate', category: 'ai_suggested', data: c })),
+                    ...escalations.map(e => ({ kind: 'escalation', category: 'human_required', data: e })),
+                    ...gaps.map(g => ({ kind: 'gap', category: 'teach_required', data: g })),
+                ];
+
+                document.getElementById('aiStatSuggested').innerText = candidates.length;
+                document.getElementById('aiStatTeach').innerText = gaps.length;
+                document.getElementById('aiStatHuman').innerText = escalations.length;
+                updateAiResolutionBadge(candidates.length + escalations.length + gaps.length);
+
+                renderAiResolution();
+            } catch (err) {
+                tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: red;">Failed to load AI Resolution &amp; Answers.</td></tr>';
+            }
+        }
+
+        function updateAiResolutionBadge(count) {
+            const badge = document.getElementById('aiResolutionBadge');
+            if (!badge) return;
+            if (count > 0) {
+                badge.textContent = count;
+                badge.style.display = 'inline-block';
+            } else {
+                badge.style.display = 'none';
+            }
+        }
+
+        const AI_CATEGORY_LABEL = {
+            ai_suggested: '✨ AI Suggested',
+            teach_required: '📘 Needs Teaching',
+            human_required: '🙋 Needs a Human',
+        };
+
+        function renderAiResolution() {
+            const tbody = document.getElementById('aiResolutionTableBody');
+            const items = aiResolutionFilter === 'all'
+                ? aiResolutionItems
+                : aiResolutionItems.filter(i => i.category === aiResolutionFilter);
+
+            if (!items.length) {
+                tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: #888;">Nothing waiting in this view.</td></tr>';
+                return;
+            }
+
+            tbody.innerHTML = items.map(item => renderAiResolutionRow(item)).join('');
+        }
+
+        function renderAiResolutionRow(item) {
+            const label = AI_CATEGORY_LABEL[item.category];
+            if (item.kind === 'candidate') {
+                const c = item.data;
+                const confidence = Math.round((c.confidence || 0) * 100);
+                const confColour = confidence >= 85 ? 'var(--success, #2e7d32)' : (confidence >= 60 ? '#b26a00' : 'var(--danger)');
+                return `
+                <tr>
+                    <td><span class="badge badge-veg">${label}</span></td>
+                    <td style="max-width: 220px;">${escapeHtml(c.user_message || '—')}</td>
+                    <td style="max-width: 340px; font-size: 0.82rem;">
+                        <div id="ai-candidateText-${c.id}" style="white-space:pre-wrap;">${escapeHtml(c.response)}</div>
+                        <textarea id="ai-candidateEdit-${c.id}" style="display:none;width:100%;min-height:110px;">${escapeHtml(c.response)}</textarea>
+                    </td>
+                    <td style="color: ${confColour}; font-weight: 600;">${confidence}%</td>
+                    <td style="white-space: nowrap;">
+                        <button class="btn-primary" style="padding: 4px 10px; font-size: 0.75rem;" onclick="aiApproveCandidate(${c.id})">✅ Approve</button>
+                        <button class="btn-secondary" style="padding:4px 10px;font-size:0.75rem;" id="ai-candidateEditButton-${c.id}" onclick="aiBeginCandidateEdit(${c.id})">✏️ Edit</button>
+                        <button class="btn-primary" style="display:none;padding:4px 10px;font-size:0.75rem;" id="ai-candidateSaveButton-${c.id}" onclick="aiSaveCandidateEdit(${c.id})">Save draft</button>
+                        <button class="btn-secondary" style="display:none;padding:4px 10px;font-size:0.75rem;" id="ai-candidateCancelButton-${c.id}" onclick="aiCancelCandidateEdit(${c.id})">Cancel</button>
+                        <button class="btn-secondary" style="padding: 4px 10px; font-size: 0.75rem; color: var(--danger);" onclick="aiRejectCandidate(${c.id})">✕ Reject</button>
+                    </td>
+                </tr>`;
+            }
+            if (item.kind === 'escalation') {
+                const e = item.data;
+                return `
+                <tr>
+                    <td><span class="badge badge-nonveg">${label}</span></td>
+                    <td style="max-width: 220px;"><b>${escapeHtml(e.channel)}</b> · <code>${escapeHtml(e.user_id)}</code><br>${escapeHtml(e.user_message)}</td>
+                    <td style="font-size: 0.82rem;">${escapeHtml(e.reason || '')}</td>
+                    <td>—</td>
+                    <td style="white-space: nowrap;">
+                        <button class="btn-secondary" style="padding: 4px 10px; font-size: 0.78rem;" onclick="openResolveModal(${e.id}, '${escapeHtml(e.user_message)}')">✨ Teach &amp; Resolve</button>
+                    </td>
+                </tr>`;
+            }
+            // knowledge gap
+            const g = item.data;
+            const intents = (g.intents || []).join(', ');
+            return `
+            <tr>
+                <td><span class="badge badge-nonveg">${label}</span></td>
+                <td style="max-width: 220px;">${escapeHtml(g.example_message || '—')}</td>
+                <td style="font-size: 0.82rem;">${escapeHtml(intents || g.reason || '')}</td>
+                <td>seen ${g.occurrences || 1}x</td>
+                <td style="white-space: nowrap;">
+                    <button class="btn-secondary" style="padding: 4px 10px; font-size: 0.75rem;" onclick="aiSetGapStatus(${g.id}, 'DISMISSED')">Dismiss</button>
+                </td>
+            </tr>`;
+        }
+
+        async function aiApproveCandidate(id) {
+            if (!confirm('Approve this answer?\n\nIt will be added to the bot\'s verified knowledge and sent to customers who ask this from now on.')) return;
+            try {
+                const resp = await fetch(`/admin/candidates/${id}/approve`, {
+                    method: 'POST',
+                    headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ approved_by: 'admin_dashboard' })
+                });
+                if (resp.ok) { loadAiResolution(); refreshCandidateBadge(); }
+                else { const err = await resp.json().catch(() => ({})); alert('Could not approve: ' + (err.detail || resp.status)); }
+            } catch (err) { alert('Could not approve: ' + err); }
+        }
+
+        function aiBeginCandidateEdit(id) {
+            document.getElementById(`ai-candidateText-${id}`).style.display = 'none';
+            document.getElementById(`ai-candidateEdit-${id}`).style.display = 'block';
+            document.getElementById(`ai-candidateEditButton-${id}`).style.display = 'none';
+            document.getElementById(`ai-candidateSaveButton-${id}`).style.display = 'inline-block';
+            document.getElementById(`ai-candidateCancelButton-${id}`).style.display = 'inline-block';
+        }
+
+        function aiCancelCandidateEdit(id) { renderAiResolution(); }
+
+        async function aiSaveCandidateEdit(id) {
+            const response = document.getElementById(`ai-candidateEdit-${id}`).value.trim();
+            if (!response) return alert('Draft answer cannot be empty.');
+            const resp = await fetch(`/admin/candidates/${id}`, {
+                method: 'PATCH', headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+                body: JSON.stringify({ response, edited_by: 'admin_dashboard' })
+            });
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok) return alert('Could not save draft: ' + (data.detail || resp.status));
+            loadAiResolution();
+        }
+
+        async function aiRejectCandidate(id) {
+            if (!confirm('Reject this draft? It will not be shown to customers and will be removed from this list.')) return;
+            try {
+                const resp = await fetch(`/admin/candidates/${id}/reject`, { method: 'POST', headers: getAuthHeaders() });
+                if (resp.ok) { loadAiResolution(); refreshCandidateBadge(); }
+                else { const err = await resp.json().catch(() => ({})); alert('Could not reject: ' + (err.detail || resp.status)); }
+            } catch (err) { alert('Could not reject: ' + err); }
+        }
+
+        async function aiSetGapStatus(gapId, status) {
+            try {
+                const resp = await fetch(`/admin/knowledge-gaps/${gapId}/status`, {
+                    method: 'POST',
+                    headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ status })
+                });
+                if (resp.ok) loadAiResolution();
+                else { const err = await resp.json().catch(() => ({})); alert('Could not update: ' + (err.detail || resp.status)); }
+            } catch (err) { alert('Could not update: ' + err); }
         }
     </script>
 </body>
