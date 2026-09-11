@@ -207,6 +207,35 @@ def shared_reel_identity(message: Dict[str, Any]) -> Optional[Dict[str, str]]:
     return None
 
 
+def shared_post_media_id(message: Dict[str, Any]) -> Optional[str]:
+    """
+    The messaging-attachment id of a post shared into the DM, or None.
+
+    Reads exactly one field — ``payload.ig_post_media_id`` on an attachment
+    whose ``type`` is ``ig_post`` — and nothing else. Unlike a reel, a shared
+    post's ``payload.url`` is a lookaside CDN link carrying no shortcode, so
+    there is no deterministic permalink to normalize here; a direct Graph
+    fetch of a captured id has independently confirmed it is not resolvable
+    against the account's own media graph (verified in production, not
+    assumed), so this id is meaningful only once an admin has explicitly
+    paired it to a route — see instagram_post_pairings. ``payload.title`` is
+    the caption and is never read for routing.
+    """
+    attachments = (message or {}).get("attachments")
+    if not isinstance(attachments, list):
+        return None
+    for attachment in attachments:
+        if not isinstance(attachment, dict) or attachment.get("type") != "ig_post":
+            continue
+        payload = attachment.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        media_id = str(payload.get("ig_post_media_id") or "").strip()
+        if media_id:
+            return media_id
+    return None
+
+
 def product_catalogue() -> List[Dict[str, str]]:
     """Products/collections currently backed by canonical approved knowledge."""
     seen = set()
@@ -306,13 +335,14 @@ def decode_route(row: Dict[str, Any]) -> Dict[str, Any]:
 
 def route_for_inbound(
     *, ad_id: Optional[str], media_id: Optional[str], shortcode: Optional[str] = None,
+    post_media_id: Optional[str] = None,
 ) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
     """
-    Specific Ad ID wins over media ID; old Ad-ID rows remain usable.
-
-    A shared reel's shortcode is tried last, because it is the weakest claim
-    of the three: an ad ID and a story ID say the customer arrived through
-    that thing, while a shared reel only says they sent it to us.
+    Precedence, strongest claim first: ad ID, then a story reply's verified
+    media ID, then a shared reel's shortcode, then a shared post's media ID —
+    which is admin-paired rather than Meta-verified, so it is tried last of
+    all four and only after route_for_inbound is called with a genuine
+    ``post_media_id``, never guessed from one of the other fields.
     """
     from camellia.database import db
 
@@ -343,6 +373,13 @@ def route_for_inbound(
         route = db.find_instagram_source_route("shortcode", str(shortcode))
         if route:
             return decode_route(route), "shared_media_url"
+    if post_media_id:
+        # A paired post's id lives in the same media_id column a story reply
+        # would occupy — it is still an exact Meta identifier once bound, just
+        # one an admin verified rather than one Meta labelled as a reply.
+        route = db.find_instagram_source_route("media_id", str(post_media_id))
+        if route:
+            return decode_route(route), "shared_post_media_id"
     return None, None
 
 

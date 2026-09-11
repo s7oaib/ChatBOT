@@ -296,6 +296,28 @@ class Database:
             # A reel shared into a DM is matched by its normalized shortcode.
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_instagram_routes_shortcode ON instagram_source_routes(shortcode, active)")
 
+            # A shared post carries no shortcode/URL Meta will put in a
+            # webhook, and its messaging-attachment id has not been shown to
+            # correspond to any id the Graph API will confirm — so a post
+            # route can only get a verified media_id through an admin
+            # deliberately pairing one. One row per pairing attempt; the
+            # deliberately short lifetime and one-active-at-a-time rule are
+            # enforced by the application, not this table.
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS instagram_post_pairings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                routing_id INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                expires_at TIMESTAMP NOT NULL,
+                started_by TEXT,
+                bound_media_id TEXT,
+                bound_at TIMESTAMP
+            );
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_post_pairings_status ON instagram_post_pairings(status, expires_at)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_post_pairings_routing ON instagram_post_pairings(routing_id, id DESC)")
+
             for column, declaration in (
                 ("source_routing_id", "INTEGER"),
                 ("source_match_method", "TEXT"),
@@ -601,6 +623,13 @@ class Database:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def get_instagram_source_route(self, routing_id: int) -> Optional[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM instagram_source_routes WHERE routing_id = ?", (routing_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
     def find_instagram_source_route(self, field: str, value: str) -> Optional[Dict[str, Any]]:
         # The column name is interpolated, so the allowlist is the thing
         # keeping this query safe. Widening it is adding a name to the list,
@@ -633,6 +662,101 @@ class Database:
             )
             conn.commit()
         return cursor.rowcount > 0
+
+    # --- Shared-post pairing: admin-verified media_id binding --------------
+
+    def start_post_pairing(self, routing_id: int, ttl_seconds: int, started_by: Optional[str]) -> Dict[str, Any]:
+        """Opens a pairing window for one route, superseding any other open one.
+
+        Only one route may be mid-pairing at a time — otherwise the next
+        shared post received during the window would be ambiguous about which
+        route it was meant to bind. Starting a new pairing is how an admin
+        cancels a forgotten one, so this does not refuse; it supersedes.
+        """
+        now = datetime.utcnow()
+        # SQLite's own CURRENT_TIMESTAMP renders as "YYYY-MM-DD HH:MM:SS" —
+        # matched here rather than using isoformat()'s "T"-separated,
+        # microsecond-bearing string, which would sort before every
+        # CURRENT_TIMESTAMP value in a plain string comparison and make
+        # get_active_post_pairing()'s expiry check never actually expire
+        # anything.
+        expires_at = (now + timedelta(seconds=ttl_seconds)).strftime("%Y-%m-%d %H:%M:%S")
+        with self.get_connection() as conn:
+            conn.execute(
+                "UPDATE instagram_post_pairings SET status='cancelled' WHERE status='pending'"
+            )
+            cursor = conn.execute(
+                """
+                INSERT INTO instagram_post_pairings (routing_id, status, started_at, expires_at, started_by)
+                VALUES (?, 'pending', ?, ?, ?)
+                """,
+                (routing_id, now.isoformat(), expires_at, started_by),
+            )
+            conn.commit()
+            row = conn.execute(
+                "SELECT * FROM instagram_post_pairings WHERE id = ?", (cursor.lastrowid,)
+            ).fetchone()
+        return dict(row)
+
+    def get_active_post_pairing(self) -> Optional[Dict[str, Any]]:
+        """The one pairing currently waiting for a shared post, if its window has not closed."""
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM instagram_post_pairings WHERE status = 'pending' "
+                "AND expires_at > CURRENT_TIMESTAMP ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        return dict(row) if row else None
+
+    def get_post_pairing_for_route(self, routing_id: int) -> Optional[Dict[str, Any]]:
+        """Newest pairing attempt for this route, of any status — for the admin status view."""
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM instagram_post_pairings WHERE routing_id = ? ORDER BY id DESC LIMIT 1",
+                (routing_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def cancel_post_pairing(self, routing_id: int) -> bool:
+        with self.get_connection() as conn:
+            cursor = conn.execute(
+                "UPDATE instagram_post_pairings SET status='cancelled' "
+                "WHERE routing_id = ? AND status = 'pending'",
+                (routing_id,),
+            )
+            conn.commit()
+        return cursor.rowcount > 0
+
+    def bind_post_pairing(self, pairing_id: int, media_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Commits one shared post's media id to the route it was paired against.
+
+        Writes both sides atomically-enough for SQLite's single-writer model:
+        the pairing row records what was bound and when (for the admin to see
+        it happened and to what), and the route itself gets the verified
+        media_id, which is what the existing exact-match lookup already
+        matches ad-id/story replies against — a paired post needs no matcher
+        of its own once this is set.
+        """
+        now = datetime.utcnow().isoformat()
+        with self.get_connection() as conn:
+            pairing = conn.execute(
+                "SELECT * FROM instagram_post_pairings WHERE id = ? AND status = 'pending' "
+                "AND expires_at > CURRENT_TIMESTAMP",
+                (pairing_id,),
+            ).fetchone()
+            if not pairing:
+                return None
+            conn.execute(
+                "UPDATE instagram_post_pairings SET status='bound', bound_media_id=?, bound_at=? WHERE id=?",
+                (media_id, now, pairing_id),
+            )
+            conn.execute(
+                "UPDATE instagram_source_routes SET media_id=?, updated_at=? WHERE routing_id=?",
+                (media_id, now, pairing["routing_id"]),
+            )
+            conn.commit()
+            row = conn.execute("SELECT * FROM instagram_post_pairings WHERE id=?", (pairing_id,)).fetchone()
+        return dict(row)
 
     @staticmethod
     def _create_indexes(cursor) -> None:

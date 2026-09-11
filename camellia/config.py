@@ -215,6 +215,13 @@ class Config:
     # How long an Instagram -> WhatsApp handoff reference stays valid/active
     # for deduplication before a repeated "human please" creates a new one.
     CROSS_CHANNEL_HANDOFF_EXPIRY_HOURS: int = int(os.getenv("CROSS_CHANNEL_HANDOFF_EXPIRY_HOURS", "72"))
+    # How long an admin-started shared-post pairing session stays open before
+    # it auto-expires. A shared post carries no shortcode/URL in the webhook
+    # (only a messaging-attachment id Graph cannot verify against a route),
+    # so pairing is the deliberate, admin-initiated alternative: short window,
+    # on purpose, so a stray share long after the admin meant to pair cannot
+    # bind to the wrong route.
+    INSTAGRAM_POST_PAIRING_TTL_SECONDS: int = int(os.getenv("INSTAGRAM_POST_PAIRING_TTL_SECONDS", "600"))
     # Placeholder copy — the manual-configuration report flags this as
     # pending client sign-off; do not treat it as approved client wording.
     INSTAGRAM_HANDOFF_MESSAGE: str = os.getenv(
