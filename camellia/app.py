@@ -1809,11 +1809,16 @@ async def identify_instagram_route(
 
 @app.get("/admin/instagram-routes")
 def list_instagram_routes(
+    include_archived: bool = False,
     x_admin_key: Optional[str] = Header(None),
     x_admin_pin: Optional[str] = Header(None),
 ):
     require_admin(x_admin_key, x_admin_pin)
-    routes = [decode_route(row) for row in db.list_instagram_source_routes()]
+    if include_archived:
+        # The Archived tab: only archived rows, never mixed with active ones.
+        routes = [decode_route(row) for row in db.list_instagram_source_routes(include_archived=True) if row.get("archived_at")]
+    else:
+        routes = [decode_route(row) for row in db.list_instagram_source_routes()]
     return {
         "status": "success",
         "routes": routes,
@@ -1869,6 +1874,42 @@ def archive_instagram_route(
     if not db.archive_instagram_source_route(routing_id):
         raise HTTPException(status_code=404, detail="Routing record not found.")
     return {"status": "success", "routing_id": routing_id, "archived": True}
+
+
+@app.post("/admin/instagram-routes/{routing_id}/restore")
+def restore_instagram_route(
+    routing_id: int,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """Un-archives a route in place. Same row, same id — nothing duplicated."""
+    require_admin(x_admin_key, x_admin_pin)
+    if not db.restore_instagram_source_route(routing_id):
+        raise HTTPException(status_code=404, detail="Archived routing record not found.")
+    return {"status": "success", "routing_id": routing_id, "restored": True}
+
+
+@app.delete("/admin/instagram-routes/{routing_id}/permanent")
+def delete_instagram_route(
+    routing_id: int,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """
+    Permanently deletes one routing configuration.
+
+    Deliberately a separate, explicit path from the archive DELETE above —
+    "Remove" and "Archive" are different actions with different consequences,
+    and giving them different endpoints instead of a body flag makes that
+    distinction obvious to anything calling this, not only to the admin UI.
+    Scope is narrow: this route and the pairing attempts that exist only to
+    serve it. Topics, menus, catalogue entries, knowledge, conversations and
+    handoffs are never touched by removing a route.
+    """
+    require_admin(x_admin_key, x_admin_pin)
+    if not db.delete_instagram_source_route(routing_id, removed_by=x_admin_key or "admin"):
+        raise HTTPException(status_code=404, detail="Routing record not found.")
+    return {"status": "success", "routing_id": routing_id, "removed": True}
 
 
 # --------------------------------------------------------------------------
@@ -3482,6 +3523,10 @@ def get_admin_dashboard():
             </details>
             <div class="action-bar"><button class="btn-primary" type="button" onclick="saveInstagramRoute()">Save route</button><button class="btn-secondary" type="button" onclick="resetInstagramRouteForm()">Cancel edit</button></div>
             <div id="adRouteResult" class="result-box"></div>
+            <div style="display:flex; gap:8px; margin-top:16px; border-bottom:1px solid var(--border);">
+                <button class="tab-btn active" type="button" id="igRouteTabActiveBtn" onclick="switchIgRouteTab('active')" style="border-radius:8px 8px 0 0;">Active</button>
+                <button class="tab-btn" type="button" id="igRouteTabArchivedBtn" onclick="switchIgRouteTab('archived')" style="border-radius:8px 8px 0 0;">Archived</button>
+            </div>
             <div id="adRouteList" class="ad-route-list"><p style="color:var(--text-muted);font-size:0.84rem;">Loading saved routes...</p></div>
         </div>
 
@@ -3806,6 +3851,24 @@ THIS WEEK'S BENGAL SPECIALS
             <div style="display: flex; gap: 8px; justify-content: flex-end;">
                 <button class="btn-secondary" onclick="resolveEscalationOnly()">Mark Resolved Only</button>
                 <button class="btn-primary" onclick="submitResolveAndLearn()">Teach & Resolve</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="igRemoveModal" style="display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 9999; justify-content: center; align-items: center; padding: 20px;">
+        <div style="background: white; border-radius: 16px; width: 100%; max-width: 480px; padding: 24px; box-shadow: 0 10px 30px rgba(0,0,0,0.2);">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px;">
+                <h3 style="margin: 0; color: var(--danger);">Remove Instagram Routing?</h3>
+                <button onclick="closeIgRemoveModal()" style="background: none; border: none; font-size: 1.4rem; cursor: pointer;">&times;</button>
+            </div>
+            <p style="font-size: 0.88rem; color: #333; margin-bottom: 12px;">Remove this routing configuration permanently?</p>
+            <div id="igRemoveModalDetails" style="background:#F7F5F3; border:1px solid var(--border); border-radius:10px; padding:12px; font-size:0.82rem; line-height:1.6; margin-bottom:12px;"></div>
+            <div style="background:#FEF2F2; border:1px solid #FCA5A5; border-radius:10px; padding:10px 12px; font-size:0.8rem; color:#991B1B; margin-bottom:16px;">
+                This deletes only the routing configuration. It does not delete the Instagram content, Topic, Menu, or approved business knowledge.
+            </div>
+            <div style="display: flex; gap: 8px; justify-content: flex-end;">
+                <button class="btn-secondary" onclick="closeIgRemoveModal()">Cancel</button>
+                <button class="btn-danger" onclick="confirmIgRemove()">Remove Permanently</button>
             </div>
         </div>
     </div>
@@ -4284,13 +4347,69 @@ THIS WEEK'S BENGAL SPECIALS
         async function setInstagramRouteActive(id, active) {
             await fetch(`/admin/instagram-routes/${id}/active`,{method:'PATCH',headers:{...getAuthHeaders(),'Content-Type':'application/json'},body:JSON.stringify({active})}); loadAdRoutes();
         }
-        async function archiveInstagramRoute(id) { if(!confirm('Archive this Instagram route?'))return; await fetch(`/admin/instagram-routes/${id}`,{method:'DELETE',headers:getAuthHeaders()}); loadAdRoutes(); }
+        async function archiveInstagramRoute(id) { if(!confirm('Archive this Instagram route? It stops matching customer traffic but stays recoverable from the Archived tab.'))return; await fetch(`/admin/instagram-routes/${id}`,{method:'DELETE',headers:getAuthHeaders()}); loadAdRoutes(); }
+
+        async function restoreInstagramRoute(id) {
+            const resp = await fetch(`/admin/instagram-routes/${id}/restore`, { method: 'POST', headers: getAuthHeaders() });
+            if (!resp.ok) { alert('Could not restore this route. Please try again.'); return; }
+            loadAdRoutes();
+        }
+
+        // Instagram Content Routing: Active / Archived tabs. Archived rows get
+        // Restore/Remove only — no Edit/Disable/pairing until restored, so an
+        // archived route cannot be quietly edited without first bringing it back.
+        let igRouteTab = 'active';
+        function switchIgRouteTab(tab) {
+            igRouteTab = tab;
+            document.getElementById('igRouteTabActiveBtn').classList.toggle('active', tab === 'active');
+            document.getElementById('igRouteTabArchivedBtn').classList.toggle('active', tab === 'archived');
+            loadAdRoutes();
+        }
+
+        // Remove is permanent and destructive, so it always goes through this
+        // confirmation modal — never a one-click action, and never triggered
+        // from the same row position Edit/Disable/Archive already occupy.
+        let igRemoveTargetId = null;
+        function openIgRemoveModal(id) {
+            const route = (window.igRoutes || []).find(r => r.routing_id === id);
+            if (!route) return;
+            igRemoveTargetId = id;
+            document.getElementById('igRemoveModalDetails').innerHTML = `
+                <div><b>Instagram URL:</b> ${escapeHtml(route.canonical_url || route.ad_id || route.media_id || '—')}</div>
+                <div><b>Source type:</b> ${escapeHtml(route.source_type || '—')}</div>
+                <div><b>Shortcode:</b> ${escapeHtml(route.shortcode || '—')}</div>
+                <div><b>Topic:</b> ${escapeHtml(route.routing_topic || '—')}</div>
+                <div><b>Priority Products:</b> ${escapeHtml((route.priority_products || []).join(', ') || 'none')}</div>`;
+            document.getElementById('igRemoveModal').style.display = 'flex';
+        }
+        function closeIgRemoveModal() { document.getElementById('igRemoveModal').style.display = 'none'; igRemoveTargetId = null; }
+
+        async function confirmIgRemove() {
+            if (!igRemoveTargetId) return;
+            const id = igRemoveTargetId;
+            try {
+                const resp = await fetch(`/admin/instagram-routes/${id}/permanent`, { method: 'DELETE', headers: getAuthHeaders() });
+                if (!resp.ok) throw new Error();
+                closeIgRemoveModal();
+                const result = document.getElementById('adRouteResult');
+                result.style.display = 'block';
+                result.className = 'result-box success';
+                result.innerText = 'Routing configuration removed.';
+                loadAdRoutes();
+            } catch (err) {
+                const result = document.getElementById('adRouteResult');
+                result.style.display = 'block';
+                result.className = 'result-box error';
+                result.innerText = 'Could not remove this routing configuration. Please try again.';
+            }
+        }
 
         async function loadAdRoutes() {
             const list = document.getElementById('adRouteList');
             if (!list || !currentAdminKey) return;
             try {
-                const resp = await fetch('/admin/instagram-routes', { headers: getAuthHeaders() });
+                const query = igRouteTab === 'archived' ? '?include_archived=true' : '';
+                const resp = await fetch(`/admin/instagram-routes${query}`, { headers: getAuthHeaders() });
                 const data = await resp.json();
                 if (!resp.ok) throw new Error(data.detail || 'Could not load saved routes.');
                 const routes = data.routes || [];
@@ -4298,11 +4417,22 @@ THIS WEEK'S BENGAL SPECIALS
                 document.getElementById('igProductPicker').innerHTML='<option value="">Choose an approved product…</option>'+igProducts.map(item=>`<option value="${escapeHtml(item.id)}">${escapeHtml(item.label)}</option>`).join('');
                 document.getElementById('igKnowledgeScope').innerHTML=(data.knowledge_scopes||[]).map(id=>`<option value="${escapeHtml(id)}">${escapeHtml(id)}</option>`).join('');
                 renderIgPriorityProducts();
+
+                if (igRouteTab === 'archived') {
+                    if (!routes.length) { list.innerHTML='<p style="color:var(--text-muted);font-size:0.84rem;">No archived routes.</p>'; return; }
+                    list.innerHTML = routes.map(route => `
+                        <div class="ad-route-row">
+                            <span><b>${escapeHtml(route.canonical_url||route.ad_id||route.media_id)}</b><br><small>${escapeHtml(route.source_type)} · ${escapeHtml(route.shortcode||'no shortcode')} · ${escapeHtml(route.routing_topic||'no topic')} · priorities: ${escapeHtml((route.priority_products||[]).join(', ')||'none')} · archived ${escapeHtml(route.archived_at||'')}</small></span>
+                            <span><button class="btn-secondary" type="button" onclick="restoreInstagramRoute(${route.routing_id})">Restore</button> <button class="btn-danger" type="button" onclick="openIgRemoveModal(${route.routing_id})">Remove Permanently</button></span>
+                        </div>`).join('');
+                    return;
+                }
+
                 if (!routes.length && !(data.legacy_ad_routes||[]).length) { list.innerHTML='<p style="color:var(--text-muted);font-size:0.84rem;">No Instagram routes added yet.</p>'; return; }
                 list.innerHTML = routes.map(route => `
                     <div class="ad-route-row">
                         <span><b>${escapeHtml(route.canonical_url||route.ad_id||route.media_id)}</b><br><small>${escapeHtml(route.source_type)} · ${escapeHtml(route.shortcode||'no shortcode')} · ${escapeHtml(route.routing_topic||'no topic')} · priorities: ${escapeHtml((route.priority_products||[]).join(', ')||'none')}</small></span>
-                        <span><button class="btn-secondary" type="button" onclick="editInstagramRoute(${route.routing_id})">Edit</button> <button class="btn-secondary" type="button" onclick="setInstagramRouteActive(${route.routing_id},${!route.active})">${route.active?'Disable':'Enable'}</button> <button class="btn-danger" type="button" onclick="archiveInstagramRoute(${route.routing_id})">Archive</button>${route.source_type==='post'?` <button class="btn-secondary" type="button" onclick="pairInstagramPost(${route.routing_id})">${route.media_id?'Re-pair':'Verify / Pair Shared Post'}</button>`:''}</span>
+                        <span><button class="btn-secondary" type="button" onclick="editInstagramRoute(${route.routing_id})">Edit</button> <button class="btn-secondary" type="button" onclick="setInstagramRouteActive(${route.routing_id},${!route.active})">${route.active?'Disable':'Enable'}</button> <button class="btn-danger" type="button" onclick="archiveInstagramRoute(${route.routing_id})">Archive</button> <button class="btn-danger" type="button" onclick="openIgRemoveModal(${route.routing_id})">Remove</button>${route.source_type==='post'?` <button class="btn-secondary" type="button" onclick="pairInstagramPost(${route.routing_id})">${route.media_id?'Re-pair':'Verify / Pair Shared Post'}</button>`:''}</span>
                         ${route.source_type==='post'?`<div id="igPairingStatus-${route.routing_id}" style="font-size:0.78rem;color:var(--text-muted);margin-top:4px;">${route.media_id?`Paired media ID: ${escapeHtml(route.media_id)}`:'Not yet paired — the share webhook for posts carries no shortcode/URL, so a verified media ID must be paired manually.'}</div>`:''}
                     </div>`).join('') + (data.legacy_ad_routes||[]).map(route=>`<div class="ad-route-row"><span><b>Legacy Ad ID ${escapeHtml(route.ad_id)}</b><br><small>Priority: ${escapeHtml(route.product)} · managed under Advanced compatibility</small></span></div>`).join('');
             } catch (err) {
