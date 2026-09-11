@@ -163,6 +163,27 @@ class Config:
     except ValueError:
         STRUCTURED_NLU_ROLLOUT_PERCENT: int = 100
 
+    # AI Resolution & Answers, Phase 3 slice 2: a triage model categorizes
+    # every message the deterministic/canonical path could not answer into one
+    # of seven review buckets, purely for the admin dashboard. Same rollout
+    # shape as ROUTER_SHADOW_ENABLED above — it changes no reply and sends
+    # nothing; it only ever writes to triage_shadow, which nothing in the
+    # reply path reads. Off by default: it costs a Groq call per unmatched
+    # message.
+    LLM_TRIAGE_ENABLED: bool = os.getenv("LLM_TRIAGE_ENABLED", "false").lower() in ("true", "1", "t", "yes")
+    # Its own model for the same reason the router has one: a different job,
+    # a different rate-limit bucket, and freedom to change one without
+    # touching the other.
+    LLM_TRIAGE_MODEL: str = os.getenv("LLM_TRIAGE_MODEL", "") or "groq/compound-mini"
+    # How confident a grounded AUTO_RESOLVE call would need to be before any
+    # future phase let it auto-send. Recorded on every shadow row now
+    # (`would_auto_resolve`) so that threshold can be picked from real
+    # traffic instead of guessed — nothing reads this to act yet.
+    try:
+        LLM_TRIAGE_CONFIDENCE_THRESHOLD: float = float(os.getenv("LLM_TRIAGE_CONFIDENCE_THRESHOLD", "0.85"))
+    except ValueError:
+        LLM_TRIAGE_CONFIDENCE_THRESHOLD: float = 0.85
+
     # Active conversation state survives restarts and is shared by workers via
     # the existing SQLite volume. The short TTL limits stale conversational state.
     SESSION_PERSISTENCE_ENABLED: bool = os.getenv("SESSION_PERSISTENCE_ENABLED", "true").lower() in ("true", "1", "t", "yes")

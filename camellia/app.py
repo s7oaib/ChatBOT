@@ -1610,6 +1610,21 @@ def health_check():
             router_shadow["error"] = f"{type(e).__name__}"
             log.warning("Could not read the router shadow pulse: %s", e)
 
+    # AI Resolution & Answers, Phase 3 slice 2. Same reasoning as
+    # router_shadow above: LLM_TRIAGE_ENABLED lives in the host dashboard,
+    # invisible to anything in this repo, so this is the only way to confirm
+    # a flip actually took without opening the admin dashboard.
+    llm_triage: Dict[str, Any] = {
+        "enabled": config.LLM_TRIAGE_ENABLED,
+        "model": config.LLM_TRIAGE_MODEL if config.LLM_TRIAGE_ENABLED else None,
+    }
+    if config.LLM_TRIAGE_ENABLED:
+        try:
+            llm_triage.update(db.triage_shadow_pulse())
+        except Exception as e:
+            llm_triage["error"] = f"{type(e).__name__}"
+            log.warning("Could not read the triage shadow pulse: %s", e)
+
     # A bot that cannot answer is down, whatever else is working. Live mode
     # without credentials is the same kind of failure one step later — it
     # produces a reply that cannot be delivered.
@@ -1675,6 +1690,7 @@ def health_check():
             "instagram_token": instagram_token,
             "escalation_alerts_to": alert_destination,
             "router_shadow": router_shadow,
+            "llm_triage": llm_triage,
             "language_understanding": {
                 "structured_nlu_enabled": config.STRUCTURED_NLU_ENABLED,
                 "rollout_percent": config.STRUCTURED_NLU_ROLLOUT_PERCENT,
@@ -2241,6 +2257,29 @@ def get_router_shadow_report(
     report["shadow_enabled"] = config.ROUTER_SHADOW_ENABLED
     if not config.ROUTER_SHADOW_ENABLED and not report["compared"]:
         report["note"] = "ROUTER_SHADOW_ENABLED is off, so nothing is being compared."
+    return report
+
+@app.get("/admin/triage-shadow")
+def get_triage_shadow_report(
+    days: int = 7,
+    limit: int = 40,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """
+    AI Resolution & Answers, Phase 3 slice 2: how a triage model would have
+    categorized every message the deterministic/canonical path could not
+    answer, and what it would have needed to be grounded and confident
+    enough to auto-resolve. Nothing here has ever been sent to a customer or
+    changed a candidate/escalation/knowledge-gap row — it is a parallel
+    measurement, read for review only.
+    """
+    require_admin(x_admin_key, x_admin_pin)
+    report = db.triage_shadow_report(days=days, limit=limit)
+    report["shadow_enabled"] = config.LLM_TRIAGE_ENABLED
+    report["confidence_threshold"] = config.LLM_TRIAGE_CONFIDENCE_THRESHOLD
+    if not config.LLM_TRIAGE_ENABLED and not report["classified"]:
+        report["note"] = "LLM_TRIAGE_ENABLED is off, so nothing is being classified."
     return report
 
 # The four prompts Instagram shows before a customer types anything. Each one
@@ -4067,6 +4106,42 @@ THIS WEEK'S BENGAL SPECIALS
                     </tbody>
                 </table>
             </div>
+
+            <!-- Triage shadow mode: a model's opinion on every message above,
+                 run purely for measurement. It has never sent a reply, never
+                 auto-approved anything, and never touched the queue above —
+                 this is read-only so the quality of its calls can be judged
+                 against real traffic before any auto-resolve path is built. -->
+            <div style="margin-top:28px; padding-top:20px; border-top:2px solid var(--border);">
+                <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 10px;">
+                    <div>
+                        <h3 style="margin:0;">🔬 Triage Shadow Mode <span style="font-weight:400; font-size:0.8rem; color:var(--text-muted);">(measurement only — nothing below has ever reached a customer)</span></h3>
+                        <p id="triageShadowStatusLine" style="font-size:0.82rem; color:var(--text-muted); margin-top:4px;">Checking status…</p>
+                    </div>
+                    <button class="btn-secondary" onclick="loadTriageShadow()">🔄 Refresh</button>
+                </div>
+
+                <div id="triageShadowSummary" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 16px;"></div>
+
+                <div style="overflow-x: auto;">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Message</th>
+                                <th>Triage Category</th>
+                                <th>Confidence</th>
+                                <th>Grounded</th>
+                                <th>Would Auto-Resolve?</th>
+                                <th>What Actually Happened</th>
+                                <th>Model's Reasoning</th>
+                            </tr>
+                        </thead>
+                        <tbody id="triageShadowTableBody">
+                            <tr><td colspan="7" style="text-align: center; color: #888;">Loading...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
         </div>
 
         <!-- Writing an answer by hand used to be a collapsed form inside the
@@ -4392,7 +4467,7 @@ THIS WEEK'S BENGAL SPECIALS
             if (group === 'menu_manager') { mmLoadMenuList(); }
             if (group === 'customers') { loadAnalytics(); loadConversations(); }
             if (group === 'answers') { loadCandidates(); loadKnowledge(); }
-            if (group === 'ai_resolution') { loadAiResolution(); }
+            if (group === 'ai_resolution') { loadAiResolution(); loadTriageShadow(); }
         }
 
         // MENU MANAGER tab: every menu is edited as a draft (server-side, in
@@ -6233,6 +6308,71 @@ Non-Veg:
                 if (resp.ok) loadAiResolution();
                 else { const err = await resp.json().catch(() => ({})); alert('Could not update: ' + (err.detail || resp.status)); }
             } catch (err) { alert('Could not update: ' + err); }
+        }
+
+        // Triage shadow mode: read-only. There is deliberately no approve,
+        // reject, or resolve action anywhere below — a shadow row was never
+        // acted on by anything, and this view must not become the first
+        // thing that does.
+        const TRIAGE_CATEGORY_LABEL = {
+            AUTO_RESOLVE: '🟢 Auto-Resolve',
+            AI_SUGGESTED: '✨ AI Suggested',
+            TEACH_REQUIRED: '📘 Teach Required',
+            HUMAN_REQUIRED: '🙋 Human Required',
+            NON_ACTIONABLE: '💬 Non-Actionable',
+            CONTACT_DETAIL: '📇 Contact Detail',
+            UNSUPPORTED: '🚫 Unsupported',
+        };
+
+        async function loadTriageShadow() {
+            const statusLine = document.getElementById('triageShadowStatusLine');
+            const summary = document.getElementById('triageShadowSummary');
+            const tbody = document.getElementById('triageShadowTableBody');
+            try {
+                const resp = await fetch('/admin/triage-shadow?days=7&limit=40', { headers: getAuthHeaders() });
+                if (!resp.ok) {
+                    statusLine.innerText = 'Could not load triage shadow report.';
+                    tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: red;">Failed to load.</td></tr>';
+                    return;
+                }
+                const data = await resp.json();
+
+                statusLine.innerText = data.shadow_enabled
+                    ? `On — ${data.classified} message(s) classified in the last ${data.days} day(s). Confidence threshold for a future auto-resolve: ${Math.round(data.confidence_threshold * 100)}%.`
+                    : (data.note || 'LLM_TRIAGE_ENABLED is off.');
+
+                summary.innerHTML = (data.by_category || []).map(c => `
+                    <div style="background:#F8FAFC; border:1px solid var(--border); padding:12px; border-radius:12px; text-align:center;">
+                        <span style="font-size:0.72rem; color:#64748B; font-weight:600;">${escapeHtml(TRIAGE_CATEGORY_LABEL[c.category] || c.category)}</span>
+                        <h3 style="font-size:1.4rem; margin-top:4px;">${c.count}</h3>
+                        ${c.avg_confidence !== null ? `<small style="color:var(--text-muted);">avg ${Math.round(c.avg_confidence * 100)}%</small>` : ''}
+                    </div>`).join('') || '<p style="color: var(--text-muted); grid-column: 1/-1;">Nothing classified yet in this window.</p>';
+
+                const rows = data.recent || [];
+                if (!rows.length) {
+                    tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: #888;">Nothing classified yet in this window.</td></tr>';
+                    return;
+                }
+                tbody.innerHTML = rows.map(r => {
+                    const label = r.ok ? (TRIAGE_CATEGORY_LABEL[r.category] || r.category) : `⚠️ ${escapeHtml(r.detail || 'failed')}`;
+                    const wouldAuto = r.would_auto_resolve ? '✅ Yes' : '—';
+                    const grounded = r.ok ? (r.grounded ? '✅ Grounded' : '—') : '—';
+                    const actual = r.was_matched ? `Matched: ${escapeHtml(r.template_id || '')}` : `Fell through${r.template_id ? ` (${escapeHtml(r.template_id)})` : ''}`;
+                    return `
+                    <tr>
+                        <td style="max-width: 220px;">${escapeHtml(r.user_message || '')}</td>
+                        <td><span class="badge badge-veg">${label}</span></td>
+                        <td>${r.ok && r.confidence !== null ? Math.round(r.confidence * 100) + '%' : '—'}</td>
+                        <td>${grounded}</td>
+                        <td>${wouldAuto}</td>
+                        <td style="font-size:0.8rem;">${actual}</td>
+                        <td style="max-width: 260px; font-size:0.78rem; color:var(--text-muted);">${escapeHtml(r.reasoning || '')}</td>
+                    </tr>`;
+                }).join('');
+            } catch (err) {
+                statusLine.innerText = 'Could not load triage shadow report.';
+                tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: red;">Failed to load.</td></tr>';
+            }
         }
     </script>
 </body>

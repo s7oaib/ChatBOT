@@ -256,3 +256,22 @@ def test_ai_resolution_tab_exists_and_reuses_existing_endpoints(page):
     assert "fetch(`/admin/candidates/${id}/reject`" in page
     assert "fetch(`/admin/knowledge-gaps/${gapId}/status`" in page
     assert "onclick=\"openResolveModal(" in script, "gap/escalation rows must reuse the existing resolve modal"
+
+
+def test_triage_shadow_section_is_present_and_strictly_read_only(page):
+    """
+    Phase 3 slice 2: the triage model's shadow categorization has to be
+    visible inside AI Resolution & Answers, but it must never gain an
+    approve/reject/resolve action of its own -- a shadow row was never acted
+    on by anything, and the dashboard must not become the first thing that
+    does before an auto-resolve path exists.
+    """
+    assert 'id="triageShadowTableBody"' in page
+    assert "Triage Shadow Mode" in page
+    assert "measurement only" in page
+
+    section = page[page.index("async function loadTriageShadow"):]
+    section = section[:section.index("</script>")]
+    assert "fetch('/admin/triage-shadow" in section
+    for verb in ("method: 'POST'", "method: 'PATCH'", "method: 'DELETE'", "confirm("):
+        assert verb not in section, f"triage shadow section must stay read-only, found {verb!r}"

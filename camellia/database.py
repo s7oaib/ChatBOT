@@ -88,6 +88,37 @@ class Database:
             );
             """)
 
+            # AI Resolution & Answers, Phase 3 slice 2: the triage model's
+            # silent category for every message the deterministic/canonical
+            # path could not answer. Same shape as router_shadow above — a
+            # measurement table nothing in the reply path reads, kept
+            # separate from candidate_templates/escalations/knowledge_gaps
+            # because a row here was never acted on, only observed.
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS triage_shadow (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                channel TEXT,
+                user_id TEXT,
+                user_message TEXT NOT NULL,
+                category TEXT,
+                confidence REAL,
+                reasoning TEXT,
+                ok INTEGER DEFAULT 0,
+                detail TEXT,
+                matched_knowledge_id INTEGER,
+                matched_knowledge_source TEXT,
+                matched_knowledge_preview TEXT,
+                grounded INTEGER DEFAULT 0,
+                grounding_reason TEXT,
+                would_auto_resolve INTEGER DEFAULT 0,
+                was_matched INTEGER DEFAULT 0,
+                template_id TEXT,
+                latency_ms REAL,
+                model TEXT,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+
             # Columns added after this table shipped. CREATE TABLE IF NOT
             # EXISTS does nothing to a table that already exists, and the
             # production database lives on a Railway volume full of real rows,
@@ -1069,6 +1100,8 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_conversations_timestamp ON conversations(timestamp);",
             # /health reads this table on every poll, so it must not scan it.
             "CREATE INDEX IF NOT EXISTS idx_router_shadow_timestamp ON router_shadow(timestamp);",
+            "CREATE INDEX IF NOT EXISTS idx_triage_shadow_timestamp ON triage_shadow(timestamp);",
+            "CREATE INDEX IF NOT EXISTS idx_triage_shadow_category ON triage_shadow(category);",
             # get_escalations() filters on status, ordered by id DESC.
             "CREATE INDEX IF NOT EXISTS idx_escalations_status_id ON escalations(status, id DESC);",
             "CREATE INDEX IF NOT EXISTS idx_escalations_user ON escalations(user_id);",
@@ -1218,6 +1251,120 @@ class Database:
                 "by_model": by_model,
                 "unmatched_but_routed_in_sample": rescued,
                 "disagreements": disagreements,
+            }
+
+    def record_triage_shadow(
+        self,
+        channel: str,
+        user_id: str,
+        user_message: str,
+        category: Optional[str],
+        confidence: Optional[float],
+        reasoning: Optional[str],
+        ok: bool,
+        detail: str,
+        matched_knowledge_id: Optional[int],
+        matched_knowledge_source: Optional[str],
+        matched_knowledge_preview: Optional[str],
+        grounded: bool,
+        grounding_reason: Optional[str],
+        would_auto_resolve: bool,
+        was_matched: bool,
+        template_id: Optional[str],
+        latency_ms: float,
+        model: Optional[str] = None,
+    ) -> None:
+        """Stores one silent triage classification. Never read by any reply path."""
+        with self.get_connection() as conn:
+            conn.execute("""
+            INSERT INTO triage_shadow (
+                channel, user_id, user_message, category, confidence, reasoning,
+                ok, detail, matched_knowledge_id, matched_knowledge_source,
+                matched_knowledge_preview, grounded, grounding_reason,
+                would_auto_resolve, was_matched, template_id, latency_ms, model
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                channel, user_id, user_message, category, confidence, reasoning,
+                1 if ok else 0, detail, matched_knowledge_id, matched_knowledge_source,
+                matched_knowledge_preview, 1 if grounded else 0, grounding_reason,
+                1 if would_auto_resolve else 0, 1 if was_matched else 0, template_id,
+                round(latency_ms, 1), model,
+            ))
+            conn.commit()
+
+    def triage_shadow_pulse(self, hours: int = 24) -> Dict[str, Any]:
+        """Just enough to tell whether shadow triage is actually running, for /health."""
+        with self.get_connection() as conn:
+            cutoff = (datetime.utcnow() - timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
+            row = conn.execute("""
+                SELECT COUNT(*) AS n, MAX(timestamp) AS last_at,
+                       SUM(would_auto_resolve) AS would_auto_resolve
+                FROM triage_shadow WHERE timestamp >= ?
+            """, (cutoff,)).fetchone()
+            classified = row["n"] or 0
+            return {
+                "classified_recently": classified,
+                "would_auto_resolve_recently": row["would_auto_resolve"] or 0,
+                "last_classification_at": row["last_at"],
+                "window_hours": hours,
+            }
+
+    def triage_shadow_report(self, days: int = 7, limit: int = 40) -> Dict[str, Any]:
+        """
+        How the triage model would have categorized the messages the bot
+        could not answer on its own, for admin review before any auto-resolve
+        path exists. Recent rows are the point — an admin has to be able to
+        read the model's reasoning against the real message, not just a count.
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cutoff = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+
+            totals = cursor.execute("""
+                SELECT COUNT(*) AS n, SUM(ok) AS ok, SUM(would_auto_resolve) AS would_auto_resolve,
+                       SUM(grounded) AS grounded, AVG(latency_ms) AS avg_latency
+                FROM triage_shadow WHERE timestamp >= ?
+            """, (cutoff,)).fetchone()
+            classified = totals["n"] or 0
+
+            by_category = [
+                {
+                    "category": row["category"] or "unclassified",
+                    "count": row["n"],
+                    "avg_confidence": round(row["avg_confidence"], 3) if row["avg_confidence"] is not None else None,
+                }
+                for row in cursor.execute("""
+                    SELECT category, COUNT(*) AS n, AVG(confidence) AS avg_confidence
+                    FROM triage_shadow WHERE timestamp >= ? AND ok = 1
+                    GROUP BY category ORDER BY n DESC
+                """, (cutoff,))
+            ]
+
+            by_detail = [
+                {"detail": row["detail"], "count": row["n"]}
+                for row in cursor.execute("""
+                    SELECT detail, COUNT(*) AS n FROM triage_shadow
+                    WHERE timestamp >= ? AND ok = 0 GROUP BY detail ORDER BY n DESC
+                """, (cutoff,))
+            ]
+
+            recent = [
+                dict(row) for row in cursor.execute("""
+                    SELECT * FROM triage_shadow WHERE timestamp >= ?
+                    ORDER BY id DESC LIMIT ?
+                """, (cutoff, limit))
+            ]
+
+            return {
+                "days": days,
+                "classified": classified,
+                "ok": totals["ok"] or 0,
+                "grounded": totals["grounded"] or 0,
+                "would_auto_resolve": totals["would_auto_resolve"] or 0,
+                "avg_latency_ms": round(totals["avg_latency"], 1) if totals["avg_latency"] else None,
+                "by_category": by_category,
+                "failures": by_detail,
+                "recent": recent,
             }
 
     def entry_point_breakdown(self, channel: str = "instagram", days: int = 30) -> Dict[str, Any]:

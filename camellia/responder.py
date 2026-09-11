@@ -17,6 +17,7 @@ from camellia.order_calculator import order_calculator
 from camellia.rag_fallback import MEDIUM_CONFIDENCE_THRESHOLD, rag_fallback_engine
 from camellia.text_rules import FLOWER_RE, strip_flower_emoji
 from camellia.router import shadow_router
+from camellia.triage import triage_classifier
 from camellia.database import db
 from camellia.trigger_index import trigger_index
 from camellia import weekly_flyer
@@ -1280,6 +1281,27 @@ class DeterministicResponder:
                 keyword_pick=template_id,
                 templates=self.qa_data.get("templates", []),
                 history_turns=session_memory.get_session(user_id, channel).get("turns", []),
+            )
+
+        # AI Resolution & Answers, Phase 3 slice 2: the triage model only
+        # gets a message that deterministic/canonical resolution already gave
+        # up on — was_matched is False here in exactly the cases that reach
+        # the candidate/escalation/knowledge-gap machinery further down this
+        # same fallback tail. Instagram-only and behind its own flag, on top
+        # of WhatsApp's existing human-only gate in whatsapp_adapter.py, so a
+        # future flip of WHATSAPP_CHATBOT_ENABLED could never also turn this on.
+        if (
+            config.LLM_TRIAGE_ENABLED
+            and channel == "instagram"
+            and not was_matched
+            and template_id != "ad_gate_blocked"
+        ):
+            triage_classifier.record_shadow(
+                user_message=user_message,
+                channel=channel,
+                user_id=user_id,
+                was_matched=was_matched,
+                template_id=template_id,
             )
 
         if self._should_send_slow_notice(user_id, channel, response_text, template_id):
