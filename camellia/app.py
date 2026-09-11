@@ -48,6 +48,7 @@ from camellia.instagram_routing import (
     normalize_instagram_url,
     product_catalogue,
     route_for_inbound,
+    shared_post_media_id,
     shared_reel_identity,
     validate_route_payload,
     verify_media_by_id,
@@ -515,10 +516,37 @@ def _reply_to_unreadable_attachment(sender_id: str) -> None:
         log.exception("Failed to answer an unreadable attachment from %s.", sender_id)
 
 
-def _establish_shared_reel_context(sender_id: str, identity: Dict[str, str]) -> None:
+def _apply_source_context(sender_id: str, route: Dict[str, Any], match_method: str) -> None:
+    """Writes a resolved route into the session for the next message to use.
+
+    Shared by the reel and the paired-post paths — both establish exactly
+    the same kind of context, just from different evidence.
+    """
+    facts = session_memory.get_facts(sender_id, "instagram")
+    facts["source_route"] = route
+    facts["source_match_method"] = match_method
+    # Sharing a post is itself a change of subject: the customer has just put
+    # a specific thing in front of us, newer and more specific than whatever
+    # was last discussed. Without clearing that stale topic, source routing
+    # is skipped for the vague follow-up it exists to answer —
+    # `can_use_source` in responder.py treats any `last_topic` as the
+    # conversation already having a subject. In production this is what sent
+    # a "tell me more" straight after a shared reel into general matching
+    # instead of the reel's route.
+    #
+    # An open question the bot itself asked (awaiting_*) is deliberately left
+    # alone: that is a reply the customer still owes us, and the pack size or
+    # area they type next has to keep resolving. Cart, order_draft and any
+    # CAM handoff are untouched — a share changes conversational subject, not
+    # order state.
+    facts["last_topic"] = None
+    facts["source_priority_cursor"] = 0
+
+
+def _establish_shared_reel_context(sender_id: str, identity: Dict[str, str]) -> bool:
     """
     Remembers which configured reel a customer just shared, for their next
-    message to use.
+    message to use. Returns whether a configured route was found.
 
     A shared reel carries no question, so nothing is answered from it here —
     it only establishes context. The customer sends "tell me more" a few
@@ -538,39 +566,98 @@ def _establish_shared_reel_context(sender_id: str, identity: Dict[str, str]) -> 
                 "Shared reel %s from %s is not configured for routing; no source context set.",
                 identity.get("shortcode"), sender_id,
             )
-            return
-        facts = session_memory.get_facts(sender_id, "instagram")
-        facts["source_route"] = route
-        facts["source_match_method"] = match_method
-        # Sharing a post is itself a change of subject: the customer has just
-        # put a specific thing in front of us, which is newer and more
-        # specific than whatever was last discussed. Without clearing that
-        # stale topic, source routing is skipped for the vague follow-up it
-        # exists to answer — `can_use_source` in responder.py treats any
-        # `last_topic` as the conversation already having a subject. In
-        # production this is what sent a "tell me more" straight after a
-        # shared reel into general matching instead of the reel's route.
-        #
-        # An open question the bot itself asked (awaiting_*) is deliberately
-        # left alone: that is a reply the customer still owes us, and the
-        # pack size or area they type next has to keep resolving.
-        facts["last_topic"] = None
-        facts["source_priority_cursor"] = 0
+            return False
+        _apply_source_context(sender_id, route, match_method)
         log.info(
             "Shared reel %s from %s matched routing_id %s (%s) via %s.",
             identity.get("shortcode"), sender_id, route.get("routing_id"),
             route.get("routing_topic"), match_method,
         )
+        return True
     except Exception:
         # Context is a nicety; the attachment reply below is not allowed to
         # fail because of it.
         log.exception("Could not establish shared-reel context for %s.", sender_id)
+        return False
 
 
-def _handle_shared_attachment(sender_id: str, identity: Optional[Dict[str, str]]) -> None:
-    """Establishes reel context where there is any, then answers exactly as before."""
-    if identity:
-        _establish_shared_reel_context(sender_id, identity)
+def _establish_shared_post_context(sender_id: str, post_media_id: str) -> bool:
+    """
+    Resolves a shared post's messaging-attachment id against a configured
+    route, either one already paired or — while an admin has deliberately
+    opened a pairing window — this exact share. Returns whether a route was
+    established.
+
+    A post's id has no deterministic permalink to fall back on (see
+    ``shared_post_media_id``'s docstring), so unlike a reel, an unpaired post
+    resolves to nothing: no shortcode, no caption match, no guess from
+    timing. Only an id that is either already bound to a route, or captured
+    during that route's own open pairing window, is trusted.
+    """
+    try:
+        route, match_method = route_for_inbound(
+            ad_id=None, media_id=None, post_media_id=post_media_id,
+        )
+        if route:
+            _apply_source_context(sender_id, route, match_method)
+            log.info(
+                "Shared post %s from %s matched routing_id %s (%s) via %s.",
+                post_media_id, sender_id, route.get("routing_id"),
+                route.get("routing_topic"), match_method,
+            )
+            return True
+
+        pairing = db.get_active_post_pairing()
+        if not pairing:
+            log.info(
+                "Shared post %s from %s is not configured and no pairing is open; no source context set.",
+                post_media_id, sender_id,
+            )
+            return False
+
+        bound = db.bind_post_pairing(pairing["id"], post_media_id)
+        if not bound:
+            # The window closed between the check above and this write —
+            # a race, not an error; the share is simply unpaired.
+            return False
+        route_row = db.get_instagram_source_route(pairing["routing_id"])
+        if not route_row:
+            return False
+        route = decode_route(route_row)
+        _apply_source_context(sender_id, route, "shared_post_media_id")
+        log.info(
+            "Paired shared post %s from %s to routing_id %s (%s) via an open admin pairing window.",
+            post_media_id, sender_id, route.get("routing_id"), route.get("routing_topic"),
+        )
+        return True
+    except Exception:
+        log.exception("Could not establish shared-post context for %s.", sender_id)
+        return False
+
+
+def _handle_shared_attachment(
+    sender_id: str,
+    reel_identity: Optional[Dict[str, str]],
+    post_media_id: Optional[str] = None,
+) -> None:
+    """
+    Establishes source context where there is any, then answers the
+    attachment.
+
+    A recognized post — already paired, or bound just now against an open
+    pairing window — skips the "I can't open photos" reply: the system did
+    understand what was shared, and sending that message would misstate what
+    just happened. A reel keeps its existing reply exactly as before; that
+    path is proven in production and this change does not touch it.
+    """
+    if reel_identity:
+        _establish_shared_reel_context(sender_id, reel_identity)
+        _reply_to_unreadable_attachment(sender_id)
+        return
+    if post_media_id:
+        recognized = _establish_shared_post_context(sender_id, post_media_id)
+        if recognized:
+            return
     _reply_to_unreadable_attachment(sender_id)
 
 
@@ -826,6 +913,10 @@ def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks
                     shared_reel_identity(messaging_event.get("message") or {})
                     if reason == "attachment_only" else None
                 )
+                shared_post_id = (
+                    shared_post_media_id(messaging_event.get("message") or {})
+                    if reason == "attachment_only" and not shared_reel else None
+                )
 
                 # A photo, voice note or sticker is a real person saying
                 # something we cannot read. Silence is the worst available
@@ -834,11 +925,14 @@ def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks
                 # alive; it was found by the drop log within a minute of that
                 # log existing.
                 if reason == "attachment_only" and is_ad_qualified:
-                    background_tasks.add_task(_handle_shared_attachment, sender_id, shared_reel)
+                    background_tasks.add_task(
+                        _handle_shared_attachment, sender_id, shared_reel, shared_post_id,
+                    )
                     results.append({
                         "sender_id": sender_id,
                         "action": "queued_attachment_reply",
                         "shared_reel_shortcode": (shared_reel or {}).get("shortcode"),
+                        "shared_post_media_id": shared_post_id,
                     })
                     continue
 
@@ -1775,6 +1869,55 @@ def archive_instagram_route(
     if not db.archive_instagram_source_route(routing_id):
         raise HTTPException(status_code=404, detail="Routing record not found.")
     return {"status": "success", "routing_id": routing_id, "archived": True}
+
+
+# --------------------------------------------------------------------------
+# Shared-post pairing. A shared post carries no shortcode/URL Meta will put
+# in a webhook, and its messaging-attachment id has not been shown to
+# correspond to anything Graph will verify — so a post route only gets a
+# trustworthy media_id through an admin deliberately pairing one: start a
+# short window, share the exact post into the business DM, and whatever id
+# arrives during that window binds to the route. Binding is a one-shot
+# write into instagram_source_routes.media_id; runtime matching then reuses
+# the existing exact media_id lookup, no separate code path required.
+# --------------------------------------------------------------------------
+
+@app.post("/admin/instagram-routes/{routing_id}/pairing/start")
+def start_instagram_post_pairing(
+    routing_id: int,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    require_admin(x_admin_key, x_admin_pin)
+    if not db.get_instagram_source_route(routing_id):
+        raise HTTPException(status_code=404, detail="Routing record not found.")
+    pairing = db.start_post_pairing(
+        routing_id, config.INSTAGRAM_POST_PAIRING_TTL_SECONDS, started_by=x_admin_key or "admin",
+    )
+    return {"status": "success", "pairing": pairing, "ttl_seconds": config.INSTAGRAM_POST_PAIRING_TTL_SECONDS}
+
+
+@app.get("/admin/instagram-routes/{routing_id}/pairing")
+def get_instagram_post_pairing_status(
+    routing_id: int,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    require_admin(x_admin_key, x_admin_pin)
+    pairing = db.get_post_pairing_for_route(routing_id)
+    return {"status": "success", "pairing": pairing}
+
+
+@app.post("/admin/instagram-routes/{routing_id}/pairing/cancel")
+def cancel_instagram_post_pairing(
+    routing_id: int,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    require_admin(x_admin_key, x_admin_pin)
+    cancelled = db.cancel_post_pairing(routing_id)
+    return {"status": "success", "cancelled": cancelled}
+
 
 @app.post("/admin/menu/upload-image")
 @limiter.limit("10/minute")
@@ -4159,11 +4302,63 @@ THIS WEEK'S BENGAL SPECIALS
                 list.innerHTML = routes.map(route => `
                     <div class="ad-route-row">
                         <span><b>${escapeHtml(route.canonical_url||route.ad_id||route.media_id)}</b><br><small>${escapeHtml(route.source_type)} · ${escapeHtml(route.shortcode||'no shortcode')} · ${escapeHtml(route.routing_topic||'no topic')} · priorities: ${escapeHtml((route.priority_products||[]).join(', ')||'none')}</small></span>
-                        <span><button class="btn-secondary" type="button" onclick="editInstagramRoute(${route.routing_id})">Edit</button> <button class="btn-secondary" type="button" onclick="setInstagramRouteActive(${route.routing_id},${!route.active})">${route.active?'Disable':'Enable'}</button> <button class="btn-danger" type="button" onclick="archiveInstagramRoute(${route.routing_id})">Archive</button></span>
+                        <span><button class="btn-secondary" type="button" onclick="editInstagramRoute(${route.routing_id})">Edit</button> <button class="btn-secondary" type="button" onclick="setInstagramRouteActive(${route.routing_id},${!route.active})">${route.active?'Disable':'Enable'}</button> <button class="btn-danger" type="button" onclick="archiveInstagramRoute(${route.routing_id})">Archive</button>${route.source_type==='post'?` <button class="btn-secondary" type="button" onclick="pairInstagramPost(${route.routing_id})">${route.media_id?'Re-pair':'Verify / Pair Shared Post'}</button>`:''}</span>
+                        ${route.source_type==='post'?`<div id="igPairingStatus-${route.routing_id}" style="font-size:0.78rem;color:var(--text-muted);margin-top:4px;">${route.media_id?`Paired media ID: ${escapeHtml(route.media_id)}`:'Not yet paired — the share webhook for posts carries no shortcode/URL, so a verified media ID must be paired manually.'}</div>`:''}
                     </div>`).join('') + (data.legacy_ad_routes||[]).map(route=>`<div class="ad-route-row"><span><b>Legacy Ad ID ${escapeHtml(route.ad_id)}</b><br><small>Priority: ${escapeHtml(route.product)} · managed under Advanced compatibility</small></span></div>`).join('');
             } catch (err) {
                 list.innerHTML = `<p style="color: var(--danger); font-size: 0.84rem;">${escapeHtml(err.message || err)}</p>`;
             }
+        }
+
+        // Shared-post pairing: a post carries no shortcode/URL in Meta's share
+        // webhook, so a verified media ID can only be established by an admin
+        // deliberately sharing the exact configured post while a short pairing
+        // window is open. Starting a window supersedes any other open one —
+        // only one route may be mid-pairing at a time.
+        let igPairingPollTimer = null;
+
+        async function pairInstagramPost(routingId) {
+            const box = document.getElementById(`igPairingStatus-${routingId}`);
+            if (!confirm('This starts a 10-minute pairing window and cancels any other route currently pairing.\n\nAfter starting, share the exact configured post into the business Instagram DM from an admin account. Continue?')) return;
+            try {
+                const resp = await fetch(`/admin/instagram-routes/${routingId}/pairing/start`, { method: 'POST', headers: getAuthHeaders() });
+                const data = await resp.json();
+                if (!resp.ok) throw new Error(data.detail || 'Could not start pairing.');
+                if (box) box.innerHTML = `⏳ Pairing window open (expires ${escapeHtml(data.pairing.expires_at)}). Share the exact post into the business DM now.`;
+                if (igPairingPollTimer) clearInterval(igPairingPollTimer);
+                igPairingPollTimer = setInterval(() => pollInstagramPairing(routingId), 4000);
+            } catch (err) {
+                if (box) box.innerHTML = `<span style="color:var(--danger);">${escapeHtml(err.message || err)}</span>`;
+            }
+        }
+
+        async function pollInstagramPairing(routingId) {
+            const box = document.getElementById(`igPairingStatus-${routingId}`);
+            if (!box) { clearInterval(igPairingPollTimer); return; }
+            try {
+                const resp = await fetch(`/admin/instagram-routes/${routingId}/pairing`, { headers: getAuthHeaders() });
+                const data = await resp.json();
+                const pairing = data.pairing;
+                if (!pairing) return;
+                if (pairing.status === 'bound') {
+                    clearInterval(igPairingPollTimer);
+                    box.innerHTML = `✅ Paired. Media ID: ${escapeHtml(pairing.bound_media_id)}`;
+                    loadAdRoutes();
+                } else if (pairing.status === 'pending') {
+                    box.innerHTML = `⏳ Waiting for the shared post (expires ${escapeHtml(pairing.expires_at)}). <button class="btn-secondary" type="button" onclick="cancelInstagramPairing(${routingId})">Cancel</button>`;
+                } else {
+                    clearInterval(igPairingPollTimer);
+                }
+            } catch (err) { /* transient; next poll retries */ }
+        }
+
+        async function cancelInstagramPairing(routingId) {
+            clearInterval(igPairingPollTimer);
+            const box = document.getElementById(`igPairingStatus-${routingId}`);
+            try {
+                await fetch(`/admin/instagram-routes/${routingId}/pairing/cancel`, { method: 'POST', headers: getAuthHeaders() });
+                if (box) box.innerText = 'Pairing cancelled.';
+            } catch (err) { /* best-effort */ }
         }
 
         async function saveAdRoute() {
