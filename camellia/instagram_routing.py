@@ -29,6 +29,31 @@ _SOURCE_TYPES = {"post", "reel", "ad"}
 _ESCALATION_POLICIES = {"canonical", "human_if_unsupported", "always_human"}
 
 
+def _media_list_url(client: httpx.Client, token: str, version: str) -> Optional[str]:
+    """
+    Where this token can list the account's own media, or None.
+
+    The two token flavours do not share a host. An Instagram Login token
+    ("IGAA...") addresses the account directly on graph.instagram.com and is
+    rejected by graph.facebook.com outright — which is what this function used
+    to ask unconditionally, so every lookup on such a deployment came back as
+    "permission_or_account_unavailable" and looked like a missing permission
+    rather than the wrong address. A page token still has to go the long way
+    round, via the page's linked instagram_business_account.
+    """
+    if token.startswith("IGAA"):
+        return f"https://graph.instagram.com/{version}/me/media"
+    base = f"https://graph.facebook.com/{version}"
+    page_id = (config.INSTAGRAM_PAGE_ID or "me").strip()
+    account = client.get(
+        f"{base}/{page_id}",
+        params={"fields": "instagram_business_account", "access_token": token},
+    )
+    account_data = account.json() if account.status_code == 200 else {}
+    ig_id = ((account_data.get("instagram_business_account") or {}).get("id"))
+    return f"{base}/{ig_id}/media" if ig_id else None
+
+
 def lookup_instagram_media(identity: Dict[str, str]) -> Dict[str, Any]:
     """Best-effort verification against the connected Instagram account.
 
@@ -39,20 +64,12 @@ def lookup_instagram_media(identity: Dict[str, str]) -> Dict[str, Any]:
     if not token:
         return {"metadata_status": "not_configured"}
     version = config.WHATSAPP_API_VERSION
-    page_id = (config.INSTAGRAM_PAGE_ID or "me").strip()
-    base = f"https://graph.facebook.com/{version}"
     fields = "id,caption,media_type,media_url,permalink,thumbnail_url"
     try:
         with httpx.Client(timeout=8.0) as client:
-            account = client.get(
-                f"{base}/{page_id}",
-                params={"fields": "instagram_business_account", "access_token": token},
-            )
-            account_data = account.json() if account.status_code == 200 else {}
-            ig_id = ((account_data.get("instagram_business_account") or {}).get("id"))
-            if not ig_id:
+            url = _media_list_url(client, token, version)
+            if not url:
                 return {"metadata_status": "permission_or_account_unavailable"}
-            url = f"{base}/{ig_id}/media"
             params = {"fields": fields, "limit": 100, "access_token": token}
             for _ in range(3):
                 response = client.get(url, params=params)
