@@ -54,6 +54,51 @@ def _media_list_url(client: httpx.Client, token: str, version: str) -> Optional[
     return f"{base}/{ig_id}/media" if ig_id else None
 
 
+def verify_media_by_id(media_id: str) -> Dict[str, Any]:
+    """
+    Fetches one media object directly by id and reports its identity.
+
+    Diagnostic only, not part of any customer-facing matcher: a direct
+    by-id fetch is a stronger claim than presence in a paginated
+    ``/me/media`` listing (which caps at a few hundred items and can miss
+    older or differently-scoped media), and is the right tool for deciding
+    whether an id captured off a real webhook event genuinely belongs to a
+    post the admin has configured — before any routing logic is built on
+    top of that answer.
+    """
+    token = (config.INSTAGRAM_ACCESS_TOKEN or "").strip()
+    if not token:
+        return {"status": "not_configured"}
+    if not media_id or not media_id.isdigit():
+        return {"status": "invalid_media_id"}
+    version = config.WHATSAPP_API_VERSION
+    host = "graph.instagram.com" if token.startswith("IGAA") else "graph.facebook.com"
+    url = f"https://{host}/{version}/{media_id}"
+    try:
+        with httpx.Client(timeout=8.0) as client:
+            response = client.get(url, params={
+                "fields": "id,permalink,media_type,timestamp", "access_token": token,
+            })
+        if response.status_code != 200:
+            return {"status": "not_found_or_unauthorized", "http_status": response.status_code}
+        data = response.json()
+        permalink = data.get("permalink")
+        try:
+            identity = normalize_instagram_url(permalink) if permalink else None
+        except ValueError:
+            identity = None
+        return {
+            "status": "verified",
+            "media_id": str(data.get("id") or media_id),
+            "media_type": data.get("media_type"),
+            "timestamp": data.get("timestamp"),
+            "canonical_url": (identity or {}).get("canonical_url"),
+            "shortcode": (identity or {}).get("shortcode"),
+        }
+    except (httpx.HTTPError, ValueError, TypeError) as exc:
+        return {"status": "lookup_failed", "detail": type(exc).__name__}
+
+
 def lookup_instagram_media(identity: Dict[str, str]) -> Dict[str, Any]:
     """Best-effort verification against the connected Instagram account.
 

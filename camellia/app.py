@@ -50,6 +50,7 @@ from camellia.instagram_routing import (
     route_for_inbound,
     shared_reel_identity,
     validate_route_payload,
+    verify_media_by_id,
 )
 from camellia.sheet_sync import sheet_sync
 from camellia.menu_parser import menu_parser
@@ -752,6 +753,24 @@ def get_instagram_attachment_debug(
         "limit": _ATTACHMENT_DEBUG_LIMIT,
         "events": list(reversed(_ATTACHMENT_DEBUG_EVENTS)),
     }
+
+
+@app.get("/admin/debug/instagram-media/{media_id}")
+def get_instagram_media_verification(
+    media_id: str,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """
+    Fetches one media id directly by Graph API and reports its real identity.
+
+    Diagnostic only: this is how an id captured off a real webhook event
+    (an attachment's ig_post_media_id, for instance) is checked against what
+    it actually is before any routing logic trusts it. It never writes
+    anything and is not part of any inbound matcher.
+    """
+    require_admin(x_admin_key, x_admin_pin)
+    return verify_media_by_id(media_id)
 
 
 def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks) -> dict:
