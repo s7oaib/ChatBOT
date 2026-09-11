@@ -53,6 +53,8 @@ from camellia.sheet_sync import sheet_sync
 from camellia.menu_parser import menu_parser
 from camellia import weekly_flyer
 from camellia import menu_dates
+from camellia import menu_manager
+from camellia import menu_images
 from camellia.session_memory import session_memory
 from camellia.monitoring import get_logger, delivery_monitor, latency_monitor
 from camellia.knowledge import SOURCE_MAP
@@ -2383,6 +2385,182 @@ async def update_menu(request: Request, x_admin_key: Optional[str] = Header(None
         log.error("Failed to update menu: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
 
+
+# --------------------------------------------------------------------------
+# Menu Manager — every menu the chatbot actively serves, edited by the client
+# as a draft, previewed, and only made customer-facing by Save & Publish
+# (camellia/menu_manager.py owns validation/rendering/persistence; this is
+# just the admin-gated HTTP surface over it, same auth as every other
+# /admin/menu/* route).
+# --------------------------------------------------------------------------
+
+@app.get("/admin/menu-manager/menus")
+def list_manageable_menus(x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    menus = menu_manager.list_menus()
+    for menu in menus:
+        menu.update(menu_images.card(menu["menu_key"]))
+    return {"status": "success", "menus": menus}
+
+
+@app.get("/admin/menu-manager/menus/{menu_key}")
+def get_manageable_menu(menu_key: str, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    try:
+        return {"status": "success", **menu_manager.get_menu(menu_key), "image": menu_images.card(menu_key)}
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"No manageable menu '{menu_key}'")
+
+
+@app.put("/admin/menu-manager/menus/{menu_key}/draft")
+async def save_menu_draft(menu_key: str, request: Request, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    if not isinstance(body.get("items"), list):
+        raise HTTPException(status_code=400, detail="'items' must be a list")
+    admin_identity = x_admin_key or "admin"
+    try:
+        result = menu_manager.save_draft(menu_key, body["items"], updated_by=admin_identity)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"No manageable menu '{menu_key}'")
+    except menu_manager.MenuValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"status": "success", **result}
+
+
+@app.delete("/admin/menu-manager/menus/{menu_key}/draft")
+def discard_menu_draft(menu_key: str, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    try:
+        menu_manager.discard_draft(menu_key)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"No manageable menu '{menu_key}'")
+    return {"status": "success"}
+
+
+@app.get("/admin/menu-manager/menus/{menu_key}/preview")
+def preview_menu(menu_key: str, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    try:
+        return {"status": "success", **menu_manager.preview(menu_key)}
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"No manageable menu '{menu_key}'")
+
+
+@app.post("/admin/menu-manager/menus/{menu_key}/publish")
+async def publish_menu(menu_key: str, request: Request, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    admin_identity = x_admin_key or "admin"
+    raw_items = None
+    try:
+        body = await request.json()
+        if isinstance(body, dict) and isinstance(body.get("items"), list):
+            raw_items = body["items"]
+    except Exception:
+        raw_items = None  # No body / not JSON: publish the existing draft.
+    try:
+        result = menu_manager.publish(menu_key, raw_items=raw_items, changed_by=admin_identity)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"No manageable menu '{menu_key}'")
+    except menu_manager.MenuValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"status": "success", **result}
+
+
+@app.get("/admin/menu-manager/menus/{menu_key}/versions")
+def list_menu_versions(menu_key: str, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    try:
+        return {"status": "success", "versions": menu_manager.list_versions(menu_key)}
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"No manageable menu '{menu_key}'")
+
+
+@app.post("/admin/menu-manager/menus/{menu_key}/versions/{version_id}/restore")
+def restore_menu_version(menu_key: str, version_id: int, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    admin_identity = x_admin_key or "admin"
+    try:
+        result = menu_manager.restore_version(menu_key, version_id, changed_by=admin_identity)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"No manageable menu '{menu_key}' or version '{version_id}'")
+    except menu_manager.MenuValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"status": "success", **result}
+
+
+# Visual image workflow.  Structured item editing above remains available as
+# an advanced capability, while these routes keep image bytes in the durable
+# upload directory and SQLite holds metadata only.
+@app.post("/admin/menu-manager/menus/{menu_key}/image/draft")
+async def save_menu_image_draft(menu_key: str, file: Optional[UploadFile] = File(None), x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    if file is None:
+        raise HTTPException(status_code=400, detail="No image file provided.")
+    data = await file.read()
+    if len(data) > MAX_UPLOAD_SIZE:
+        raise HTTPException(status_code=413, detail="File too large (maximum 10MB allowed).")
+    try:
+        return {"status": "success", "draft": menu_images.save_draft(menu_key, data, file.content_type or "", x_admin_key or "admin")}
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"No manageable menu '{menu_key}'")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/admin/menu-manager/menus/{menu_key}/image/preview")
+def preview_menu_image(menu_key: str, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    try:
+        return {"status": "success", **menu_images.preview(menu_key)}
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"No manageable menu '{menu_key}'")
+
+
+@app.post("/admin/menu-manager/menus/{menu_key}/image/publish")
+def publish_menu_image(menu_key: str, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    try:
+        return {"status": "success", "image": menu_images.publish(menu_key)}
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"No manageable menu '{menu_key}'")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/admin/menu-manager/menus/{menu_key}/image/history")
+def menu_image_history(menu_key: str, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    try:
+        return {"status": "success", "versions": menu_images.history(menu_key)}
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"No manageable menu '{menu_key}'")
+
+
+@app.post("/admin/menu-manager/menus/{menu_key}/image/archive")
+def archive_menu_image(menu_key: str, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    try:
+        return {"status": "success", "image": menu_images.archive(menu_key)}
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"No manageable menu '{menu_key}'")
+
+
+@app.post("/admin/menu-manager/menus/{menu_key}/image/restore/{version_id}")
+def restore_menu_image(menu_key: str, version_id: int, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    try:
+        restored = menu_images.restore(menu_key, version_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"No manageable menu '{menu_key}'")
+    if not restored:
+        raise HTTPException(status_code=404, detail="Image version not found")
+    return {"status": "success", "image": restored}
+
+
 @app.post("/admin/parse-menu-card")
 async def parse_menu_card(request: Request, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
     """
@@ -2735,7 +2913,29 @@ def get_admin_dashboard():
         }
         .badge-veg { background: #D1FAE5; color: #065F46; }
         .badge-nonveg { background: #FEE2E2; color: #991B1B; }
-        
+
+        /* Menu Manager */
+        .collection-select { width: 100%; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; background: #fff; color: var(--text-dark); }
+        .catalogue-item { border: 1px solid var(--border); background: #FCFBF9; color: var(--text-dark); padding: 8px 10px; border-radius: 9px; cursor: pointer; text-align: left; }
+        .catalogue-item:hover { border-color: var(--primary); background: #F5EEF0; }
+        .catalogue-item small { display: block; color: var(--text-muted); margin-top: 2px; }
+        .visual-menu-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; margin-bottom: 20px; }
+        .visual-menu-card { border: 1px solid var(--border); border-radius: 14px; overflow: hidden; background: #fff; }
+        .visual-menu-card h3 { margin: 0; padding: 14px 14px 6px; color: var(--primary); font-size: 1rem; }
+        .visual-menu-card img { width: 100%; height: 210px; object-fit: contain; background: #f6f3ef; display: block; }
+        .visual-menu-meta { padding: 8px 14px; color: var(--text-muted); font-size: .8rem; }
+        .visual-menu-actions { display: flex; flex-wrap: wrap; gap: 7px; padding: 0 14px 14px; }
+        .visual-menu-actions button { font-size: .78rem; padding: 7px 9px; }
+        .collection-layout { display: grid; grid-template-columns: minmax(220px, 1fr) 2fr; gap: 18px; align-items: start; }
+        .collection-box { border: 1px solid var(--border); border-radius: 14px; padding: 14px; background: #FCFBF9; }
+        .collection-box h3 { margin: 0 0 10px; color: var(--primary); font-size: 0.98rem; }
+        .collection-slot { border: 1px solid var(--border); border-radius: 10px; padding: 12px; margin-bottom: 10px; background: #fff; }
+        .collection-slot label { display: block; font-size: 0.78rem; font-weight: 600; margin-top: 8px; }
+        .collection-slot label:first-child { margin-top: 0; }
+        @media (max-width: 780px) {
+            .collection-layout { grid-template-columns: 1fr; }
+        }
+
         /* Analytics Table */
         table.data-table { width: 100%; border-collapse: collapse; margin-top: 16px; font-size: 0.86rem; }
         table.data-table th { background: #F5F1ED; text-align: left; padding: 10px 14px; font-weight: 600; border-bottom: 1.5px solid var(--border); }
@@ -2822,6 +3022,7 @@ def get_admin_dashboard():
         <!-- Tab Navigation Bar -->
         <div class="tabs-nav">
             <button class="tab-btn active" onclick="switchTab('tab-image', this)">🍱 Menu</button>
+            <button class="tab-btn" onclick="switchTab('tab-menu-manager', this)">📋 Menu Manager</button>
             <button class="tab-btn" onclick="switchTab('tab-stats', this)">💬 Customers</button>
             <button class="tab-btn" onclick="switchTab('tab-candidates', this)">✅ Answers <span id="candidateBadge" style="display:none; background: var(--danger); color: #fff; border-radius: 10px; padding: 1px 7px; font-size: 0.72rem; margin-left: 4px;"></span></button>
         </div>
@@ -2998,6 +3199,44 @@ THIS WEEK'S BENGAL SPECIALS
 
             <div id="activeMenuContent">
                 <p style="color: #666; font-size: 0.9rem;">Loading current menu...</p>
+            </div>
+        </div>
+
+        <!-- MENU MANAGER tab: every menu the chatbot actively serves, edited
+             as a draft, previewed exactly as customers will see it, and only
+             made live by Save & Publish. camellia/menu_manager.py owns
+             validation/persistence/reload; this is its admin UI. -->
+        <div id="tab-menu-manager" class="panel-card" data-group="menu_manager" style="display: none;">
+            <div class="panel-header">
+                <h2>📋 Menu Manager</h2>
+                <p>Edit any menu the chatbot uses. Changes are a draft until you press Save &amp; Publish — the bot keeps answering with the current live menu until then.</p>
+            </div>
+
+            <div id="mmImageGrid" class="visual-menu-grid"><p style="color: var(--text-muted);">Loading menu images...</p></div>
+
+            <div class="collection-layout">
+                <div class="collection-box">
+                    <h3>Menus</h3>
+                    <div id="mmMenuList"><p style="color: var(--text-muted); font-size: 0.84rem;">Loading menus...</p></div>
+                </div>
+
+                <div class="collection-box">
+                    <h3 id="mmEditorTitle">Select a menu to edit</h3>
+                    <div id="mmEditorItems"></div>
+                    <div class="action-bar" style="margin-top: 14px; flex-wrap: wrap; gap: 8px;">
+                        <button class="btn-secondary" type="button" onclick="mmAddItem()">+ Add item</button>
+                        <button class="btn-secondary" type="button" onclick="mmSaveDraft()">💾 Save draft</button>
+                        <button class="btn-secondary" type="button" onclick="mmPreview()">👁 Preview</button>
+                        <button class="btn-primary" type="button" onclick="mmPublish()">✅ Save &amp; Publish</button>
+                        <button class="btn-secondary" type="button" onclick="mmCancelDraft()">✕ Cancel draft</button>
+                    </div>
+                    <div id="mmMessage" class="result-box"></div>
+                    <div id="mmPreviewBox" style="display:none; margin-top: 14px;">
+                        <h3 style="color: var(--primary); font-size: 0.95rem;">Preview — exactly what customers/chatbot will see</h3>
+                        <pre id="mmPreviewText" style="white-space: pre-wrap; background: #FCFBF9; border: 1px solid var(--border); border-radius: 10px; padding: 12px; font-size: 0.82rem;"></pre>
+                    </div>
+                    <div id="mmVersions" style="margin-top: 18px;"></div>
+                </div>
             </div>
         </div>
 
@@ -3336,6 +3575,7 @@ THIS WEEK'S BENGAL SPECIALS
         // not have to move.
         const TAB_GROUPS = {
             'tab-image': 'menu',
+            'tab-menu-manager': 'menu_manager',
             'tab-stats': 'customers',
             'tab-candidates': 'answers'
         };
@@ -3356,8 +3596,238 @@ THIS WEEK'S BENGAL SPECIALS
             // Everything in the group is on screen at once, so everything in it
             // needs its data.
             if (group === 'menu') { loadActiveMenu(); loadAdRoutes(); }
+            if (group === 'menu_manager') { mmLoadMenuList(); }
             if (group === 'customers') { loadAnalytics(); loadConversations(); }
             if (group === 'answers') { loadCandidates(); loadKnowledge(); }
+        }
+
+        // MENU MANAGER tab: every menu is edited as a draft (server-side, in
+        // menu_drafts) and only becomes the chatbot's live answer when Save &
+        // Publish is pressed — camellia/menu_manager.py owns validation,
+        // rendering and the reload, this is only its HTTP-backed editor.
+        let mmMenus = [];
+        let mmCurrentKey = null;
+        let mmCurrentKind = null;
+        let mmItems = [];
+
+        async function mmLoadMenuList() {
+            const list = document.getElementById('mmMenuList');
+            if (!list || !currentAdminKey) return;
+            try {
+                const resp = await fetch('/admin/menu-manager/menus', { headers: getAuthHeaders() });
+                const data = await resp.json();
+                if (!resp.ok) throw new Error(data.detail || 'Could not load menus.');
+                mmMenus = data.menus || [];
+                mmRenderImageGallery();
+                list.innerHTML = mmMenus.map(m => `
+                    <button class="catalogue-item" type="button" style="display:block; width:100%; text-align:left; margin-bottom:8px;" onclick="mmOpenMenu('${m.menu_key}')">
+                        <b>${escapeHtml(m.label)}</b>
+                        <small>${m.active_item_count}/${m.item_count} active item(s)${m.has_draft ? ' · <span style="color:var(--primary); font-weight:700;">unsaved draft</span>' : ''}</small>
+                    </button>`).join('');
+                if (mmCurrentKey) mmOpenMenu(mmCurrentKey);
+            } catch (err) {
+                list.innerHTML = `<p style="color: var(--danger);">${escapeHtml(err.message || err)}</p>`;
+            }
+        }
+
+        function mmRenderImageGallery() {
+            const grid = document.getElementById('mmImageGrid');
+            if (!grid) return;
+            grid.innerHTML = mmMenus.map(m => {
+                const image = m.image_url ? `<img src="${escapeHtml(m.image_url)}" alt="${escapeHtml(m.label)}">` : '<div style="height:210px;display:grid;place-items:center;background:#f6f3ef;color:#888">No image published</div>';
+                const key = encodeURIComponent(m.menu_key);
+                return `<article class="visual-menu-card"><h3>${escapeHtml(m.label)}</h3>${image}<div class="visual-menu-meta"><b>${escapeHtml(m.image_status || 'Active')}</b>${m.published_at ? ` · ${escapeHtml(m.published_at)}` : ''}</div><div class="visual-menu-actions"><button class="btn-primary" onclick="mmReplaceImage('${key}')">Replace Menu</button><button class="btn-secondary" onclick="mmPreviewImage('${key}')">Preview</button><button class="btn-secondary" onclick="mmHistoryImage('${key}')">History</button><button class="btn-danger" onclick="mmArchiveImage('${key}')">Archive</button></div><div id="mm-image-history-${key}" style="padding:0 14px 12px"></div></article>`;
+            }).join('');
+        }
+
+        function mmReplaceImage(key) { const input=document.createElement('input'); input.type='file'; input.accept='image/jpeg,image/png,image/webp'; input.onchange=async()=>{const file=input.files&&input.files[0];if(!file)return;const form=new FormData();form.append('file',file);const response=await fetch(`/admin/menu-manager/menus/${key}/image/draft`,{method:'POST',headers:getAuthHeaders(),body:form});const data=await response.json();const msg=document.getElementById('mmMessage');msg.style.display='block';msg.className=response.ok?'result-box info':'result-box error';msg.innerText=response.ok?'Draft image saved. Preview it, then publish when ready.':(data.detail||'Upload failed.');if(response.ok)mmLoadMenuList();};input.click(); }
+        async function mmPreviewImage(key){const response=await fetch(`/admin/menu-manager/menus/${key}/image/preview`,{headers:getAuthHeaders()});const data=await response.json();const msg=document.getElementById('mmMessage');msg.style.display='block';msg.className='result-box info';msg.innerHTML=response.ok?`<b>Current</b><br><img src="${escapeHtml(data.current||'')}" style="max-width:220px;max-height:260px"><br><b>New draft</b><br>${data.draft?`<img src="${escapeHtml(data.draft.image_path)}" style="max-width:220px;max-height:260px">`:'No draft saved.'}`:escapeHtml(data.detail||'Preview failed');}
+        async function mmPublishImage(key){const response=await fetch(`/admin/menu-manager/menus/${key}/image/publish`,{method:'POST',headers:getAuthHeaders()});const data=await response.json();const msg=document.getElementById('mmMessage');msg.style.display='block';msg.className=response.ok?'result-box success':'result-box error';msg.innerText=response.ok?'Published. Customers receive the new image immediately.':(data.detail||'Publish failed.');if(response.ok)mmLoadMenuList();}
+        async function mmArchiveImage(key){if(!confirm('Are you sure you want to remove this menu from customer view?'))return;const response=await fetch(`/admin/menu-manager/menus/${key}/image/archive`,{method:'POST',headers:getAuthHeaders()});const data=await response.json();const msg=document.getElementById('mmMessage');msg.style.display='block';msg.className='result-box info';msg.innerText=response.ok?'Menu archived; it remains in History.':(data.detail||'Archive failed.');if(response.ok)mmLoadMenuList();}
+        async function mmHistoryImage(key){const response=await fetch(`/admin/menu-manager/menus/${key}/image/history`,{headers:getAuthHeaders()});const data=await response.json();const box=document.getElementById(`mm-image-history-${key}`);box.innerHTML=(data.versions||[]).map(v=>`<div style="margin:7px 0"><img src="${escapeHtml(v.image_path)}" style="width:70px;height:50px;object-fit:cover;vertical-align:middle;border-radius:4px"><span style="font-size:.78rem">Version ${v.version} — ${escapeHtml(v.status)}</span>${v.status!=='current'?` <button class="btn-secondary" onclick="mmRestoreImage('${key}',${v.id})">Restore</button>`:''}</div>`).join('')||'<small>No image history yet.</small>';}
+        async function mmRestoreImage(key,versionId){const response=await fetch(`/admin/menu-manager/menus/${key}/image/restore/${versionId}`,{method:'POST',headers:getAuthHeaders()});const data=await response.json();const msg=document.getElementById('mmMessage');msg.style.display='block';msg.className=response.ok?'result-box success':'result-box error';msg.innerText=response.ok?'Previous menu restored.':(data.detail||'Restore failed.');if(response.ok)mmLoadMenuList();}
+
+        async function mmOpenMenu(menuKey) {
+            const msg = document.getElementById('mmMessage');
+            msg.style.display = 'none';
+            document.getElementById('mmPreviewBox').style.display = 'none';
+            try {
+                const resp = await fetch(`/admin/menu-manager/menus/${encodeURIComponent(menuKey)}`, { headers: getAuthHeaders() });
+                const data = await resp.json();
+                if (!resp.ok) throw new Error(data.detail || 'Could not load this menu.');
+                mmCurrentKey = menuKey;
+                mmCurrentKind = data.kind;
+                mmItems = data.draft || data.published || [];
+                document.getElementById('mmEditorTitle').innerText = data.label + (data.draft ? ' (editing draft)' : '');
+                mmRenderItems();
+                mmLoadVersions();
+            } catch (err) {
+                msg.style.display = 'block';
+                msg.className = 'result-box error';
+                msg.innerText = err.message || String(err);
+            }
+        }
+
+        function mmRenderItems() {
+            const container = document.getElementById('mmEditorItems');
+            if (!mmCurrentKey) { container.innerHTML = ''; return; }
+            if (mmCurrentKind === 'collection') {
+                container.innerHTML = mmItems.map((item, i) => `
+                    <div class="collection-slot">
+                        <label>Flavour / item name</label>
+                        <input type="text" class="collection-select" value="${escapeHtml(item.flavour || '')}" onchange="mmItems[${i}].flavour=this.value">
+                        <div style="display:flex; gap:8px; margin-top:6px; flex-wrap:wrap;">
+                            ${['250g','500g','1kg'].map(size => `
+                                <label style="font-size:0.76rem;">${size} price
+                                    <input type="number" style="width:90px;" value="${(item.prices && item.prices[size]) || ''}"
+                                        onchange="mmSetPrice(${i}, '${size}', this.value)">
+                                </label>`).join('')}
+                        </div>
+                        <label style="display:flex; align-items:center; gap:6px; margin-top:6px; font-size:0.8rem;">
+                            <input type="checkbox" ${item.active !== false ? 'checked' : ''} onchange="mmItems[${i}].active=this.checked">
+                            Active (unchecked items are kept here but hidden from customers)
+                        </label>
+                        <button class="btn-danger" type="button" style="margin-top:6px;" onclick="mmRemoveItem(${i})">Remove</button>
+                    </div>`).join('') || '<p style="color: var(--text-muted);">No items yet — use + Add item.</p>';
+            } else {
+                container.innerHTML = mmItems.map((item, i) => `
+                    <div class="collection-slot">
+                        <label>Dish name</label>
+                        <input type="text" class="collection-select" value="${escapeHtml(item.item || '')}" onchange="mmItems[${i}].item=this.value">
+                        <label style="margin-top:6px;">Price (₹)</label>
+                        <input type="number" class="collection-select" value="${item.price_inr || ''}" onchange="mmItems[${i}].price_inr=Number(this.value)">
+                        <label style="margin-top:6px;">Description</label>
+                        <input type="text" class="collection-select" value="${escapeHtml(item.description || '')}" onchange="mmItems[${i}].description=this.value">
+                        <label style="margin-top:6px;">Quantity / pack</label>
+                        <input type="text" class="collection-select" value="${escapeHtml(item.quantity || '')}" onchange="mmItems[${i}].quantity=this.value">
+                        <button class="btn-danger" type="button" style="margin-top:6px;" onclick="mmRemoveItem(${i})">Remove</button>
+                    </div>`).join('') || '<p style="color: var(--text-muted);">No items yet — use + Add item.</p>';
+            }
+        }
+
+        function mmSetPrice(index, size, value) {
+            const item = mmItems[index];
+            item.prices = item.prices || {};
+            const num = Number(value);
+            if (value === '' || Number.isNaN(num)) { delete item.prices[size]; }
+            else { item.prices[size] = num; }
+        }
+
+        function mmAddItem() {
+            if (!mmCurrentKey) return alert('Choose a menu first.');
+            mmItems.push(mmCurrentKind === 'collection'
+                ? { flavour: '', active: true, prices: {} }
+                : { item: '', price_inr: 0 });
+            mmRenderItems();
+        }
+
+        function mmRemoveItem(index) {
+            mmItems.splice(index, 1);
+            mmRenderItems();
+        }
+
+        function mmShowMessage(kind, text) {
+            const msg = document.getElementById('mmMessage');
+            msg.style.display = 'block';
+            msg.className = `result-box ${kind}`;
+            msg.innerText = text;
+        }
+
+        async function mmSaveDraft() {
+            if (!mmCurrentKey) return;
+            try {
+                const resp = await fetch(`/admin/menu-manager/menus/${encodeURIComponent(mmCurrentKey)}/draft`, {
+                    method: 'PUT', headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+                    body: JSON.stringify({ items: mmItems })
+                });
+                const data = await resp.json();
+                if (!resp.ok) throw new Error(data.detail || 'Could not save draft.');
+                mmShowMessage('success', 'Draft saved. The live chatbot menu is unchanged until you Save & Publish.');
+                mmLoadMenuList();
+            } catch (err) {
+                mmShowMessage('error', err.message || String(err));
+            }
+        }
+
+        async function mmPreview() {
+            if (!mmCurrentKey) return;
+            try {
+                await mmSaveDraft();
+                const resp = await fetch(`/admin/menu-manager/menus/${encodeURIComponent(mmCurrentKey)}/preview`, { headers: getAuthHeaders() });
+                const data = await resp.json();
+                if (!resp.ok) throw new Error(data.detail || 'Could not build preview.');
+                document.getElementById('mmPreviewBox').style.display = 'block';
+                document.getElementById('mmPreviewText').innerText = data.customer_facing_text;
+            } catch (err) {
+                mmShowMessage('error', err.message || String(err));
+            }
+        }
+
+        async function mmPublish() {
+            if (!mmCurrentKey) return;
+            if (!confirm('Publish this menu? Customers and the chatbot will see it immediately.')) return;
+            try {
+                const resp = await fetch(`/admin/menu-manager/menus/${encodeURIComponent(mmCurrentKey)}/publish`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+                    body: JSON.stringify({ items: mmItems })
+                });
+                const data = await resp.json();
+                if (!resp.ok) throw new Error(data.detail || 'Could not publish.');
+                mmShowMessage('success', `Published as version ${data.version_id}. The chatbot is using this menu now.`);
+                mmLoadMenuList();
+            } catch (err) {
+                mmShowMessage('error', err.message || String(err));
+            }
+        }
+
+        async function mmCancelDraft() {
+            if (!mmCurrentKey) return;
+            try {
+                await fetch(`/admin/menu-manager/menus/${encodeURIComponent(mmCurrentKey)}/draft`, {
+                    method: 'DELETE', headers: getAuthHeaders()
+                });
+                mmShowMessage('info', 'Draft discarded.');
+                mmOpenMenu(mmCurrentKey);
+                mmLoadMenuList();
+            } catch (err) {
+                mmShowMessage('error', err.message || String(err));
+            }
+        }
+
+        async function mmLoadVersions() {
+            const box = document.getElementById('mmVersions');
+            if (!mmCurrentKey) { box.innerHTML = ''; return; }
+            try {
+                const resp = await fetch(`/admin/menu-manager/menus/${encodeURIComponent(mmCurrentKey)}/versions`, { headers: getAuthHeaders() });
+                const data = await resp.json();
+                if (!resp.ok) throw new Error(data.detail || 'Could not load version history.');
+                const versions = data.versions || [];
+                if (!versions.length) { box.innerHTML = '<p style="color: var(--text-muted); font-size: 0.8rem;">No published versions yet.</p>'; return; }
+                box.innerHTML = '<h3 style="color: var(--primary); font-size: 0.95rem;">Version history</h3>' + versions.map(v => `
+                    <div class="collection-slot" style="display:flex; justify-content:space-between; align-items:center;">
+                        <span style="font-size:0.8rem;">#${v.id} · ${escapeHtml(v.action)} · ${escapeHtml(v.changed_at)} · ${escapeHtml(v.changed_by || 'admin')}</span>
+                        <button class="btn-secondary" type="button" onclick="mmRestoreVersion(${v.id})">Restore</button>
+                    </div>`).join('');
+            } catch (err) {
+                box.innerHTML = `<p style="color: var(--danger); font-size: 0.8rem;">${escapeHtml(err.message || err)}</p>`;
+            }
+        }
+
+        async function mmRestoreVersion(versionId) {
+            if (!mmCurrentKey) return;
+            if (!confirm(`Restore version #${versionId}? This publishes it immediately.`)) return;
+            try {
+                const resp = await fetch(`/admin/menu-manager/menus/${encodeURIComponent(mmCurrentKey)}/versions/${versionId}/restore`, {
+                    method: 'POST', headers: getAuthHeaders()
+                });
+                const data = await resp.json();
+                if (!resp.ok) throw new Error(data.detail || 'Could not restore this version.');
+                mmShowMessage('success', `Restored and published as version ${data.version_id}.`);
+                mmOpenMenu(mmCurrentKey);
+                mmLoadMenuList();
+            } catch (err) {
+                mmShowMessage('error', err.message || String(err));
+            }
         }
 
         let igProducts = [];
