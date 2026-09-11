@@ -530,6 +530,20 @@ def _establish_shared_reel_context(sender_id: str, identity: Dict[str, str]) -> 
         facts = session_memory.get_facts(sender_id, "instagram")
         facts["source_route"] = route
         facts["source_match_method"] = match_method
+        # Sharing a post is itself a change of subject: the customer has just
+        # put a specific thing in front of us, which is newer and more
+        # specific than whatever was last discussed. Without clearing that
+        # stale topic, source routing is skipped for the vague follow-up it
+        # exists to answer — `can_use_source` in responder.py treats any
+        # `last_topic` as the conversation already having a subject. In
+        # production this is what sent a "tell me more" straight after a
+        # shared reel into general matching instead of the reel's route.
+        #
+        # An open question the bot itself asked (awaiting_*) is deliberately
+        # left alone: that is a reply the customer still owes us, and the
+        # pack size or area they type next has to keep resolving.
+        facts["last_topic"] = None
+        facts["source_priority_cursor"] = 0
         log.info(
             "Shared reel %s from %s matched routing_id %s (%s) via %s.",
             identity.get("shortcode"), sender_id, route.get("routing_id"),
