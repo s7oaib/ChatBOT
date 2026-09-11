@@ -318,6 +318,22 @@ class Database:
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_post_pairings_status ON instagram_post_pairings(status, expires_at)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_post_pairings_routing ON instagram_post_pairings(routing_id, id DESC)")
 
+            # A permanent-delete audit trail. Kept even after the route row
+            # itself is gone, and deliberately small — no customer data, just
+            # enough to answer "what was this route and who removed it."
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS instagram_route_removals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                routing_id INTEGER NOT NULL,
+                canonical_url TEXT,
+                source_type TEXT,
+                shortcode TEXT,
+                routing_topic TEXT,
+                removed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                removed_by TEXT
+            );
+            """)
+
             for column, declaration in (
                 ("source_routing_id", "INTEGER"),
                 ("source_match_method", "TEXT"),
@@ -654,14 +670,68 @@ class Database:
         return cursor.rowcount > 0
 
     def archive_instagram_source_route(self, routing_id: int) -> bool:
+        # `active` is left exactly as it was — `archived_at IS NULL` is
+        # already what gates matching, so forcing active=0 here would only
+        # destroy the one piece of information restore needs: whether this
+        # route should resume matching immediately or come back disabled.
         now = datetime.utcnow().isoformat()
         with self.get_connection() as conn:
             cursor = conn.execute(
-                "UPDATE instagram_source_routes SET active=0, archived_at=?, updated_at=? WHERE routing_id=?",
+                "UPDATE instagram_source_routes SET archived_at=?, updated_at=? WHERE routing_id=?",
                 (now, now, routing_id),
             )
             conn.commit()
         return cursor.rowcount > 0
+
+    def restore_instagram_source_route(self, routing_id: int) -> bool:
+        """Un-archives a route in place — same row, same id, nothing duplicated.
+
+        Deliberately does not touch `active`: an operator who archived a
+        route they had disabled should get back a disabled route, not one
+        that starts matching customer traffic again on its own.
+        """
+        now = datetime.utcnow().isoformat()
+        with self.get_connection() as conn:
+            cursor = conn.execute(
+                "UPDATE instagram_source_routes SET archived_at=NULL, updated_at=? "
+                "WHERE routing_id=? AND archived_at IS NOT NULL",
+                (now, routing_id),
+            )
+            conn.commit()
+        return cursor.rowcount > 0
+
+    def delete_instagram_source_route(self, routing_id: int, removed_by: Optional[str] = None) -> bool:
+        """Permanently deletes one routing configuration.
+
+        Scope is deliberately narrow: the route row itself, and the
+        pairing-attempt rows that exist only to serve that route (they carry
+        no meaning once the route they were pairing is gone). Nothing about
+        Topics, Menus, product/knowledge catalogues, conversations, or CAM
+        handoffs is touched — none of those are owned by a route, and a
+        route referencing one of them is not a reason to remove it.
+
+        A row is written to instagram_route_removals before the delete, so
+        what this route was and who removed it survives the delete itself.
+        """
+        with self.get_connection() as conn:
+            route = conn.execute(
+                "SELECT * FROM instagram_source_routes WHERE routing_id = ?", (routing_id,)
+            ).fetchone()
+            if not route:
+                return False
+            conn.execute(
+                """
+                INSERT INTO instagram_route_removals
+                    (routing_id, canonical_url, source_type, shortcode, routing_topic, removed_by)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (routing_id, route["canonical_url"], route["source_type"],
+                 route["shortcode"], route["routing_topic"], removed_by),
+            )
+            conn.execute("DELETE FROM instagram_post_pairings WHERE routing_id = ?", (routing_id,))
+            conn.execute("DELETE FROM instagram_source_routes WHERE routing_id = ?", (routing_id,))
+            conn.commit()
+        return True
 
     # --- Shared-post pairing: admin-verified media_id binding --------------
 
