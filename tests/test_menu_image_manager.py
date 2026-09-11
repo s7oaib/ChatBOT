@@ -69,7 +69,8 @@ def test_chatbot_picks_up_a_published_image_with_no_restart(image_store, monkeyp
     # Restoring the first (now archived) version immediately restores it as
     # the chatbot's answer too — no code edit, no redeploy.
     restored = menu_images.restore("aamar_mishti", first["id"])
-    assert responder_module.current_menu_image("aamar_mishti", "/images/AAMAR%20MISHTI.jpeg") == restored["image_path"] == first["image_path"]
+    lookup = responder_module.current_menu_image("aamar_mishti", "/images/AAMAR%20MISHTI.jpeg")
+    assert lookup == restored["image_path"] == first["image_path"]
 
 
 def test_weekly_vegetarian_publish_overrides_the_flyer_rotation(image_store, monkeypatch):

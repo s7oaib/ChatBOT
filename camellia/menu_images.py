@@ -11,7 +11,6 @@ from typing import Any, Dict, Optional
 
 from PIL import Image
 
-from camellia.config import config
 from camellia.database import db
 from camellia import weekly_flyer
 
@@ -90,7 +89,12 @@ def card(menu_key: str) -> Dict[str, Any]:
     draft = db.get_menu_image_draft(key)
     archived = db.has_menu_image_archive(key)
     image_url = (current or {}).get("image_path") or (None if archived else _fallback(key))
-    return {"menu_key": menu_key, "image_url": image_url, "image_status": "Archived" if current is None and archived else ("Published" if current else "Built-in"), "image_version": (current or {}).get("version"), "published_at": (current or {}).get("published_at"), "image_draft": draft}
+    status = "Archived" if current is None and archived else ("Published" if current else "Built-in")
+    return {
+        "menu_key": menu_key, "image_url": image_url, "image_status": status,
+        "image_version": (current or {}).get("version"),
+        "published_at": (current or {}).get("published_at"), "image_draft": draft,
+    }
 
 
 def save_draft(menu_key: str, data: bytes, content_type: str, uploaded_by: str = "admin") -> Dict[str, Any]:
@@ -112,7 +116,8 @@ def preview(menu_key: str) -> Dict[str, Any]:
     if menu_key not in MENU_IMAGE_DEFINITIONS:
         raise KeyError(menu_key)
     current = db.get_menu_image_current(menu_key)
-    return {"menu_key": menu_key, "current": (current or {}).get("image_path") or (None if current is not None else _fallback(menu_key)), "draft": db.get_menu_image_draft(menu_key)}
+    current_url_value = (current or {}).get("image_path") or (None if current is not None else _fallback(menu_key))
+    return {"menu_key": menu_key, "current": current_url_value, "draft": db.get_menu_image_draft(menu_key)}
 
 
 def publish(menu_key: str) -> Dict[str, Any]:

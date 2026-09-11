@@ -464,18 +464,31 @@ class Database:
     # --- Visual Menu Manager: durable menu image versions ------------------
 
     def get_menu_image_current(self, menu_key: str) -> Optional[Dict[str, Any]]:
-        with self.get_connection() as conn:
-            row = conn.execute("SELECT * FROM menu_image_versions WHERE menu_key = ? AND status = 'current' ORDER BY version DESC LIMIT 1", (menu_key,)).fetchone()
-            return dict(row) if row else None
+        # Every responder reply checks this, so a table that has not been
+        # created yet (a connection racing process startup, or a test
+        # database recreated without re-running init_db) must read as "no
+        # managed image" rather than take the whole reply down.
+        try:
+            with self.get_connection() as conn:
+                row = conn.execute("SELECT * FROM menu_image_versions WHERE menu_key = ? AND status = 'current' ORDER BY version DESC LIMIT 1", (menu_key,)).fetchone()
+                return dict(row) if row else None
+        except sqlite3.OperationalError:
+            return None
 
     def get_menu_image_draft(self, menu_key: str) -> Optional[Dict[str, Any]]:
-        with self.get_connection() as conn:
-            row = conn.execute("SELECT * FROM menu_image_versions WHERE menu_key = ? AND status = 'draft' ORDER BY id DESC LIMIT 1", (menu_key,)).fetchone()
-            return dict(row) if row else None
+        try:
+            with self.get_connection() as conn:
+                row = conn.execute("SELECT * FROM menu_image_versions WHERE menu_key = ? AND status = 'draft' ORDER BY id DESC LIMIT 1", (menu_key,)).fetchone()
+                return dict(row) if row else None
+        except sqlite3.OperationalError:
+            return None
 
     def has_menu_image_archive(self, menu_key: str) -> bool:
-        with self.get_connection() as conn:
-            return conn.execute("SELECT 1 FROM menu_image_versions WHERE menu_key = ? AND status = 'archived' LIMIT 1", (menu_key,)).fetchone() is not None
+        try:
+            with self.get_connection() as conn:
+                return conn.execute("SELECT 1 FROM menu_image_versions WHERE menu_key = ? AND status = 'archived' LIMIT 1", (menu_key,)).fetchone() is not None
+        except sqlite3.OperationalError:
+            return False
 
     def save_menu_image_draft(self, menu_key: str, image_path: str, uploaded_by: str) -> Dict[str, Any]:
         now = datetime.utcnow().isoformat()
