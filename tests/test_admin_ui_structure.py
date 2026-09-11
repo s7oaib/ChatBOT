@@ -64,13 +64,44 @@ def test_dashboard_javascript_brackets_balance(script, opener, closer):
     )
 
 
-def test_the_dashboard_has_three_tabs(page):
+def test_the_dashboard_has_four_tabs(page):
     """
     Eight tabs needed 1655px of nav on a 347px phone, so most of the portal was
-    unreachable on the handset the kitchen actually uses.
+    unreachable on the handset the kitchen actually uses. Menu Manager is its
+    own tab rather than folded into Menu, so it does not disturb the existing
+    Instagram Post & Ad Routing panel that already lives there.
     """
     buttons = re.findall(r'<button class="tab-btn[^"]*" onclick="switchTab\(', page)
-    assert len(buttons) == 3, f"expected 3 tabs, found {len(buttons)}"
+    assert len(buttons) == 4, f"expected 4 tabs, found {len(buttons)}"
+
+
+def test_menu_manager_sits_between_menu_and_customers(page):
+    nav = page[page.index('<div class="tabs-nav">'):]
+    nav = nav[:nav.index('</div>')]
+    assert nav.index("tab-image") < nav.index("tab-menu-manager") < nav.index("tab-stats")
+    assert "Menu Manager" in nav
+
+
+def test_menu_manager_can_edit_preview_publish_and_restore(page):
+    assert 'id="mmMenuList"' in page
+    assert 'id="mmEditorItems"' in page
+    assert 'id="mmPreviewText"' in page
+    assert 'id="mmImageGrid"' in page
+    assert "mmLoadMenuList()" in page
+    assert "mmSaveDraft()" in page
+    assert "mmPreview()" in page
+    assert "mmPublish()" in page
+    assert "mmRestoreVersion(" in page
+    assert "mmReplaceImage(" in page
+    assert "mmArchiveImage(" in page
+    assert "mmHistoryImage(" in page
+
+
+def test_ad_routing_panel_still_present_alongside_menu_manager(page):
+    """Menu Manager must not have displaced the existing Post & Ad Routing UI."""
+    assert 'id="tab-ad-routing"' in page
+    assert "Instagram Post" in page or "Post &amp; Ad Routing" in page
+    assert 'id="igPriorityProducts"' in page
 
 
 def test_menu_dashboard_explains_how_to_hide_the_current_week(page):

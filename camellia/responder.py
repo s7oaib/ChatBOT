@@ -21,6 +21,7 @@ from camellia.database import db
 from camellia.trigger_index import trigger_index
 from camellia import weekly_flyer
 from camellia import menu_dates
+from camellia.menu_images import current_url as current_menu_image
 from camellia import semantic_fallback
 from camellia.understanding import BusinessAction, Intent, understanding_engine
 from camellia.knowledge import HUMAN_ONLY_INTENTS, approved_knowledge
@@ -2811,6 +2812,15 @@ class DeterministicResponder:
         # extraction fails, the two can legitimately disagree, and letting a
         # stale text date suppress this week's photo is exactly the "upload
         # did nothing" failure the split exists to prevent.
+        # A deliberately published Menu Manager image wins immediately and is
+        # read from durable metadata on every request; no process restart is
+        # needed. An explicitly archived image returns no card.
+        managed = db.get_menu_image_current("weekly_vegetarian")
+        if managed:
+            return managed["image_path"], None
+        if db.has_menu_image_archive("weekly_vegetarian"):
+            return None, None
+
         uploaded = weekly_flyer.get()
         if uploaded:
             if not weekly_flyer.is_current(uploaded):
@@ -2826,8 +2836,8 @@ class DeterministicResponder:
     def _detect_relevant_images(self, user_message: str) -> Optional[Any]:
         """Attaches relevant menu photo cards when user inquires about products or menus in AI-First mode."""
         lowered = user_message.lower().strip()
-        img_signature_sondesh = "/images/Signature%20Sondesh.jpeg"
-        img_aamar_mishti = "/images/AAMAR%20MISHTI.jpeg"
+        img_signature_sondesh = current_menu_image("signature", "/images/Signature%20Sondesh.jpeg")
+        img_aamar_mishti = current_menu_image("aamar_mishti", "/images/AAMAR%20MISHTI.jpeg")
 
         import datetime, zoneinfo
         try:
@@ -2890,8 +2900,8 @@ class DeterministicResponder:
         self, template_id: str, default_response: str, user_id: str = None, channel: str = None, user_message: str = ""
     ) -> Tuple[str, Optional[Any]]:
         """Attaches the exact photo card(s) a template should send alongside its text whenever requested."""
-        img_signature_sondesh = "/images/Signature%20Sondesh.jpeg"
-        img_aamar_mishti = "/images/AAMAR%20MISHTI.jpeg"
+        img_signature_sondesh = current_menu_image("signature", "/images/Signature%20Sondesh.jpeg")
+        img_aamar_mishti = current_menu_image("aamar_mishti", "/images/AAMAR%20MISHTI.jpeg")
 
         import datetime, zoneinfo
         try:
@@ -3194,6 +3204,8 @@ class DeterministicResponder:
         elif template_id == "artisanal_differentiation":
             target_images = [img_aamar_mishti, img_signature_sondesh]
 
+        if isinstance(target_images, list):
+            target_images = [image for image in target_images if image]
         if target_images:
             return formatted_text, target_images
 

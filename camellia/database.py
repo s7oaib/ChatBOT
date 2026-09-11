@@ -305,6 +305,51 @@ class Database:
             ):
                 self._ensure_column(cursor, "conversations", column, declaration)
 
+            # Menu Manager: one row per unpublished edit in progress. A menu_key
+            # ("collections.aamar_mishti", "weekly.vegetarian", ...) has at most
+            # one draft — a second save overwrites it rather than accumulating.
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS menu_drafts (
+                menu_key TEXT PRIMARY KEY,
+                draft_json TEXT NOT NULL,
+                updated_by TEXT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+
+            # Menu Manager: one row per publish/restore, holding the full
+            # resulting item list for that menu_key — the lightweight version
+            # history the client can review or roll back to.
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS menu_versions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                menu_key TEXT NOT NULL,
+                snapshot_json TEXT NOT NULL,
+                action TEXT NOT NULL DEFAULT 'publish',
+                changed_by TEXT,
+                changed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_menu_versions_key ON menu_versions(menu_key, id DESC);")
+
+            # Visual Menu Manager: durable image versions per menu_key. Image
+            # bytes live on the same durable volume as menu.json; this table
+            # holds only the metadata needed to make one version current.
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS menu_image_versions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                menu_key TEXT NOT NULL,
+                image_path TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'draft',
+                version INTEGER NOT NULL,
+                uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                uploaded_by TEXT,
+                published_at TIMESTAMP,
+                archived_at TIMESTAMP
+            );
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_menu_image_versions_key ON menu_image_versions(menu_key, version DESC)")
+
             # Seed counters if empty
             cursor.execute("INSERT OR IGNORE INTO analytics (key, value) VALUES ('total_messages', 0);")
             cursor.execute("INSERT OR IGNORE INTO analytics (key, value) VALUES ('matched_responses', 0);")
@@ -354,6 +399,149 @@ class Database:
             cursor = conn.execute("DELETE FROM ad_product_routes WHERE ad_id = ?", (ad_id,))
             conn.commit()
         return cursor.rowcount > 0
+
+    # --- Menu Manager: drafts and version history -------------------------
+
+    def save_menu_draft(self, menu_key: str, draft_json: str, updated_by: Optional[str] = None) -> None:
+        with self.get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO menu_drafts (menu_key, draft_json, updated_by, updated_at)
+                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(menu_key) DO UPDATE SET
+                    draft_json = excluded.draft_json,
+                    updated_by = excluded.updated_by,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (menu_key, draft_json, updated_by),
+            )
+            conn.commit()
+
+    def get_menu_draft(self, menu_key: str) -> Optional[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM menu_drafts WHERE menu_key = ?", (menu_key,)
+            ).fetchone()
+            return dict(row) if row else None
+
+    def clear_menu_draft(self, menu_key: str) -> None:
+        with self.get_connection() as conn:
+            conn.execute("DELETE FROM menu_drafts WHERE menu_key = ?", (menu_key,))
+            conn.commit()
+
+    def record_menu_version(
+        self, menu_key: str, snapshot_json: str, action: str = "publish",
+        changed_by: Optional[str] = None,
+    ) -> int:
+        with self.get_connection() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO menu_versions (menu_key, snapshot_json, action, changed_by)
+                VALUES (?, ?, ?, ?)
+                """,
+                (menu_key, snapshot_json, action, changed_by),
+            )
+            conn.commit()
+            return cursor.lastrowid
+
+    def get_menu_versions(self, menu_key: str, limit: int = 20) -> List[Dict[str, Any]]:
+        """Newest first — the version a client wants to inspect or restore is
+        almost always a recent one."""
+        with self.get_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM menu_versions WHERE menu_key = ? ORDER BY id DESC LIMIT ?",
+                (menu_key, limit),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def get_menu_version(self, version_id: int) -> Optional[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM menu_versions WHERE id = ?", (version_id,)
+            ).fetchone()
+            return dict(row) if row else None
+
+    # --- Visual Menu Manager: durable menu image versions ------------------
+
+    def get_menu_image_current(self, menu_key: str) -> Optional[Dict[str, Any]]:
+        # Every responder reply checks this, so a table that has not been
+        # created yet (a connection racing process startup, or a test
+        # database recreated without re-running init_db) must read as "no
+        # managed image" rather than take the whole reply down.
+        try:
+            with self.get_connection() as conn:
+                row = conn.execute("SELECT * FROM menu_image_versions WHERE menu_key = ? AND status = 'current' ORDER BY version DESC LIMIT 1", (menu_key,)).fetchone()
+                return dict(row) if row else None
+        except sqlite3.OperationalError:
+            return None
+
+    def get_menu_image_draft(self, menu_key: str) -> Optional[Dict[str, Any]]:
+        try:
+            with self.get_connection() as conn:
+                row = conn.execute("SELECT * FROM menu_image_versions WHERE menu_key = ? AND status = 'draft' ORDER BY id DESC LIMIT 1", (menu_key,)).fetchone()
+                return dict(row) if row else None
+        except sqlite3.OperationalError:
+            return None
+
+    def has_menu_image_archive(self, menu_key: str) -> bool:
+        try:
+            with self.get_connection() as conn:
+                return conn.execute("SELECT 1 FROM menu_image_versions WHERE menu_key = ? AND status = 'archived' LIMIT 1", (menu_key,)).fetchone() is not None
+        except sqlite3.OperationalError:
+            return False
+
+    def save_menu_image_draft(self, menu_key: str, image_path: str, uploaded_by: str) -> Dict[str, Any]:
+        now = datetime.utcnow().isoformat()
+        with self.get_connection() as conn:
+            conn.execute("DELETE FROM menu_image_versions WHERE menu_key = ? AND status = 'draft'", (menu_key,))
+            next_version = (conn.execute("SELECT COALESCE(MAX(version), 0) + 1 AS n FROM menu_image_versions WHERE menu_key = ?", (menu_key,)).fetchone()["n"])
+            cur = conn.execute("INSERT INTO menu_image_versions (menu_key, image_path, status, version, uploaded_at, uploaded_by) VALUES (?, ?, 'draft', ?, ?, ?)", (menu_key, image_path, next_version, now, uploaded_by))
+            conn.commit()
+            return dict(conn.execute("SELECT * FROM menu_image_versions WHERE id = ?", (cur.lastrowid,)).fetchone())
+
+    def publish_menu_image(self, menu_key: str) -> Optional[Dict[str, Any]]:
+        now = datetime.utcnow().isoformat()
+        with self.get_connection() as conn:
+            draft = conn.execute("SELECT * FROM menu_image_versions WHERE menu_key = ? AND status = 'draft' ORDER BY id DESC LIMIT 1", (menu_key,)).fetchone()
+            if not draft:
+                return None
+            conn.execute("UPDATE menu_image_versions SET status = 'archived', archived_at = ? WHERE menu_key = ? AND status = 'current'", (now, menu_key))
+            conn.execute("UPDATE menu_image_versions SET status = 'current', published_at = ? WHERE id = ?", (now, draft["id"]))
+            conn.commit()
+            return dict(conn.execute("SELECT * FROM menu_image_versions WHERE id = ?", (draft["id"],)).fetchone())
+
+    def archive_menu_image(self, menu_key: str) -> Optional[Dict[str, Any]]:
+        now = datetime.utcnow().isoformat()
+        with self.get_connection() as conn:
+            row = conn.execute("SELECT * FROM menu_image_versions WHERE menu_key = ? AND status = 'current' ORDER BY version DESC LIMIT 1", (menu_key,)).fetchone()
+            if not row:
+                return None
+            conn.execute("UPDATE menu_image_versions SET status = 'archived', archived_at = ? WHERE id = ?", (now, row["id"]))
+            conn.commit()
+            return dict(conn.execute("SELECT * FROM menu_image_versions WHERE id = ?", (row["id"],)).fetchone())
+
+    def create_menu_image_archive(self, menu_key: str, image_path: str, uploaded_by: str) -> Dict[str, Any]:
+        now = datetime.utcnow().isoformat()
+        with self.get_connection() as conn:
+            version = conn.execute("SELECT COALESCE(MAX(version), 0) + 1 AS n FROM menu_image_versions WHERE menu_key = ?", (menu_key,)).fetchone()["n"]
+            cur = conn.execute("INSERT INTO menu_image_versions (menu_key, image_path, status, version, uploaded_at, uploaded_by, archived_at) VALUES (?, ?, 'archived', ?, ?, ?, ?)", (menu_key, image_path, version, now, uploaded_by, now))
+            conn.commit()
+            return dict(conn.execute("SELECT * FROM menu_image_versions WHERE id = ?", (cur.lastrowid,)).fetchone())
+
+    def list_menu_image_history(self, menu_key: str) -> list[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            return [dict(row) for row in conn.execute("SELECT * FROM menu_image_versions WHERE menu_key = ? AND status != 'draft' ORDER BY version DESC", (menu_key,)).fetchall()]
+
+    def restore_menu_image(self, menu_key: str, version_id: int) -> Optional[Dict[str, Any]]:
+        now = datetime.utcnow().isoformat()
+        with self.get_connection() as conn:
+            target = conn.execute("SELECT * FROM menu_image_versions WHERE id = ? AND menu_key = ? AND status = 'archived'", (version_id, menu_key)).fetchone()
+            if not target:
+                return None
+            conn.execute("UPDATE menu_image_versions SET status = 'archived', archived_at = ? WHERE menu_key = ? AND status = 'current'", (now, menu_key))
+            conn.execute("UPDATE menu_image_versions SET status = 'current', published_at = ?, archived_at = NULL WHERE id = ?", (now, version_id))
+            conn.commit()
+            return dict(conn.execute("SELECT * FROM menu_image_versions WHERE id = ?", (version_id,)).fetchone())
 
     def save_instagram_source_route(self, route: Dict[str, Any], routing_id: Optional[int] = None) -> Dict[str, Any]:
         """Create/update one source route, deduplicating URL and identifiers."""
