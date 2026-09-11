@@ -2067,6 +2067,23 @@ class Database:
             conn.commit()
         return cursor.rowcount > 0
 
+    def _hydrate_candidate_row(self, item: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Shared shaping for a candidate_templates row before it reaches the
+        dashboard: strip flowers left over from before the save-time strip
+        existed, fall back original_draft to the current response for a row
+        that was never edited, decode source_refs, and normalize `edited`
+        to a real bool for the JS layer.
+        """
+        item["response"] = strip_flower_emoji(item.get("response") or "")
+        item["original_draft"] = item.get("original_draft") or item["response"]
+        item["edited"] = bool(item.get("edited"))
+        try:
+            item["source_refs"] = json.loads(item.get("source_refs") or "[]")
+        except Exception:
+            item["source_refs"] = []
+        return item
+
     def get_pending_candidates(self) -> List[Dict[str, Any]]:
         """Retrieves all candidate templates awaiting human approval."""
         with self.get_connection() as conn:
@@ -2075,22 +2092,29 @@ class Database:
             rows = cursor.fetchall()
             result = []
             for row in rows:
-                item = dict(row)
-                # Rows written before the save-time strip existed still carry
-                # flowers, so clean them on the way to the dashboard too.
-                item["response"] = strip_flower_emoji(item.get("response") or "")
+                item = self._hydrate_candidate_row(dict(row))
                 eligible, _ = candidate_eligibility(item.get("user_message") or "", item["response"])
                 valid, _ = validate_candidate_answer(item["response"])
                 if not eligible or not valid:
                     continue
-                item["original_draft"] = item.get("original_draft") or item["response"]
-                item["edited"] = bool(item.get("edited"))
-                try:
-                    item["source_refs"] = json.loads(item.get("source_refs") or "[]")
-                except Exception:
-                    item["source_refs"] = []
                 result.append(item)
             return result
+
+    def get_candidates_by_status(self, status: str, limit: int = 100) -> List[Dict[str, Any]]:
+        """
+        Historical candidate rows for review — an approved or rejected
+        decision already made. Unlike get_pending_candidates, this does not
+        re-run the eligibility/validity gate: that gate decides what belongs
+        in the live approval queue, not whether a past decision is worth
+        showing in the dashboard's AI Resolution & Answers view.
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM candidate_templates WHERE status = ? ORDER BY id DESC LIMIT ?",
+                (status, limit),
+            )
+            return [self._hydrate_candidate_row(dict(row)) for row in cursor.fetchall()]
 
     def get_candidate_template(self, candidate_id: int) -> Optional[Dict[str, Any]]:
         """Returns one candidate template for the approval workflow."""

@@ -2659,12 +2659,24 @@ async def update_templates(request: Request, x_admin_key: Optional[str] = Header
 
 @app.get("/admin/candidates")
 def get_candidate_templates(
+    status: str = "PENDING_APPROVAL",
     x_admin_key: Optional[str] = Header(None),
     x_admin_pin: Optional[str] = Header(None),
 ):
-    """Returns RAG/AI candidate answers awaiting human approval."""
+    """
+    Returns RAG/AI candidate answers by status. Default is the live approval
+    queue (PENDING_APPROVAL); APPROVED/REJECTED return the historical record
+    for the AI Resolution & Answers "Rejected / Archived" view — a decision
+    already made, not a new place decisions get made.
+    """
     require_admin(x_admin_key, x_admin_pin)
-    candidates = db.get_pending_candidates()
+    normalized = status.strip().upper()
+    if normalized == "PENDING_APPROVAL":
+        candidates = db.get_pending_candidates()
+    elif normalized in {"APPROVED", "REJECTED"}:
+        candidates = db.get_candidates_by_status(normalized)
+    else:
+        raise HTTPException(status_code=400, detail="status must be PENDING_APPROVAL, APPROVED, or REJECTED")
     return {"status": "success", "count": len(candidates), "candidates": candidates}
 
 @app.get("/admin/knowledge-gaps")
@@ -3690,10 +3702,28 @@ def get_admin_dashboard():
         <div class="tabs-nav">
             <button class="tab-btn active" onclick="switchTab('tab-image', this)">🍱 Menu</button>
             <button class="tab-btn" onclick="switchTab('tab-menu-manager', this)">📋 Menu Manager</button>
-            <button class="tab-btn" onclick="switchTab('tab-stats', this)">💬 Customers</button>
-            <button class="tab-btn" onclick="switchTab('tab-candidates', this)">✅ Answers <span id="candidateBadge" style="display:none; background: var(--danger); color: #fff; border-radius: 10px; padding: 1px 7px; font-size: 0.72rem; margin-left: 4px;"></span></button>
             <button class="tab-btn" onclick="switchTab('tab-ai-resolution', this)">🤖 AI Resolution &amp; Answers <span id="aiResolutionBadge" style="display:none; background: var(--danger); color: #fff; border-radius: 10px; padding: 1px 7px; font-size: 0.72rem; margin-left: 4px;"></span></button>
         </div>
+
+        <!-- Customers and Answers used to be their own top-level tabs. Every
+             action either one offered — view an escalation, Teach & Resolve,
+             view/edit/approve/reject a candidate draft, see approved
+             knowledge — is now inside AI Resolution & Answers below, reading
+             and writing the exact same candidate_templates/escalations/
+             learned_knowledge/knowledge_gaps tables through the exact same
+             endpoints. Nothing about those tables or endpoints changed; only
+             which screen a client reaches them from did. The two panels
+             stay in the DOM, unstyled into the normal flow, reachable only
+             from here — for regression comparison during this transition,
+             not for daily use. -->
+        <details style="margin: 10px 0 0; font-size: 0.82rem; color: var(--text-muted);">
+            <summary style="cursor:pointer; user-select:none;">⚙️ Advanced / Legacy Views (debugging only)</summary>
+            <div style="display:flex; gap:8px; margin-top:8px; flex-wrap:wrap;">
+                <button class="btn-secondary" type="button" onclick="switchTab('tab-stats', null)">Open Legacy Customers View</button>
+                <button class="btn-secondary" type="button" onclick="switchTab('tab-candidates', null)">Open Legacy Answers View</button>
+            </div>
+            <p style="margin-top:6px;">These are the old per-workflow screens, kept only so a real discrepancy against AI Resolution &amp; Answers can be checked during this transition. Use the 🤖 AI Resolution &amp; Answers tab above for normal work.</p>
+        </details>
 
         <!-- MENU tab, panel 2 of 4: same job, for when there is no photo -->
         <div id="tab-image" class="panel-card" data-group="menu">
@@ -4062,39 +4092,54 @@ THIS WEEK'S BENGAL SPECIALS
                 <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
                     <div>
                         <h2>🤖 AI Resolution &amp; Answers</h2>
-                        <p>Everything the bot could not answer on its own, in one queue: drafts it wrote and is waiting on you to approve, questions it has no knowledge of yet, and customers waiting on a person. <b>Nothing here has been shown to a customer</b> except items already marked resolved/approved elsewhere.</p>
+                        <p>The one place for everything the bot could not answer on its own: drafts waiting on your approval, questions it has no knowledge of yet, and customers waiting on a person — plus the answers you've already approved. <b>Nothing here has been shown to a customer</b> except items already marked resolved/approved.</p>
                     </div>
                     <button class="btn-secondary" onclick="loadAiResolution()">🔄 Refresh</button>
                 </div>
             </div>
 
-            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px; margin-bottom: 18px;">
-                <div style="background: #FFF7ED; border: 1px solid #FED7AA; padding: 16px; border-radius: 14px; text-align: center;">
-                    <span style="font-size: 0.78rem; color: #9A3412; font-weight: 600;">AI SUGGESTED (needs approval)</span>
-                    <h3 id="aiStatSuggested" style="font-size: 1.7rem; color: #9A3412; margin-top: 4px;">0</h3>
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 14px; margin-bottom: 18px;">
+                <div style="background: #F8FAFC; border: 1px solid var(--border); padding: 16px; border-radius: 14px; text-align: center;">
+                    <span style="font-size: 0.75rem; color: #64748B; font-weight: 600;">TOTAL INQUIRIES</span>
+                    <h3 id="aiStatTotal" style="font-size: 1.7rem; margin-top: 4px;">0</h3>
                 </div>
-                <div style="background: #EFF6FF; border: 1px solid #BFDBFE; padding: 16px; border-radius: 14px; text-align: center;">
-                    <span style="font-size: 0.78rem; color: #1E40AF; font-weight: 600;">NEEDS TEACHING (no answer yet)</span>
-                    <h3 id="aiStatTeach" style="font-size: 1.7rem; color: #1E40AF; margin-top: 4px;">0</h3>
+                <div style="background: #ECFDF5; border: 1px solid #A7F3D0; padding: 16px; border-radius: 14px; text-align: center;">
+                    <span style="font-size: 0.75rem; color: #065F46; font-weight: 600;">AUTO RESOLVED</span>
+                    <h3 id="aiStatAutoResolved" style="font-size: 1.7rem; color: var(--success); margin-top: 4px;">0</h3>
+                </div>
+                <div style="background: #FFF7ED; border: 1px solid #FED7AA; padding: 16px; border-radius: 14px; text-align: center;">
+                    <span style="font-size: 0.75rem; color: #9A3412; font-weight: 600;">NEEDS ATTENTION</span>
+                    <h3 id="aiStatNeedsAttention" style="font-size: 1.7rem; color: #9A3412; margin-top: 4px;">0</h3>
                 </div>
                 <div style="background: #FEF2F2; border: 1px solid #FECACA; padding: 16px; border-radius: 14px; text-align: center;">
-                    <span style="font-size: 0.78rem; color: #991B1B; font-weight: 600;">WAITING ON A HUMAN</span>
+                    <span style="font-size: 0.75rem; color: #991B1B; font-weight: 600;">HUMAN REQUIRED</span>
                     <h3 id="aiStatHuman" style="font-size: 1.7rem; color: var(--danger); margin-top: 4px;">0</h3>
+                </div>
+                <div id="aiStatAnalyzedCard" style="display:none; background: #EEF2FF; border: 1px solid #C7D2FE; padding: 16px; border-radius: 14px; text-align: center;">
+                    <span style="font-size: 0.75rem; color: #3730A3; font-weight: 600;">AI ANALYZED (shadow, not resolved)</span>
+                    <h3 id="aiStatAnalyzed" style="font-size: 1.7rem; color: #3730A3; margin-top: 4px;">0</h3>
                 </div>
             </div>
 
+            <div style="margin-bottom:12px;">
+                <input type="text" id="aiResolutionSearch" class="field-control" placeholder="🔎 Search customer questions or answers…" style="max-width:420px;" oninput="renderAiResolution()">
+            </div>
+
             <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:14px;">
-                <button class="tab-btn active" type="button" id="aiFilterBtn-all" onclick="setAiResolutionFilter('all')">All</button>
+                <button class="tab-btn active" type="button" id="aiFilterBtn-needs_attention" onclick="setAiResolutionFilter('needs_attention')">Needs Attention</button>
                 <button class="tab-btn" type="button" id="aiFilterBtn-ai_suggested" onclick="setAiResolutionFilter('ai_suggested')">AI Suggested</button>
-                <button class="tab-btn" type="button" id="aiFilterBtn-teach_required" onclick="setAiResolutionFilter('teach_required')">Needs Teaching</button>
-                <button class="tab-btn" type="button" id="aiFilterBtn-human_required" onclick="setAiResolutionFilter('human_required')">Waiting on a Human</button>
+                <button class="tab-btn" type="button" id="aiFilterBtn-human_required" onclick="setAiResolutionFilter('human_required')">Human Required</button>
+                <button class="tab-btn" type="button" id="aiFilterBtn-teach_required" onclick="setAiResolutionFilter('teach_required')">Knowledge Gaps</button>
+                <button class="tab-btn" type="button" id="aiFilterBtn-approved" onclick="setAiResolutionFilter('approved')">Approved Answers</button>
+                <button class="tab-btn" type="button" id="aiFilterBtn-rejected" onclick="setAiResolutionFilter('rejected')">Rejected / Archived</button>
+                <button class="tab-btn" type="button" onclick="document.getElementById('triage-shadow-section').scrollIntoView({behavior:'smooth'})">Triage Shadow ↓</button>
             </div>
 
             <div style="overflow-x: auto;">
                 <table class="data-table">
                     <thead>
                         <tr>
-                            <th>Type</th>
+                            <th>Status</th>
                             <th>Customer Asked / Situation</th>
                             <th>Draft Answer / Detail</th>
                             <th>Confidence / Seen</th>
@@ -4112,7 +4157,7 @@ THIS WEEK'S BENGAL SPECIALS
                  auto-approved anything, and never touched the queue above —
                  this is read-only so the quality of its calls can be judged
                  against real traffic before any auto-resolve path is built. -->
-            <div style="margin-top:28px; padding-top:20px; border-top:2px solid var(--border);">
+            <div id="triage-shadow-section" style="margin-top:28px; padding-top:20px; border-top:2px solid var(--border);">
                 <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 10px;">
                     <div>
                         <h3 style="margin:0;">🔬 Triage Shadow Mode <span style="font-weight:400; font-size:0.8rem; color:var(--text-muted);">(measurement only — nothing below has ever reached a customer)</span></h3>
@@ -6051,6 +6096,7 @@ Non-Veg:
                 });
                 if (resp.ok) {
                     loadKnowledge();
+                    refreshAiResolutionIfVisible();
                 } else {
                     alert('Failed to delete knowledge item.');
                 }
@@ -6115,13 +6161,16 @@ Non-Veg:
             }
         }
 
-        // AI RESOLUTION & ANSWERS: a merged read of three existing queues
-        // (candidate_templates, escalations, knowledge_gaps) through their
-        // existing endpoints. It introduces no new table and no new
-        // customer-facing behaviour — approve/reject/edit/resolve here call
-        // the identical endpoints the Answers and Customers tabs already use.
-        let aiResolutionFilter = 'all';
-        let aiResolutionItems = [];
+        // AI RESOLUTION & ANSWERS: a merged read of the existing queues
+        // (candidate_templates pending/approved/rejected, escalations,
+        // knowledge_gaps, learned_knowledge) through their existing
+        // endpoints. It introduces no new table and no new customer-facing
+        // behaviour — approve/reject/edit/resolve/delete here call the
+        // identical endpoints the old Answers and Customers tabs used.
+        let aiResolutionFilter = 'needs_attention';
+        let aiResolutionItems = [];          // candidates(pending) + escalations(pending) + gaps(open)
+        let aiResolutionApproved = [];       // learned_knowledge
+        let aiResolutionRejected = [];       // candidates(status=REJECTED)
 
         function refreshAiResolutionIfVisible() {
             const panel = document.getElementById('tab-ai-resolution');
@@ -6130,7 +6179,7 @@ Non-Veg:
 
         function setAiResolutionFilter(filter) {
             aiResolutionFilter = filter;
-            ['all', 'ai_suggested', 'teach_required', 'human_required'].forEach(f => {
+            ['needs_attention', 'ai_suggested', 'teach_required', 'human_required', 'approved', 'rejected'].forEach(f => {
                 const btn = document.getElementById(`aiFilterBtn-${f}`);
                 if (btn) btn.classList.toggle('active', f === filter);
             });
@@ -6141,18 +6190,26 @@ Non-Veg:
             const tbody = document.getElementById('aiResolutionTableBody');
             tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: #888;">Loading...</td></tr>';
             try {
-                const [candResp, escResp, gapResp] = await Promise.all([
+                const [candResp, escResp, gapResp, approvedResp, rejectedResp, analyticsResp] = await Promise.all([
                     fetch('/admin/candidates', { headers: getAuthHeaders() }),
                     fetch('/admin/escalations?status=pending&limit=100', { headers: getAuthHeaders() }),
                     fetch('/admin/knowledge-gaps?status=OPEN&limit=100', { headers: getAuthHeaders() }),
+                    fetch('/admin/learned-knowledge?limit=100', { headers: getAuthHeaders() }),
+                    fetch('/admin/candidates?status=REJECTED', { headers: getAuthHeaders() }),
+                    fetch('/admin/analytics', { headers: getAuthHeaders() }),
                 ]);
                 const candData = candResp.ok ? await candResp.json() : { candidates: [] };
                 const escData = escResp.ok ? await escResp.json() : { escalations: [] };
                 const gapData = gapResp.ok ? await gapResp.json() : { knowledge_gaps: [] };
+                const approvedData = approvedResp.ok ? await approvedResp.json() : { learned_knowledge: [] };
+                const rejectedData = rejectedResp.ok ? await rejectedResp.json() : { candidates: [] };
+                const analytics = analyticsResp.ok ? await analyticsResp.json() : {};
 
                 const candidates = candData.candidates || [];
                 const escalations = escData.escalations || [];
                 const gaps = gapData.knowledge_gaps || [];
+                aiResolutionApproved = approvedData.learned_knowledge || [];
+                aiResolutionRejected = rejectedData.candidates || [];
 
                 aiResolutionItems = [
                     ...candidates.map(c => ({ kind: 'candidate', category: 'ai_suggested', data: c })),
@@ -6160,10 +6217,12 @@ Non-Veg:
                     ...gaps.map(g => ({ kind: 'gap', category: 'teach_required', data: g })),
                 ];
 
-                document.getElementById('aiStatSuggested').innerText = candidates.length;
-                document.getElementById('aiStatTeach').innerText = gaps.length;
+                const needsAttention = candidates.length + escalations.length + gaps.length;
+                document.getElementById('aiStatTotal').innerText = analytics.total_conversations || 0;
+                document.getElementById('aiStatAutoResolved').innerText = analytics.matched_conversations || 0;
+                document.getElementById('aiStatNeedsAttention').innerText = needsAttention;
                 document.getElementById('aiStatHuman').innerText = escalations.length;
-                updateAiResolutionBadge(candidates.length + escalations.length + gaps.length);
+                updateAiResolutionBadge(needsAttention);
 
                 renderAiResolution();
             } catch (err) {
@@ -6184,22 +6243,45 @@ Non-Veg:
 
         const AI_CATEGORY_LABEL = {
             ai_suggested: '✨ AI Suggested',
-            teach_required: '📘 Needs Teaching',
-            human_required: '🙋 Needs a Human',
+            teach_required: '📘 Knowledge Gap',
+            human_required: '🙋 Pending Human',
+            approved: '✅ Approved',
+            rejected: '🗄️ Rejected',
         };
 
         function renderAiResolution() {
             const tbody = document.getElementById('aiResolutionTableBody');
-            const items = aiResolutionFilter === 'all'
-                ? aiResolutionItems
-                : aiResolutionItems.filter(i => i.category === aiResolutionFilter);
+            const query = (document.getElementById('aiResolutionSearch').value || '').trim().toLowerCase();
+
+            let items;
+            if (aiResolutionFilter === 'approved') {
+                items = aiResolutionApproved.map(k => ({ kind: 'approved', category: 'approved', data: k }));
+            } else if (aiResolutionFilter === 'rejected') {
+                items = aiResolutionRejected.map(c => ({ kind: 'rejected', category: 'rejected', data: c }));
+            } else if (aiResolutionFilter === 'needs_attention') {
+                items = aiResolutionItems;
+            } else {
+                items = aiResolutionItems.filter(i => i.category === aiResolutionFilter);
+            }
+
+            if (query) {
+                items = items.filter(i => aiResolutionSearchText(i).includes(query));
+            }
 
             if (!items.length) {
-                tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: #888;">Nothing waiting in this view.</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: #888;">Nothing here right now.</td></tr>';
                 return;
             }
 
             tbody.innerHTML = items.map(item => renderAiResolutionRow(item)).join('');
+        }
+
+        function aiResolutionSearchText(item) {
+            const d = item.data;
+            return [
+                d.user_message, d.response, d.verified_answer, d.question_pattern,
+                d.topic, d.example_message, d.reason,
+            ].filter(Boolean).join(' ').toLowerCase();
         }
 
         function renderAiResolutionRow(item) {
@@ -6215,6 +6297,7 @@ Non-Veg:
                     <td style="max-width: 340px; font-size: 0.82rem;">
                         <div id="ai-candidateText-${c.id}" style="white-space:pre-wrap;">${escapeHtml(c.response)}</div>
                         <textarea id="ai-candidateEdit-${c.id}" style="display:none;width:100%;min-height:110px;">${escapeHtml(c.response)}</textarea>
+                        ${c.edited ? `<small style="color:var(--text-muted);">Edited by ${escapeHtml(c.edited_by || 'admin')} · ${escapeHtml(c.edited_at || '')}</small>` : ''}
                     </td>
                     <td style="color: ${confColour}; font-weight: 600;">${confidence}%</td>
                     <td style="white-space: nowrap;">
@@ -6239,18 +6322,43 @@ Non-Veg:
                     </td>
                 </tr>`;
             }
-            // knowledge gap
-            const g = item.data;
-            const intents = (g.intents || []).join(', ');
+            if (item.kind === 'gap') {
+                const g = item.data;
+                const intents = (g.intents || []).join(', ');
+                return `
+                <tr>
+                    <td><span class="badge badge-nonveg">${label}</span></td>
+                    <td style="max-width: 220px;">${escapeHtml(g.example_message || '—')}</td>
+                    <td style="font-size: 0.82rem;">${escapeHtml(intents || g.reason || '')}</td>
+                    <td>seen ${g.occurrences || 1}x</td>
+                    <td style="white-space: nowrap;">
+                        <button class="btn-secondary" style="padding: 4px 10px; font-size: 0.75rem;" onclick="aiSetGapStatus(${g.id}, 'DISMISSED')">Dismiss</button>
+                    </td>
+                </tr>`;
+            }
+            if (item.kind === 'approved') {
+                const k = item.data;
+                return `
+                <tr>
+                    <td><span class="badge badge-veg">${label}</span></td>
+                    <td style="max-width: 220px;"><b>${escapeHtml(k.topic || '')}</b><br><code style="font-size:0.78rem;">${escapeHtml(k.question_pattern || '')}</code></td>
+                    <td style="max-width: 340px; font-size: 0.82rem; white-space:pre-wrap;">${escapeHtml(k.verified_answer || '')}</td>
+                    <td><span class="badge badge-veg">${escapeHtml(k.source || 'staff')}</span></td>
+                    <td style="white-space: nowrap;">
+                        <button class="btn-secondary" style="padding: 4px 8px; font-size: 0.75rem; color: var(--danger);" onclick="deleteKnowledge(${k.id})">🗑️ Delete</button>
+                    </td>
+                </tr>`;
+            }
+            // rejected candidate — a decision already made, kept for the record only
+            const r = item.data;
+            const rConfidence = Math.round((r.confidence || 0) * 100);
             return `
-            <tr>
+            <tr style="opacity:0.75;">
                 <td><span class="badge badge-nonveg">${label}</span></td>
-                <td style="max-width: 220px;">${escapeHtml(g.example_message || '—')}</td>
-                <td style="font-size: 0.82rem;">${escapeHtml(intents || g.reason || '')}</td>
-                <td>seen ${g.occurrences || 1}x</td>
-                <td style="white-space: nowrap;">
-                    <button class="btn-secondary" style="padding: 4px 10px; font-size: 0.75rem;" onclick="aiSetGapStatus(${g.id}, 'DISMISSED')">Dismiss</button>
-                </td>
+                <td style="max-width: 220px;">${escapeHtml(r.user_message || '—')}</td>
+                <td style="max-width: 340px; font-size: 0.82rem; white-space:pre-wrap;">${escapeHtml(r.response || '')}</td>
+                <td>${rConfidence}%</td>
+                <td style="font-size:0.78rem; color:var(--text-muted);">No longer editable</td>
             </tr>`;
         }
 
@@ -6340,6 +6448,16 @@ Non-Veg:
                 statusLine.innerText = data.shadow_enabled
                     ? `On — ${data.classified} message(s) classified in the last ${data.days} day(s). Confidence threshold for a future auto-resolve: ${Math.round(data.confidence_threshold * 100)}%.`
                     : (data.note || 'LLM_TRIAGE_ENABLED is off.');
+
+                // Shown in the top summary only while shadow mode is on, and
+                // deliberately never folded into AUTO RESOLVED — a shadow
+                // category is a prediction nobody has acted on, not a
+                // resolution.
+                const analyzedCard = document.getElementById('aiStatAnalyzedCard');
+                if (analyzedCard) {
+                    analyzedCard.style.display = data.shadow_enabled ? 'block' : 'none';
+                    document.getElementById('aiStatAnalyzed').innerText = data.classified || 0;
+                }
 
                 summary.innerHTML = (data.by_category || []).map(c => `
                     <div style="background:#F8FAFC; border:1px solid var(--border); padding:12px; border-radius:12px; text-align:center;">
