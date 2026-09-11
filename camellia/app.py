@@ -2679,6 +2679,43 @@ def get_candidate_templates(
         raise HTTPException(status_code=400, detail="status must be PENDING_APPROVAL, APPROVED, or REJECTED")
     return {"status": "success", "count": len(candidates), "candidates": candidates}
 
+@app.post("/admin/db-backup")
+def create_db_backup(
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """
+    Snapshots the live SQLite file next to itself before a schema migration
+    runs — every prior schema change in this project (routing tables, the
+    Topic/Menu catalogue, router/triage shadow) landed via additive
+    `_ensure_column` calls with no separate backup step, but a client asked
+    for one explicitly ahead of the Custom Q&A migration, so this exists to
+    make that step actually possible from here (nothing in this repo can
+    reach the Railway volume directly). Checkpoints WAL first so the copy is
+    consistent, not just a copy of the base file with pending writes still
+    sitting in a -wal sidecar.
+    """
+    require_admin(x_admin_key, x_admin_pin)
+    import shutil
+    import sqlite3
+
+    src_path = db.db_path
+    if not os.path.exists(src_path):
+        raise HTTPException(status_code=404, detail=f"No database file at {src_path}")
+
+    try:
+        with sqlite3.connect(src_path) as conn:
+            conn.execute("PRAGMA wal_checkpoint(FULL);")
+    except Exception as e:
+        log.warning("WAL checkpoint before backup failed (continuing anyway): %s", e)
+
+    stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    backup_path = f"{src_path}.backup-{stamp}"
+    shutil.copy2(src_path, backup_path)
+    size_bytes = os.path.getsize(backup_path)
+    log.info("Database backed up to %s (%d bytes)", backup_path, size_bytes)
+    return {"status": "backed_up", "backup_path": backup_path, "size_bytes": size_bytes, "source_path": src_path}
+
 @app.get("/admin/knowledge-gaps")
 def get_knowledge_gaps(
     status: str = "OPEN",
