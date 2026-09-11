@@ -10,7 +10,7 @@ from datetime import datetime
 from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlsplit
-from fastapi import FastAPI, Request, Response, Query, Header, HTTPException, File, UploadFile, BackgroundTasks
+from fastapi import FastAPI, Request, Response, Query, Header, HTTPException, File, Form, UploadFile, BackgroundTasks
 from fastapi.responses import PlainTextResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from typing import Dict, Any, List, Optional, Tuple
@@ -43,13 +43,19 @@ from camellia.handoff import (
 )
 from camellia.ad_routing import product_for_ad
 from camellia.instagram_routing import (
+    InstagramTopicError,
+    create_topic,
     decode_route,
+    decode_topic,
     lookup_instagram_media,
+    migrate_legacy_routing_topics,
     normalize_instagram_url,
     product_catalogue,
     route_for_inbound,
+    route_template_id,
     shared_post_media_id,
     shared_reel_identity,
+    update_topic,
     validate_route_payload,
     verify_media_by_id,
 )
@@ -59,6 +65,8 @@ from camellia import weekly_flyer
 from camellia import menu_dates
 from camellia import menu_manager
 from camellia import menu_images
+from camellia import menu_catalogue
+from camellia.menu_catalogue import MenuCatalogueError
 from camellia.session_memory import session_memory
 from camellia.monitoring import get_logger, delivery_monitor, latency_monitor
 from camellia.knowledge import SOURCE_MAP
@@ -109,6 +117,13 @@ async def lifespan(app: FastAPI):
     _prune_expired_weekly_menus()
 
     db.init_db()
+    # Built-in menu catalogue rows are seeded inside init_db() itself (every
+    # Database instance gets them, test fixtures included); only the
+    # Topic-backfill migration needs a separate call here.
+    try:
+        migrate_legacy_routing_topics()
+    except Exception:
+        log.exception("Could not migrate legacy Instagram routing topics.")
     if not config.META_APP_SECRET and not config.REQUIRE_WEBHOOK_SIGNATURE:
         # CRITICAL rather than WARNING: an unsigned webhook endpoint on a public
         # domain lets anyone POST fake customer messages, which this bot turns
@@ -2809,6 +2824,197 @@ async def update_menu(request: Request, x_admin_key: Optional[str] = Header(None
 
 
 # --------------------------------------------------------------------------
+# Dynamic menu catalogue — the registry every menu (built-in or client-
+# created) is listed under. camellia/menu_catalogue.py owns validation and
+# id generation; the durable image/version machinery in menu_images.py
+# already works against any menu_id here, so creating a menu needs nothing
+# beyond a catalogue row plus one published image to become real everywhere
+# it is referenced (Menu Manager gallery, Topic default menu, Instagram
+# routing) — no second upload system, no restart.
+# --------------------------------------------------------------------------
+
+@app.get("/admin/menu-catalogue")
+def list_menu_catalogue_route(x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    return {"status": "success", "menus": menu_catalogue.list_menus(), "categories": menu_catalogue.CATEGORIES}
+
+
+@app.get("/admin/menu-manager/images")
+def list_menu_images_gallery(x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    """Every menu's current image card — built-in and client-created alike."""
+    require_admin(x_admin_key, x_admin_pin)
+    return {"status": "success", "menus": menu_images.list_menus()}
+
+
+@app.post("/admin/menu-catalogue")
+async def create_menu_catalogue_entry(
+    name: str = Form(...),
+    category: str = Form("Other"),
+    description: str = Form(...),
+    active: bool = Form(True),
+    file: UploadFile = File(...),
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """
+    Creates a new menu and immediately publishes its image — the single
+    "Create Menu" action the client sees corresponds to one catalogue row
+    plus one published image version, not a separate draft-then-publish
+    step, since a brand-new menu has nothing else to preview against yet.
+
+    No OCR, no fact extraction: the uploaded image is stored exactly as
+    uploaded. Only the name/category/description typed here are recorded as
+    customer-facing text; nothing about price, availability, ingredients or
+    allergens is inferred from the image or created by this endpoint.
+    """
+    require_admin(x_admin_key, x_admin_pin)
+    image_bytes = await file.read()
+    if len(image_bytes) > MAX_UPLOAD_SIZE:
+        raise HTTPException(status_code=413, detail="File too large (maximum 10MB allowed).")
+    try:
+        entry = menu_catalogue.create_menu(name, category, description, active=active)
+    except MenuCatalogueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    try:
+        menu_images.save_draft(entry["menu_id"], image_bytes, file.content_type or "", x_admin_key or "admin")
+        published = menu_images.publish(entry["menu_id"])
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"status": "success", "menu": entry, "image": published}
+
+
+@app.patch("/admin/menu-catalogue/{menu_id}")
+async def update_menu_catalogue_entry_route(
+    menu_id: str, request: Request,
+    x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None),
+):
+    require_admin(x_admin_key, x_admin_pin)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    try:
+        updated = menu_catalogue.update_menu(
+            menu_id, name=body.get("name"), category=body.get("category"),
+            description=body.get("description"), active=body.get("active"),
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"No menu '{menu_id}'")
+    except MenuCatalogueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"status": "success", "menu": updated}
+
+
+# --------------------------------------------------------------------------
+# Instagram Content Routing topics — a reusable Topic an operator picks once
+# instead of retyping the same routing_topic text on every route. Selecting
+# one on a route pre-fills that route's topic text, priority products and
+# knowledge scope; from then on the route itself, not the Topic, is what
+# matching and replies act on (see validate_route_payload's docstring).
+# --------------------------------------------------------------------------
+
+@app.get("/admin/instagram-topics")
+def list_instagram_topics_route(x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    return {"status": "success", "topics": [decode_topic(t) for t in db.list_instagram_topics()]}
+
+
+@app.post("/admin/instagram-topics")
+async def create_instagram_topic_route(
+    request: Request, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None),
+):
+    require_admin(x_admin_key, x_admin_pin)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    try:
+        topic = create_topic(
+            body.get("name", ""), body.get("description", ""),
+            default_menu_id=body.get("default_menu_id") or None,
+            priority_products=body.get("priority_products") or [],
+            knowledge_scope=body.get("knowledge_scope") or [],
+            active=bool(body.get("active", True)),
+        )
+    except InstagramTopicError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"status": "success", "topic": decode_topic(topic)}
+
+
+@app.patch("/admin/instagram-topics/{topic_id}")
+async def update_instagram_topic_route(
+    topic_id: str, request: Request,
+    x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None),
+):
+    require_admin(x_admin_key, x_admin_pin)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    kwargs: Dict[str, Any] = {}
+    for field in ("name", "description", "active"):
+        if field in body:
+            kwargs[field] = body[field]
+    if "priority_products" in body:
+        kwargs["priority_products"] = body["priority_products"]
+    if "knowledge_scope" in body:
+        kwargs["knowledge_scope"] = body["knowledge_scope"]
+    if "default_menu_id" in body:
+        if body["default_menu_id"]:
+            kwargs["default_menu_id"] = body["default_menu_id"]
+        else:
+            kwargs["clear_default_menu"] = True
+    try:
+        topic = update_topic(topic_id, **kwargs)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"No topic '{topic_id}'")
+    except InstagramTopicError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"status": "success", "topic": decode_topic(topic)}
+
+
+@app.get("/admin/instagram-routes/preview")
+def preview_instagram_route_response(
+    topic_id: str = "", product: str = "", menu_id: str = "",
+    x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None),
+):
+    """
+    Approximately what a customer would receive from a vague "Tell me more"
+    through this route — read-only, no session created, no conversation
+    logged. Composed from exactly the pieces a real reply would use: the
+    Topic's own admin-authored description, the linked menu's current image,
+    and the first priority product's approved template — never invented.
+
+    `product` and `menu_id` are the in-progress form's own current choices,
+    not yet saved — passing them previews the route being edited rather than
+    only the Topic's last-saved defaults, so unsaved changes show up too.
+    """
+    require_admin(x_admin_key, x_admin_pin)
+    topic = db.get_instagram_topic(topic_id) if topic_id else None
+    if topic_id and not topic:
+        raise HTTPException(status_code=404, detail=f"No topic '{topic_id}'")
+
+    priority = json.loads(topic["priority_products"]) if topic else []
+    chosen_product = product or (priority[0] if priority else None)
+    template_id = route_template_id(chosen_product) if chosen_product else None
+    template = responder._template_by_id(template_id) if template_id else None
+
+    resolved_menu_id = menu_id or (topic or {}).get("default_menu_id")
+    menu_entry = menu_catalogue.get_menu(resolved_menu_id) if resolved_menu_id else None
+    image_url = menu_images.current_url(resolved_menu_id) if resolved_menu_id else None
+
+    return {
+        "status": "success",
+        "topic_name": (topic or {}).get("name"),
+        "topic_description": (topic or {}).get("description"),
+        "linked_menu": menu_entry,
+        "linked_menu_image": image_url,
+        "matched_product": chosen_product,
+        "approved_response": (template or {}).get("response"),
+    }
+
+
+# --------------------------------------------------------------------------
 # Menu Manager — every menu the chatbot actively serves, edited by the client
 # as a draft, previewed, and only made customer-facing by Save & Publish
 # (camellia/menu_manager.py owns validation/rendering/persistence; this is
@@ -3486,42 +3692,65 @@ def get_admin_dashboard():
 
         <div id="tab-ad-routing" class="panel-card" data-group="menu" style="display: none;">
             <div class="panel-header">
-                <h2>📣 Instagram Post &amp; Ad Routing</h2>
-                <p>Paste the Instagram post or reel link customers see, then choose the approved products the conversation should introduce first.</p>
+                <h2>📣 Instagram Content Routing</h2>
+                <p>Paste the Instagram link, pick a Topic, and save. The Topic fills in the menu, description and priority products for you.</p>
             </div>
             <div class="ad-routing-form">
                 <div>
-                    <label class="field-label" for="igRouteUrl">Instagram Post/Reel Link</label>
+                    <label class="field-label" for="igRouteUrl">Instagram Post / Reel Link</label>
                     <input class="field-control" id="igRouteUrl" autocomplete="off" placeholder="https://www.instagram.com/reel/…/">
                 </div>
                 <button class="btn-secondary" type="button" onclick="identifyInstagramRoute()">Identify</button>
             </div>
             <div id="igRouteIdentity" style="font-size:0.82rem; margin:10px 0; color:var(--text-muted);"></div>
-            <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+            <div id="igPostConnectionStatus" style="display:none; font-size:0.82rem; margin:10px 0; padding:8px 10px; border-radius:8px;"></div>
+
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-top:8px;">
                 <div>
-                    <label class="field-label" for="igRoutingTopic">Topic</label>
-                    <input class="field-control" id="igRoutingTopic" maxlength="160" placeholder="What this post is about">
+                    <label class="field-label" for="igTopicPicker">Topic</label>
+                    <div style="display:flex; gap:8px;">
+                        <select class="field-control" id="igTopicPicker" onchange="onIgTopicChange()"><option value="">Select Topic</option></select>
+                        <button class="btn-secondary" type="button" onclick="openTopicModal()">+ Add Topic</button>
+                    </div>
                 </div>
                 <div>
-                    <label class="field-label" for="igEscalationPolicy">Escalation policy</label>
-                    <select class="field-control" id="igEscalationPolicy"><option value="human_if_unsupported">Human if unsupported</option><option value="canonical">Normal canonical rules</option><option value="always_human">Always offer human help</option></select>
+                    <label class="field-label" for="igMenuPicker">Menu to Show</label>
+                    <div style="display:flex; gap:8px;">
+                        <select class="field-control" id="igMenuPicker"><option value="">Select Menu</option></select>
+                        <button class="btn-secondary" type="button" onclick="openMenuModal()">+ Add Menu</button>
+                    </div>
                 </div>
             </div>
+
             <div style="margin-top:12px;">
-                <label class="field-label">Priority Products <span style="font-weight:normal;">(ordered, optional)</span></label>
+                <label class="field-label" for="igTopicDescription">Topic Description</label>
+                <textarea class="field-control" id="igTopicDescription" rows="2" placeholder="Select or create a Topic to see its description"></textarea>
+            </div>
+
+            <div style="margin-top:12px;">
+                <label class="field-label">Priority Products <span style="font-weight:normal;">(ordered, optional — defaults from the Topic)</span></label>
                 <div style="display:flex; gap:8px;"><select class="field-control" id="igProductPicker"></select><button class="btn-secondary" type="button" onclick="addIgPriorityProduct()">+ Add Product</button></div>
                 <div id="igPriorityProducts" class="ad-route-list" style="margin-top:8px;"></div>
             </div>
-            <details style="margin-top:12px;"><summary><b>Advanced</b> — Media ID, Ad ID, Campaign ID and knowledge scope</summary>
+
+            <details style="margin-top:12px;"><summary><b>Advanced Settings</b> — Media ID, Ad ID, Campaign ID, escalation policy, knowledge scope</summary>
                 <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:10px; margin-top:10px;">
                     <input class="field-control" id="igMediaId" placeholder="Verified Media / Story ID">
                     <input class="field-control" id="igAdId" placeholder="Meta Ad ID">
                     <input class="field-control" id="igCampaignId" placeholder="Campaign ID (reference only)">
+                    <select class="field-control" id="igEscalationPolicy"><option value="human_if_unsupported">Human if unsupported</option><option value="canonical">Normal canonical rules</option><option value="always_human">Always offer human help</option></select>
                     <select class="field-control" id="igKnowledgeScope" multiple title="Optional canonical knowledge scope"></select>
                 </div>
                 <p style="font-size:0.76rem;color:var(--text-muted);">Runtime webhooks provide Ad ID or Story Media ID—not the pasted URL or shortcode. Add an identifier here when Meta supplies one.</p>
             </details>
-            <div class="action-bar"><button class="btn-primary" type="button" onclick="saveInstagramRoute()">Save route</button><button class="btn-secondary" type="button" onclick="resetInstagramRouteForm()">Cancel edit</button></div>
+
+            <div id="igPreviewBox" style="display:none; margin-top:14px; background:#FCFBF9; border:1px solid var(--border); border-radius:10px; padding:14px; font-size:0.85rem;"></div>
+
+            <div class="action-bar">
+                <button class="btn-secondary" type="button" onclick="previewInstagramRoute()">Preview Customer Response</button>
+                <button class="btn-primary" type="button" onclick="saveInstagramRoute()">Save Routing</button>
+                <button class="btn-secondary" type="button" onclick="resetInstagramRouteForm()">Cancel edit</button>
+            </div>
             <div id="adRouteResult" class="result-box"></div>
             <div style="display:flex; gap:8px; margin-top:16px; border-bottom:1px solid var(--border);">
                 <button class="tab-btn active" type="button" id="igRouteTabActiveBtn" onclick="switchIgRouteTab('active')" style="border-radius:8px 8px 0 0;">Active</button>
@@ -3634,8 +3863,13 @@ THIS WEEK'S BENGAL SPECIALS
              validation/persistence/reload; this is its admin UI. -->
         <div id="tab-menu-manager" class="panel-card" data-group="menu_manager" style="display: none;">
             <div class="panel-header">
-                <h2>📋 Menu Manager</h2>
-                <p>Edit any menu the chatbot uses. Changes are a draft until you press Save &amp; Publish — the bot keeps answering with the current live menu until then.</p>
+                <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px; flex-wrap:wrap;">
+                    <div>
+                        <h2>📋 Menu Manager</h2>
+                        <p>Edit any menu the chatbot uses. Changes are a draft until you press Save &amp; Publish — the bot keeps answering with the current live menu until then.</p>
+                    </div>
+                    <button class="btn-primary" type="button" onclick="openMenuModal()" style="white-space:nowrap;">+ Add New Menu</button>
+                </div>
             </div>
 
             <div id="mmImageGrid" class="visual-menu-grid"><p style="color: var(--text-muted);">Loading menu images...</p></div>
@@ -3873,6 +4107,60 @@ THIS WEEK'S BENGAL SPECIALS
         </div>
     </div>
 
+    <div id="topicModal" style="display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 9999; justify-content: center; align-items: center; padding: 20px;">
+        <div style="background: white; border-radius: 16px; width: 100%; max-width: 520px; padding: 24px; box-shadow: 0 10px 30px rgba(0,0,0,0.2); max-height: 90vh; overflow-y: auto;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px;">
+                <h3 style="margin: 0; color: var(--primary);" id="topicModalTitle">+ Add Topic</h3>
+                <button onclick="closeTopicModal()" style="background: none; border: none; font-size: 1.4rem; cursor: pointer;">&times;</button>
+            </div>
+            <input type="hidden" id="topicModalEditingId">
+            <label class="field-label">Topic Name *</label>
+            <input class="field-control" id="topicName" placeholder="e.g. Wedding / Event Sondesh" style="margin-bottom:10px;">
+            <label class="field-label">Description *</label>
+            <textarea class="field-control" id="topicDescription" rows="3" placeholder="Shown to customers who ask a vague question after sharing this content." style="margin-bottom:10px;"></textarea>
+            <label class="field-label">Default Menu *</label>
+            <select class="field-control" id="topicDefaultMenu" style="margin-bottom:10px;"><option value="">Select Menu</option></select>
+            <label style="display:flex; align-items:center; gap:6px; font-size:0.85rem; margin-bottom:10px;"><input type="checkbox" id="topicActive" checked> Active</label>
+            <details><summary style="cursor:pointer; font-size:0.85rem; margin-bottom:8px;"><b>Advanced</b> — Priority Products, Knowledge Scope</summary>
+                <div style="margin-top:8px;">
+                    <label class="field-label">Priority Products</label>
+                    <div style="display:flex; gap:8px;"><select class="field-control" id="topicProductPicker"></select><button class="btn-secondary" type="button" onclick="addTopicPriorityProduct()">+ Add</button></div>
+                    <div id="topicPriorityProducts" class="ad-route-list" style="margin-top:8px;"></div>
+                    <label class="field-label" style="margin-top:10px;">Knowledge Scope</label>
+                    <select class="field-control" id="topicKnowledgeScope" multiple></select>
+                </div>
+            </details>
+            <div style="display: flex; gap: 8px; justify-content: flex-end; margin-top:16px;">
+                <button class="btn-secondary" onclick="closeTopicModal()">Cancel</button>
+                <button class="btn-primary" onclick="submitTopic()">Create Topic</button>
+            </div>
+            <div id="topicModalResult" class="result-box"></div>
+        </div>
+    </div>
+
+    <div id="menuModal" style="display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 9999; justify-content: center; align-items: center; padding: 20px;">
+        <div style="background: white; border-radius: 16px; width: 100%; max-width: 480px; padding: 24px; box-shadow: 0 10px 30px rgba(0,0,0,0.2); max-height: 90vh; overflow-y: auto;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px;">
+                <h3 style="margin: 0; color: var(--primary);">+ Add New Menu</h3>
+                <button onclick="closeMenuModal()" style="background: none; border: none; font-size: 1.4rem; cursor: pointer;">&times;</button>
+            </div>
+            <label class="field-label">Menu Name *</label>
+            <input class="field-control" id="menuName" placeholder="e.g. Meal Subscription" style="margin-bottom:10px;">
+            <label class="field-label">Menu Type / Category</label>
+            <select class="field-control" id="menuCategory" style="margin-bottom:10px;"></select>
+            <label class="field-label">Customer Description *</label>
+            <textarea class="field-control" id="menuDescription" rows="3" placeholder="e.g. Weekly Bengali home-style meal subscription with rotating menus." style="margin-bottom:10px;"></textarea>
+            <label class="field-label">Menu Image *</label>
+            <input type="file" id="menuImageFile" accept="image/jpeg,image/png,image/webp" style="margin-bottom:10px;">
+            <label style="display:flex; align-items:center; gap:6px; font-size:0.85rem; margin-bottom:10px;"><input type="checkbox" id="menuActive" checked> Active</label>
+            <div style="display: flex; gap: 8px; justify-content: flex-end;">
+                <button class="btn-secondary" onclick="closeMenuModal()">Cancel</button>
+                <button class="btn-primary" onclick="submitMenu()">Create Menu</button>
+            </div>
+            <div id="menuModalResult" class="result-box"></div>
+        </div>
+    </div>
+
     <script>
         // Remembering the PIN between page loads is a convenience, never part
         // of authentication — so no storage failure may stand between a valid
@@ -4074,14 +4362,29 @@ THIS WEEK'S BENGAL SPECIALS
             }
         }
 
-        function mmRenderImageGallery() {
+        // The image gallery is deliberately its own fetch, independent of
+        // mmMenus (the structured item/price editor list, which only ever
+        // covers the five built-in menus that have a MANAGEABLE_MENUS entry).
+        // A menu created purely through "+ Add New Menu" has no item list at
+        // all — just a name, category, description and image — so it would
+        // never appear here if this reused mmMenus. Fetching the dynamic
+        // catalogue directly means every menu, old or brand new, shows up.
+        async function mmRenderImageGallery() {
             const grid = document.getElementById('mmImageGrid');
-            if (!grid) return;
-            grid.innerHTML = mmMenus.map(m => {
-                const image = m.image_url ? `<img src="${escapeHtml(m.image_url)}" alt="${escapeHtml(m.label)}">` : '<div style="height:210px;display:grid;place-items:center;background:#f6f3ef;color:#888">No image published</div>';
-                const key = encodeURIComponent(m.menu_key);
-                return `<article class="visual-menu-card"><h3>${escapeHtml(m.label)}</h3>${image}<div class="visual-menu-meta"><b>${escapeHtml(m.image_status || 'Active')}</b>${m.published_at ? ` · ${escapeHtml(m.published_at)}` : ''}</div><div class="visual-menu-actions"><button class="btn-primary" onclick="mmReplaceImage('${key}')">Replace Menu</button><button class="btn-secondary" onclick="mmPreviewImage('${key}')">Preview</button><button class="btn-secondary" onclick="mmHistoryImage('${key}')">History</button><button class="btn-danger" onclick="mmArchiveImage('${key}')">Archive</button></div><div id="mm-image-history-${key}" style="padding:0 14px 12px"></div></article>`;
-            }).join('');
+            if (!grid || !currentAdminKey) return;
+            try {
+                const resp = await fetch('/admin/menu-manager/images', { headers: getAuthHeaders() });
+                const data = await resp.json();
+                if (!resp.ok) throw new Error(data.detail || 'Could not load menu images.');
+                const menus = data.menus || [];
+                grid.innerHTML = menus.map(m => {
+                    const image = m.image_url ? `<img src="${escapeHtml(m.image_url)}" alt="${escapeHtml(m.title)}">` : '<div style="height:210px;display:grid;place-items:center;background:#f6f3ef;color:#888">No image published</div>';
+                    const key = encodeURIComponent(m.menu_key);
+                    return `<article class="visual-menu-card"><h3>${escapeHtml(m.title)}${m.category ? ` <span style="font-weight:400;font-size:0.75rem;color:var(--text-muted);">· ${escapeHtml(m.category)}</span>` : ''}</h3>${image}<div class="visual-menu-meta"><b>${escapeHtml(m.status || 'Active')}</b>${m.published_at ? ` · ${escapeHtml(m.published_at)}` : ''}</div><div class="visual-menu-actions"><button class="btn-primary" onclick="mmReplaceImage('${key}')">Replace</button><button class="btn-secondary" onclick="mmPreviewImage('${key}')">Preview</button><button class="btn-secondary" onclick="mmHistoryImage('${key}')">History</button><button class="btn-danger" onclick="mmArchiveImage('${key}')">Archive</button></div><div id="mm-image-history-${key}" style="padding:0 14px 12px"></div></article>`;
+                }).join('');
+            } catch (err) {
+                grid.innerHTML = `<p style="color: var(--danger);">${escapeHtml(err.message || err)}</p>`;
+            }
         }
 
         function mmReplaceImage(key) { const input=document.createElement('input'); input.type='file'; input.accept='image/jpeg,image/png,image/webp'; input.onchange=async()=>{const file=input.files&&input.files[0];if(!file)return;const form=new FormData();form.append('file',file);const response=await fetch(`/admin/menu-manager/menus/${key}/image/draft`,{method:'POST',headers:getAuthHeaders(),body:form});const data=await response.json();const msg=document.getElementById('mmMessage');msg.style.display='block';msg.className=response.ok?'result-box info':'result-box error';msg.innerText=response.ok?'Draft image saved. Preview it, then publish when ready.':(data.detail||'Upload failed.');if(response.ok)mmLoadMenuList();};input.click(); }
@@ -4277,6 +4580,51 @@ THIS WEEK'S BENGAL SPECIALS
         let igProducts = [];
         let igPriority = [];
         let igEditingId = null;
+        let igTopics = [];
+        let igMenus = [];
+
+        // Topic and Menu dropdowns are populated purely from the backend —
+        // no hardcoded list — so a Topic or Menu created just now is
+        // immediately selectable everywhere it belongs, no restart needed.
+        async function loadTopicsAndMenus() {
+            try {
+                const [topicsResp, menusResp] = await Promise.all([
+                    fetch('/admin/instagram-topics', { headers: getAuthHeaders() }),
+                    fetch('/admin/menu-catalogue', { headers: getAuthHeaders() }),
+                ]);
+                const topicsData = await topicsResp.json();
+                const menusData = await menusResp.json();
+                igTopics = topicsData.topics || [];
+                igMenus = (menusData.menus || []).filter(m => m.active);
+                window.igMenuCategories = menusData.categories || [];
+
+                const topicOptions = '<option value="">Select Topic</option>' + igTopics.map(t =>
+                    `<option value="${escapeHtml(t.topic_id)}">${escapeHtml(t.name)}</option>`).join('');
+                document.getElementById('igTopicPicker').innerHTML = topicOptions;
+
+                const menuOptions = '<option value="">Select Menu</option>' + igMenus.map(m =>
+                    `<option value="${escapeHtml(m.menu_id)}">${escapeHtml(m.name)}</option>`).join('');
+                document.getElementById('igMenuPicker').innerHTML = menuOptions;
+                const topicDefaultMenuEl = document.getElementById('topicDefaultMenu');
+                if (topicDefaultMenuEl) topicDefaultMenuEl.innerHTML = menuOptions;
+            } catch (err) { /* dropdowns just stay empty; the rest of the tab still works */ }
+        }
+
+        function onIgTopicChange() {
+            const topicId = document.getElementById('igTopicPicker').value;
+            const topic = igTopics.find(t => t.topic_id === topicId);
+            document.getElementById('igTopicDescription').value = topic ? (topic.description || '') : '';
+            if (topic && topic.default_menu_id) {
+                document.getElementById('igMenuPicker').value = topic.default_menu_id;
+            }
+            // Priority Products default from the Topic, but only fill an
+            // empty list — the client's own choices on this route are never
+            // silently overwritten by switching Topics.
+            if (topic && !igPriority.length && (topic.priority_products || []).length) {
+                igPriority = [...topic.priority_products];
+                renderIgPriorityProducts();
+            }
+        }
 
         function renderIgPriorityProducts() {
             const box = document.getElementById('igPriorityProducts');
@@ -4302,10 +4650,17 @@ THIS WEEK'S BENGAL SPECIALS
 
         function resetInstagramRouteForm() {
             igEditingId = null; igPriority = [];
-            ['igRouteUrl','igRoutingTopic','igMediaId','igAdId','igCampaignId'].forEach(id => { const el=document.getElementById(id); if(el)el.value=''; });
+            ['igRouteUrl','igMediaId','igAdId','igCampaignId'].forEach(id => { const el=document.getElementById(id); if(el)el.value=''; });
+            document.getElementById('igTopicPicker').value = '';
+            document.getElementById('igMenuPicker').value = '';
+            document.getElementById('igTopicDescription').value = '';
             document.getElementById('igEscalationPolicy').value='human_if_unsupported';
             Array.from(document.getElementById('igKnowledgeScope').options).forEach(option => option.selected=false);
-            document.getElementById('igRouteIdentity').innerHTML=''; renderIgPriorityProducts();
+            document.getElementById('igRouteIdentity').innerHTML='';
+            document.getElementById('igPreviewBox').style.display = 'none';
+            const status = document.getElementById('igPostConnectionStatus');
+            if (status) status.style.display = 'none';
+            renderIgPriorityProducts();
         }
 
         async function identifyInstagramRoute() {
@@ -4326,7 +4681,10 @@ THIS WEEK'S BENGAL SPECIALS
             const route=(window.igRoutes||[]).find(item=>item.routing_id===id); if(!route)return;
             igEditingId=id; igPriority=[...(route.priority_products||[])];
             document.getElementById('igRouteUrl').value=route.canonical_url||'';
-            document.getElementById('igRoutingTopic').value=route.routing_topic||'';
+            document.getElementById('igTopicPicker').value=route.topic_id||'';
+            document.getElementById('igMenuPicker').value=route.menu_id||'';
+            const topic = igTopics.find(t => t.topic_id === route.topic_id);
+            document.getElementById('igTopicDescription').value = topic ? (topic.description || '') : '';
             document.getElementById('igMediaId').value=route.media_id||'';
             document.getElementById('igAdId').value=route.ad_id||'';
             document.getElementById('igCampaignId').value=route.campaign_id||'';
@@ -4337,15 +4695,149 @@ THIS WEEK'S BENGAL SPECIALS
 
         async function saveInstagramRoute() {
             const result=document.getElementById('adRouteResult');
-            const payload={routing_id:igEditingId,url:document.getElementById('igRouteUrl').value.trim(),routing_topic:document.getElementById('igRoutingTopic').value.trim(),media_id:document.getElementById('igMediaId').value.trim(),ad_id:document.getElementById('igAdId').value.trim(),campaign_id:document.getElementById('igCampaignId').value.trim(),escalation_policy:document.getElementById('igEscalationPolicy').value,priority_products:igPriority,knowledge_scope:Array.from(document.getElementById('igKnowledgeScope').selectedOptions).map(o=>o.value),active:true};
+            const payload={routing_id:igEditingId,url:document.getElementById('igRouteUrl').value.trim(),topic_id:document.getElementById('igTopicPicker').value,menu_id:document.getElementById('igMenuPicker').value,media_id:document.getElementById('igMediaId').value.trim(),ad_id:document.getElementById('igAdId').value.trim(),campaign_id:document.getElementById('igCampaignId').value.trim(),escalation_policy:document.getElementById('igEscalationPolicy').value,priority_products:igPriority,knowledge_scope:Array.from(document.getElementById('igKnowledgeScope').selectedOptions).map(o=>o.value),active:true};
             const resp=await fetch('/admin/instagram-routes',{method:'POST',headers:{...getAuthHeaders(),'Content-Type':'application/json'},body:JSON.stringify(payload)});
             const data=await resp.json().catch(()=>({})); result.style.display='block';
             if(!resp.ok){result.className='result-box error';result.innerText=data.detail||'Could not save route.';return;}
-            result.className='result-box success';result.innerText='Instagram source route saved.'; resetInstagramRouteForm(); loadAdRoutes();
+            result.className='result-box success';result.innerText='Routing configuration saved.'; resetInstagramRouteForm(); loadAdRoutes();
+        }
+
+        async function previewInstagramRoute() {
+            const box = document.getElementById('igPreviewBox');
+            const topicId = document.getElementById('igTopicPicker').value;
+            if (!topicId) { alert('Select a Topic first to preview its response.'); return; }
+            box.style.display = 'block';
+            box.innerHTML = 'Loading preview…';
+            const menuId = document.getElementById('igMenuPicker').value;
+            const product = igPriority[0] || '';
+            const params = new URLSearchParams({ topic_id: topicId, menu_id: menuId, product });
+            try {
+                const resp = await fetch(`/admin/instagram-routes/preview?${params}`, { headers: getAuthHeaders() });
+                const data = await resp.json();
+                if (!resp.ok) throw new Error(data.detail || 'Could not build preview.');
+                const imageHtml = data.linked_menu_image ? `<img src="${escapeHtml(data.linked_menu_image)}" style="max-width:220px;max-height:220px;border-radius:8px;margin-top:8px;display:block;">` : '';
+                box.innerHTML = `
+                    <div style="font-size:0.78rem;color:var(--text-muted);margin-bottom:6px;">Approximately what a customer sees after "Tell me more":</div>
+                    <div><b>${escapeHtml(data.topic_name || '')}</b></div>
+                    <div style="margin-top:6px; white-space:pre-wrap;">${escapeHtml(data.topic_description || '')}</div>
+                    ${imageHtml}
+                    <div style="margin-top:8px; white-space:pre-wrap; font-family:monospace; font-size:0.8rem; background:#fff; border:1px solid var(--border); border-radius:8px; padding:8px;">${escapeHtml(data.approved_response || '(no approved product template matched yet — add Priority Products)')}</div>`;
+            } catch (err) {
+                box.innerHTML = `<span style="color:var(--danger);">${escapeHtml(err.message || err)}</span>`;
+            }
         }
 
         async function setInstagramRouteActive(id, active) {
             await fetch(`/admin/instagram-routes/${id}/active`,{method:'PATCH',headers:{...getAuthHeaders(),'Content-Type':'application/json'},body:JSON.stringify({active})}); loadAdRoutes();
+        }
+
+        // + Add Topic modal. A Topic is a reusable label: create it once here,
+        // and it is immediately selectable on this and every future route —
+        // no hardcoded list, no restart.
+        let topicPriority = [];
+        function renderTopicPriorityProducts() {
+            const box = document.getElementById('topicPriorityProducts');
+            if (!box) return;
+            if (!topicPriority.length) { box.innerHTML = '<small>No priority products.</small>'; return; }
+            box.innerHTML = topicPriority.map((id, index) => {
+                const product = igProducts.find(item => item.id === id);
+                const label = product ? product.label : id;
+                return `<div class="ad-route-row"><span>${index + 1}. ${escapeHtml(label)}</span><button class="btn-danger" type="button" onclick="topicPriority.splice(${index},1);renderTopicPriorityProducts();">Remove</button></div>`;
+            }).join('');
+        }
+        function addTopicPriorityProduct() {
+            const id = document.getElementById('topicProductPicker').value;
+            if (!id || topicPriority.includes(id)) return;
+            topicPriority.push(id); renderTopicPriorityProducts();
+        }
+
+        function openTopicModal() {
+            document.getElementById('topicModalTitle').innerText = '+ Add Topic';
+            document.getElementById('topicModalEditingId').value = '';
+            document.getElementById('topicName').value = '';
+            document.getElementById('topicDescription').value = '';
+            document.getElementById('topicDefaultMenu').value = '';
+            document.getElementById('topicActive').checked = true;
+            topicPriority = []; renderTopicPriorityProducts();
+            Array.from(document.getElementById('topicKnowledgeScope').options).forEach(o => o.selected = false);
+            document.getElementById('topicModalResult').style.display = 'none';
+            document.getElementById('topicModal').style.display = 'flex';
+        }
+        function closeTopicModal() { document.getElementById('topicModal').style.display = 'none'; }
+
+        async function submitTopic() {
+            const result = document.getElementById('topicModalResult');
+            const payload = {
+                name: document.getElementById('topicName').value.trim(),
+                description: document.getElementById('topicDescription').value.trim(),
+                default_menu_id: document.getElementById('topicDefaultMenu').value,
+                active: document.getElementById('topicActive').checked,
+                priority_products: topicPriority,
+                knowledge_scope: Array.from(document.getElementById('topicKnowledgeScope').selectedOptions).map(o => o.value),
+            };
+            try {
+                const resp = await fetch('/admin/instagram-topics', {
+                    method: 'POST', headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload),
+                });
+                const data = await resp.json();
+                if (!resp.ok) throw new Error(data.detail || 'Could not create topic.');
+                closeTopicModal();
+                await loadTopicsAndMenus();
+                // The newly created topic is selected immediately, and its
+                // defaults (menu, description, priority products) fill in —
+                // the same as picking any other topic from the dropdown.
+                document.getElementById('igTopicPicker').value = data.topic.topic_id;
+                onIgTopicChange();
+            } catch (err) {
+                result.style.display = 'block';
+                result.className = 'result-box error';
+                result.innerText = err.message || String(err);
+            }
+        }
+
+        // + Add New Menu modal. Shared by Instagram Content Routing and the
+        // Visual Menu Manager — a menu created from either place appears in
+        // both, plus the Topic form's Default Menu dropdown, immediately.
+        function openMenuModal() {
+            document.getElementById('menuName').value = '';
+            document.getElementById('menuDescription').value = '';
+            document.getElementById('menuImageFile').value = '';
+            document.getElementById('menuActive').checked = true;
+            const categories = window.igMenuCategories || ['Sondesh','Weekly Vegetarian','Weekly Non-Vegetarian','Bento / Meal','Subscription','Event','Other'];
+            document.getElementById('menuCategory').innerHTML = categories.map(c => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join('');
+            document.getElementById('menuModalResult').style.display = 'none';
+            document.getElementById('menuModal').style.display = 'flex';
+        }
+        function closeMenuModal() { document.getElementById('menuModal').style.display = 'none'; }
+
+        async function submitMenu() {
+            const result = document.getElementById('menuModalResult');
+            const name = document.getElementById('menuName').value.trim();
+            const description = document.getElementById('menuDescription').value.trim();
+            const file = document.getElementById('menuImageFile').files[0];
+            if (!name) { result.style.display='block'; result.className='result-box error'; result.innerText='Menu name is required.'; return; }
+            if (!description) { result.style.display='block'; result.className='result-box error'; result.innerText='Customer description is required.'; return; }
+            if (!file) { result.style.display='block'; result.className='result-box error'; result.innerText='A menu image is required.'; return; }
+            const form = new FormData();
+            form.append('name', name);
+            form.append('category', document.getElementById('menuCategory').value);
+            form.append('description', description);
+            form.append('active', document.getElementById('menuActive').checked);
+            form.append('file', file);
+            try {
+                const resp = await fetch('/admin/menu-catalogue', { method: 'POST', headers: getAuthHeaders(), body: form });
+                const data = await resp.json();
+                if (!resp.ok) throw new Error(data.detail || 'Could not create menu.');
+                closeMenuModal();
+                await loadTopicsAndMenus();
+                document.getElementById('igMenuPicker').value = data.menu.menu_id;
+                if (typeof mmLoadMenuList === 'function') mmLoadMenuList();
+            } catch (err) {
+                result.style.display = 'block';
+                result.className = 'result-box error';
+                result.innerText = err.message || String(err);
+            }
         }
         async function archiveInstagramRoute(id) { if(!confirm('Archive this Instagram route? It stops matching customer traffic but stays recoverable from the Archived tab.'))return; await fetch(`/admin/instagram-routes/${id}`,{method:'DELETE',headers:getAuthHeaders()}); loadAdRoutes(); }
 
@@ -4415,8 +4907,11 @@ THIS WEEK'S BENGAL SPECIALS
                 const routes = data.routes || [];
                 window.igRoutes=routes; igProducts=data.product_catalogue||[];
                 document.getElementById('igProductPicker').innerHTML='<option value="">Choose an approved product…</option>'+igProducts.map(item=>`<option value="${escapeHtml(item.id)}">${escapeHtml(item.label)}</option>`).join('');
+                document.getElementById('topicProductPicker') && (document.getElementById('topicProductPicker').innerHTML=document.getElementById('igProductPicker').innerHTML);
                 document.getElementById('igKnowledgeScope').innerHTML=(data.knowledge_scopes||[]).map(id=>`<option value="${escapeHtml(id)}">${escapeHtml(id)}</option>`).join('');
+                document.getElementById('topicKnowledgeScope') && (document.getElementById('topicKnowledgeScope').innerHTML=document.getElementById('igKnowledgeScope').innerHTML);
                 renderIgPriorityProducts();
+                if (!igTopics.length && !igMenus.length) await loadTopicsAndMenus();
 
                 if (igRouteTab === 'archived') {
                     if (!routes.length) { list.innerHTML='<p style="color:var(--text-muted);font-size:0.84rem;">No archived routes.</p>'; return; }
@@ -4429,12 +4924,24 @@ THIS WEEK'S BENGAL SPECIALS
                 }
 
                 if (!routes.length && !(data.legacy_ad_routes||[]).length) { list.innerHTML='<p style="color:var(--text-muted);font-size:0.84rem;">No Instagram routes added yet.</p>'; return; }
-                list.innerHTML = routes.map(route => `
-                    <div class="ad-route-row">
-                        <span><b>${escapeHtml(route.canonical_url||route.ad_id||route.media_id)}</b><br><small>${escapeHtml(route.source_type)} · ${escapeHtml(route.shortcode||'no shortcode')} · ${escapeHtml(route.routing_topic||'no topic')} · priorities: ${escapeHtml((route.priority_products||[]).join(', ')||'none')}</small></span>
-                        <span><button class="btn-secondary" type="button" onclick="editInstagramRoute(${route.routing_id})">Edit</button> <button class="btn-secondary" type="button" onclick="setInstagramRouteActive(${route.routing_id},${!route.active})">${route.active?'Disable':'Enable'}</button> <button class="btn-danger" type="button" onclick="archiveInstagramRoute(${route.routing_id})">Archive</button> <button class="btn-danger" type="button" onclick="openIgRemoveModal(${route.routing_id})">Remove</button>${route.source_type==='post'?` <button class="btn-secondary" type="button" onclick="pairInstagramPost(${route.routing_id})">${route.media_id?'Re-pair':'Verify / Pair Shared Post'}</button>`:''}</span>
-                        ${route.source_type==='post'?`<div id="igPairingStatus-${route.routing_id}" style="font-size:0.78rem;color:var(--text-muted);margin-top:4px;">${route.media_id?`Paired media ID: ${escapeHtml(route.media_id)}`:'Not yet paired — the share webhook for posts carries no shortcode/URL, so a verified media ID must be paired manually.'}</div>`:''}
-                    </div>`).join('') + (data.legacy_ad_routes||[]).map(route=>`<div class="ad-route-row"><span><b>Legacy Ad ID ${escapeHtml(route.ad_id)}</b><br><small>Priority: ${escapeHtml(route.product)} · managed under Advanced compatibility</small></span></div>`).join('');
+                list.innerHTML = routes.map(route => {
+                    const menuName = (igMenus.find(m => m.menu_id === route.menu_id) || {}).name;
+                    const summary = `${escapeHtml(route.source_type)} · ${escapeHtml(route.shortcode||'no shortcode')} · ${escapeHtml(route.routing_topic||'no topic')}${menuName?` · menu: ${escapeHtml(menuName)}`:''} · priorities: ${escapeHtml((route.priority_products||[]).join(', ')||'none')}`;
+                    // A post's connection is a client-friendly status, not a raw
+                    // Meta id — the id itself stays inside Advanced Settings
+                    // (the Media ID field, populated when you press Edit).
+                    const postStatus = route.source_type==='post'
+                        ? `<div id="igPairingStatus-${route.routing_id}" style="font-size:0.78rem;margin-top:4px;padding:4px 8px;border-radius:6px;display:inline-block;${route.media_id?'background:#ECFDF5;color:#065F46;':'background:#FEF3C7;color:#92400E;'}">${route.media_id?'✓ Post connected':'⚠ Post connection needs verification'}</div>`
+                        : '';
+                    const connectBtn = route.source_type==='post'
+                        ? ` <button class="btn-secondary" type="button" onclick="pairInstagramPost(${route.routing_id})">${route.media_id?'Reconnect Post':'Connect Post'}</button>`
+                        : '';
+                    return `<div class="ad-route-row">
+                        <span><b>${escapeHtml(route.canonical_url||route.ad_id||route.media_id)}</b><br><small>${summary}</small></span>
+                        <span><button class="btn-secondary" type="button" onclick="editInstagramRoute(${route.routing_id})">Edit</button> <button class="btn-secondary" type="button" onclick="setInstagramRouteActive(${route.routing_id},${!route.active})">${route.active?'Disable':'Enable'}</button> <button class="btn-danger" type="button" onclick="archiveInstagramRoute(${route.routing_id})">Archive</button> <button class="btn-danger" type="button" onclick="openIgRemoveModal(${route.routing_id})">Remove</button>${connectBtn}</span>
+                        ${postStatus}
+                    </div>`;
+                }).join('') + (data.legacy_ad_routes||[]).map(route=>`<div class="ad-route-row"><span><b>Legacy Ad ID ${escapeHtml(route.ad_id)}</b><br><small>Priority: ${escapeHtml(route.product)} · managed under Advanced compatibility</small></span></div>`).join('');
             } catch (err) {
                 list.innerHTML = `<p style="color: var(--danger); font-size: 0.84rem;">${escapeHtml(err.message || err)}</p>`;
             }
@@ -4472,7 +4979,7 @@ THIS WEEK'S BENGAL SPECIALS
                 if (!pairing) return;
                 if (pairing.status === 'bound') {
                     clearInterval(igPairingPollTimer);
-                    box.innerHTML = `✅ Paired. Media ID: ${escapeHtml(pairing.bound_media_id)}`;
+                    box.innerHTML = `✅ Post connected`;
                     loadAdRoutes();
                 } else if (pairing.status === 'pending') {
                     box.innerHTML = `⏳ Waiting for the shared post (expires ${escapeHtml(pairing.expires_at)}). <button class="btn-secondary" type="button" onclick="cancelInstagramPairing(${routingId})">Cancel</button>`;
