@@ -1,10 +1,15 @@
 """Persistent, truth-safe context for Instagram post and ad entry points.
 
-Instagram URLs are useful to an operator, but they are not present in the
-messaging webhook.  Runtime matching therefore uses only identifiers that
-Meta actually supplied (ad ID, or the story/media ID on a reply).  A route
-points at canonical knowledge/product identifiers; it never copies business
-facts into the routing table.
+Runtime matching uses only identifiers Meta actually supplied: the ad ID, the
+story/media ID on a reply, and — for a reel shared into the DM — the canonical
+permalink Meta puts on the attachment itself. That last one was captured in
+production on 2026-09-11: ``type: "ig_reel"`` carrying ``payload.url`` =
+``https://www.instagram.com/reel/<shortcode>/``, an ordinary permalink the
+existing URL normalizer already reads.
+
+A route points at canonical knowledge/product identifiers; it never copies
+business facts into the routing table, and never reads a caption to decide
+what a customer meant.
 """
 
 import json
@@ -97,6 +102,47 @@ def normalize_instagram_url(raw_url: str) -> Dict[str, str]:
         "shortcode": shortcode,
         "source_type": source_type,
     }
+
+
+def shared_reel_identity(message: Dict[str, Any]) -> Optional[Dict[str, str]]:
+    """
+    The canonical identity of a reel shared into the DM, or None.
+
+    Reads exactly one field — ``payload.url`` on an attachment whose ``type``
+    is ``ig_reel`` — and puts it through the same deterministic normalizer the
+    admin form uses, so a shared reel and a configured reel are compared as
+    the same canonical string.
+
+    Everything else Meta sends alongside it is deliberately ignored:
+
+    * ``payload.title`` is the caption. It is customer-visible marketing text,
+      not an identifier, and matching on it would let a caption decide what
+      the business is taken to have said.
+    * ``payload.reel_video_id`` is a video id that has never been verified to
+      equal the Graph media id an operator configures, so treating the two as
+      interchangeable would be a guess.
+    * ``ig_post`` attachments carry a lookaside CDN URL with no shortcode in
+      it, so a shared post cannot be identified this way at all and is left
+      unmatched rather than approximated.
+    """
+    attachments = (message or {}).get("attachments")
+    if not isinstance(attachments, list):
+        return None
+    for attachment in attachments:
+        if not isinstance(attachment, dict) or attachment.get("type") != "ig_reel":
+            continue
+        payload = attachment.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        try:
+            identity = normalize_instagram_url(payload.get("url"))
+        except (ValueError, TypeError):
+            # A URL we cannot parse is not a reel we can identify. Silence
+            # here is correct: the alternative is guessing.
+            continue
+        if identity["source_type"] == "reel":
+            return identity
+    return None
 
 
 def product_catalogue() -> List[Dict[str, str]]:
@@ -196,8 +242,16 @@ def decode_route(row: Dict[str, Any]) -> Dict[str, Any]:
     return route
 
 
-def route_for_inbound(*, ad_id: Optional[str], media_id: Optional[str]) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
-    """Specific Ad ID wins over media ID; old Ad-ID rows remain usable."""
+def route_for_inbound(
+    *, ad_id: Optional[str], media_id: Optional[str], shortcode: Optional[str] = None,
+) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """
+    Specific Ad ID wins over media ID; old Ad-ID rows remain usable.
+
+    A shared reel's shortcode is tried last, because it is the weakest claim
+    of the three: an ad ID and a story ID say the customer arrived through
+    that thing, while a shared reel only says they sent it to us.
+    """
     from camellia.database import db
 
     if ad_id:
@@ -223,6 +277,10 @@ def route_for_inbound(*, ad_id: Optional[str], media_id: Optional[str]) -> tuple
         route = db.find_instagram_source_route("media_id", str(media_id))
         if route:
             return decode_route(route), "media_id"
+    if shortcode:
+        route = db.find_instagram_source_route("shortcode", str(shortcode))
+        if route:
+            return decode_route(route), "shared_media_url"
     return None, None
 
 

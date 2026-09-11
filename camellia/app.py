@@ -48,6 +48,7 @@ from camellia.instagram_routing import (
     normalize_instagram_url,
     product_catalogue,
     route_for_inbound,
+    shared_reel_identity,
     validate_route_payload,
 )
 from camellia.sheet_sync import sheet_sync
@@ -366,7 +367,10 @@ def _process_instagram_event(
             facts["source_route"] = source_route
         elif isinstance(facts.get("source_route"), dict):
             source_route = facts["source_route"]
-            source_match_method = "session"
+            # A reel shared a moment ago is why this route is in the session
+            # at all, so the follow-up message is attributed to the share
+            # rather than to the vaguer "it was already here".
+            source_match_method = facts.get("source_match_method") or "session"
         facts["source_context_used"] = False
         trace.update({
             "source_routing_id": (source_route or {}).get("routing_id"),
@@ -497,6 +501,51 @@ def _reply_to_unreadable_attachment(sender_id: str) -> None:
         send_instagram_reply(sender_id, _UNREADABLE_ATTACHMENT_REPLY)
     except Exception:
         log.exception("Failed to answer an unreadable attachment from %s.", sender_id)
+
+
+def _establish_shared_reel_context(sender_id: str, identity: Dict[str, str]) -> None:
+    """
+    Remembers which configured reel a customer just shared, for their next
+    message to use.
+
+    A shared reel carries no question, so nothing is answered from it here —
+    it only establishes context. The customer sends "tell me more" a few
+    seconds later, and that message is the one that needs to know which post
+    it is about.
+
+    An unconfigured reel (a customer forwarding someone else's video, which
+    production traffic does contain) resolves to nothing and leaves the
+    session exactly as it was. No topic is guessed from the caption.
+    """
+    try:
+        route, match_method = route_for_inbound(
+            ad_id=None, media_id=None, shortcode=identity.get("shortcode"),
+        )
+        if not route:
+            log.info(
+                "Shared reel %s from %s is not configured for routing; no source context set.",
+                identity.get("shortcode"), sender_id,
+            )
+            return
+        facts = session_memory.get_facts(sender_id, "instagram")
+        facts["source_route"] = route
+        facts["source_match_method"] = match_method
+        log.info(
+            "Shared reel %s from %s matched routing_id %s (%s) via %s.",
+            identity.get("shortcode"), sender_id, route.get("routing_id"),
+            route.get("routing_topic"), match_method,
+        )
+    except Exception:
+        # Context is a nicety; the attachment reply below is not allowed to
+        # fail because of it.
+        log.exception("Could not establish shared-reel context for %s.", sender_id)
+
+
+def _handle_shared_attachment(sender_id: str, identity: Optional[Dict[str, str]]) -> None:
+    """Establishes reel context where there is any, then answers exactly as before."""
+    if identity:
+        _establish_shared_reel_context(sender_id, identity)
+    _reply_to_unreadable_attachment(sender_id)
 
 
 def _classify_unanswered_event(messaging_event: dict) -> Optional[str]:
@@ -726,6 +775,14 @@ def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks
                 if reason == "attachment_only":
                     _record_attachment_debug_event(messaging_event, sender_id)
 
+                # Parsed here because it is pure string work, but resolved and
+                # stored in the background task below — the webhook must keep
+                # returning 200 before Meta decides it timed out and redelivers.
+                shared_reel = (
+                    shared_reel_identity(messaging_event.get("message") or {})
+                    if reason == "attachment_only" else None
+                )
+
                 # A photo, voice note or sticker is a real person saying
                 # something we cannot read. Silence is the worst available
                 # answer — they cannot tell whether anyone is there. Asking
@@ -733,8 +790,12 @@ def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks
                 # alive; it was found by the drop log within a minute of that
                 # log existing.
                 if reason == "attachment_only" and is_ad_qualified:
-                    background_tasks.add_task(_reply_to_unreadable_attachment, sender_id)
-                    results.append({"sender_id": sender_id, "action": "queued_attachment_reply"})
+                    background_tasks.add_task(_handle_shared_attachment, sender_id, shared_reel)
+                    results.append({
+                        "sender_id": sender_id,
+                        "action": "queued_attachment_reply",
+                        "shared_reel_shortcode": (shared_reel or {}).get("shortcode"),
+                    })
                     continue
 
                 if reason:

@@ -275,7 +275,11 @@ class TestUnreadableAttachments:
             result = app_module._dispatch_instagram_payload(self._event(), tasks)
 
         assert result["results"][0]["action"] == "queued_attachment_reply"
-        assert tasks.add_task.call_args.args[0] is app_module._reply_to_unreadable_attachment
+        # The reply now goes through the wrapper that first resolves a shared
+        # reel's source context; a plain photo carries no identity, so the
+        # answer the customer gets is unchanged.
+        assert tasks.add_task.call_args.args[0] is app_module._handle_shared_attachment
+        assert tasks.add_task.call_args.args[2] is None
 
     def test_the_reply_tells_them_what_to_do_and_how_to_reach_a_human(self):
         session_memory.clear_session("att_send", "instagram")
