@@ -71,9 +71,11 @@ def describe_entry_point(messaging_event: Dict[str, Any]) -> EntryPoint:
     ads_context = referral.get("ads_context_data")
     ad_title = ads_context.get("ad_title") if isinstance(ads_context, dict) else None
     from_ad_click = str(referral.get("source", "")).upper() == "ADS"
-    # The only media identifier present in the webhook shapes we currently
-    # receive is the story id attached to a reply. Post/reel shortcodes and
-    # URLs are not copied into messaging events, so they are never inferred.
+    # The only media identifier on a *typed* message is the story id attached
+    # to a reply; nothing here infers one from anywhere else. A reel shared as
+    # an attachment does carry its own permalink, but that arrives on a
+    # different event shape and is read by shared_reel_identity() rather than
+    # folded in here.
     reply_to = message_obj.get("reply_to") or {}
     story = reply_to.get("story") if isinstance(reply_to, dict) else None
     media_id = str(story.get("id")) if isinstance(story, dict) and story.get("id") else None

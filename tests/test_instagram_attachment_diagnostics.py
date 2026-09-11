@@ -134,9 +134,12 @@ def test_debug_endpoint_returns_captured_events_for_admin(admin_headers):
 
 def test_attachment_reply_behaviour_is_unchanged(monkeypatch):
     """
-    Evidence collection only: the customer still gets exactly the same
-    "I can't open photos" reply, and nothing routes, classifies, or infers a
-    source from the attachment.
+    The customer still gets exactly the same "I can't open photos" reply.
+
+    This event's attachment type is not one production has ever sent — a
+    reel arrives as ``ig_reel`` — so nothing is identified from it and no
+    source context is established, which is the correct outcome for an
+    attachment shape we cannot recognise.
     """
     queued = []
     monkeypatch.setattr(app_module, "_process_instagram_event", lambda *a, **k: queued.append(("routed", a)))
@@ -158,6 +161,9 @@ def test_attachment_reply_behaviour_is_unchanged(monkeypatch):
     result = app_module._dispatch_instagram_payload(payload, _Tasks())
 
     assert result["results"][0]["action"] == "queued_attachment_reply"
-    assert [name for name, _ in queued] == ["_reply_to_unreadable_attachment"]
+    assert [name for name, _ in queued] == ["_handle_shared_attachment"]
+    # No identity was extracted, so the wrapper has no context to establish.
+    assert queued[0][1][1] is None
+    assert result["results"][0]["shared_reel_shortcode"] is None
     # Captured for inspection, but no routing decision was taken from it.
     assert len(app_module._ATTACHMENT_DEBUG_EVENTS) == 1

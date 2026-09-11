@@ -293,6 +293,8 @@ class Database:
             """)
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_instagram_routes_ad ON instagram_source_routes(ad_id, active)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_instagram_routes_media ON instagram_source_routes(media_id, active)")
+            # A reel shared into a DM is matched by its normalized shortcode.
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_instagram_routes_shortcode ON instagram_source_routes(shortcode, active)")
 
             for column, declaration in (
                 ("source_routing_id", "INTEGER"),
@@ -600,7 +602,10 @@ class Database:
         return [dict(row) for row in rows]
 
     def find_instagram_source_route(self, field: str, value: str) -> Optional[Dict[str, Any]]:
-        if field not in ("ad_id", "media_id"):
+        # The column name is interpolated, so the allowlist is the thing
+        # keeping this query safe. Widening it is adding a name to the list,
+        # never relaxing the check.
+        if field not in ("ad_id", "media_id", "shortcode"):
             raise ValueError("Unsupported route identifier.")
         with self.get_connection() as conn:
             row = conn.execute(
