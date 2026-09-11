@@ -345,6 +345,57 @@ class Database:
             ):
                 self._ensure_column(cursor, "conversations", column, declaration)
 
+            # Dynamic menu catalogue: the registry of every menu the Visual
+            # Menu Manager and Instagram routing know about — the durable
+            # image/version machinery in menu_image_versions already works
+            # against any menu_key string, so a new menu needs nothing more
+            # than a row here to become real everywhere it is referenced.
+            # `is_builtin` marks the five menus that predate this catalogue
+            # (their image history already exists under these exact keys);
+            # it is informational only and gates nothing.
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS menu_catalogue (
+                menu_id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                category TEXT NOT NULL DEFAULT 'Other',
+                description TEXT NOT NULL DEFAULT '',
+                active INTEGER NOT NULL DEFAULT 1,
+                is_builtin INTEGER NOT NULL DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+
+            # Instagram Content Routing topics: a reusable label an operator
+            # picks once and every future route reuses, instead of retyping
+            # the same topic as free text on each route. `priority_products`
+            # and `knowledge_scope` here are the *defaults* a route is
+            # pre-filled with at creation time, not a live reference read at
+            # matching time — the route's own columns remain what the
+            # matcher and responder actually act on, so nothing about
+            # existing routing behavior changes shape.
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS instagram_topics (
+                topic_id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                default_menu_id TEXT,
+                priority_products TEXT NOT NULL DEFAULT '[]',
+                knowledge_scope TEXT NOT NULL DEFAULT '[]',
+                active INTEGER NOT NULL DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+            cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_topics_normalized_name ON instagram_topics(name COLLATE NOCASE)")
+
+            self._ensure_column(cursor, "instagram_source_routes", "topic_id", "TEXT")
+            # The menu shown for this route. Defaults from the selected
+            # Topic's default_menu_id at save time (see validate_route_payload)
+            # but is its own column so a route can override it independently —
+            # "the client may override it if needed" without changing the Topic.
+            self._ensure_column(cursor, "instagram_source_routes", "menu_id", "TEXT")
+
             # Menu Manager: one row per unpublished edit in progress. A menu_key
             # ("collections.aamar_mishti", "weekly.vegetarian", ...) has at most
             # one draft — a second save overwrites it rather than accumulating.
@@ -394,6 +445,29 @@ class Database:
             cursor.execute("INSERT OR IGNORE INTO analytics (key, value) VALUES ('total_messages', 0);")
             cursor.execute("INSERT OR IGNORE INTO analytics (key, value) VALUES ('matched_responses', 0);")
             cursor.execute("INSERT OR IGNORE INTO analytics (key, value) VALUES ('escalations_count', 0);")
+
+            # The five menus that predate the dynamic menu catalogue. Seeded
+            # here — not from a separate startup call — so every Database
+            # instance (production, or an isolated one built fresh in a
+            # test) has them without remembering to ask; INSERT OR IGNORE
+            # means an operator's later edits to a built-in's description
+            # are never overwritten by this running again.
+            for menu_id, name, category, description in (
+                ("aamar_mishti", "Aamar Mishti Collection", "Sondesh",
+                 "Everyday Bengali Sondesh collection, made with local dairy milk."),
+                ("signature", "Signature Collection", "Sondesh",
+                 "Sondesh for special occasions and gifting, made with A2 cow milk."),
+                ("weekly_vegetarian", "Weekly Vegetarian", "Weekly Vegetarian",
+                 "This week's fresh vegetarian Bengali dishes."),
+                ("weekly_non_vegetarian", "Weekly Non-Vegetarian", "Weekly Non-Vegetarian",
+                 "This week's fresh non-vegetarian Bengali dishes."),
+                ("bento", "Bento / Meal Menu", "Bento / Meal", "Ready-to-eat Bengali meal boxes."),
+            ):
+                cursor.execute(
+                    "INSERT OR IGNORE INTO menu_catalogue (menu_id, name, category, description, active, is_builtin) "
+                    "VALUES (?, ?, ?, ?, 1, 1)",
+                    (menu_id, name, category, description),
+                )
 
             self._create_indexes(cursor)
 
@@ -591,7 +665,8 @@ class Database:
             route.get("media_id"), route.get("ad_id"), route.get("campaign_id"),
             route.get("routing_topic", ""), json.dumps(route.get("knowledge_scope", [])),
             route.get("escalation_policy", "human_if_unsupported"),
-            json.dumps(route.get("priority_products", [])), int(bool(route.get("active", True))), now,
+            json.dumps(route.get("priority_products", [])), int(bool(route.get("active", True))),
+            route.get("topic_id"), route.get("menu_id"), now,
         )
         with self.get_connection() as conn:
             if routing_id is None:
@@ -610,8 +685,8 @@ class Database:
                     """INSERT INTO instagram_source_routes
                     (source_type, canonical_url, shortcode, media_id, ad_id, campaign_id,
                      routing_topic, knowledge_scope, escalation_policy, priority_products,
-                     active, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                     active, topic_id, menu_id, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     values[:-1] + (now, now),
                 )
                 routing_id = int(cursor.lastrowid)
@@ -619,7 +694,7 @@ class Database:
                 cursor = conn.execute(
                     """UPDATE instagram_source_routes SET source_type=?, canonical_url=?, shortcode=?,
                     media_id=?, ad_id=?, campaign_id=?, routing_topic=?, knowledge_scope=?,
-                    escalation_policy=?, priority_products=?, active=?, updated_at=?, archived_at=NULL
+                    escalation_policy=?, priority_products=?, active=?, topic_id=?, menu_id=?, updated_at=?, archived_at=NULL
                     WHERE routing_id=?""",
                     values + (routing_id,),
                 )
@@ -665,6 +740,19 @@ class Database:
             cursor = conn.execute(
                 "UPDATE instagram_source_routes SET active=?, updated_at=? WHERE routing_id=? AND archived_at IS NULL",
                 (int(active), datetime.utcnow().isoformat(), routing_id),
+            )
+            conn.commit()
+        return cursor.rowcount > 0
+
+    def set_instagram_source_route_topic(self, routing_id: int, topic_id: str) -> bool:
+        """Backfills topic_id only — deliberately narrower than
+        save_instagram_source_route, which unconditionally clears archived_at
+        on update. Used by the startup migration, which must never un-archive
+        a route just because it is backfilling one field."""
+        with self.get_connection() as conn:
+            cursor = conn.execute(
+                "UPDATE instagram_source_routes SET topic_id=? WHERE routing_id=?",
+                (topic_id, routing_id),
             )
             conn.commit()
         return cursor.rowcount > 0
@@ -827,6 +915,135 @@ class Database:
             conn.commit()
             row = conn.execute("SELECT * FROM instagram_post_pairings WHERE id=?", (pairing_id,)).fetchone()
         return dict(row)
+
+    # --- Dynamic menu catalogue ---------------------------------------------
+
+    def list_menu_catalogue(self, include_inactive: bool = True) -> List[Dict[str, Any]]:
+        where = "" if include_inactive else "WHERE active = 1"
+        with self.get_connection() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM menu_catalogue {where} ORDER BY is_builtin DESC, name COLLATE NOCASE"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_menu_catalogue_entry(self, menu_id: str) -> Optional[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            row = conn.execute("SELECT * FROM menu_catalogue WHERE menu_id = ?", (menu_id,)).fetchone()
+        return dict(row) if row else None
+
+    def find_menu_catalogue_entry_by_name(self, name: str) -> Optional[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM menu_catalogue WHERE name = ? COLLATE NOCASE", (name.strip(),)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def create_menu_catalogue_entry(
+        self, menu_id: str, name: str, category: str, description: str,
+        active: bool = True, is_builtin: bool = False,
+    ) -> Dict[str, Any]:
+        with self.get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO menu_catalogue (menu_id, name, category, description, active, is_builtin)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (menu_id, name, category, description, int(active), int(is_builtin)),
+            )
+            conn.commit()
+            row = conn.execute("SELECT * FROM menu_catalogue WHERE menu_id = ?", (menu_id,)).fetchone()
+        return dict(row)
+
+    def update_menu_catalogue_entry(
+        self, menu_id: str, *, name: Optional[str] = None, category: Optional[str] = None,
+        description: Optional[str] = None, active: Optional[bool] = None,
+    ) -> Optional[Dict[str, Any]]:
+        fields, values = [], []
+        for column, value in (("name", name), ("category", category), ("description", description)):
+            if value is not None:
+                fields.append(f"{column} = ?")
+                values.append(value)
+        if active is not None:
+            fields.append("active = ?")
+            values.append(int(active))
+        if not fields:
+            return self.get_menu_catalogue_entry(menu_id)
+        fields.append("updated_at = ?")
+        values.append(datetime.utcnow().isoformat())
+        values.append(menu_id)
+        with self.get_connection() as conn:
+            cursor = conn.execute(f"UPDATE menu_catalogue SET {', '.join(fields)} WHERE menu_id = ?", values)
+            conn.commit()
+        return self.get_menu_catalogue_entry(menu_id) if cursor.rowcount else None
+
+    # --- Instagram Content Routing topics -----------------------------------
+
+    def list_instagram_topics(self, include_inactive: bool = True) -> List[Dict[str, Any]]:
+        where = "" if include_inactive else "WHERE active = 1"
+        with self.get_connection() as conn:
+            rows = conn.execute(f"SELECT * FROM instagram_topics {where} ORDER BY name COLLATE NOCASE").fetchall()
+        return [dict(row) for row in rows]
+
+    def get_instagram_topic(self, topic_id: str) -> Optional[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            row = conn.execute("SELECT * FROM instagram_topics WHERE topic_id = ?", (topic_id,)).fetchone()
+        return dict(row) if row else None
+
+    def find_instagram_topic_by_name(self, name: str) -> Optional[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM instagram_topics WHERE name = ? COLLATE NOCASE", (name.strip(),)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def create_instagram_topic(
+        self, topic_id: str, name: str, description: str, default_menu_id: Optional[str],
+        priority_products: List[str], knowledge_scope: List[str], active: bool = True,
+    ) -> Dict[str, Any]:
+        with self.get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO instagram_topics
+                    (topic_id, name, description, default_menu_id, priority_products, knowledge_scope, active)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (topic_id, name, description, default_menu_id,
+                 json.dumps(priority_products), json.dumps(knowledge_scope), int(active)),
+            )
+            conn.commit()
+            row = conn.execute("SELECT * FROM instagram_topics WHERE topic_id = ?", (topic_id,)).fetchone()
+        return dict(row)
+
+    def update_instagram_topic(
+        self, topic_id: str, *, name: Optional[str] = None, description: Optional[str] = None,
+        default_menu_id: Optional[str] = None, priority_products: Optional[List[str]] = None,
+        knowledge_scope: Optional[List[str]] = None, active: Optional[bool] = None,
+        clear_default_menu: bool = False,
+    ) -> Optional[Dict[str, Any]]:
+        fields, values = [], []
+        if name is not None:
+            fields.append("name = ?"); values.append(name)
+        if description is not None:
+            fields.append("description = ?"); values.append(description)
+        if clear_default_menu:
+            fields.append("default_menu_id = NULL")
+        elif default_menu_id is not None:
+            fields.append("default_menu_id = ?"); values.append(default_menu_id)
+        if priority_products is not None:
+            fields.append("priority_products = ?"); values.append(json.dumps(priority_products))
+        if knowledge_scope is not None:
+            fields.append("knowledge_scope = ?"); values.append(json.dumps(knowledge_scope))
+        if active is not None:
+            fields.append("active = ?"); values.append(int(active))
+        if not fields:
+            return self.get_instagram_topic(topic_id)
+        fields.append("updated_at = ?")
+        values.append(datetime.utcnow().isoformat())
+        values.append(topic_id)
+        with self.get_connection() as conn:
+            cursor = conn.execute(f"UPDATE instagram_topics SET {', '.join(fields)} WHERE topic_id = ?", values)
+            conn.commit()
+        return self.get_instagram_topic(topic_id) if cursor.rowcount else None
 
     @staticmethod
     def _create_indexes(cursor) -> None:

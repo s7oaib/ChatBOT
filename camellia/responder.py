@@ -1444,6 +1444,10 @@ class DeterministicResponder:
             lowered_text,
         )
         source_route = facts.get("source_route") if isinstance(facts.get("source_route"), dict) else None
+        source_topic = (
+            db.get_instagram_topic(source_route["topic_id"])
+            if source_route and source_route.get("topic_id") else None
+        )
         priorities = [
             product for product in (source_route or {}).get("priority_products", [])
             if route_template_id(product)
@@ -1464,6 +1468,12 @@ class DeterministicResponder:
             template = self._template_by_id(template_id)
             if template and template.get("response") and not template.get("escalate"):
                 response_text, images = self._format_dynamic_response(template_id, template["response"], user_id=user_id, channel=channel, user_message=user_message)
+                # The Topic's own admin-authored description frames the
+                # approved product answer that follows it — safe because it
+                # is text an operator wrote, not anything inferred from the
+                # topic name or generated here.
+                if source_topic and source_topic.get("description"):
+                    response_text = f"{source_topic['description']}\n\n{response_text}"
                 facts["source_context_used"] = True
                 facts["source_priority_cursor"] = min(cursor + 1, len(priorities)) if priorities else 1
                 session_memory.add_turn(user_id, channel, user_message, response_text)
@@ -1480,8 +1490,28 @@ class DeterministicResponder:
                     user_message=user_message,
                 )
                 topic = str(source_route.get("routing_topic") or "").strip()
-                if topic:
+                if source_topic and source_topic.get("description"):
+                    # The Topic's own description is admin-authored, safe
+                    # customer-facing copy — replaces the bare label prefix
+                    # with what the operator actually wrote about it.
+                    response_text = f"{topic}\n\n{source_topic['description']}\n\n{response_text}" if topic else f"{source_topic['description']}\n\n{response_text}"
+                elif topic:
                     response_text = f"About {topic}:\n\n{response_text}"
+                # The Topic's linked menu image, when one is published, rides
+                # alongside the overview cards already in `images` — never in
+                # place of them, and never inferred from anything but the
+                # admin's own default_menu_id choice on the Topic.
+                linked_menu_id = (source_route or {}).get("menu_id") or (source_topic or {}).get("default_menu_id")
+                if linked_menu_id:
+                    linked_image = current_menu_image(linked_menu_id, None)
+                    if linked_image:
+                        if isinstance(images, list):
+                            if linked_image not in images:
+                                images = images + [linked_image]
+                        elif images:
+                            images = [images, linked_image] if images != linked_image else images
+                        else:
+                            images = [linked_image]
                 facts["source_context_used"] = True
                 session_memory.add_turn(user_id, channel, user_message, response_text)
                 return response_text, True, "source_topic_know_more", images
@@ -1744,7 +1774,6 @@ class DeterministicResponder:
         
         # Check Self-Healing Learned Knowledge Base (Saved from Staff Escalation Resolutions)
         try:
-            from camellia.database import db
             learned_items = db.get_learned_knowledge(limit=100)
             for item in learned_items:
                 pattern = item.get("question_pattern", "").lower().strip()

@@ -261,12 +261,36 @@ def product_ids() -> set[str]:
 
 
 def validate_route_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Normalize an admin route without accepting copied product facts."""
+    """
+    Normalize an admin route without accepting copied product facts.
+
+    A `topic_id` is the simplified client-facing path: pick a Topic and the
+    route's topic text, priority products, and knowledge scope all default
+    from it. Those defaults only fill in gaps — an explicit, non-empty
+    priority_products/knowledge_scope in the payload always wins, matching
+    "the client may override it if needed." The Topic itself is never read
+    again at matching or reply time; its fields are copied onto the route
+    once, here, so the route stays the single thing the matcher and
+    responder act on.
+    """
+    from camellia.database import db
+
     raw_url = str(payload.get("canonical_url") or payload.get("url") or "").strip()
     normalized = normalize_instagram_url(raw_url) if raw_url else {}
     source_type = normalized.get("source_type") or str(payload.get("source_type") or "ad").strip().lower()
     if source_type not in _SOURCE_TYPES:
         raise ValueError("source_type must be post, reel, or ad.")
+
+    topic_id = str(payload.get("topic_id") or "").strip() or None
+    topic = db.get_instagram_topic(topic_id) if topic_id else None
+    if topic_id and not topic:
+        raise ValueError("Unknown topic.")
+
+    menu_id = str(payload.get("menu_id") or "").strip() or None
+    if not menu_id and topic:
+        menu_id = topic.get("default_menu_id") or None
+    if menu_id and not db.get_menu_catalogue_entry(menu_id):
+        raise ValueError("Unknown menu.")
 
     priority = payload.get("priority_products", [])
     if priority is None:
@@ -274,6 +298,8 @@ def validate_route_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(priority, list) or any(not isinstance(item, str) for item in priority):
         raise ValueError("priority_products must be an ordered list of product IDs.")
     priority = [item.strip() for item in priority]
+    if not priority and topic:
+        priority = list(json.loads(topic["priority_products"]) or [])
     if len(priority) != len(set(priority)):
         raise ValueError("A priority product can only be added once.")
     unknown_products = [item for item in priority if item not in product_ids()]
@@ -286,6 +312,8 @@ def validate_route_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(scope, list) or any(not isinstance(item, str) for item in scope):
         raise ValueError("knowledge_scope must be a list of canonical knowledge domains.")
     scope = [item.strip() for item in scope]
+    if not scope and topic:
+        scope = list(json.loads(topic["knowledge_scope"]) or [])
     unknown_scope = [item for item in scope if item not in SOURCE_MAP]
     if unknown_scope:
         raise ValueError(f"Unknown knowledge scope: {unknown_scope[0]}")
@@ -297,6 +325,15 @@ def validate_route_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     active = payload.get("active", True)
     if not isinstance(active, bool):
         raise ValueError("active must be true or false.")
+
+    # routing_topic stays the display/back-compat field every existing part
+    # of the code already reads (the "About {topic}:" prefix, admin lists,
+    # audit rows). With a Topic selected it always mirrors the Topic's name,
+    # so the two can never drift apart under the same route.
+    routing_topic = (
+        topic["name"] if topic else str(payload.get("routing_topic") or "").strip()
+    )
+
     clean = {
         "source_type": source_type,
         "canonical_url": normalized.get("canonical_url"),
@@ -304,7 +341,9 @@ def validate_route_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         "media_id": str(payload.get("media_id") or "").strip() or None,
         "ad_id": str(payload.get("ad_id") or "").strip() or None,
         "campaign_id": str(payload.get("campaign_id") or "").strip() or None,
-        "routing_topic": str(payload.get("routing_topic") or "").strip(),
+        "topic_id": topic_id,
+        "menu_id": menu_id,
+        "routing_topic": routing_topic,
         "knowledge_scope": scope,
         "escalation_policy": escalation,
         "priority_products": priority,
@@ -331,6 +370,21 @@ def decode_route(row: Dict[str, Any]) -> Dict[str, Any]:
         item for item in route["priority_products"] if item not in available
     ]
     return route
+
+
+def decode_topic(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Same JSON-string-to-list unpacking decode_route does, for a Topic row —
+    without it, priority_products/knowledge_scope cross the API as an encoded
+    string rather than an array."""
+    topic = dict(row)
+    for field in ("priority_products", "knowledge_scope"):
+        value = topic.get(field)
+        try:
+            topic[field] = json.loads(value) if isinstance(value, str) else list(value or [])
+        except (json.JSONDecodeError, TypeError):
+            topic[field] = []
+    topic["active"] = bool(topic.get("active"))
+    return topic
 
 
 def route_for_inbound(
@@ -397,3 +451,122 @@ def route_template_id(product_id: str, *, price: bool = False) -> Optional[str]:
         if record.knowledge_id == wanted:
             return record.template_id
     return None
+
+
+class InstagramTopicError(ValueError):
+    """A topic create/update request failed validation."""
+
+
+def _slugify_topic(name: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "_", name.strip().lower()).strip("_")
+    return slug or "topic"
+
+
+def create_topic(
+    name: str, description: str, default_menu_id: Optional[str] = None,
+    priority_products: Optional[List[str]] = None, knowledge_scope: Optional[List[str]] = None,
+    active: bool = True,
+) -> Dict[str, Any]:
+    from camellia.database import db
+
+    name = (name or "").strip()
+    description = (description or "").strip()
+    if not name:
+        raise InstagramTopicError("Topic name is required.")
+    if not description:
+        raise InstagramTopicError("Description is required.")
+    if db.find_instagram_topic_by_name(name):
+        raise InstagramTopicError(f"A topic named '{name}' already exists.")
+
+    priority_products = [str(p).strip() for p in (priority_products or []) if str(p).strip()]
+    unknown = [p for p in priority_products if p not in product_ids()]
+    if unknown:
+        raise InstagramTopicError(f"Unknown priority product: {unknown[0]}")
+    knowledge_scope = [str(s).strip() for s in (knowledge_scope or []) if str(s).strip()]
+    unknown_scope = [s for s in knowledge_scope if s not in SOURCE_MAP]
+    if unknown_scope:
+        raise InstagramTopicError(f"Unknown knowledge scope: {unknown_scope[0]}")
+
+    if default_menu_id and not db.get_menu_catalogue_entry(default_menu_id):
+        raise InstagramTopicError("Unknown default menu.")
+
+    topic_id = _slugify_topic(name)
+    if db.get_instagram_topic(topic_id):
+        suffix = 2
+        while db.get_instagram_topic(f"{topic_id}_{suffix}"):
+            suffix += 1
+        topic_id = f"{topic_id}_{suffix}"
+
+    return db.create_instagram_topic(
+        topic_id, name, description, default_menu_id or None,
+        priority_products, knowledge_scope, active=active,
+    )
+
+
+def update_topic(topic_id: str, **fields: Any) -> Dict[str, Any]:
+    from camellia.database import db
+
+    if not db.get_instagram_topic(topic_id):
+        raise KeyError(topic_id)
+    if "name" in fields and fields["name"] is not None:
+        name = fields["name"].strip()
+        if not name:
+            raise InstagramTopicError("Topic name is required.")
+        existing = db.find_instagram_topic_by_name(name)
+        if existing and existing["topic_id"] != topic_id:
+            raise InstagramTopicError(f"A topic named '{name}' already exists.")
+        fields["name"] = name
+    if fields.get("default_menu_id") and not db.get_menu_catalogue_entry(fields["default_menu_id"]):
+        raise InstagramTopicError("Unknown default menu.")
+    updated = db.update_instagram_topic(topic_id, **fields)
+    if not updated:
+        raise KeyError(topic_id)
+    return updated
+
+
+def migrate_legacy_routing_topics() -> int:
+    """
+    Backfills `topic_id` on routes that predate the Topic catalogue.
+
+    Idempotent and safe to run on every startup: a route already carrying a
+    topic_id is left untouched, and a route with no routing_topic text has
+    nothing to migrate. Matching is by exact topic name only — never a guess
+    from priority products or a shortcode — so a route that finds no
+    matching Topic simply gets one created from its existing text.
+
+    Uses set_instagram_source_route_topic() rather than
+    save_instagram_source_route(), specifically so an archived route stays
+    archived: the general save path unconditionally clears archived_at on
+    update, which is correct for an admin editing a route on purpose but
+    would be a real data-integrity bug here — a startup migration must never
+    un-archive anything.
+    """
+    from camellia.database import db
+
+    migrated = 0
+    for row in db.list_instagram_source_routes(include_archived=True):
+        if row.get("topic_id"):
+            continue
+        name = (row.get("routing_topic") or "").strip()
+        if not name:
+            continue
+        topic = db.find_instagram_topic_by_name(name)
+        if not topic:
+            priority = json.loads(row.get("priority_products") or "[]")
+            scope = json.loads(row.get("knowledge_scope") or "[]")
+            topic = db.create_instagram_topic(
+                _unique_topic_id(db, name), name, "", None, priority, scope, active=True,
+            )
+        db.set_instagram_source_route_topic(row["routing_id"], topic["topic_id"])
+        migrated += 1
+    return migrated
+
+
+def _unique_topic_id(db_module, name: str) -> str:
+    topic_id = _slugify_topic(name)
+    if not db_module.get_instagram_topic(topic_id):
+        return topic_id
+    suffix = 2
+    while db_module.get_instagram_topic(f"{topic_id}_{suffix}"):
+        suffix += 1
+    return f"{topic_id}_{suffix}"

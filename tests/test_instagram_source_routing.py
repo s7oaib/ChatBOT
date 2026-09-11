@@ -123,7 +123,7 @@ def test_ordered_priorities_handle_vague_then_what_else_without_overriding_expli
 
 def test_admin_route_ui_has_ordering_crud_and_advanced_compatibility():
     html = app.get_admin_dashboard().body.decode()
-    for expected in ("Instagram Post/Reel Link", "Priority Products", "+ Add Product", "moveIgPriority", "Remove", "Edit", "Disable", "Archive", "Advanced", "igAdId", "igMediaId", "igCampaignId"):
+    for expected in ("Instagram Post / Reel Link", "Priority Products", "+ Add Product", "moveIgPriority", "Remove", "Edit", "Disable", "Archive", "Advanced", "igAdId", "igMediaId", "igCampaignId"):
         assert expected in html
 
 
