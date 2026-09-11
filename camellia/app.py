@@ -9,6 +9,7 @@ import httpx
 from datetime import datetime
 from contextlib import asynccontextmanager
 from pathlib import Path
+from urllib.parse import urlsplit
 from fastapi import FastAPI, Request, Response, Query, Header, HTTPException, File, UploadFile, BackgroundTasks
 from fastapi.responses import PlainTextResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -554,6 +555,131 @@ def get_dropped_webhook_events(
     return {"count": len(_DROPPED_WEBHOOK_EVENTS), "events": list(reversed(_DROPPED_WEBHOOK_EVENTS))}
 
 
+# Sharing a reel into a DM arrives as an attachment with no message text, so
+# it never reaches the source-routing path. Whether Meta puts anything usable
+# (a permalink, a media id) inside that attachment is not documented by any
+# payload this repo has ever captured, and the code has only ever checked
+# `message.attachments` for truthiness — so nothing here assumes a field name.
+# This records the structure Meta actually sends, so the question can be
+# answered from evidence before any matcher is written.
+#
+# Structure, not content: values are kept only where they identify a shared
+# object (ids, types, URLs with the query string removed), everything else is
+# reported as its type. Deliberately in memory and bounded — a diagnostic
+# answering one question, not a second copy of customer data.
+_ATTACHMENT_DEBUG_EVENTS: List[Dict[str, Any]] = []
+_ATTACHMENT_DEBUG_LIMIT = 10
+_ATTACHMENT_DEBUG_MAX_DEPTH = 6
+_ATTACHMENT_DEBUG_MAX_STR = 300
+
+# Meta signs its CDN URLs with short-lived credentials in the query string
+# (and a shared link can carry click-tracking tokens), so a URL is recorded
+# as scheme://host/path only. A key that looks like a credential is never
+# recorded at all, whatever Meta decides to call it.
+_SECRET_KEY_HINTS = (
+    "token", "secret", "signature", "auth", "cookie", "password",
+    "credential", "session", "bearer", "apikey", "api_key",
+)
+
+
+def _sanitize_debug_url(value: str) -> str:
+    """scheme://host/path — the shape that identifies a shared object, with
+    signed query parameters dropped."""
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return "<unparseable-url>"
+    if not parsed.scheme or not parsed.hostname:
+        return "<not-a-url>"
+    cleaned = f"{parsed.scheme}://{parsed.hostname}{parsed.path}"
+    if parsed.query:
+        cleaned += "?<query-removed>"
+    return cleaned[:_ATTACHMENT_DEBUG_MAX_STR]
+
+
+def _sanitize_debug_value(key: str, value: Any, depth: int = 0) -> Any:
+    """
+    Reports what Meta sent without copying anything sensitive out of it.
+
+    Field names are never assumed — whatever keys arrive are the keys
+    reported. Only the values that could identify a shared post/reel survive
+    in readable form; everything else degrades to its type.
+    """
+    if any(hint in key.lower() for hint in _SECRET_KEY_HINTS):
+        return "<redacted-by-key-name>"
+    if depth >= _ATTACHMENT_DEBUG_MAX_DEPTH:
+        return "<max-depth>"
+
+    if isinstance(value, dict):
+        return {
+            str(k): _sanitize_debug_value(str(k), v, depth + 1)
+            for k, v in list(value.items())[:40]
+        }
+    if isinstance(value, list):
+        return [_sanitize_debug_value(key, item, depth + 1) for item in value[:10]]
+    if isinstance(value, bool) or value is None:
+        return value
+    if isinstance(value, (int, float)):
+        return value
+    if isinstance(value, str):
+        if value.startswith(("http://", "https://")):
+            return _sanitize_debug_url(value)
+        if len(value) > _ATTACHMENT_DEBUG_MAX_STR:
+            return f"<str len={len(value)}>"
+        return value
+    return f"<{type(value).__name__}>"
+
+
+def _record_attachment_debug_event(messaging_event: dict, sender_id: Optional[str]) -> None:
+    """
+    Captures the sanitized shape of one attachment-only Instagram message.
+
+    Changes nothing about how the message is answered — this only observes.
+    Never allowed to raise: a diagnostic that can break the webhook is worse
+    than the missing evidence it was added to collect.
+    """
+    try:
+        message = messaging_event.get("message") or {}
+        attachments = message.get("attachments")
+        attachment_list = attachments if isinstance(attachments, list) else []
+
+        _ATTACHMENT_DEBUG_EVENTS.append({
+            "at": datetime.utcnow().isoformat(timespec="seconds"),
+            "had_sender": bool(sender_id),
+            "event_keys": sorted(str(k) for k in messaging_event.keys()),
+            "message_keys": sorted(str(k) for k in message.keys()),
+            "attachment_count": len(attachment_list),
+            # Every key each attachment actually carries, so a field this
+            # code has never heard of still shows up.
+            "attachment_keys": [
+                sorted(str(k) for k in item.keys()) if isinstance(item, dict) else f"<{type(item).__name__}>"
+                for item in attachment_list
+            ],
+            "attachments": _sanitize_debug_value("attachments", attachment_list),
+            # A reply/share wrapper, if Meta sends one, lives beside the
+            # attachments rather than inside them.
+            "reply_to": _sanitize_debug_value("reply_to", message.get("reply_to")),
+            "referral": _sanitize_debug_value("referral", messaging_event.get("referral")),
+        })
+        del _ATTACHMENT_DEBUG_EVENTS[:-_ATTACHMENT_DEBUG_LIMIT]
+    except Exception:
+        log.exception("Attachment diagnostic capture failed; the message itself is unaffected.")
+
+
+@app.get("/admin/debug/instagram-attachments")
+def get_instagram_attachment_debug(
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """Sanitized structure of recent attachment-only Instagram messages."""
+    require_admin(x_admin_key, x_admin_pin)
+    return {
+        "count": len(_ATTACHMENT_DEBUG_EVENTS),
+        "limit": _ATTACHMENT_DEBUG_LIMIT,
+        "events": list(reversed(_ATTACHMENT_DEBUG_EVENTS)),
+    }
+
+
 def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks) -> dict:
     log.info("Instagram Webhook Raw Payload:\n%s", json.dumps(payload, indent=2))
 
@@ -592,6 +718,13 @@ def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks
                 # them to fill the buffer in about a minute, burying the one
                 # event that actually mattered.
                 reason = _classify_unanswered_event(messaging_event)
+
+                # Observation only, before either branch below: a reel shared
+                # into a DM lands here, and what Meta puts inside that
+                # attachment is the open question blocking shared-reel
+                # routing. Recording it changes nothing about the reply.
+                if reason == "attachment_only":
+                    _record_attachment_debug_event(messaging_event, sender_id)
 
                 # A photo, voice note or sticker is a real person saying
                 # something we cannot read. Silence is the worst available
