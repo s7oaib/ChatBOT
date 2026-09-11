@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional
 from camellia.config import config
 from camellia.database import db
 from camellia.monitoring import get_logger
+from camellia.session_memory import session_memory
 
 log = get_logger("camellia.handoff")
 
@@ -112,7 +113,7 @@ def extract_reference(text: str) -> Optional[str]:
     return f"CAM-{match.group(1)}" if match else None
 
 
-def _known_entities(facts: Dict[str, Any]) -> Dict[str, Any]:
+def _known_entities(facts: Dict[str, Any], *, include_order: bool = False) -> Dict[str, Any]:
     """Whatever Instagram's own understanding already extracted this session.
 
     Reused as-is — never re-asked of the customer. Sourced from
@@ -125,8 +126,15 @@ def _known_entities(facts: Dict[str, Any]) -> Dict[str, Any]:
     for key, value in (facts.get("last_entities") or {}).items():
         if value not in (None, ""):
             known[key] = value
-    order_draft = facts.get("order_draft") or {}
-    for key, value in order_draft.items():
+    # The draft is accumulated order state, so it belongs to an order handoff
+    # only. On a general escalation it is the same stale luggage the cart was:
+    # an empty draft still carries a default quantity of 1, which reached
+    # staff as a bare "Quantity: 1" against an enquiry about nothing, and a
+    # half-built one would have handed over a product the customer had not
+    # mentioned in this message. `last_entities` above is different — that is
+    # what the current message itself said.
+    order_draft = facts.get("order_draft") if include_order else None
+    for key, value in (order_draft or {}).items():
         if value not in (None, "") and key not in known:
             known[key] = value
     if facts.get("ad_product") and "product" not in known:
@@ -150,6 +158,7 @@ def get_or_create_handoff(
     user_message: str,
     facts: Dict[str, Any],
     escalation_id: Optional[int] = None,
+    include_order: bool = False,
 ) -> Dict[str, Any]:
     """Returns the customer's active handoff, creating one only if needed.
 
@@ -157,15 +166,22 @@ def get_or_create_handoff(
     "can I speak to someone" a minute later gets ONE reference, not three —
     `db.get_active_handoff` is the single source of truth for "is there
     already an open enquiry for this customer".
+
+    `include_order` is what separates "I want to order this" from "can I
+    speak to someone". Only the first is allowed to carry the cart into the
+    handoff. Attaching it to every escalation is how a customer who asked
+    for a human ended up with a WhatsApp message that opened "I'm continuing
+    my Camellia Instagram order" and quoted a Jolbhora order from a previous
+    day — an order they had not mentioned and might no longer want.
     """
-    order_summary = verified_order_summary(facts)
+    order_summary = verified_order_summary(facts) if include_order else None
     existing = db.get_active_handoff(channel, user_id)
     if existing:
         existing["newly_created"] = False
         existing["verified_order"] = order_summary
         return existing
 
-    known_entities = _known_entities(facts)
+    known_entities = _known_entities(facts, include_order=include_order)
     if order_summary:
         known_entities["verified_order"] = order_summary
     unresolved_topic = str((facts.get("last_entities") or {}).get("topic") or "").strip() or None
@@ -293,6 +309,24 @@ def staff_summary(handoff: Dict[str, Any]) -> str:
 def mark_referred(handoff_ref: str) -> None:
     """Called once the WhatsApp continuation link has actually been sent."""
     db.update_handoff_status(handoff_ref, "REFERRED_TO_WHATSAPP")
+
+
+def retire_order_state(user_id: str, channel: str) -> None:
+    """
+    Drops the cart once its contents have been handed to WhatsApp.
+
+    The order draft exists to build a receipt; once that receipt and its
+    prefilled link have been sent, a human owns the order and Instagram's
+    copy is finished. Keeping it alive is what let a days-old Jolbhora cart
+    ride along on later, unrelated enquiries.
+
+    Deliberately narrow: this clears the cart and order draft only.
+    Source/reel routing, the handoff reference and its deduplication all
+    survive, because none of them are order state — a customer who shared a
+    reel and then ordered is still in that reel's context afterwards.
+    """
+    session_memory.clear_order_draft(user_id, channel)
+    log.info("Retired Instagram order state for %s/%s after WhatsApp referral.", channel, user_id)
 
 
 def mark_whatsapp_connected(handoff_ref: str) -> Optional[Dict[str, Any]]:

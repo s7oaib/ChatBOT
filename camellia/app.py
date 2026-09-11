@@ -38,8 +38,8 @@ from camellia.handoff import (
     customer_facing_notice,
     get_or_create_handoff,
     mark_referred,
+    retire_order_state,
     staff_summary,
-    verified_order_summary,
 )
 from camellia.ad_routing import product_for_ad
 from camellia.instagram_routing import (
@@ -417,9 +417,15 @@ def _process_instagram_event(
             # Created before the staff alert (not after) so the alert can name
             # the CAM reference and the known-entities summary the customer
             # never has to repeat, instead of a second, disconnected message.
+            # Only a message that is actually placing an order may carry the
+            # cart into the handoff. "Talk to human" is not one of those, and
+            # treating it as one is what attached a days-old Jolbhora order to
+            # a plain request to speak to somebody.
+            is_order_handoff = template_id in ("order_draft_receipt", "order_next_steps")
             handoff = get_or_create_handoff(
                 user_id=sender_id, channel="instagram", reason=reason,
                 user_message=message_text, facts=facts,
+                include_order=is_order_handoff,
             )
             # A repeated "human"/"can someone help" against an already-active
             # handoff reuses the reference (above) and must not re-alert
@@ -436,13 +442,18 @@ def _process_instagram_event(
                         "handoff_summary": staff_summary(handoff),
                     },
                 )
-            order_summary = verified_order_summary(facts)
+            order_summary = handoff.get("verified_order")
             if template_id == "order_draft_receipt":
                 response_text = response_text.rstrip()
             else:
                 response_text = customer_facing_notice()
             link_message = customer_facing_link_message(handoff["handoff_ref"], order_summary)
             mark_referred(handoff["handoff_ref"])
+            if is_order_handoff and order_summary:
+                # The order is now on its way to a human, prefilled in the
+                # link above. Instagram's copy has done its job; keeping it
+                # would make it luggage for every later enquiry.
+                retire_order_state(sender_id, "instagram")
             template_id = "instagram_whatsapp_handoff"
             image_url = None
 
