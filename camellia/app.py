@@ -573,6 +573,7 @@ def _apply_source_context(sender_id: str, route: Dict[str, Any], match_method: s
     facts = session_memory.get_facts(sender_id, "instagram")
     facts["source_route"] = route
     facts["source_match_method"] = match_method
+    facts["source_context_superseded"] = False
     # Sharing a post is itself a change of subject: the customer has just put
     # a specific thing in front of us, newer and more specific than whatever
     # was last discussed. Without clearing that stale topic, source routing

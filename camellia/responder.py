@@ -4,6 +4,7 @@ import json
 import random
 import re
 import time
+import unicodedata
 from dataclasses import dataclass
 from typing import Dict, Any, Tuple, Optional, List
 from camellia.config import config
@@ -308,6 +309,119 @@ BARE_PRICE_QUESTION_RE = re.compile(
     r"what.?s the price)",
     re.IGNORECASE,
 )
+
+# A shared Instagram attachment gives the next message a subject, but only
+# when the customer's wording is actually referential.  Keep this as a small
+# deterministic intent layer rather than a growing list of whole sentences:
+# punctuation, casing, apostrophes and one-character typos are normalized,
+# then the terms are combined into an intent.
+_SOURCE_REFERENTIAL_TERMS = frozenset({
+    "this", "that", "it", "above", "reel", "post", "video", "item", "one",
+})
+_SOURCE_DETAIL_TERMS = frozenset({
+    "tell", "more", "details", "detail", "about", "explain", "what", "options",
+    "flavour", "flavours", "flavor", "flavors", "interested",
+})
+_SOURCE_PRICE_TERMS = frozenset({"price", "prices", "cost", "rate", "much"})
+_SOURCE_AVAILABILITY_TERMS = frozenset({"available", "availability"})
+_SOURCE_ACTION_TERMS = frozenset({"want", "need", "like", "get", "order", "buy", "looks", "good"})
+_SOURCE_CONTEXT_FILLER_TERMS = frozenset({
+    "i", "im", "am", "me", "the", "a", "is", "are", "do", "you", "can", "how",
+    "what", "there", "please", "pls", "send", "give", "more", "about", "tell",
+})
+_SOURCE_COMMON_TYPOS = {
+    "thsi": "this", "taht": "that", "tihs": "this", "oen": "one",
+    "ths": "this", "abov": "above", "mor": "more", "moore": "more",
+    "mroe": "more", "tlel": "tell", "detials": "details",
+    "availble": "available", "avialble": "available",
+}
+
+
+def _one_edit_or_exact(left: str, right: str) -> bool:
+    """Allow a single insertion/deletion/substitution/transposition typo."""
+    if left == right:
+        return True
+    if abs(len(left) - len(right)) > 1 or min(len(left), len(right)) < 4:
+        return False
+    if len(left) == len(right):
+        mismatches = [i for i, (a, b) in enumerate(zip(left, right)) if a != b]
+        if len(mismatches) == 1:
+            return True
+        if len(mismatches) == 2:
+            first, second = mismatches
+            return second == first + 1 and left[first] == right[second] and left[second] == right[first]
+        return False
+    # One insertion/deletion: walk once and permit one skipped character.
+    shorter, longer = (left, right) if len(left) < len(right) else (right, left)
+    i = j = 0
+    skipped = False
+    while i < len(shorter) and j < len(longer):
+        if shorter[i] == longer[j]:
+            i += 1
+            j += 1
+            continue
+        if skipped:
+            return False
+        skipped = True
+        j += 1
+    return True
+
+
+def _source_term_set(tokens: List[str], vocabulary: frozenset[str]) -> set[str]:
+    return {
+        candidate for candidate in vocabulary
+        if any(
+            _SOURCE_COMMON_TYPOS.get(token, token) == candidate
+            or (len(candidate) >= 5 and _one_edit_or_exact(token, candidate))
+            for token in tokens
+        )
+    }
+
+
+def source_referential_intent(text: str) -> Optional[str]:
+    """Classify a source-context follow-up without inventing a subject.
+
+    Returns ``price``, ``availability``, ``order``, ``details`` or ``None``.
+    Detail/price/availability shorthand is intentionally accepted without an
+    explicit pronoun because it is a normal continuation immediately after a
+    shared attachment.  Action words such as ``want`` or ``buy`` require a
+    referential term (``this``, ``the reel``, ``above``, etc.) so an unrelated
+    first message cannot borrow a nonexistent source.
+    """
+    normalized = unicodedata.normalize("NFKC", str(text or "")).lower()
+    normalized = normalized.replace("’", "'").replace("‘", "'")
+    normalized = re.sub(r"\bi\s*['’]?\s*m\b", "im", normalized)
+    normalized = re.sub(r"[^a-z0-9\s]", " ", normalized)
+    tokens = normalized.split()
+    if not tokens:
+        return None
+
+    referential = _source_term_set(tokens, _SOURCE_REFERENTIAL_TERMS)
+    details = _source_term_set(tokens, _SOURCE_DETAIL_TERMS)
+    prices = _source_term_set(tokens, _SOURCE_PRICE_TERMS)
+    availability = _source_term_set(tokens, _SOURCE_AVAILABILITY_TERMS)
+    actions = _source_term_set(tokens, _SOURCE_ACTION_TERMS)
+    has_reference = bool(referential)
+    canonical_tokens = [_SOURCE_COMMON_TYPOS.get(token, token) for token in tokens]
+    # "this one" / "that one" / "above one" are covered by the individual
+    # terms, as are natural shorthand forms such as "about the reel".
+    if prices and (has_reference or prices & {"price", "prices", "cost", "rate", "much"}):
+        return "price"
+    if availability and (has_reference or availability):
+        return "availability"
+    if actions and has_reference:
+        return "order"
+    context_only_detail = all(
+        token in _SOURCE_CONTEXT_FILLER_TERMS or token in _SOURCE_DETAIL_TERMS
+        for token in canonical_tokens
+    )
+    if details and (has_reference or context_only_detail):
+        return "details"
+    if has_reference:
+        # "This one please" / "the above one" carry a clear selection even
+        # when the customer omits an explicit verb.
+        return "order"
+    return None
 
 # Words that carry no subject, so they cannot anchor an answer to a question.
 RELEVANCE_STOP_WORDS = frozenset({
@@ -1473,7 +1587,7 @@ class DeterministicResponder:
         # A referral is a preference only for genuinely vague openings. It
         # runs before conversational shorthand (such as a bare "price"), so
         # a meal-ad click never receives the sweet-product price prompt.
-        vague_opening = re.fullmatch(
+        legacy_vague_opening = re.fullmatch(
             r"(?:hi+|hello+|hey+|namaste|menu|show menu|send menu|tell me more|interested|"
             r"price|prices|how much|cost|rate|available|is this available|what about this|"
             r"can i order this|i saw this|what is this|what else(?: do you have)?)[?!,. ]*",
@@ -1485,6 +1599,49 @@ class DeterministicResponder:
             lowered_text,
         )
         source_route = facts.get("source_route") if isinstance(facts.get("source_route"), dict) else None
+        if explicit_product and (source_route or ad_product):
+            # A named product/topic is a new subject. Keep the prior route in
+            # the conversation evidence, but do not let a later pronoun jump
+            # back to that older reel/post/ad after this explicit change.
+            facts["source_context_superseded"] = True
+        # A configured ad may carry a canonical product mapping without a
+        # row in instagram_source_routes; that existing ad context is still a
+        # valid subject for a follow-up. Reel/post context requires the active
+        # source route established by the attachment.
+        source_context_available = bool(
+            (
+                source_route.get("active", True)
+                if source_route is not None
+                else (channel == "instagram" and ad_product)
+            )
+        ) and not facts.get("source_context_superseded")
+        detected_source_intent = source_referential_intent(user_message)
+        source_intent = detected_source_intent if source_context_available else None
+        facts["source_referential_intent"] = source_intent
+        has_explicit_source_reference = bool(re.search(
+            r"\b(this|that|it|above|reel|post|video|item|one)\b", lowered_text,
+        ))
+        if (
+            channel == "instagram"
+            and detected_source_intent
+            and (
+                has_explicit_source_reference
+                or detected_source_intent in {"details", "order"}
+            )
+            and not source_context_available
+            and not explicit_product
+            and not facts.get("clarify_sent")
+        ):
+            facts["clarify_sent"] = True
+            clarification = (
+                "Which item are you interested in? Please tell me the sweet, meal, "
+                "or post/reel you mean and I'll share the right details."
+            )
+            session_memory.add_turn(user_id, channel, user_message, clarification)
+            return clarification, True, "clarify_request", None
+        # Keep the historical shorthand behavior, while allowing ordinary
+        # human phrasing such as "this one please" or "price for this".
+        vague_opening = bool(source_intent or legacy_vague_opening)
         source_topic = (
             db.get_instagram_topic(source_route["topic_id"])
             if source_route and source_route.get("topic_id") else None
@@ -1500,11 +1657,11 @@ class DeterministicResponder:
         source_product = priorities[0] if priorities else ad_product
         what_else = bool(re.fullmatch(r"what else(?: do you have)?[?!,. ]*", lowered_text))
         can_use_source = not active_flow and (not facts.get("last_topic") or what_else)
-        if channel == "instagram" and source_product and vague_opening and not explicit_product and can_use_source:
+        if channel == "instagram" and source_context_available and source_product and vague_opening and not explicit_product and can_use_source:
             cursor = int(facts.get("source_priority_cursor") or 0)
             if what_else and priorities:
                 source_product = priorities[min(cursor, len(priorities) - 1)]
-            wants_price = bool(re.search(r"price|cost|rate|how much", lowered_text))
+            wants_price = source_intent == "price" or bool(re.search(r"price|cost|rate|how much", lowered_text))
             template_id = route_template_id(source_product, price=wants_price) or route_template_id(source_product)
             template = self._template_by_id(template_id)
             if template and template.get("response") and not template.get("escalate"):
@@ -1527,7 +1684,7 @@ class DeterministicResponder:
         # A topic-only route may frame a vague opening, but the body still
         # comes from the approved overview template. The admin label is not
         # allowed to supply a price, promise, availability, or other fact.
-        if channel == "instagram" and source_route and vague_opening and not explicit_product and can_use_source:
+        if channel == "instagram" and source_context_available and source_route and vague_opening and not explicit_product and can_use_source:
             template = self._template_by_id("know_more")
             if template and template.get("response"):
                 response_text, images = self._format_dynamic_response(
