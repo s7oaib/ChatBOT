@@ -383,6 +383,7 @@ def decode_topic(row: Dict[str, Any]) -> Dict[str, Any]:
             topic[field] = json.loads(value) if isinstance(value, str) else list(value or [])
         except (json.JSONDecodeError, TypeError):
             topic[field] = []
+    topic["response_order"] = topic.get("response_order") if topic.get("response_order") in RESPONSE_ORDERS else "description_first"
     topic["active"] = bool(topic.get("active"))
     return topic
 
@@ -457,6 +458,9 @@ class InstagramTopicError(ValueError):
     """A topic create/update request failed validation."""
 
 
+RESPONSE_ORDERS = {"description_first", "menu_first"}
+
+
 def _slugify_topic(name: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "_", name.strip().lower()).strip("_")
     return slug or "topic"
@@ -465,7 +469,7 @@ def _slugify_topic(name: str) -> str:
 def create_topic(
     name: str, description: str, default_menu_id: Optional[str] = None,
     priority_products: Optional[List[str]] = None, knowledge_scope: Optional[List[str]] = None,
-    active: bool = True,
+    active: bool = True, response_order: str = "description_first",
 ) -> Dict[str, Any]:
     from camellia.database import db
 
@@ -475,6 +479,9 @@ def create_topic(
         raise InstagramTopicError("Topic name is required.")
     if not description:
         raise InstagramTopicError("Description is required.")
+    response_order = str(response_order or "description_first").strip().lower()
+    if response_order not in RESPONSE_ORDERS:
+        raise InstagramTopicError("Reply order must be Description First or Menu First.")
     if db.find_instagram_topic_by_name(name):
         raise InstagramTopicError(f"A topic named '{name}' already exists.")
 
@@ -499,7 +506,7 @@ def create_topic(
 
     return db.create_instagram_topic(
         topic_id, name, description, default_menu_id or None,
-        priority_products, knowledge_scope, active=active,
+        priority_products, knowledge_scope, active=active, response_order=response_order,
     )
 
 
@@ -518,6 +525,11 @@ def update_topic(topic_id: str, **fields: Any) -> Dict[str, Any]:
         fields["name"] = name
     if fields.get("default_menu_id") and not db.get_menu_catalogue_entry(fields["default_menu_id"]):
         raise InstagramTopicError("Unknown default menu.")
+    if "response_order" in fields:
+        response_order = str(fields["response_order"] or "description_first").strip().lower()
+        if response_order not in RESPONSE_ORDERS:
+            raise InstagramTopicError("Reply order must be Description First or Menu First.")
+        fields["response_order"] = response_order
     updated = db.update_instagram_topic(topic_id, **fields)
     if not updated:
         raise KeyError(topic_id)

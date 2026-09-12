@@ -544,11 +544,13 @@ class Database:
                 default_menu_id TEXT,
                 priority_products TEXT NOT NULL DEFAULT '[]',
                 knowledge_scope TEXT NOT NULL DEFAULT '[]',
+                response_order TEXT NOT NULL DEFAULT 'description_first',
                 active INTEGER NOT NULL DEFAULT 1,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
             """)
+            self._ensure_column(cursor, "instagram_topics", "response_order", "TEXT NOT NULL DEFAULT 'description_first'")
             cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_topics_normalized_name ON instagram_topics(name COLLATE NOCASE)")
 
             self._ensure_column(cursor, "instagram_source_routes", "topic_id", "TEXT")
@@ -1161,16 +1163,17 @@ class Database:
     def create_instagram_topic(
         self, topic_id: str, name: str, description: str, default_menu_id: Optional[str],
         priority_products: List[str], knowledge_scope: List[str], active: bool = True,
+        response_order: str = "description_first",
     ) -> Dict[str, Any]:
         with self.get_connection() as conn:
             conn.execute(
                 """
                 INSERT INTO instagram_topics
-                    (topic_id, name, description, default_menu_id, priority_products, knowledge_scope, active)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                    (topic_id, name, description, default_menu_id, priority_products, knowledge_scope, response_order, active)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (topic_id, name, description, default_menu_id,
-                 json.dumps(priority_products), json.dumps(knowledge_scope), int(active)),
+                 json.dumps(priority_products), json.dumps(knowledge_scope), response_order, int(active)),
             )
             conn.commit()
             row = conn.execute("SELECT * FROM instagram_topics WHERE topic_id = ?", (topic_id,)).fetchone()
@@ -1180,6 +1183,7 @@ class Database:
         self, topic_id: str, *, name: Optional[str] = None, description: Optional[str] = None,
         default_menu_id: Optional[str] = None, priority_products: Optional[List[str]] = None,
         knowledge_scope: Optional[List[str]] = None, active: Optional[bool] = None,
+        response_order: Optional[str] = None,
         clear_default_menu: bool = False,
     ) -> Optional[Dict[str, Any]]:
         fields, values = [], []
@@ -1195,6 +1199,8 @@ class Database:
             fields.append("priority_products = ?"); values.append(json.dumps(priority_products))
         if knowledge_scope is not None:
             fields.append("knowledge_scope = ?"); values.append(json.dumps(knowledge_scope))
+        if response_order is not None:
+            fields.append("response_order = ?"); values.append(response_order)
         if active is not None:
             fields.append("active = ?"); values.append(int(active))
         if not fields:

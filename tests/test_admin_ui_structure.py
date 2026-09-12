@@ -292,6 +292,30 @@ def test_instagram_routing_keeps_client_friendly_cards_and_existing_actions(page
     assert "Save Changes" in page
 
 
+def test_instagram_routing_delete_is_client_friendly_and_scoped(page):
+    section = page[page.index('id="tab-ad-routing"'):page.index('<!-- MENU tab, panel 3 of 4')]
+    assert page.count("openIgRemoveModal") >= 3, "active and archived cards need Delete"
+    assert "Delete this Instagram routing connection?" in page
+    assert "Topic:" in page and "Instagram content type:" in page and "Menu:" in page and "Status:" in page
+    assert "This only removes this Instagram routing connection." in page
+    assert "It will not delete the Instagram content, Topic, Menu, products, Custom Q&amp;A, or customer conversations." in page
+    assert ">Cancel</button>" in page
+    assert "Delete Routing" in page
+    assert "confirmIgRemove()" in page
+    assert "method: 'DELETE'" in page and "/admin/instagram-routes/${id}/permanent" in page
+    assert "✓ Instagram routing deleted" in page
+    assert "Remove Permanently" not in page
+
+
+def test_topic_preview_exposes_reply_order_and_uses_the_preview_endpoint(page):
+    section = page[page.index('id="tab-ad-routing"'):page.index('<!-- MENU tab, panel 3 of 4')]
+    assert "Reply Order:" in section
+    assert "⇅ Swap Order" in section
+    assert "Description First" in page and "Menu First" in page
+    assert "swapIgResponseOrder" in page
+    assert "response_order: igResponseOrder" in page
+
+
 def test_both_dashboard_routes_send_the_same_no_cache_headers():
     """/admin and /admin/dashboard are the same page; one must not be stale."""
     for path in ("/admin", "/admin/dashboard"):

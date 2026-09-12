@@ -30,6 +30,25 @@ from camellia.knowledge import HUMAN_ONLY_INTENTS, approved_knowledge
 log = get_logger("camellia.responder")
 
 
+def compose_topic_response(
+    topic_title: str = "", topic_description: str = "", menu_text: str = "",
+    response_order: str = "description_first",
+) -> str:
+    """Compose the shared Topic response used by preview and live Instagram.
+
+    Existing Topics and malformed values safely retain the historical
+    description-first order.  The menu text is the already-approved response;
+    this helper only changes the order of those existing customer-facing parts.
+    """
+    title = str(topic_title or "").strip()
+    description = str(topic_description or "").strip()
+    menu = str(menu_text or "").strip()
+    order = str(response_order or "").lower()
+    ordered = [menu, description] if order == "menu_first" else [description, menu]
+    parts = [title] + [part for part in ordered if part]
+    return "\n\n".join(part for part in parts if part)
+
+
 def _structured_nlu_enabled_for(user_id: str, channel: str) -> bool:
     """Stable rollout cohort: a customer never flips paths between messages."""
     if not config.STRUCTURED_NLU_ENABLED:
@@ -1495,7 +1514,11 @@ class DeterministicResponder:
                 # is text an operator wrote, not anything inferred from the
                 # topic name or generated here.
                 if source_topic and source_topic.get("description"):
-                    response_text = f"{source_topic['description']}\n\n{response_text}"
+                    response_text = compose_topic_response(
+                        source_topic.get("name") or source_route.get("routing_topic"),
+                        source_topic.get("description"), response_text,
+                        source_topic.get("response_order") or "description_first",
+                    )
                 facts["source_context_used"] = True
                 facts["source_priority_cursor"] = min(cursor + 1, len(priorities)) if priorities else 1
                 session_memory.add_turn(user_id, channel, user_message, response_text)
@@ -1513,10 +1536,12 @@ class DeterministicResponder:
                 )
                 topic = str(source_route.get("routing_topic") or "").strip()
                 if source_topic and source_topic.get("description"):
-                    # The Topic's own description is admin-authored, safe
-                    # customer-facing copy — replaces the bare label prefix
-                    # with what the operator actually wrote about it.
-                    response_text = f"{topic}\n\n{source_topic['description']}\n\n{response_text}" if topic else f"{source_topic['description']}\n\n{response_text}"
+                    # The same helper is used by the admin Preview Reply, so
+                    # a Topic's saved order cannot drift between preview/live.
+                    response_text = compose_topic_response(
+                        topic, source_topic.get("description"), response_text,
+                        source_topic.get("response_order") or "description_first",
+                    )
                 elif topic:
                     response_text = f"About {topic}:\n\n{response_text}"
                 # The Topic's linked menu image, when one is published, rides

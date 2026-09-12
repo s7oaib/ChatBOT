@@ -33,7 +33,7 @@ from camellia.instagram_routing import (
 from camellia.menu_catalogue import MenuCatalogueError
 import camellia.menu_images as menu_images_module
 import camellia.responder as responder_module
-from camellia.responder import responder
+from camellia.responder import compose_topic_response, responder
 from camellia.session_memory import session_memory
 
 
@@ -203,6 +203,44 @@ def test_topic_description_is_editable(catalogue_db):
     assert update_topic(topic["topic_id"])["name"] == "Meal Subscription"  # no-op update is safe
 
 
+def test_topic_response_order_defaults_and_persists(catalogue_db):
+    topic = create_topic("Reply Order Topic", "A description.")
+    assert topic["response_order"] == "description_first"
+    updated = update_topic(topic["topic_id"], response_order="menu_first")
+    assert updated["response_order"] == "menu_first"
+    assert instagram_routing.decode_topic(catalogue_db.get_instagram_topic(topic["topic_id"]))["response_order"] == "menu_first"
+
+
+def test_shared_topic_response_renderer_keeps_both_orders_explicit():
+    description = "Topic description."
+    menu = "Approved menu details."
+    first = compose_topic_response("Sondesh", description, menu, "description_first")
+    second = compose_topic_response("Sondesh", description, menu, "menu_first")
+    assert first.index(description) < first.index(menu)
+    assert second.index(menu) < second.index(description)
+
+
+def test_topic_response_order_applies_to_reel_post_and_ad_contexts(catalogue_db, bypass_ad_gate):
+    topic = create_topic("Ordered Topic", "Description from the Topic.", default_menu_id="aamar_mishti", response_order="menu_first", priority_products=["jolbhora"])
+    expected_menu = responder._template_by_id("jolbhora")["response"]
+    for source_type in ("reel", "post", "ad"):
+        uid = f"ordered_{source_type}"
+        session_memory.clear_session(uid, "instagram")
+        facts = session_memory.get_facts(uid, "instagram")
+        facts["source_route"] = {"source_type": source_type, "topic_id": topic["topic_id"], "routing_topic": topic["name"], "menu_id": "aamar_mishti", "priority_products": ["jolbhora"], "active": True}
+        facts["source_match_method"] = "test"
+        text, matched, _template_id, _images = responder.match_and_respond("Tell me more", user_id=uid, channel="instagram")
+        assert matched is True
+        assert text.index(expected_menu.splitlines()[0]) < text.index("Description from the Topic.")
+
+
+def test_existing_topic_without_reply_order_uses_description_first(catalogue_db):
+    with catalogue_db.get_connection() as conn:
+        conn.execute("INSERT INTO instagram_topics (topic_id, name, description, priority_products, knowledge_scope, active) VALUES (?, ?, ?, ?, ?, ?)", ("legacy_order", "Legacy Order", "Legacy description.", "[]", "[]", 1))
+        conn.commit()
+    assert instagram_routing.decode_topic(catalogue_db.get_instagram_topic("legacy_order"))["response_order"] == "description_first"
+
+
 def test_topic_appears_dynamically_in_admin_listing(admin_client):
     client, headers = admin_client
     if not headers:
@@ -244,6 +282,36 @@ def test_topic_priority_products_cross_the_api_as_a_real_list_not_a_json_string(
         json={"priority_products": ["aamar_mishti"]},
     ).json()["topic"]
     assert updated["priority_products"] == ["aamar_mishti"]
+
+
+def test_topic_reply_order_crosses_create_and_edit_api(admin_client):
+    client, headers = admin_client
+    if not headers:
+        pytest.skip("ADMIN_API_KEY not configured")
+    created = client.post("/admin/instagram-topics", headers=headers, json={
+        "name": "API Reply Order", "description": "A description.", "response_order": "menu_first",
+    })
+    assert created.status_code == 200
+    topic = created.json()["topic"]
+    assert topic["response_order"] == "menu_first"
+    edited = client.patch(f"/admin/instagram-topics/{topic['topic_id']}", headers=headers, json={"response_order": "description_first"})
+    assert edited.status_code == 200
+    assert edited.json()["topic"]["response_order"] == "description_first"
+
+
+def test_topic_preview_uses_saved_reply_order(admin_client):
+    client, headers = admin_client
+    if not headers:
+        pytest.skip("ADMIN_API_KEY not configured")
+    created = client.post("/admin/instagram-topics", headers=headers, json={
+        "name": "Preview Reply Order", "description": "Preview description.",
+        "default_menu_id": "aamar_mishti", "priority_products": ["jolbhora"], "response_order": "menu_first",
+    }).json()["topic"]
+    preview = client.get(f"/admin/instagram-routes/preview?topic_id={created['topic_id']}", headers=headers)
+    assert preview.status_code == 200
+    data = preview.json()
+    assert data["response_order"] == "menu_first"
+    assert data["approved_response"].index(data["menu_response"].splitlines()[0]) < data["approved_response"].index("Preview description.")
 
 
 # --- Route <-> Topic -------------------------------------------------

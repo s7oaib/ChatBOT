@@ -31,7 +31,7 @@ from camellia.ice_breakers import (
     MAX_ICE_BREAKERS,
     MAX_ICE_BREAKER_CHARS,
 )
-from camellia.responder import responder
+from camellia.responder import compose_topic_response, responder
 from camellia.ai_responder import ai_responder
 from camellia.whatsapp_adapter import whatsapp_adapter
 from camellia.escalator import escalator
@@ -55,6 +55,7 @@ from camellia.instagram_routing import (
     product_catalogue,
     route_for_inbound,
     route_template_id,
+    RESPONSE_ORDERS,
     shared_post_media_id,
     shared_reel_identity,
     update_topic,
@@ -3756,6 +3757,7 @@ async def create_instagram_topic_route(
             priority_products=body.get("priority_products") or [],
             knowledge_scope=body.get("knowledge_scope") or [],
             active=bool(body.get("active", True)),
+            response_order=body.get("response_order") or "description_first",
         )
     except InstagramTopicError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -3780,6 +3782,8 @@ async def update_instagram_topic_route(
         kwargs["priority_products"] = body["priority_products"]
     if "knowledge_scope" in body:
         kwargs["knowledge_scope"] = body["knowledge_scope"]
+    if "response_order" in body:
+        kwargs["response_order"] = body["response_order"]
     if "default_menu_id" in body:
         if body["default_menu_id"]:
             kwargs["default_menu_id"] = body["default_menu_id"]
@@ -3796,7 +3800,7 @@ async def update_instagram_topic_route(
 
 @app.get("/admin/instagram-routes/preview")
 def preview_instagram_route_response(
-    topic_id: str = "", product: str = "", menu_id: str = "",
+    topic_id: str = "", product: str = "", menu_id: str = "", response_order: str = "",
     x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None),
 ):
     """
@@ -3815,7 +3819,8 @@ def preview_instagram_route_response(
     if topic_id and not topic:
         raise HTTPException(status_code=404, detail=f"No topic '{topic_id}'")
 
-    priority = json.loads(topic["priority_products"]) if topic else []
+    topic_view = decode_topic(topic) if topic else {}
+    priority = topic_view.get("priority_products", []) if topic else []
     chosen_product = product or (priority[0] if priority else None)
     template_id = route_template_id(chosen_product) if chosen_product else None
     template = responder._template_by_id(template_id) if template_id else None
@@ -3823,15 +3828,22 @@ def preview_instagram_route_response(
     resolved_menu_id = menu_id or (topic or {}).get("default_menu_id")
     menu_entry = menu_catalogue.get_menu(resolved_menu_id) if resolved_menu_id else None
     image_url = menu_images.current_url(resolved_menu_id) if resolved_menu_id else None
+    menu_response = (template or {}).get("response") or ""
+    chosen_order = response_order if response_order in RESPONSE_ORDERS else (topic_view.get("response_order") or "description_first")
+    ordered_response = compose_topic_response(
+        topic_view.get("name"), topic_view.get("description"), menu_response, chosen_order,
+    )
 
     return {
         "status": "success",
-        "topic_name": (topic or {}).get("name"),
-        "topic_description": (topic or {}).get("description"),
+        "topic_name": topic_view.get("name"),
+        "topic_description": topic_view.get("description"),
         "linked_menu": menu_entry,
         "linked_menu_image": image_url,
         "matched_product": chosen_product,
-        "approved_response": (template or {}).get("response"),
+        "approved_response": ordered_response,
+        "menu_response": menu_response,
+        "response_order": chosen_order,
     }
 
 
@@ -4550,6 +4562,7 @@ def get_admin_dashboard():
                 <div style="display:flex; gap:8px; flex-wrap:wrap;">
                     <select class="field-control" id="igTopicPicker" onchange="onIgTopicChange()" style="flex:1; min-width:220px;"><option value="">Select Topic</option></select>
                     <button class="btn-secondary" type="button" onclick="openTopicModal()">+ Add Topic</button>
+                    <button class="btn-secondary" id="igEditTopicButton" type="button" onclick="openTopicEditor()" disabled>Edit Topic</button>
                 </div>
             </div>
 
@@ -4559,6 +4572,8 @@ def get_admin_dashboard():
                 <div style="margin-top:8px;"><b>Menu:</b> <span id="igTopicPreviewMenu">—</span></div>
                 <div style="margin-top:4px;"><b>Priority:</b> <span id="igTopicPreviewPriority">—</span></div>
                 <div style="margin-top:4px; white-space:pre-wrap;"><b>Description:</b> <span id="igTopicPreviewDescription">—</span></div>
+                <div style="margin-top:10px;"><b>Reply Order:</b> <span id="igTopicPreviewOrder">Description First</span></div>
+                <button class="btn-secondary" type="button" onclick="swapIgResponseOrder()" style="margin-top:8px;">⇅ Swap Order</button>
                 <button class="btn-secondary" type="button" onclick="previewInstagramRoute()" style="margin-top:10px;">Preview Reply</button>
                 <div id="igPreviewBox" style="display:none; margin-top:10px; background:#fff; border:1px solid var(--border); border-radius:8px; padding:10px; font-size:0.84rem;"></div>
             </div>
@@ -5137,17 +5152,16 @@ THIS WEEK'S BENGAL SPECIALS
     <div id="igRemoveModal" style="display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 9999; justify-content: center; align-items: center; padding: 20px;">
         <div style="background: white; border-radius: 16px; width: 100%; max-width: 480px; padding: 24px; box-shadow: 0 10px 30px rgba(0,0,0,0.2);">
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px;">
-                <h3 style="margin: 0; color: var(--danger);">Remove Instagram Routing?</h3>
+                <h3 style="margin: 0; color: var(--danger);">Delete this Instagram routing connection?</h3>
                 <button onclick="closeIgRemoveModal()" style="background: none; border: none; font-size: 1.4rem; cursor: pointer;">&times;</button>
             </div>
-            <p style="font-size: 0.88rem; color: #333; margin-bottom: 12px;">Remove this routing configuration permanently?</p>
             <div id="igRemoveModalDetails" style="background:#F7F5F3; border:1px solid var(--border); border-radius:10px; padding:12px; font-size:0.82rem; line-height:1.6; margin-bottom:12px;"></div>
             <div style="background:#FEF2F2; border:1px solid #FCA5A5; border-radius:10px; padding:10px 12px; font-size:0.8rem; color:#991B1B; margin-bottom:16px;">
-                This deletes only the routing configuration. It does not delete the Instagram content, Topic, Menu, or approved business knowledge.
+                This only removes this Instagram routing connection. It will not delete the Instagram content, Topic, Menu, products, Custom Q&amp;A, or customer conversations.
             </div>
             <div style="display: flex; gap: 8px; justify-content: flex-end;">
                 <button class="btn-secondary" onclick="closeIgRemoveModal()">Cancel</button>
-                <button class="btn-danger" onclick="confirmIgRemove()">Remove Permanently</button>
+                <button class="btn-danger" onclick="confirmIgRemove()">Delete Routing</button>
             </div>
         </div>
     </div>
@@ -5295,6 +5309,8 @@ THIS WEEK'S BENGAL SPECIALS
             <textarea class="field-control" id="topicDescription" rows="3" placeholder="Shown to customers who ask a vague question after sharing this content." style="margin-bottom:10px;"></textarea>
             <label class="field-label">Default Menu *</label>
             <select class="field-control" id="topicDefaultMenu" style="margin-bottom:10px;"><option value="">Select Menu</option></select>
+            <label class="field-label">Reply Order</label>
+            <select class="field-control" id="topicResponseOrder" style="margin-bottom:10px;"><option value="description_first">Description First</option><option value="menu_first">Menu First</option></select>
             <label style="display:flex; align-items:center; gap:6px; font-size:0.85rem; margin-bottom:10px;"><input type="checkbox" id="topicActive" checked> Active</label>
             <details><summary style="cursor:pointer; font-size:0.85rem; margin-bottom:8px;"><b>Advanced</b> — Priority Products, Knowledge Scope</summary>
                 <div style="margin-top:8px;">
@@ -5761,6 +5777,7 @@ THIS WEEK'S BENGAL SPECIALS
         let igEditingId = null;
         let igTopics = [];
         let igMenus = [];
+        let igResponseOrder = 'description_first';
 
         // Topic and Menu dropdowns are populated purely from the backend —
         // no hardcoded list — so a Topic or Menu created just now is
@@ -5792,6 +5809,9 @@ THIS WEEK'S BENGAL SPECIALS
         function onIgTopicChange(preservePriority = false) {
             const topicId = document.getElementById('igTopicPicker').value;
             const topic = igTopics.find(t => t.topic_id === topicId);
+            igResponseOrder = topic && topic.response_order === 'menu_first' ? 'menu_first' : 'description_first';
+            const editTopicButton = document.getElementById('igEditTopicButton');
+            if (editTopicButton) editTopicButton.disabled = !topic;
             document.getElementById('igTopicDescription').value = topic ? (topic.description || '') : '';
             if (topic && topic.default_menu_id) {
                 document.getElementById('igMenuPicker').value = topic.default_menu_id;
@@ -5820,7 +5840,15 @@ THIS WEEK'S BENGAL SPECIALS
             document.getElementById('igTopicPreviewMenu').innerText = menu ? menu.name : 'No menu selected';
             document.getElementById('igTopicPreviewPriority').innerText = labels.length ? labels.join(' → ') : 'Normal conversation routing';
             document.getElementById('igTopicPreviewDescription').innerText = document.getElementById('igTopicDescription').value || '—';
+            document.getElementById('igTopicPreviewOrder').innerText = igResponseOrder === 'menu_first' ? 'Menu First' : 'Description First';
             box.style.display = 'block';
+        }
+
+        function swapIgResponseOrder() {
+            if (!document.getElementById('igTopicPicker').value) return;
+            igResponseOrder = igResponseOrder === 'menu_first' ? 'description_first' : 'menu_first';
+            renderIgTopicPreview();
+            previewInstagramRoute();
         }
 
         function renderIgPriorityProducts() {
@@ -5850,6 +5878,7 @@ THIS WEEK'S BENGAL SPECIALS
             igEditingId = null; igPriority = [];
             ['igRouteUrl','igMediaId','igAdId','igCampaignId'].forEach(id => { const el=document.getElementById(id); if(el)el.value=''; });
             document.getElementById('igTopicPicker').value = '';
+            igResponseOrder = 'description_first';
             document.getElementById('igMenuPicker').value = '';
             document.getElementById('igTopicDescription').value = '';
             document.getElementById('igEscalationPolicy').value='human_if_unsupported';
@@ -5923,18 +5952,16 @@ THIS WEEK'S BENGAL SPECIALS
             box.innerHTML = 'Loading preview…';
             const menuId = document.getElementById('igMenuPicker').value;
             const product = igPriority[0] || '';
-            const params = new URLSearchParams({ topic_id: topicId, menu_id: menuId, product });
+            const params = new URLSearchParams({ topic_id: topicId, menu_id: menuId, product, response_order: igResponseOrder });
             try {
                 const resp = await fetch(`/admin/instagram-routes/preview?${params}`, { headers: getAuthHeaders() });
                 const data = await resp.json();
                 if (!resp.ok) throw new Error(data.detail || 'Could not build preview.');
                 const imageHtml = data.linked_menu_image ? `<img src="${escapeHtml(data.linked_menu_image)}" style="max-width:220px;max-height:220px;border-radius:8px;margin-top:8px;display:block;">` : '';
                 box.innerHTML = `
-                    <div style="font-size:0.78rem;color:var(--text-muted);margin-bottom:6px;">Approximately what a customer sees after "Tell me more":</div>
-                    <div><b>${escapeHtml(data.topic_name || '')}</b></div>
-                    <div style="margin-top:6px; white-space:pre-wrap;">${escapeHtml(data.topic_description || '')}</div>
-                    ${imageHtml}
-                    <div style="margin-top:8px; white-space:pre-wrap; font-family:monospace; font-size:0.8rem; background:#fff; border:1px solid var(--border); border-radius:8px; padding:8px;">${escapeHtml(data.approved_response || '(no approved product template matched yet — add Priority Products)')}</div>`;
+                    <div style="font-size:0.78rem;color:var(--text-muted);margin-bottom:6px;">Reply order: ${escapeHtml(data.response_order === 'menu_first' ? 'Menu First' : 'Description First')}</div>
+                    <div style="white-space:pre-wrap; font-family:inherit; font-size:0.85rem; background:#fff; border:1px solid var(--border); border-radius:8px; padding:8px;">${escapeHtml(data.approved_response || '(no approved product template matched yet — add Priority Products)')}</div>
+                    ${imageHtml}`;
             } catch (err) {
                 box.innerHTML = `<span style="color:var(--danger);">${escapeHtml(err.message || err)}</span>`;
             }
@@ -5964,17 +5991,32 @@ THIS WEEK'S BENGAL SPECIALS
             topicPriority.push(id); renderTopicPriorityProducts();
         }
 
-        function openTopicModal() {
-            document.getElementById('topicModalTitle').innerText = '+ Add Topic';
-            document.getElementById('topicModalEditingId').value = '';
+        function openTopicModal(editingId = '') {
+            const topic = editingId ? igTopics.find(item => item.topic_id === editingId) : null;
+            document.getElementById('topicModalTitle').innerText = topic ? 'Edit Topic' : '+ Add Topic';
+            document.getElementById('topicModalEditingId').value = topic ? topic.topic_id : '';
             document.getElementById('topicName').value = '';
             document.getElementById('topicDescription').value = '';
             document.getElementById('topicDefaultMenu').value = '';
+            document.getElementById('topicResponseOrder').value = topic && topic.response_order === 'menu_first' ? 'menu_first' : 'description_first';
             document.getElementById('topicActive').checked = true;
             topicPriority = []; renderTopicPriorityProducts();
             Array.from(document.getElementById('topicKnowledgeScope').options).forEach(o => o.selected = false);
             document.getElementById('topicModalResult').style.display = 'none';
             document.getElementById('topicModal').style.display = 'flex';
+            if (topic) {
+                document.getElementById('topicName').value = topic.name || '';
+                document.getElementById('topicDescription').value = topic.description || '';
+                document.getElementById('topicDefaultMenu').value = topic.default_menu_id || '';
+                document.getElementById('topicActive').checked = topic.active !== false;
+                topicPriority = [...(topic.priority_products || [])];
+                renderTopicPriorityProducts();
+                Array.from(document.getElementById('topicKnowledgeScope').options).forEach(o => o.selected = (topic.knowledge_scope || []).includes(o.value));
+            }
+        }
+        function openTopicEditor() {
+            const id = document.getElementById('igTopicPicker').value;
+            if (id) openTopicModal(id);
         }
         function closeTopicModal() { document.getElementById('topicModal').style.display = 'none'; }
 
@@ -5985,21 +6027,22 @@ THIS WEEK'S BENGAL SPECIALS
                 description: document.getElementById('topicDescription').value.trim(),
                 default_menu_id: document.getElementById('topicDefaultMenu').value,
                 active: document.getElementById('topicActive').checked,
+                response_order: document.getElementById('topicResponseOrder').value || 'description_first',
                 priority_products: topicPriority,
                 knowledge_scope: Array.from(document.getElementById('topicKnowledgeScope').selectedOptions).map(o => o.value),
             };
             try {
-                const resp = await fetch('/admin/instagram-topics', {
-                    method: 'POST', headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+                const editingId = document.getElementById('topicModalEditingId').value;
+                const resp = await fetch(editingId ? `/admin/instagram-topics/${encodeURIComponent(editingId)}` : '/admin/instagram-topics', {
+                    method: editingId ? 'PATCH' : 'POST', headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
                     body: JSON.stringify(payload),
                 });
                 const data = await resp.json();
-                if (!resp.ok) throw new Error(data.detail || 'Could not create topic.');
+                if (!resp.ok) throw new Error(data.detail || 'Could not save topic.');
                 closeTopicModal();
                 await loadTopicsAndMenus();
-                // The newly created topic is selected immediately, and its
-                // defaults (menu, description, priority products) fill in —
-                // the same as picking any other topic from the dropdown.
+                // The saved topic is selected immediately, and its defaults
+                // (including reply order) fill in like any normal selection.
                 document.getElementById('igTopicPicker').value = data.topic.topic_id;
                 onIgTopicChange();
             } catch (err) {
@@ -6079,12 +6122,14 @@ THIS WEEK'S BENGAL SPECIALS
             const route = (window.igRoutes || []).find(r => r.routing_id === id);
             if (!route) return;
             igRemoveTargetId = id;
+            const menu = igMenus.find(item => item.menu_id === route.menu_id);
+            const sourceType = route.source_type === 'reel' ? 'Reel' : route.source_type === 'post' ? 'Post' : 'Ad';
+            const status = route.archived_at ? 'Archived' : route.active ? 'Active' : 'Disabled';
             document.getElementById('igRemoveModalDetails').innerHTML = `
-                <div><b>Instagram URL:</b> ${escapeHtml(route.canonical_url || route.ad_id || route.media_id || '—')}</div>
-                <div><b>Source type:</b> ${escapeHtml(route.source_type || '—')}</div>
-                <div><b>Shortcode:</b> ${escapeHtml(route.shortcode || '—')}</div>
                 <div><b>Topic:</b> ${escapeHtml(route.routing_topic || '—')}</div>
-                <div><b>Priority Products:</b> ${escapeHtml((route.priority_products || []).join(', ') || 'none')}</div>`;
+                <div><b>Instagram content type:</b> ${sourceType}</div>
+                <div><b>Menu:</b> ${escapeHtml((menu || {}).name || route.menu_id || '—')}</div>
+                <div><b>Status:</b> ${status}</div>`;
             document.getElementById('igRemoveModal').style.display = 'flex';
         }
         function closeIgRemoveModal() { document.getElementById('igRemoveModal').style.display = 'none'; igRemoveTargetId = null; }
@@ -6099,7 +6144,7 @@ THIS WEEK'S BENGAL SPECIALS
                 const result = document.getElementById('adRouteResult');
                 result.style.display = 'block';
                 result.className = 'result-box success';
-                result.innerText = 'Routing configuration removed.';
+                result.innerText = '✓ Instagram routing deleted';
                 loadAdRoutes();
             } catch (err) {
                 const result = document.getElementById('adRouteResult');
@@ -6132,7 +6177,7 @@ THIS WEEK'S BENGAL SPECIALS
                         <div class="ad-route-row" style="display:block;">
                             <div style="display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap; align-items:flex-start;">
                                 <span><b>${escapeHtml(route.routing_topic || 'Instagram content')}</b><br><small>${route.source_type === 'reel' ? 'Instagram Reel' : route.source_type === 'post' ? 'Instagram Post' : 'Instagram Ad'} · Archived</small></span>
-                                <span><button class="btn-secondary" type="button" onclick="restoreInstagramRoute(${route.routing_id})">Restore</button> <button class="btn-danger" type="button" onclick="openIgRemoveModal(${route.routing_id})">Remove Permanently</button></span>
+                                <span><button class="btn-secondary" type="button" onclick="restoreInstagramRoute(${route.routing_id})">Restore</button> <button class="btn-danger" type="button" onclick="openIgRemoveModal(${route.routing_id})">Delete</button></span>
                             </div>
                             <div style="margin-top:8px;"><b>Menu:</b> ${escapeHtml((igMenus.find(m => m.menu_id === route.menu_id) || {}).name || route.menu_id || '—')}</div>
                             <div style="margin-top:4px;"><b>Priority:</b> ${escapeHtml((route.priority_products||[]).map(id => ((igProducts.find(p => p.id === id) || {}).label || id)).join(' → ') || 'Normal conversation routing')}</div>
@@ -6158,7 +6203,7 @@ THIS WEEK'S BENGAL SPECIALS
                     return `<div class="ad-route-row" style="display:block;">
                         <div style="display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap; align-items:flex-start;">
                             <span><b>${escapeHtml(route.routing_topic || 'Instagram content')}</b><br><small>${sourceLabel}</small></span>
-                            <span><button class="btn-secondary" type="button" onclick="editInstagramRoute(${route.routing_id})">Edit</button> <button class="btn-secondary" type="button" onclick="setInstagramRouteActive(${route.routing_id},${!route.active})">${route.active?'Disable':'Enable'}</button> <button class="btn-danger" type="button" onclick="archiveInstagramRoute(${route.routing_id})">Archive</button>${connectBtn}</span>
+                            <span><button class="btn-secondary" type="button" onclick="editInstagramRoute(${route.routing_id})">Edit</button> <button class="btn-secondary" type="button" onclick="setInstagramRouteActive(${route.routing_id},${!route.active})">${route.active?'Disable':'Enable'}</button> <button class="btn-danger" type="button" onclick="archiveInstagramRoute(${route.routing_id})">Archive</button> <button class="btn-danger" type="button" onclick="openIgRemoveModal(${route.routing_id})">Delete</button>${connectBtn}</span>
                         </div>
                         <div style="margin-top:8px;"><b>Menu:</b> ${escapeHtml(menuName || route.menu_id || '—')}</div>
                         <div style="margin-top:4px;"><b>Priority:</b> ${escapeHtml(priorityLabels.join(' → ') || 'Normal conversation routing')}</div>

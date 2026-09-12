@@ -73,6 +73,26 @@ def test_removing_route_a_deletes_only_route_a(two_routes):
     assert remaining["priority_products"] == ROUTE_B["priority_products"] or "signature_collection" in remaining["priority_products"]
 
 
+def test_removing_route_preserves_its_topic_menu_products_and_knowledge(tmp_path):
+    database = Database(str(tmp_path / "scoped-delete.db"))
+    database.create_menu_catalogue_entry("delete_menu", "Delete Test Menu", "Event", "Menu kept after route deletion.")
+    database.create_instagram_topic(
+        "delete_topic", "Delete Test Topic", "Topic kept after route deletion.",
+        "delete_menu", ["jolbhora"], [], active=True,
+    )
+    knowledge_id = database.add_learned_knowledge("Delete Test", "what is kept", "The approved answer remains.")
+    route = database.save_instagram_source_route({
+        "source_type": "reel", "canonical_url": "https://www.instagram.com/reel/delete123/",
+        "shortcode": "delete123", "routing_topic": "Delete Test Topic", "topic_id": "delete_topic",
+        "menu_id": "delete_menu", "priority_products": ["jolbhora"], "knowledge_scope": [], "active": True,
+    })
+
+    assert database.delete_instagram_source_route(route["routing_id"], removed_by="tester") is True
+    assert database.get_instagram_topic("delete_topic")["name"] == "Delete Test Topic"
+    assert database.get_menu_catalogue_entry("delete_menu")["name"] == "Delete Test Menu"
+    assert database.get_custom_qa(knowledge_id)["verified_answer"] == "The approved answer remains."
+
+
 def test_removed_route_no_longer_matches_inbound_traffic(two_routes):
     database, id_a, id_b = two_routes
     database.delete_instagram_source_route(id_a, removed_by="tester")
