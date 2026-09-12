@@ -64,7 +64,7 @@ def test_dashboard_javascript_brackets_balance(script, opener, closer):
     )
 
 
-def test_the_dashboard_has_three_client_facing_tabs(page):
+def test_the_dashboard_has_four_client_facing_tabs(page):
     """
     Eight tabs needed 1655px of nav on a 347px phone, so most of the portal was
     unreachable on the handset the kitchen actually uses. Menu Manager is its
@@ -76,11 +76,13 @@ def test_the_dashboard_has_three_client_facing_tabs(page):
     there — see test_ai_resolution_tab_exists_and_reuses_existing_endpoints
     and the candidate/escalation/knowledge-gap regression tests below. Their
     old panels stay in the DOM behind the Advanced/Legacy disclosure, not in
-    this main nav bar.
+    this main nav bar. Custom Q&A is the fourth: the client-managed reusable
+    knowledge library, on the same learned_knowledge table.
     """
     nav = page[page.index('<div class="tabs-nav">'):page.index('</div>', page.index('<div class="tabs-nav">'))]
     buttons = re.findall(r'<button class="tab-btn[^"]*" onclick="switchTab\(', nav)
-    assert len(buttons) == 3, f"expected 3 client-facing tabs, found {len(buttons)}"
+    assert len(buttons) == 4, f"expected 4 client-facing tabs, found {len(buttons)}"
+    assert "Custom Q&amp;A" in nav
 
 
 def test_menu_manager_sits_between_menu_and_ai_resolution(page):
@@ -306,7 +308,39 @@ def test_triage_shadow_section_is_present_and_strictly_read_only(page):
     assert "measurement only" in page
 
     section = page[page.index("async function loadTriageShadow"):]
-    section = section[:section.index("</script>")]
+    section = section[:section.index("// CUSTOM Q&A:")]
     assert "fetch('/admin/triage-shadow" in section
     for verb in ("method: 'POST'", "method: 'PATCH'", "method: 'DELETE'", "confirm("):
         assert verb not in section, f"triage shadow section must stay read-only, found {verb!r}"
+
+
+def test_custom_qa_tab_exists_and_reuses_the_same_learned_knowledge_endpoints(page):
+    """
+    Custom Q&A must not be a second knowledge system: every action it offers
+    has to call /admin/custom-qa, which is backed by the same
+    learned_knowledge table (and matcher) Teach & Resolve and candidate
+    approval already use.
+    """
+    assert 'id="tab-custom-qa"' in page
+    assert "Custom Q&amp;A" in page
+    assert "'tab-custom-qa': 'custom_qa'" in page
+    assert "Create and manage approved answers the chatbot can reuse" in page
+
+    script = page[page.index("async function loadCustomQa"):]
+    assert "fetch(`/admin/custom-qa?status=" in script
+    assert "fetch('/admin/custom-qa" in page or "fetch(`/admin/custom-qa" in page
+    assert "/admin/custom-qa/${id}/status" in page or "/admin/custom-qa/${item.id}" in page
+    assert "/admin/custom-qa/export.csv" in page
+    assert "/admin/custom-qa/csv-template" in page
+    assert "/admin/custom-qa/import/dry-run" in page
+    assert "/admin/custom-qa/import/confirm" in page
+    assert "/admin/custom-qa/test" in page
+    assert "/admin/custom-qa/preview" in page
+    assert "/versions" in page and "/restore/" in page
+
+
+def test_custom_qa_lifecycle_and_delete_confirmation_are_present(page):
+    assert "Delete this Custom Q&amp;A permanently?" in page
+    assert "This permanently removes this Q&amp;A and it will no longer be available to the chatbot." in page
+    assert "cqaSetStatus" in page
+    assert "customQaHistoryModal" in page

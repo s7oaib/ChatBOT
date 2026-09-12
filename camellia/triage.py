@@ -129,7 +129,7 @@ class TriageClassifier:
         """
         from camellia.rag_fallback import rag_fallback_engine
 
-        match = db.search_learned_knowledge(user_message)
+        match = db.search_learned_knowledge(user_message, count_usage=False)
         if not match:
             return {
                 "matched_knowledge_id": None,

@@ -1,6 +1,8 @@
 import asyncio
+import csv
 import hmac
 import hashlib
+import io
 import json
 import os
 import re
@@ -70,7 +72,7 @@ from camellia.menu_catalogue import MenuCatalogueError
 from camellia.session_memory import session_memory
 from camellia.monitoring import get_logger, delivery_monitor, latency_monitor
 from camellia.knowledge import SOURCE_MAP
-from camellia.candidate_safety import candidate_eligibility, validate_candidate_answer
+from camellia.candidate_safety import candidate_eligibility, detect_business_commitment_warnings, validate_candidate_answer
 
 log = get_logger("camellia.app")
 
@@ -2565,6 +2567,548 @@ def delete_learned_knowledge_entry(
         raise HTTPException(status_code=404, detail="Knowledge entry not found")
     return {"status": "deleted", "id": knowledge_id}
 
+SOURCE_LABELS = {
+    "client_admin": "Created by Client",
+    "staff_resolution": "Teach & Resolve",
+    "staff_dashboard": "Staff Resolution",
+    "csv_import": "Imported",
+}
+
+
+def _source_label(source: Optional[str]) -> str:
+    """
+    Cryptic DB source strings never reach a client as the primary label.
+    Mapped by what actually writes each one, not by string similarity —
+    `staff_resolution` is the Teach & Resolve producer's literal source
+    value, `staff_dashboard` is the older manual-entry form's.
+    """
+    source = source or ""
+    if source in SOURCE_LABELS:
+        return SOURCE_LABELS[source]
+    if source.startswith("approved_candidate"):
+        return "AI Approved"
+    return source.replace("_", " ").title() if source else "Unknown"
+
+
+def _custom_qa_public(item: Dict[str, Any]) -> Dict[str, Any]:
+    """Shapes a learned_knowledge row for the Custom Q&A tab — no bare DB id up front."""
+    return {
+        "id": item.get("id"),
+        "topic": item.get("topic"),
+        "primary_question": item.get("question_pattern"),
+        "aliases": item.get("aliases", []),
+        "approved_answer": item.get("verified_answer"),
+        "priority": item.get("priority") or "NORMAL",
+        "status": item.get("status") or "ACTIVE",
+        "source": item.get("source"),
+        "source_label": _source_label(item.get("source")),
+        "usage_count": item.get("usage_count") or 0,
+        "last_used_at": item.get("last_used_at"),
+        "created_at": item.get("created_at"),
+        "created_by": item.get("created_by"),
+        "updated_at": item.get("updated_at"),
+        "updated_by": item.get("updated_by"),
+    }
+
+
+@app.get("/admin/custom-qa")
+def list_custom_qa(
+    status: str = "ACTIVE",
+    source: Optional[str] = None,
+    priority: Optional[str] = None,
+    topic: Optional[str] = None,
+    search: Optional[str] = None,
+    limit: int = 500,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """The Custom Q&A tab's list — the same learned_knowledge rows AI Resolution & Answers' Approved Answers filter reads, with aliases attached."""
+    require_admin(x_admin_key, x_admin_pin)
+    items = db.list_custom_qa(status=status, source=source, priority=priority, topic=topic, search=search, limit=limit)
+    return {"status": "success", "count": len(items), "items": [_custom_qa_public(i) for i in items]}
+
+
+@app.get("/admin/custom-qa/{knowledge_id:int}")
+def get_custom_qa_detail(
+    knowledge_id: int,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    require_admin(x_admin_key, x_admin_pin)
+    item = db.get_custom_qa(knowledge_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Custom Q&A not found")
+    return _custom_qa_public(item)
+
+
+def _validate_custom_qa_answer(answer: str) -> None:
+    valid, error = validate_candidate_answer(answer)
+    if not valid:
+        raise HTTPException(status_code=400, detail=error)
+
+
+@app.post("/admin/custom-qa")
+async def create_custom_qa(
+    request: Request,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """
+    Creates a new Custom Q&A — a plain learned_knowledge row (source
+    defaults to client_admin) plus its aliases and a first version snapshot.
+    Exact duplicates always block; near-duplicates and business-commitment
+    content only warn, and only until force_save resubmits the same body.
+    """
+    require_admin(x_admin_key, x_admin_pin)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    topic = (body.get("topic") or "").strip()
+    primary_question = (body.get("primary_question") or "").strip()
+    answer = (body.get("approved_answer") or "").strip()
+    aliases = [a for a in (body.get("aliases") or []) if (a or "").strip()]
+    priority = (body.get("priority") or "NORMAL").upper()
+    status = (body.get("status") or "ACTIVE").upper()
+    created_by = body.get("created_by") or "client_admin_dashboard"
+    force_save = bool(body.get("force_save"))
+
+    if not topic or not primary_question or not answer:
+        raise HTTPException(status_code=400, detail="topic, primary_question, and approved_answer are required")
+    if priority not in {"NORMAL", "HIGH"}:
+        raise HTTPException(status_code=400, detail="priority must be NORMAL or HIGH")
+    if status not in {"ACTIVE", "DISABLED", "ARCHIVED"}:
+        raise HTTPException(status_code=400, detail="status must be ACTIVE, DISABLED, or ARCHIVED")
+
+    _validate_custom_qa_answer(answer)
+
+    dupes = db.find_learned_knowledge_duplicates(primary_question, aliases)
+    if dupes["exact"]:
+        raise HTTPException(status_code=409, detail={
+            "message": "An identical question or alias already exists. Edit the existing Q&A instead of creating a duplicate.",
+            "existing": [_custom_qa_public(i) for i in dupes["exact"]],
+        })
+
+    warnings = detect_business_commitment_warnings(answer)
+    if (dupes["similar"] or warnings) and not force_save:
+        return {
+            "status": "warning",
+            "similar": [_custom_qa_public(i) for i in dupes["similar"]],
+            "commitment_warnings": warnings,
+        }
+
+    knowledge_id = db.add_learned_knowledge(
+        topic, primary_question, answer, source="client_admin", confidence=1.0,
+        priority=priority, status=status, created_by=created_by, aliases=aliases,
+    )
+    return {"status": "success", "id": knowledge_id}
+
+
+@app.patch("/admin/custom-qa/{knowledge_id:int}")
+async def edit_custom_qa(
+    knowledge_id: int,
+    request: Request,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """Edits the same learned_knowledge record in place; the prior state is versioned first."""
+    require_admin(x_admin_key, x_admin_pin)
+    existing = db.get_custom_qa(knowledge_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Custom Q&A not found")
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    topic = (body.get("topic") or existing.get("topic") or "").strip()
+    primary_question = (body.get("primary_question") or existing.get("question_pattern") or "").strip()
+    answer = (body.get("approved_answer") or existing.get("verified_answer") or "").strip()
+    aliases = body.get("aliases")
+    if aliases is None:
+        aliases = [a["alias_text"] for a in existing.get("aliases", [])]
+    aliases = [a for a in aliases if (a or "").strip()]
+    priority = (body.get("priority") or existing.get("priority") or "NORMAL").upper()
+    status = (body.get("status") or existing.get("status") or "ACTIVE").upper()
+    updated_by = body.get("updated_by") or "client_admin_dashboard"
+    force_save = bool(body.get("force_save"))
+
+    if priority not in {"NORMAL", "HIGH"}:
+        raise HTTPException(status_code=400, detail="priority must be NORMAL or HIGH")
+    if status not in {"ACTIVE", "DISABLED", "ARCHIVED"}:
+        raise HTTPException(status_code=400, detail="status must be ACTIVE, DISABLED, or ARCHIVED")
+
+    _validate_custom_qa_answer(answer)
+
+    dupes = db.find_learned_knowledge_duplicates(primary_question, aliases, exclude_id=knowledge_id)
+    if dupes["exact"]:
+        raise HTTPException(status_code=409, detail={
+            "message": "An identical question or alias already exists on a different Q&A.",
+            "existing": [_custom_qa_public(i) for i in dupes["exact"]],
+        })
+
+    warnings = detect_business_commitment_warnings(answer)
+    if (dupes["similar"] or warnings) and not force_save:
+        return {
+            "status": "warning",
+            "similar": [_custom_qa_public(i) for i in dupes["similar"]],
+            "commitment_warnings": warnings,
+        }
+
+    db.update_custom_qa(knowledge_id, topic, primary_question, answer, aliases, priority, status, updated_by)
+    return {"status": "success", "id": knowledge_id}
+
+
+@app.post("/admin/custom-qa/{knowledge_id:int}/status")
+async def set_custom_qa_status(
+    knowledge_id: int,
+    request: Request,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """Disable / enable / archive / reactivate — status only, versioned like any other edit."""
+    require_admin(x_admin_key, x_admin_pin)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    status = str(body.get("status", "")).strip().upper()
+    actor = body.get("actor") or "client_admin_dashboard"
+    if not db.set_custom_qa_status(knowledge_id, status, actor):
+        raise HTTPException(status_code=400, detail="Could not update status (bad status value or Q&A not found)")
+    return {"status": status, "id": knowledge_id}
+
+
+@app.delete("/admin/custom-qa/{knowledge_id:int}")
+def delete_custom_qa(
+    knowledge_id: int,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """Permanent delete — only this Q&A and its own aliases/version history."""
+    require_admin(x_admin_key, x_admin_pin)
+    if not db.delete_learned_knowledge(knowledge_id):
+        raise HTTPException(status_code=404, detail="Custom Q&A not found")
+    return {"status": "deleted", "id": knowledge_id}
+
+
+@app.get("/admin/custom-qa/{knowledge_id:int}/versions")
+def get_custom_qa_versions(
+    knowledge_id: int,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    require_admin(x_admin_key, x_admin_pin)
+    return {"status": "success", "versions": db.get_learned_knowledge_versions(knowledge_id)}
+
+
+@app.post("/admin/custom-qa/{knowledge_id:int}/restore/{version_id:int}")
+async def restore_custom_qa_version(
+    knowledge_id: int,
+    version_id: int,
+    request: Request,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    require_admin(x_admin_key, x_admin_pin)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    actor = body.get("actor") or "client_admin_dashboard"
+    if not db.restore_learned_knowledge_version(knowledge_id, version_id, actor):
+        raise HTTPException(status_code=404, detail="Version or Q&A not found")
+    return {"status": "restored", "id": knowledge_id, "version_id": version_id}
+
+
+@app.delete("/admin/custom-qa/aliases/{alias_id}")
+def delete_custom_qa_alias(
+    alias_id: int,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """Removes one alias only — the owning Q&A is untouched."""
+    require_admin(x_admin_key, x_admin_pin)
+    if not db.remove_learned_knowledge_alias(alias_id):
+        raise HTTPException(status_code=404, detail="Alias not found")
+    return {"status": "deleted", "alias_id": alias_id}
+
+
+@app.post("/admin/custom-qa/test")
+async def test_custom_qa_match(
+    request: Request,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """
+    Dry run only: matches a sample message against live Custom Q&A the same
+    way a real customer message would, without sending anything, writing
+    conversation history, creating an escalation/candidate, incrementing
+    usage, or touching session state.
+    """
+    require_admin(x_admin_key, x_admin_pin)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    message = (body.get("message") or "").strip()
+    if not message:
+        raise HTTPException(status_code=400, detail="message is required")
+
+    winner, matched_via, score = db._rank_learned_knowledge(message)
+    focus_id = body.get("focus_id")
+
+    if not winner:
+        return {
+            "would_match": False, "matched": None, "matched_via": None, "score": 0.0,
+            "would_win": focus_id is None,
+        }
+
+    result = {
+        "would_match": True,
+        "matched": _custom_qa_public(winner),
+        "matched_via": matched_via,
+        "score": round(score, 3),
+        "ambiguous": 0.35 <= score < 0.55,
+    }
+    if focus_id is not None:
+        would_win = int(winner.get("id")) == int(focus_id)
+        result["would_win"] = would_win
+        if not would_win:
+            result["winning_qa"] = _custom_qa_public(winner)
+            result["reason"] = (
+                f"Another Q&A already matches this question with a {'higher or equal' if score >= 0.4 else 'comparable'} "
+                f"score via {matched_via.lower() if matched_via else 'a broader match'} — "
+                "edit that one, or make this question/alias more specific."
+            )
+    else:
+        result["would_win"] = True
+    return result
+
+
+@app.post("/admin/custom-qa/preview")
+async def preview_custom_qa_reply(
+    request: Request,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """
+    Shows the exact text a customer would receive — learned_knowledge
+    answers are sent verbatim on the live path (camellia/responder.py's
+    `_conversation_request`), so the preview is that same text with no
+    reformatting, and nothing is ever sent.
+    """
+    require_admin(x_admin_key, x_admin_pin)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    knowledge_id = body.get("id")
+    answer = body.get("approved_answer")
+    if answer is None and knowledge_id is not None:
+        item = db.get_custom_qa(int(knowledge_id))
+        if not item:
+            raise HTTPException(status_code=404, detail="Custom Q&A not found")
+        answer = item.get("verified_answer")
+    if answer is None:
+        raise HTTPException(status_code=400, detail="Provide either id or approved_answer")
+
+    return {"preview_text": answer, "note": "Preview only — nothing has been sent."}
+
+
+_CSV_COLUMNS = [
+    "id", "topic", "primary_question", "aliases", "approved_answer",
+    "priority", "status", "source", "usage_count", "last_used_at",
+    "created_at", "updated_at",
+]
+
+
+def _custom_qa_to_csv_row(item: Dict[str, Any]) -> Dict[str, Any]:
+    public = _custom_qa_public(item)
+    return {
+        "id": public["id"],
+        "topic": public["topic"],
+        "primary_question": public["primary_question"],
+        "aliases": json.dumps(public["aliases"]),
+        "approved_answer": public["approved_answer"],
+        "priority": public["priority"],
+        "status": public["status"],
+        "source": public["source"],
+        "usage_count": public["usage_count"],
+        "last_used_at": public["last_used_at"] or "",
+        "created_at": public["created_at"] or "",
+        "updated_at": public["updated_at"] or "",
+    }
+
+
+@app.get("/admin/custom-qa/export.csv")
+def export_custom_qa_csv(
+    status: str = "ALL",
+    source: Optional[str] = None,
+    priority: Optional[str] = None,
+    topic: Optional[str] = None,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """
+    Admin-only CSV export. Columns are stable and never include secrets —
+    they are drawn from the same public shaping (_custom_qa_public) the
+    JSON list endpoint uses, which never surfaces a raw credential field.
+    """
+    require_admin(x_admin_key, x_admin_pin)
+    items = db.list_custom_qa(status=status, source=source, priority=priority, topic=topic, limit=5000)
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=_CSV_COLUMNS)
+    writer.writeheader()
+    for item in items:
+        writer.writerow(_custom_qa_to_csv_row(item))
+    return PlainTextResponse(
+        content=buffer.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=custom_qa_export.csv"},
+    )
+
+
+@app.get("/admin/custom-qa/csv-template")
+def custom_qa_csv_template(
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    require_admin(x_admin_key, x_admin_pin)
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=["topic", "primary_question", "aliases", "approved_answer", "priority", "status"])
+    writer.writeheader()
+    writer.writerow({
+        "topic": "Delivery",
+        "primary_question": "Do you deliver outside Delhi NCR?",
+        "aliases": json.dumps(["deliver outside ncr", "ship outside delhi"]),
+        "approved_answer": "We currently deliver only within Delhi NCR.",
+        "priority": "NORMAL",
+        "status": "ACTIVE",
+    })
+    return PlainTextResponse(
+        content=buffer.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=custom_qa_template.csv"},
+    )
+
+
+def _parse_custom_qa_csv(raw_text: str) -> List[Dict[str, Any]]:
+    reader = csv.DictReader(io.StringIO(raw_text))
+    rows = []
+    for i, row in enumerate(reader, start=1):
+        rows.append({"row_number": i, **{k: (v or "").strip() for k, v in row.items()}})
+    return rows
+
+
+def _validate_import_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    topic = row.get("topic", "")
+    primary_question = row.get("primary_question", "")
+    answer = row.get("approved_answer", "")
+    priority = (row.get("priority") or "NORMAL").upper()
+    status = (row.get("status") or "ACTIVE").upper()
+    try:
+        aliases = json.loads(row.get("aliases") or "[]")
+        if isinstance(aliases, str):
+            aliases = [a.strip() for a in aliases.split("|") if a.strip()]
+    except Exception:
+        aliases = [a.strip() for a in (row.get("aliases") or "").split("|") if a.strip()]
+
+    errors = []
+    if not topic:
+        errors.append("topic is required")
+    if not primary_question:
+        errors.append("primary_question is required")
+    if priority not in {"NORMAL", "HIGH"}:
+        errors.append("priority must be NORMAL or HIGH")
+    if status not in {"ACTIVE", "DISABLED", "ARCHIVED"}:
+        errors.append("status must be ACTIVE, DISABLED, or ARCHIVED")
+
+    valid, answer_error = validate_candidate_answer(answer)
+    if not valid:
+        errors.append(answer_error)
+
+    if errors:
+        return {"row_number": row["row_number"], "row_status": "Invalid", "errors": errors, "data": row}
+
+    warnings = detect_business_commitment_warnings(answer)
+    dupes = db.find_learned_knowledge_duplicates(primary_question, aliases)
+    row_status = "Ready"
+    if dupes["exact"]:
+        row_status = "Duplicate"
+    elif dupes["similar"]:
+        row_status = "Possible Duplicate"
+    elif warnings:
+        row_status = "Validation Warning"
+
+    return {
+        "row_number": row["row_number"],
+        "row_status": row_status,
+        "errors": [],
+        "warnings": warnings,
+        "duplicates": [i.get("id") for i in dupes["exact"]] + [i.get("id") for i in dupes["similar"]],
+        "data": {"topic": topic, "primary_question": primary_question, "approved_answer": answer, "aliases": aliases, "priority": priority, "status": status},
+    }
+
+
+@app.post("/admin/custom-qa/import/dry-run")
+async def import_custom_qa_dry_run(
+    file: UploadFile = File(...),
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """Step 2 of the import flow: validates every row, writes nothing."""
+    require_admin(x_admin_key, x_admin_pin)
+    raw = (await file.read()).decode("utf-8-sig", errors="replace")
+    rows = _parse_custom_qa_csv(raw)
+    results = [_validate_import_row(row) for row in rows]
+    summary = {
+        "rows": len(results),
+        "valid": sum(1 for r in results if r["row_status"] == "Ready"),
+        "warnings": sum(1 for r in results if r["row_status"] == "Validation Warning"),
+        "duplicates": sum(1 for r in results if r["row_status"] == "Duplicate"),
+        "possible_duplicates": sum(1 for r in results if r["row_status"] == "Possible Duplicate"),
+        "errors": sum(1 for r in results if r["row_status"] == "Invalid"),
+    }
+    return {"status": "success", "summary": summary, "rows": results}
+
+
+@app.post("/admin/custom-qa/import/confirm")
+async def import_custom_qa_confirm(
+    file: UploadFile = File(...),
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """
+    Step 3: re-validates the same file (nothing was staged from the dry
+    run) and imports only rows that are Ready. Duplicate/Invalid rows are
+    skipped, never silently overwritten or partially published.
+    """
+    require_admin(x_admin_key, x_admin_pin)
+    raw = (await file.read()).decode("utf-8-sig", errors="replace")
+    rows = _parse_custom_qa_csv(raw)
+    results = [_validate_import_row(row) for row in rows]
+
+    imported_ids = []
+    skipped = []
+    for r in results:
+        if r["row_status"] != "Ready":
+            skipped.append({"row_number": r["row_number"], "reason": r["row_status"]})
+            continue
+        data = r["data"]
+        new_id = db.add_learned_knowledge(
+            data["topic"], data["primary_question"], data["approved_answer"],
+            source="csv_import", confidence=1.0, priority=data["priority"], status=data["status"],
+            created_by="csv_import", aliases=data["aliases"],
+        )
+        imported_ids.append(new_id)
+
+    return {"status": "success", "imported": len(imported_ids), "imported_ids": imported_ids, "skipped": skipped}
+
+
 @app.post("/admin/escalations/{escalation_id}/resolve")
 async def resolve_escalation(
     escalation_id: int,
@@ -3740,6 +4284,7 @@ def get_admin_dashboard():
             <button class="tab-btn active" onclick="switchTab('tab-image', this)">🍱 Menu</button>
             <button class="tab-btn" onclick="switchTab('tab-menu-manager', this)">📋 Menu Manager</button>
             <button class="tab-btn" onclick="switchTab('tab-ai-resolution', this)">🤖 AI Resolution &amp; Answers <span id="aiResolutionBadge" style="display:none; background: var(--danger); color: #fff; border-radius: 10px; padding: 1px 7px; font-size: 0.72rem; margin-left: 4px;"></span></button>
+            <button class="tab-btn" onclick="switchTab('tab-custom-qa', this)">🗂️ Custom Q&amp;A</button>
         </div>
 
         <!-- Customers and Answers used to be their own top-level tabs. Every
@@ -4226,6 +4771,80 @@ THIS WEEK'S BENGAL SPECIALS
             </div>
         </div>
 
+        <!-- CUSTOM Q&A: the client-managed reusable knowledge library. This
+             is not a second knowledge system -- every row here is a plain
+             learned_knowledge record, the exact same table Teach & Resolve
+             and candidate approval already write to, read through the exact
+             same matcher (camellia.database.search_learned_knowledge). AI
+             Resolution & Answers stays the operational/AI/human-review
+             workflow; this tab is where the client intentionally authors
+             and maintains reusable answers. -->
+        <div id="tab-custom-qa" class="panel-card" data-group="custom_qa" style="display: none;">
+            <div class="panel-header">
+                <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+                    <div>
+                        <h2>🗂️ Custom Q&amp;A</h2>
+                        <p>Create and manage approved answers the chatbot can reuse when customers ask similar questions.</p>
+                    </div>
+                    <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                        <button class="btn-primary" onclick="openCustomQaModal()">+ Add Q&amp;A</button>
+                        <button class="btn-secondary" onclick="openCustomQaImportModal()">Import CSV</button>
+                        <button class="btn-secondary" onclick="exportCustomQaCsv()">Export CSV</button>
+                    </div>
+                </div>
+            </div>
+
+            <div style="margin-bottom:12px;">
+                <input type="text" id="customQaSearch" class="field-control" placeholder="🔎 Search questions, answers or topics…" style="max-width:420px;" oninput="renderCustomQaList()">
+            </div>
+
+            <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:10px;">
+                <button class="tab-btn active" type="button" id="cqaStatusBtn-ACTIVE" onclick="setCustomQaStatusFilter('ACTIVE')">Active</button>
+                <button class="tab-btn" type="button" id="cqaStatusBtn-DISABLED" onclick="setCustomQaStatusFilter('DISABLED')">Disabled</button>
+                <button class="tab-btn" type="button" id="cqaStatusBtn-ARCHIVED" onclick="setCustomQaStatusFilter('ARCHIVED')">Archived</button>
+                <button class="tab-btn" type="button" id="cqaStatusBtn-ALL" onclick="setCustomQaStatusFilter('ALL')">All</button>
+            </div>
+            <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:14px;">
+                <select class="field-control" id="cqaSourceFilter" style="max-width:200px;" onchange="renderCustomQaList()">
+                    <option value="">All Sources</option>
+                    <option value="client_admin">Created by Client</option>
+                    <option value="staff_resolution">Teach &amp; Resolve</option>
+                    <option value="staff_dashboard">Staff Resolution</option>
+                    <option value="csv_import">Imported</option>
+                </select>
+                <select class="field-control" id="cqaTopicFilter" style="max-width:200px;" onchange="renderCustomQaList()">
+                    <option value="">All Topics</option>
+                </select>
+                <select class="field-control" id="cqaPriorityFilter" style="max-width:160px;" onchange="renderCustomQaList()">
+                    <option value="">All Priorities</option>
+                    <option value="NORMAL">Normal</option>
+                    <option value="HIGH">High</option>
+                </select>
+                <button class="btn-secondary" onclick="loadCustomQa()">🔄 Refresh</button>
+            </div>
+
+            <div style="overflow-x: auto;">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>Topic</th>
+                            <th>Question / Aliases</th>
+                            <th>Approved Answer</th>
+                            <th>Status</th>
+                            <th>Priority</th>
+                            <th>Source</th>
+                            <th>Usage</th>
+                            <th>Last Edited</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="customQaTableBody">
+                        <tr><td colspan="9" style="text-align: center; color: #888;">Loading...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
         <!-- Writing an answer by hand used to be a collapsed form inside the
              panel below, opened by a button the client never pressed: the list
              of existing answers filled the screen and the button went with it.
@@ -4320,6 +4939,136 @@ THIS WEEK'S BENGAL SPECIALS
             <div style="display: flex; gap: 8px; justify-content: flex-end;">
                 <button class="btn-secondary" onclick="closeIgRemoveModal()">Cancel</button>
                 <button class="btn-danger" onclick="confirmIgRemove()">Remove Permanently</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Custom Q&A: Add / Edit modal. One learned_knowledge record per
+         modal session -- editing always PATCHes the same id, never
+         creates a new one. -->
+    <div id="customQaModal" style="display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 9999; justify-content: center; align-items: center; padding: 20px; overflow-y: auto;">
+        <div style="background: white; border-radius: 16px; width: 100%; max-width: 640px; padding: 24px; box-shadow: 0 10px 30px rgba(0,0,0,0.2); max-height: 90vh; overflow-y: auto;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px;">
+                <h3 style="margin: 0; color: var(--primary);" id="customQaModalTitle">+ Add Q&amp;A</h3>
+                <button onclick="closeCustomQaModal()" style="background: none; border: none; font-size: 1.4rem; cursor: pointer;">&times;</button>
+            </div>
+            <input type="hidden" id="cqaEditingId">
+
+            <div style="margin-bottom:12px;">
+                <label class="field-label">Topic / Category</label>
+                <select class="field-control" id="cqaTopicSelect" onchange="onCqaTopicSelectChange()">
+                    <option>Pricing</option><option>Delivery</option><option>Corporate Gifting</option>
+                    <option>Meal Subscription</option><option>Sondesh</option><option>Events</option>
+                    <option>Careers</option><option>Other</option>
+                </select>
+                <input type="text" class="field-control" id="cqaTopicCustom" placeholder="Type a topic…" style="display:none; margin-top:6px;">
+            </div>
+
+            <div style="margin-bottom:12px;">
+                <label class="field-label">Primary Customer Question / Trigger *</label>
+                <input type="text" class="field-control" id="cqaPrimaryQuestion" placeholder="What is the price per meal?">
+            </div>
+
+            <div style="margin-bottom:12px;">
+                <label class="field-label">Alternative Questions / Aliases</label>
+                <div id="cqaAliasList"></div>
+                <div style="display:flex; gap:8px; margin-top:6px;">
+                    <input type="text" class="field-control" id="cqaAliasInput" placeholder="meal price">
+                    <button class="btn-secondary" type="button" onclick="addCqaAlias()">+ Add Alternative Question</button>
+                </div>
+            </div>
+
+            <div style="margin-bottom:12px;">
+                <label class="field-label">Approved Answer *</label>
+                <textarea class="field-control" id="cqaAnswer" rows="4" placeholder="The exact reply the bot should send."></textarea>
+            </div>
+
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:12px;">
+                <div>
+                    <label class="field-label">Priority</label>
+                    <select class="field-control" id="cqaPriority"><option value="NORMAL">Normal</option><option value="HIGH">High</option></select>
+                </div>
+                <div>
+                    <label class="field-label">Status</label>
+                    <select class="field-control" id="cqaStatus"><option value="ACTIVE">Active</option><option value="DISABLED">Disabled</option><option value="ARCHIVED">Archived</option></select>
+                </div>
+            </div>
+
+            <p style="font-size:0.78rem; color:var(--text-muted); margin-bottom:16px;">Source: <span id="cqaSourceLabel">Created by Client</span></p>
+
+            <div id="cqaWarningsBox" style="display:none; background:#FFF7ED; border:1px solid #FED7AA; border-radius:10px; padding:12px; margin-bottom:14px; font-size:0.84rem;"></div>
+
+            <div style="border-top:1px solid var(--border); padding-top:14px; margin-bottom:14px;">
+                <label class="field-label">Test Question <span style="font-weight:400; color:var(--text-muted);">(optional, before saving)</span></label>
+                <div style="display:flex; gap:8px;">
+                    <input type="text" class="field-control" id="cqaTestQuestion" placeholder="How much is one meal?">
+                    <button class="btn-secondary" type="button" onclick="runCqaTest()">Test</button>
+                    <button class="btn-secondary" type="button" onclick="runCqaPreview()">Preview</button>
+                </div>
+                <div id="cqaTestResult" style="margin-top:10px; font-size:0.84rem;"></div>
+            </div>
+
+            <div style="display: flex; gap: 8px; justify-content: flex-end;">
+                <button class="btn-secondary" onclick="closeCustomQaModal()">Cancel</button>
+                <button class="btn-primary" onclick="saveCustomQa()">Save Q&amp;A</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Custom Q&A: delete confirmation. Permanent -- distinct from Disable/Archive. -->
+    <div id="customQaDeleteModal" style="display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 9999; justify-content: center; align-items: center; padding: 20px;">
+        <div style="background: white; border-radius: 16px; width: 100%; max-width: 480px; padding: 24px; box-shadow: 0 10px 30px rgba(0,0,0,0.2);">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px;">
+                <h3 style="margin: 0; color: var(--danger);">Delete this Custom Q&amp;A permanently?</h3>
+                <button onclick="closeCustomQaDeleteModal()" style="background: none; border: none; font-size: 1.4rem; cursor: pointer;">&times;</button>
+            </div>
+            <div id="cqaDeleteDetails" style="background:#F7F5F3; border:1px solid var(--border); border-radius:10px; padding:12px; font-size:0.82rem; line-height:1.6; margin-bottom:12px;"></div>
+            <div style="background:#FEF2F2; border:1px solid #FCA5A5; border-radius:10px; padding:10px 12px; font-size:0.8rem; color:#991B1B; margin-bottom:16px;">
+                This permanently removes this Q&amp;A and it will no longer be available to the chatbot.
+            </div>
+            <div style="display: flex; gap: 8px; justify-content: flex-end;">
+                <button class="btn-secondary" onclick="closeCustomQaDeleteModal()">Cancel</button>
+                <button class="btn-danger" onclick="confirmCustomQaDelete()">Delete Permanently</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Custom Q&A: version history. Newest first; Restore snapshots the
+         current state before applying the historical one. -->
+    <div id="customQaHistoryModal" style="display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 9999; justify-content: center; align-items: center; padding: 20px;">
+        <div style="background: white; border-radius: 16px; width: 100%; max-width: 620px; padding: 24px; box-shadow: 0 10px 30px rgba(0,0,0,0.2); max-height: 85vh; overflow-y: auto;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px;">
+                <h3 style="margin: 0; color: var(--primary);">History</h3>
+                <button onclick="closeCustomQaHistoryModal()" style="background: none; border: none; font-size: 1.4rem; cursor: pointer;">&times;</button>
+            </div>
+            <div id="cqaHistoryBody"></div>
+        </div>
+    </div>
+
+    <!-- Custom Q&A: CSV import, three steps -- upload, dry-run report,
+         confirm. Nothing is saved until Confirm Import is pressed, and
+         confirm re-validates the same file rather than trusting client
+         state from the dry run. -->
+    <div id="customQaImportModal" style="display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 9999; justify-content: center; align-items: center; padding: 20px;">
+        <div style="background: white; border-radius: 16px; width: 100%; max-width: 680px; padding: 24px; box-shadow: 0 10px 30px rgba(0,0,0,0.2); max-height: 85vh; overflow-y: auto;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px;">
+                <h3 style="margin: 0; color: var(--primary);">Import CSV</h3>
+                <button onclick="closeCustomQaImportModal()" style="background: none; border: none; font-size: 1.4rem; cursor: pointer;">&times;</button>
+            </div>
+            <p style="font-size:0.82rem; color:var(--text-muted);">
+                <a href="#" onclick="downloadCustomQaTemplate(); return false;">Download CSV Template</a>
+            </p>
+            <input type="file" id="cqaImportFile" accept=".csv" class="field-control" style="margin-bottom:12px;">
+            <div style="display:flex; gap:8px; margin-bottom:14px;">
+                <button class="btn-secondary" onclick="runCustomQaImportDryRun()">Validate (Dry Run)</button>
+                <button class="btn-primary" id="cqaImportConfirmBtn" style="display:none;" onclick="confirmCustomQaImport()">Confirm Import</button>
+            </div>
+            <div id="cqaImportSummary" style="font-size:0.85rem; margin-bottom:10px;"></div>
+            <div style="overflow-x:auto;">
+                <table class="data-table">
+                    <thead><tr><th>Row</th><th>Question</th><th>Status</th><th>Notes</th></tr></thead>
+                    <tbody id="cqaImportRows"><tr><td colspan="4" style="text-align:center; color:#888;">Upload a CSV and click Validate.</td></tr></tbody>
+                </table>
             </div>
         </div>
     </div>
@@ -4527,7 +5276,8 @@ THIS WEEK'S BENGAL SPECIALS
             'tab-menu-manager': 'menu_manager',
             'tab-stats': 'customers',
             'tab-candidates': 'answers',
-            'tab-ai-resolution': 'ai_resolution'
+            'tab-ai-resolution': 'ai_resolution',
+            'tab-custom-qa': 'custom_qa'
         };
 
         function showGroup(group) {
@@ -4550,6 +5300,7 @@ THIS WEEK'S BENGAL SPECIALS
             if (group === 'customers') { loadAnalytics(); loadConversations(); }
             if (group === 'answers') { loadCandidates(); loadKnowledge(); }
             if (group === 'ai_resolution') { loadAiResolution(); loadTriageShadow(); }
+            if (group === 'custom_qa') { loadCustomQa(); }
         }
 
         // MENU MANAGER tab: every menu is edited as a draft (server-side, in
@@ -6382,6 +7133,7 @@ Non-Veg:
                     <td style="max-width: 340px; font-size: 0.82rem; white-space:pre-wrap;">${escapeHtml(k.verified_answer || '')}</td>
                     <td><span class="badge badge-veg">${escapeHtml(k.source || 'staff')}</span></td>
                     <td style="white-space: nowrap;">
+                        <button class="btn-secondary" style="padding: 4px 8px; font-size: 0.75rem;" onclick="openInCustomQa(${k.id})">Open in Custom Q&amp;A</button>
                         <button class="btn-secondary" style="padding: 4px 8px; font-size: 0.75rem; color: var(--danger);" onclick="deleteKnowledge(${k.id})">🗑️ Delete</button>
                     </td>
                 </tr>`;
@@ -6528,6 +7280,421 @@ Non-Veg:
                 statusLine.innerText = 'Could not load triage shadow report.';
                 tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: red;">Failed to load.</td></tr>';
             }
+        }
+
+        // CUSTOM Q&A: the client-managed reusable knowledge library. Every
+        // read/write here goes through /admin/custom-qa, which is backed by
+        // the exact same learned_knowledge table (and matcher) Teach &
+        // Resolve and candidate approval already use -- there is no second
+        // knowledge store or second editor.
+        let customQaItems = [];
+        let customQaStatusFilter = 'ACTIVE';
+        let cqaAliasesDraft = [];
+
+        // Linked from AI Resolution & Answers' Approved Answers filter --
+        // one editor for learned_knowledge, not two. Switches tabs and opens
+        // the same Edit modal Custom Q&A's own Edit button uses.
+        async function openInCustomQa(id) {
+            document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+            showGroup('custom_qa');
+            await loadCustomQa();
+            const item = customQaItems.find(i => i.id === id);
+            if (item) openCustomQaModal(item);
+            else alert('Could not find this Q&A in Custom Q&A (it may be Disabled/Archived — check those filters).');
+        }
+
+        async function loadCustomQa() {
+            const tbody = document.getElementById('customQaTableBody');
+            tbody.innerHTML = '<tr><td colspan="9" style="text-align: center; color: #888;">Loading...</td></tr>';
+            try {
+                const resp = await fetch(`/admin/custom-qa?status=${encodeURIComponent(customQaStatusFilter)}&limit=500`, { headers: getAuthHeaders() });
+                if (!resp.ok) throw new Error('failed');
+                const data = await resp.json();
+                customQaItems = data.items || [];
+
+                const topicSelect = document.getElementById('cqaTopicFilter');
+                const currentTopic = topicSelect.value;
+                const topics = [...new Set(customQaItems.map(i => i.topic).filter(Boolean))].sort();
+                topicSelect.innerHTML = '<option value="">All Topics</option>' + topics.map(t => `<option value="${escapeHtml(t)}">${escapeHtml(t)}</option>`).join('');
+                topicSelect.value = topics.includes(currentTopic) ? currentTopic : '';
+
+                renderCustomQaList();
+            } catch (err) {
+                tbody.innerHTML = '<tr><td colspan="9" style="text-align: center; color: red;">Failed to load Custom Q&amp;A.</td></tr>';
+            }
+        }
+
+        function setCustomQaStatusFilter(status) {
+            customQaStatusFilter = status;
+            ['ACTIVE', 'DISABLED', 'ARCHIVED', 'ALL'].forEach(s => {
+                const btn = document.getElementById(`cqaStatusBtn-${s}`);
+                if (btn) btn.classList.toggle('active', s === status);
+            });
+            loadCustomQa();
+        }
+
+        function renderCustomQaList() {
+            const tbody = document.getElementById('customQaTableBody');
+            const query = (document.getElementById('customQaSearch').value || '').trim().toLowerCase();
+            const source = document.getElementById('cqaSourceFilter').value;
+            const topic = document.getElementById('cqaTopicFilter').value;
+            const priority = document.getElementById('cqaPriorityFilter').value;
+
+            let items = customQaItems;
+            if (source) items = items.filter(i => i.source === source);
+            if (topic) items = items.filter(i => i.topic === topic);
+            if (priority) items = items.filter(i => i.priority === priority);
+            if (query) {
+                items = items.filter(i => [i.topic, i.primary_question, i.approved_answer, ...(i.aliases || [])]
+                    .filter(Boolean).some(t => t.toLowerCase().includes(query)));
+            }
+
+            if (!items.length) {
+                tbody.innerHTML = '<tr><td colspan="9" style="text-align: center; color: #888;">Nothing here yet.</td></tr>';
+                return;
+            }
+
+            tbody.innerHTML = items.map(renderCustomQaRow).join('');
+        }
+
+        function timeAgo(iso) {
+            if (!iso) return 'Never';
+            const then = new Date(iso.includes('T') || iso.includes(' ') ? iso + (iso.endsWith('Z') ? '' : 'Z') : iso);
+            const diffMs = Date.now() - then.getTime();
+            if (isNaN(diffMs)) return iso;
+            const mins = Math.round(diffMs / 60000);
+            if (mins < 1) return 'Just now';
+            if (mins < 60) return `${mins} min ago`;
+            const hrs = Math.round(mins / 60);
+            if (hrs < 24) return `${hrs} hour${hrs === 1 ? '' : 's'} ago`;
+            const days = Math.round(hrs / 24);
+            return `${days} day${days === 1 ? '' : 's'} ago`;
+        }
+
+        function renderCustomQaRow(item) {
+            const aliasCount = (item.aliases || []).length;
+            const priorityBadge = item.priority === 'HIGH' ? '<span class="badge badge-nonveg">High</span>' : '<span class="badge badge-veg">Normal</span>';
+            const statusBadge = { ACTIVE: '<span class="badge badge-veg">Active</span>', DISABLED: '<span class="badge badge-nonveg">Disabled</span>', ARCHIVED: '<span class="badge">Archived</span>' }[item.status] || item.status;
+            const lifecycleAction = item.status === 'ARCHIVED'
+                ? `<button class="btn-secondary" style="padding:4px 8px;font-size:0.72rem;" onclick="cqaSetStatus(${item.id},'ACTIVE')">Restore</button>`
+                : `<button class="btn-secondary" style="padding:4px 8px;font-size:0.72rem;" onclick="cqaSetStatus(${item.id},'${item.status === 'ACTIVE' ? 'DISABLED' : 'ACTIVE'}')">${item.status === 'ACTIVE' ? 'Disable' : 'Enable'}</button>
+                   <button class="btn-secondary" style="padding:4px 8px;font-size:0.72rem;" onclick="cqaSetStatus(${item.id},'ARCHIVED')">Archive</button>`;
+            return `
+            <tr>
+                <td style="max-width:140px;">${escapeHtml(item.topic || '')}</td>
+                <td style="max-width:220px;">
+                    <b>${escapeHtml(item.primary_question || '')}</b>
+                    ${aliasCount ? `<br><small style="color:var(--text-muted);">+${aliasCount} alternative question${aliasCount === 1 ? '' : 's'}</small>` : ''}
+                </td>
+                <td style="max-width:280px; font-size:0.82rem; white-space:pre-wrap;">${escapeHtml((item.approved_answer || '').slice(0, 220))}${(item.approved_answer || '').length > 220 ? '…' : ''}</td>
+                <td>${statusBadge}</td>
+                <td>${priorityBadge}</td>
+                <td><span class="badge badge-veg">${escapeHtml(item.source_label || item.source || '')}</span></td>
+                <td style="font-size:0.78rem;">Used ${item.usage_count || 0} time${item.usage_count === 1 ? '' : 's'}<br>Last used: ${item.last_used_at ? timeAgo(item.last_used_at) : 'Never'}</td>
+                <td style="font-size:0.76rem; color:var(--text-muted);">${item.updated_at ? timeAgo(item.updated_at) : ''}${item.updated_by ? `<br>by ${escapeHtml(item.updated_by)}` : ''}</td>
+                <td style="white-space:nowrap;">
+                    <button class="btn-secondary" style="padding:4px 8px;font-size:0.72rem;" onclick="cqaQuickTest(${item.id})">Test</button>
+                    <button class="btn-secondary" style="padding:4px 8px;font-size:0.72rem;" onclick="cqaQuickPreview(${item.id})">Preview</button>
+                    <button class="btn-secondary" style="padding:4px 8px;font-size:0.72rem;" onclick="cqaOpenEdit(${item.id})">Edit</button>
+                    ${lifecycleAction}
+                    <button class="btn-secondary" style="padding:4px 8px;font-size:0.72rem;" onclick="cqaOpenHistory(${item.id})">History</button>
+                    <button class="btn-secondary" style="padding:4px 8px;font-size:0.72rem;color:var(--danger);" onclick="cqaOpenDeleteConfirm(${item.id})">Delete</button>
+                </td>
+            </tr>`;
+        }
+
+        async function cqaSetStatus(id, status) {
+            try {
+                const resp = await fetch(`/admin/custom-qa/${id}/status`, {
+                    method: 'POST', headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ status, actor: 'client_admin_dashboard' }),
+                });
+                if (resp.ok) { loadCustomQa(); refreshAiResolutionIfVisible(); }
+                else alert('Could not update status.');
+            } catch (e) { alert('Could not update status.'); }
+        }
+
+        async function cqaQuickTest(id) {
+            const message = window.prompt('Sample customer question to test against this Q&A:');
+            if (!message) return;
+            try {
+                const resp = await fetch('/admin/custom-qa/test', {
+                    method: 'POST', headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ message, focus_id: id }),
+                });
+                const data = await resp.json();
+                if (!data.would_match) { alert('Would Match: NO — nothing in Custom Q&A matches that question.'); return; }
+                let text = `Would Match: YES\nMatched Q&A: ${data.matched.topic} — ${data.matched.primary_question}\nMatched Via: ${data.matched_via}\nScore: ${Math.round(data.score * 100)}%\nWould This Q&A Win: ${data.would_win ? 'YES' : 'NO'}`;
+                if (!data.would_win) text += `\nWinning Q&A: ${data.winning_qa.topic} — ${data.winning_qa.primary_question}\nReason: ${data.reason}`;
+                if (data.ambiguous) text += '\n\n⚠ Two answers are close in score — consider making the question more specific.';
+                alert(text);
+            } catch (e) { alert('Test failed.'); }
+        }
+
+        async function cqaQuickPreview(id) {
+            try {
+                const resp = await fetch('/admin/custom-qa/preview', {
+                    method: 'POST', headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ id }),
+                });
+                const data = await resp.json();
+                alert(`${data.preview_text}\n\n(${data.note})`);
+            } catch (e) { alert('Preview failed.'); }
+        }
+
+        function cqaOpenDeleteConfirm(id) {
+            const item = customQaItems.find(i => i.id === id);
+            if (!item) return;
+            document.getElementById('cqaDeleteDetails').innerHTML = `
+                <div><b>Topic:</b> ${escapeHtml(item.topic || '')}</div>
+                <div><b>Question:</b> ${escapeHtml(item.primary_question || '')}</div>
+                <div><b>Source:</b> ${escapeHtml(item.source_label || '')}</div>
+                <div><b>Usage Count:</b> ${item.usage_count || 0}</div>`;
+            document.getElementById('customQaDeleteModal').dataset.id = id;
+            document.getElementById('customQaDeleteModal').style.display = 'flex';
+        }
+        function closeCustomQaDeleteModal() { document.getElementById('customQaDeleteModal').style.display = 'none'; }
+        async function confirmCustomQaDelete() {
+            const id = document.getElementById('customQaDeleteModal').dataset.id;
+            try {
+                const resp = await fetch(`/admin/custom-qa/${id}`, { method: 'DELETE', headers: getAuthHeaders() });
+                if (resp.ok) { closeCustomQaDeleteModal(); loadCustomQa(); refreshAiResolutionIfVisible(); }
+                else alert('Could not delete.');
+            } catch (e) { alert('Could not delete.'); }
+        }
+
+        async function cqaOpenHistory(id) {
+            const body = document.getElementById('cqaHistoryBody');
+            body.innerHTML = 'Loading…';
+            document.getElementById('customQaHistoryModal').style.display = 'flex';
+            document.getElementById('customQaHistoryModal').dataset.id = id;
+            try {
+                const resp = await fetch(`/admin/custom-qa/${id}/versions`, { headers: getAuthHeaders() });
+                const data = await resp.json();
+                const versions = data.versions || [];
+                if (!versions.length) { body.innerHTML = '<p style="color:var(--text-muted);">No edits yet — this Q&A has not been changed since it was created.</p>'; return; }
+                body.innerHTML = versions.map(v => `
+                    <div style="border:1px solid var(--border); border-radius:10px; padding:12px; margin-bottom:10px;">
+                        <div style="display:flex; justify-content:space-between; align-items:center;">
+                            <b>Version ${v.version_number}</b>
+                            <button class="btn-secondary" style="padding:4px 10px;font-size:0.75rem;" onclick="cqaRestoreVersion(${id},${v.version_id})">Restore</button>
+                        </div>
+                        <div style="font-size:0.8rem; color:var(--text-muted); margin:4px 0;">${escapeHtml(v.changed_by || 'unknown')} · ${escapeHtml(v.changed_at || '')} · ${escapeHtml(v.change_reason || '')}</div>
+                        <div style="font-size:0.82rem;"><b>Topic:</b> ${escapeHtml(v.topic || '')}</div>
+                        <div style="font-size:0.82rem;"><b>Question:</b> ${escapeHtml(v.primary_question || '')}</div>
+                        <div style="font-size:0.82rem; white-space:pre-wrap;"><b>Answer:</b> ${escapeHtml(v.answer || '')}</div>
+                        <div style="font-size:0.78rem; color:var(--text-muted);"><b>Priority:</b> ${escapeHtml(v.priority || '')} · <b>Aliases:</b> ${(v.aliases_snapshot || []).map(escapeHtml).join(', ') || '—'}</div>
+                    </div>`).join('');
+            } catch (e) { body.innerHTML = '<p style="color:red;">Could not load history.</p>'; }
+        }
+        function closeCustomQaHistoryModal() { document.getElementById('customQaHistoryModal').style.display = 'none'; }
+        async function cqaRestoreVersion(id, versionId) {
+            if (!confirm('Restore this version?')) return;
+            try {
+                const resp = await fetch(`/admin/custom-qa/${id}/restore/${versionId}`, {
+                    method: 'POST', headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ actor: 'client_admin_dashboard' }),
+                });
+                if (resp.ok) { closeCustomQaHistoryModal(); loadCustomQa(); }
+                else alert('Could not restore this version.');
+            } catch (e) { alert('Could not restore this version.'); }
+        }
+
+        // -- Add / Edit modal ---------------------------------------------
+
+        const CQA_TOPIC_PRESETS = ['Pricing', 'Delivery', 'Corporate Gifting', 'Meal Subscription', 'Sondesh', 'Events', 'Careers'];
+
+        function onCqaTopicSelectChange() {
+            const select = document.getElementById('cqaTopicSelect');
+            document.getElementById('cqaTopicCustom').style.display = select.value === 'Other' ? 'block' : 'none';
+        }
+
+        function renderCqaAliasList() {
+            const list = document.getElementById('cqaAliasList');
+            list.innerHTML = cqaAliasesDraft.map((a, idx) => `
+                <div style="display:flex; gap:6px; align-items:center; margin-bottom:4px;">
+                    <span style="flex:1; background:#F8FAFC; border:1px solid var(--border); border-radius:6px; padding:6px 10px; font-size:0.82rem;">${escapeHtml(a)}</span>
+                    <button class="btn-secondary" type="button" style="padding:2px 8px; font-size:0.75rem;" onclick="removeCqaAlias(${idx})">✕</button>
+                </div>`).join('');
+        }
+        function addCqaAlias() {
+            const input = document.getElementById('cqaAliasInput');
+            const value = input.value.trim();
+            if (!value) return;
+            cqaAliasesDraft.push(value);
+            input.value = '';
+            renderCqaAliasList();
+        }
+        function removeCqaAlias(idx) { cqaAliasesDraft.splice(idx, 1); renderCqaAliasList(); }
+
+        function openCustomQaModal(item) {
+            document.getElementById('cqaEditingId').value = item ? item.id : '';
+            document.getElementById('customQaModalTitle').innerText = item ? 'Edit Q&A' : '+ Add Q&A';
+            const topicSelect = document.getElementById('cqaTopicSelect');
+            const topic = item ? item.topic : '';
+            if (topic && CQA_TOPIC_PRESETS.includes(topic)) {
+                topicSelect.value = topic;
+                document.getElementById('cqaTopicCustom').style.display = 'none';
+                document.getElementById('cqaTopicCustom').value = '';
+            } else {
+                topicSelect.value = 'Other';
+                document.getElementById('cqaTopicCustom').style.display = 'block';
+                document.getElementById('cqaTopicCustom').value = topic || '';
+            }
+            document.getElementById('cqaPrimaryQuestion').value = item ? item.primary_question : '';
+            document.getElementById('cqaAnswer').value = item ? item.approved_answer : '';
+            document.getElementById('cqaPriority').value = item ? item.priority : 'NORMAL';
+            document.getElementById('cqaStatus').value = item ? item.status : 'ACTIVE';
+            document.getElementById('cqaSourceLabel').innerText = item ? (item.source_label || item.source || '') : 'Created by Client';
+            cqaAliasesDraft = item ? [...(item.aliases || [])] : [];
+            renderCqaAliasList();
+            document.getElementById('cqaTestQuestion').value = '';
+            document.getElementById('cqaTestResult').innerHTML = '';
+            document.getElementById('cqaWarningsBox').style.display = 'none';
+            document.getElementById('cqaWarningsBox').innerHTML = '';
+            document.getElementById('customQaModal').style.display = 'flex';
+        }
+        function closeCustomQaModal() { document.getElementById('customQaModal').style.display = 'none'; }
+
+        function cqaOpenEdit(id) {
+            const item = customQaItems.find(i => i.id === id);
+            if (item) openCustomQaModal(item);
+        }
+
+        function currentCqaTopic() {
+            const select = document.getElementById('cqaTopicSelect');
+            return select.value === 'Other' ? document.getElementById('cqaTopicCustom').value.trim() : select.value;
+        }
+
+        async function runCqaTest() {
+            const message = document.getElementById('cqaTestQuestion').value.trim();
+            const resultBox = document.getElementById('cqaTestResult');
+            if (!message) { resultBox.innerHTML = 'Enter a sample question first.'; return; }
+            const editingId = document.getElementById('cqaEditingId').value;
+            try {
+                const resp = await fetch('/admin/custom-qa/test', {
+                    method: 'POST', headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ message, focus_id: editingId || null }),
+                });
+                const data = await resp.json();
+                if (!data.would_match) { resultBox.innerHTML = '<b>Would Match:</b> NO'; return; }
+                let html = `<b>Would Match:</b> YES<br><b>Matched Q&A:</b> ${escapeHtml(data.matched.topic)} — ${escapeHtml(data.matched.primary_question)}<br><b>Matched Via:</b> ${escapeHtml(data.matched_via)}<br><b>Score:</b> ${Math.round(data.score * 100)}%<br><b>Would This Q&A Win:</b> ${data.would_win ? 'YES' : 'NO'}`;
+                if (!data.would_win) html += `<br><b>Winning Q&A:</b> ${escapeHtml(data.winning_qa.topic)} — ${escapeHtml(data.winning_qa.primary_question)}<br><b>Reason:</b> ${escapeHtml(data.reason)}`;
+                if (data.ambiguous) html += '<br>⚠ Two answers are close in score.';
+                resultBox.innerHTML = html;
+            } catch (e) { resultBox.innerHTML = 'Test failed.'; }
+        }
+
+        function runCqaPreview() {
+            const answer = document.getElementById('cqaAnswer').value;
+            document.getElementById('cqaTestResult').innerHTML = `<div style="white-space:pre-wrap; background:#F8FAFC; border:1px solid var(--border); border-radius:8px; padding:10px;">${escapeHtml(answer)}</div><small style="color:var(--text-muted);">Preview only — nothing has been sent.</small>`;
+        }
+
+        async function saveCustomQa(forceSave) {
+            const id = document.getElementById('cqaEditingId').value;
+            const payload = {
+                topic: currentCqaTopic(),
+                primary_question: document.getElementById('cqaPrimaryQuestion').value.trim(),
+                approved_answer: document.getElementById('cqaAnswer').value.trim(),
+                aliases: cqaAliasesDraft,
+                priority: document.getElementById('cqaPriority').value,
+                status: document.getElementById('cqaStatus').value,
+                force_save: !!forceSave,
+            };
+            if (!payload.topic || !payload.primary_question || !payload.approved_answer) {
+                alert('Topic, Primary Question, and Approved Answer are required.');
+                return;
+            }
+            try {
+                const resp = await fetch(id ? `/admin/custom-qa/${id}` : '/admin/custom-qa', {
+                    method: id ? 'PATCH' : 'POST',
+                    headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload),
+                });
+                const data = await resp.json().catch(() => ({}));
+                if (resp.status === 409) {
+                    const existing = (data.detail && data.detail.existing) || [];
+                    alert('An identical question or alias already exists:\n' + existing.map(e => `${e.topic} — ${e.primary_question}`).join('\n') + '\n\nEdit the existing Q&A instead.');
+                    return;
+                }
+                if (!resp.ok) { alert('Could not save: ' + (data.detail || resp.status)); return; }
+                if (data.status === 'warning') {
+                    let msg = '';
+                    if (data.similar && data.similar.length) {
+                        msg += 'Similar Q&A already exists:\n' + data.similar.map(s => `${s.topic} — ${s.primary_question}\n${(s.approved_answer || '').slice(0, 120)}`).join('\n\n') + '\n\n';
+                    }
+                    if (data.commitment_warnings && data.commitment_warnings.length) {
+                        msg += '⚠ This answer appears to contain: ' + data.commitment_warnings.join(', ') + '. Please confirm this information is current and approved.\n\n';
+                    }
+                    msg += 'Save anyway?';
+                    if (confirm(msg)) { saveCustomQa(true); }
+                    return;
+                }
+                closeCustomQaModal();
+                loadCustomQa();
+                refreshAiResolutionIfVisible();
+            } catch (e) { alert('Could not save Q&A.'); }
+        }
+
+        // -- CSV export / import -------------------------------------------
+
+        async function downloadBlobFrom(url, filename) {
+            const resp = await fetch(url, { headers: getAuthHeaders() });
+            if (!resp.ok) { alert('Download failed.'); return; }
+            const blob = await resp.blob();
+            const objectUrl = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = objectUrl; a.download = filename;
+            document.body.appendChild(a); a.click(); a.remove();
+            URL.revokeObjectURL(objectUrl);
+        }
+        function exportCustomQaCsv() { downloadBlobFrom('/admin/custom-qa/export.csv?status=ALL', 'custom_qa_export.csv'); }
+        function downloadCustomQaTemplate() { downloadBlobFrom('/admin/custom-qa/csv-template', 'custom_qa_template.csv'); }
+
+        function openCustomQaImportModal() {
+            document.getElementById('cqaImportFile').value = '';
+            document.getElementById('cqaImportSummary').innerHTML = '';
+            document.getElementById('cqaImportRows').innerHTML = '<tr><td colspan="4" style="text-align:center; color:#888;">Upload a CSV and click Validate.</td></tr>';
+            document.getElementById('cqaImportConfirmBtn').style.display = 'none';
+            document.getElementById('customQaImportModal').style.display = 'flex';
+        }
+        function closeCustomQaImportModal() { document.getElementById('customQaImportModal').style.display = 'none'; }
+
+        async function runCustomQaImportDryRun() {
+            const fileInput = document.getElementById('cqaImportFile');
+            if (!fileInput.files.length) { alert('Choose a CSV file first.'); return; }
+            const form = new FormData();
+            form.append('file', fileInput.files[0]);
+            try {
+                const resp = await fetch('/admin/custom-qa/import/dry-run', { method: 'POST', headers: getAuthHeaders(), body: form });
+                const data = await resp.json();
+                if (!resp.ok) { alert('Validation failed.'); return; }
+                const s = data.summary;
+                document.getElementById('cqaImportSummary').innerHTML = `Rows: ${s.rows} · Valid: ${s.valid} · Warnings: ${s.warnings} · Duplicates: ${s.duplicates} · Possible Duplicates: ${s.possible_duplicates} · Errors: ${s.errors}`;
+                document.getElementById('cqaImportRows').innerHTML = data.rows.map(r => `
+                    <tr>
+                        <td>${r.row_number}</td>
+                        <td style="max-width:220px;">${escapeHtml((r.data && r.data.primary_question) || '')}</td>
+                        <td><span class="badge ${r.row_status === 'Ready' ? 'badge-veg' : 'badge-nonveg'}">${r.row_status}</span></td>
+                        <td style="font-size:0.78rem;">${escapeHtml((r.errors || []).concat(r.warnings || []).join('; '))}</td>
+                    </tr>`).join('');
+                document.getElementById('cqaImportConfirmBtn').style.display = s.valid > 0 ? 'inline-block' : 'none';
+            } catch (e) { alert('Validation failed.'); }
+        }
+
+        async function confirmCustomQaImport() {
+            const fileInput = document.getElementById('cqaImportFile');
+            if (!fileInput.files.length) { alert('Choose a CSV file first.'); return; }
+            const form = new FormData();
+            form.append('file', fileInput.files[0]);
+            try {
+                const resp = await fetch('/admin/custom-qa/import/confirm', { method: 'POST', headers: getAuthHeaders(), body: form });
+                const data = await resp.json();
+                if (!resp.ok) { alert('Import failed.'); return; }
+                alert(`Imported ${data.imported} row(s). Skipped ${data.skipped.length} row(s).`);
+                closeCustomQaImportModal();
+                loadCustomQa();
+            } catch (e) { alert('Import failed.'); }
         }
     </script>
 </body>

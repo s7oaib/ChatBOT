@@ -3,11 +3,12 @@ import re
 import sqlite3
 import json
 from datetime import datetime, timedelta
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 from camellia.config import config
 from camellia.text_rules import strip_flower_emoji
 from camellia.candidate_safety import (
     candidate_eligibility,
+    detect_business_commitment_warnings,
     knowledge_key,
     normalize_question,
     validate_candidate_answer,
@@ -143,7 +144,10 @@ class Database:
             );
             """)
 
-            # Self-Healing Learned Knowledge base
+            # Self-Healing Learned Knowledge base. This is the single live,
+            # bot-servable answer store — Teach & Resolve, candidate approval,
+            # staff/client manual entry and CSV import (Custom Q&A) all write
+            # here; nothing forks a second knowledge table for any of them.
             cursor.execute("""
             CREATE TABLE IF NOT EXISTS learned_knowledge (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -154,6 +158,55 @@ class Database:
                 confidence REAL DEFAULT 1.0,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+
+            # Custom Q&A, additive columns on the existing table (existing
+            # rows migrate to status=ACTIVE / priority=NORMAL / usage_count=0
+            # / last_used_at=NULL via the column defaults below — nothing
+            # about topic/question_pattern/verified_answer/source/confidence
+            # on an existing row is touched).
+            self._ensure_column(cursor, "learned_knowledge", "status", "TEXT DEFAULT 'ACTIVE'")
+            self._ensure_column(cursor, "learned_knowledge", "priority", "TEXT DEFAULT 'NORMAL'")
+            self._ensure_column(cursor, "learned_knowledge", "usage_count", "INTEGER DEFAULT 0")
+            self._ensure_column(cursor, "learned_knowledge", "last_used_at", "TIMESTAMP")
+            self._ensure_column(cursor, "learned_knowledge", "created_by", "TEXT")
+            self._ensure_column(cursor, "learned_knowledge", "updated_by", "TEXT")
+            self._ensure_column(cursor, "learned_knowledge", "normalized_question", "TEXT")
+
+            # One Q&A owns zero or more alternative phrasings of the same
+            # question — a real ownership relation, not delimiter-stuffing
+            # question_pattern. A row with only question_pattern (every row
+            # written before this table existed) remains fully valid with no
+            # aliases at all.
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS learned_knowledge_aliases (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                learned_knowledge_id INTEGER NOT NULL,
+                alias_text TEXT NOT NULL,
+                normalized_alias TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                created_by TEXT
+            );
+            """)
+
+            # Every edit (and lifecycle change) snapshots the prior state here
+            # before applying the new one, so History can show what a Q&A
+            # used to say and Restore can bring it back under the same id.
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS learned_knowledge_versions (
+                version_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                learned_knowledge_id INTEGER NOT NULL,
+                version_number INTEGER NOT NULL,
+                topic TEXT,
+                primary_question TEXT,
+                answer TEXT,
+                priority TEXT,
+                status TEXT,
+                aliases_snapshot TEXT,
+                changed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                changed_by TEXT,
+                change_reason TEXT
             );
             """)
 
@@ -1102,6 +1155,10 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_router_shadow_timestamp ON router_shadow(timestamp);",
             "CREATE INDEX IF NOT EXISTS idx_triage_shadow_timestamp ON triage_shadow(timestamp);",
             "CREATE INDEX IF NOT EXISTS idx_triage_shadow_category ON triage_shadow(category);",
+            "CREATE INDEX IF NOT EXISTS idx_lk_aliases_lkid ON learned_knowledge_aliases(learned_knowledge_id);",
+            "CREATE INDEX IF NOT EXISTS idx_lk_aliases_normalized ON learned_knowledge_aliases(normalized_alias);",
+            "CREATE INDEX IF NOT EXISTS idx_lk_versions_lkid ON learned_knowledge_versions(learned_knowledge_id, version_number DESC);",
+            "CREATE INDEX IF NOT EXISTS idx_learned_knowledge_status ON learned_knowledge(status);",
             # get_escalations() filters on status, ordered by id DESC.
             "CREATE INDEX IF NOT EXISTS idx_escalations_status_id ON escalations(status, id DESC);",
             "CREATE INDEX IF NOT EXISTS idx_escalations_user ON escalations(user_id);",
@@ -1689,86 +1746,492 @@ class Database:
             conn.commit()
             return cursor.rowcount > 0
 
+    _LEARNED_STOP_WORDS = {"is", "are", "do", "you", "the", "a", "an", "and", "in", "of", "to", "for", "your", "what", "how", "can", "have"}
+
     def add_learned_knowledge(
         self,
         topic: str,
         question_pattern: str,
         verified_answer: str,
         source: str = "staff_resolution",
-        confidence: float = 1.0
+        confidence: float = 1.0,
+        priority: str = "NORMAL",
+        status: str = "ACTIVE",
+        created_by: Optional[str] = None,
+        aliases: Optional[List[str]] = None,
     ) -> Optional[int]:
-        """Adds or updates a verified knowledge item in the self-healing knowledge base."""
+        """
+        Adds a verified knowledge item to the self-healing knowledge base.
+
+        This is the single write path shared by Teach & Resolve, candidate
+        approval, manual staff/client entry (Custom Q&A) and CSV import —
+        every one of them ends up as a plain learned_knowledge row here, not
+        in a second knowledge table. `priority`/`status`/`created_by`/
+        `aliases` are new, optional, and default to the values every
+        pre-existing row already migrated to, so every caller written before
+        Custom Q&A existed keeps working unchanged.
+        """
+        topic = (topic or "").strip()
+        question_pattern = (question_pattern or "").strip().lower()
+        verified_answer = (verified_answer or "").strip()
         with self.get_connection() as conn:
             cursor = conn.cursor()
             now = datetime.utcnow().isoformat()
             cursor.execute("""
-            INSERT INTO learned_knowledge (topic, question_pattern, verified_answer, source, confidence, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (topic.strip(), question_pattern.strip().lower(), verified_answer.strip(), source, confidence, now, now))
+            INSERT INTO learned_knowledge (
+                topic, question_pattern, verified_answer, source, confidence,
+                priority, status, created_by, updated_by, normalized_question,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                topic, question_pattern, verified_answer, source, confidence,
+                (priority or "NORMAL").upper(), (status or "ACTIVE").upper(), created_by, created_by,
+                normalize_question(question_pattern), now, now,
+            ))
+            new_id = cursor.lastrowid
+            for alias in (aliases or []):
+                alias = (alias or "").strip()
+                if not alias:
+                    continue
+                cursor.execute("""
+                INSERT INTO learned_knowledge_aliases (learned_knowledge_id, alias_text, normalized_alias, created_at, created_by)
+                VALUES (?, ?, ?, ?, ?)
+                """, (new_id, alias, normalize_question(alias), now, created_by))
             conn.commit()
-            return cursor.lastrowid
+            return new_id
 
     def get_learned_knowledge(self, limit: int = 100) -> List[Dict[str, Any]]:
-        """Retrieves active learned knowledge entries ordered by most recently updated."""
+        """Retrieves learned knowledge entries ordered by most recently created, any status."""
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM learned_knowledge ORDER BY id DESC LIMIT ?", (limit,))
             rows = cursor.fetchall()
             return [dict(row) for row in rows]
 
-    def search_learned_knowledge(self, query_text: str) -> Optional[Dict[str, Any]]:
+    def get_learned_knowledge_aliases(self, learned_knowledge_id: int) -> List[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM learned_knowledge_aliases WHERE learned_knowledge_id = ? ORDER BY id ASC",
+                (learned_knowledge_id,),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def _active_learned_knowledge_with_aliases(self, limit: int = 150) -> List[Dict[str, Any]]:
+        """Only rows eligible for live matching, each carrying its own aliases."""
+        with self.get_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM learned_knowledge WHERE status = 'ACTIVE' ORDER BY id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+            items = [dict(row) for row in rows]
+            if not items:
+                return items
+            ids = [item["id"] for item in items]
+            placeholders = ",".join("?" * len(ids))
+            alias_rows = conn.execute(
+                f"SELECT learned_knowledge_id, alias_text FROM learned_knowledge_aliases WHERE learned_knowledge_id IN ({placeholders})",
+                ids,
+            ).fetchall()
+            aliases_by_id: Dict[int, List[str]] = {}
+            for row in alias_rows:
+                aliases_by_id.setdefault(row["learned_knowledge_id"], []).append(row["alias_text"])
+            for item in items:
+                item["aliases"] = aliases_by_id.get(item["id"], [])
+            return items
+
+    @staticmethod
+    def _priority_rank(item: Dict[str, Any]) -> int:
+        return 1 if str(item.get("priority") or "NORMAL").upper() == "HIGH" else 0
+
+    def _rank_learned_knowledge(self, query_text: str) -> Tuple[Optional[Dict[str, Any]], Optional[str], float]:
         """
-        Searches learned knowledge base for relevant facts matching the query.
-        Returns the highest-scoring matching item if relevance threshold is met.
+        Shared ranking behind search_learned_knowledge and the Custom Q&A
+        Test dry-run.
+
+        A single-token primary question or alias ("sondesh", "kanchagolla")
+        is too generic to ever match on its own — a specificity floor of two
+        meaningful tokens keeps a broad Custom Q&A entry from shadowing a
+        deterministic/canonical answer for the same word. Above that floor,
+        every candidate is scored by how much of ITS OWN text is satisfied
+        by the query (a literal substring containment is a full 1.0; a
+        token-overlap match scores the covered fraction), so a specific,
+        fully-covered phrase always outranks a short generic one that merely
+        happens to appear as a substring too. Priority is only a tie-breaker
+        between candidates already equal on (score, specificity).
+        """
+        q_clean = (query_text or "").lower().strip()
+        q_tokens = set(re.findall(r'\w+', q_clean))
+        if not q_tokens:
+            return None, None, 0.0
+        filtered_q = q_tokens - self._LEARNED_STOP_WORDS
+
+        items = self._active_learned_knowledge_with_aliases(limit=150)
+        # (score, specificity, priority_rank, updated_at, item, matched_via)
+        candidates: List[Tuple[float, int, int, str, Dict[str, Any], str]] = []
+
+        for item in items:
+            topic = (item.get("topic") or "").lower()
+            pattern = (item.get("question_pattern") or "").lower()
+            aliases = item.get("aliases") or []
+
+            texts = [("Primary Question", pattern)] + [("Alias", (a or "").lower()) for a in aliases]
+            best_for_item: Optional[Tuple[float, int, str]] = None
+
+            for via, text in texts:
+                if not text:
+                    continue
+                text_tokens = set(re.findall(r'\w+', text))
+                filtered_text = text_tokens - self._LEARNED_STOP_WORDS
+                specificity = len(filtered_text)
+                if specificity < 2:
+                    continue
+
+                if text in q_clean or q_clean in text:
+                    score = 1.0
+                else:
+                    overlap = filtered_text & filtered_q
+                    if len(overlap) < 2:
+                        continue
+                    score = len(overlap) / specificity
+
+                if score < 0.4:
+                    continue
+                if best_for_item is None or (score, specificity) > (best_for_item[0], best_for_item[1]):
+                    best_for_item = (score, specificity, via)
+
+            if best_for_item is None and topic:
+                topic_tokens = set(re.findall(r'\w+', topic)) - self._LEARNED_STOP_WORDS
+                if len(topic_tokens) >= 2 and topic in q_clean:
+                    best_for_item = (1.0, len(topic_tokens), "Other")
+
+            if best_for_item:
+                score, specificity, via = best_for_item
+                candidates.append((score, specificity, self._priority_rank(item), item.get("updated_at") or "", item, via))
+
+        if not candidates:
+            return None, None, 0.0
+
+        candidates.sort(key=lambda c: (c[0], c[1], c[2], c[3]))
+        score, _specificity, _prio, _updated, winner, via = candidates[-1]
+        return winner, via, score
+
+    def search_learned_knowledge(self, query_text: str, count_usage: bool = True) -> Optional[Dict[str, Any]]:
+        """
+        Searches learned knowledge base (primary questions and aliases,
+        ACTIVE only) for the best match to the query. `count_usage=False` is
+        for anything that must never move usage_count/last_used_at — the
+        Custom Q&A Test dry-run and triage shadow mode; every real serving
+        call site (responder, rag_fallback, ai_responder) keeps the default.
         """
         if not query_text:
             return None
+        winner, _via, _score = self._rank_learned_knowledge(query_text)
+        if winner and count_usage:
+            self.record_learned_knowledge_usage(winner["id"])
+        return winner
 
-        q_clean = query_text.lower().strip()
-        q_tokens = set(re.findall(r'\w+', q_clean))
-        if not q_tokens:
-            return None
-
-        items = self.get_learned_knowledge(limit=150)
-        best_match = None
-        best_score = 0.0
-
-        for item in items:
-            topic = item.get("topic", "").lower()
-            pattern = item.get("question_pattern", "").lower()
-            
-            # Direct phrase/substring match
-            if pattern in q_clean or q_clean in pattern:
-                return item
-            if topic in q_clean:
-                return item
-
-            # Token overlap scoring
-            pattern_tokens = set(re.findall(r'\w+', pattern)) | set(re.findall(r'\w+', topic))
-            # Remove generic stop words
-            stop_words = {"is", "are", "do", "you", "the", "a", "an", "and", "in", "of", "to", "for", "your", "what", "how", "can", "have"}
-            filtered_patterns = pattern_tokens - stop_words
-            filtered_q = q_tokens - stop_words
-
-            if filtered_patterns and filtered_q:
-                overlap = filtered_patterns.intersection(filtered_q)
-                score = len(overlap) / max(len(filtered_patterns), 1)
-                if len(overlap) >= 2 or (len(overlap) == 1 and len(filtered_patterns) == 1):
-                    if score > best_score:
-                        best_score = score
-                        best_match = item
-
-        if best_match and best_score >= 0.4:
-            return best_match
-        return None
+    def record_learned_knowledge_usage(self, knowledge_id: int) -> None:
+        with self.get_connection() as conn:
+            conn.execute(
+                "UPDATE learned_knowledge SET usage_count = COALESCE(usage_count, 0) + 1, last_used_at = ? WHERE id = ?",
+                (datetime.utcnow().isoformat(), knowledge_id),
+            )
+            conn.commit()
 
     def delete_learned_knowledge(self, knowledge_id: int) -> bool:
-        """Deletes a learned knowledge entry by id."""
+        """
+        Permanently deletes one learned knowledge entry and only its own
+        aliases/version history — never conversations, escalations,
+        candidate_templates, Instagram Topics, menus, handoffs, or any other
+        learned_knowledge row.
+        """
         with self.get_connection() as conn:
             cursor = conn.cursor()
+            cursor.execute("DELETE FROM learned_knowledge_aliases WHERE learned_knowledge_id = ?", (knowledge_id,))
+            cursor.execute("DELETE FROM learned_knowledge_versions WHERE learned_knowledge_id = ?", (knowledge_id,))
             cursor.execute("DELETE FROM learned_knowledge WHERE id = ?", (knowledge_id,))
+            affected = cursor.rowcount
+            conn.commit()
+            return affected > 0
+
+    # -- Custom Q&A: full editor on top of the same learned_knowledge store --
+
+    def list_custom_qa(
+        self,
+        status: Optional[str] = None,
+        source: Optional[str] = None,
+        priority: Optional[str] = None,
+        topic: Optional[str] = None,
+        search: Optional[str] = None,
+        limit: int = 500,
+    ) -> List[Dict[str, Any]]:
+        """The Custom Q&A tab's list, with each row's alias count attached."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            clauses, params = [], []
+            if status and status.upper() != "ALL":
+                clauses.append("status = ?")
+                params.append(status.upper())
+            if source:
+                clauses.append("source = ?")
+                params.append(source)
+            if priority:
+                clauses.append("priority = ?")
+                params.append(priority.upper())
+            if topic:
+                clauses.append("topic = ?")
+                params.append(topic)
+            where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+            cursor.execute(f"SELECT * FROM learned_knowledge {where} ORDER BY id DESC LIMIT ?", (*params, limit))
+            items = [dict(row) for row in cursor.fetchall()]
+
+            if not items:
+                return items
+            ids = [item["id"] for item in items]
+            placeholders = ",".join("?" * len(ids))
+            alias_rows = cursor.execute(
+                f"SELECT learned_knowledge_id, alias_text FROM learned_knowledge_aliases WHERE learned_knowledge_id IN ({placeholders})",
+                ids,
+            ).fetchall()
+            aliases_by_id: Dict[int, List[str]] = {}
+            for row in alias_rows:
+                aliases_by_id.setdefault(row["learned_knowledge_id"], []).append(row["alias_text"])
+            for item in items:
+                item["aliases"] = aliases_by_id.get(item["id"], [])
+
+            if search:
+                needle = search.strip().lower()
+                if needle:
+                    def matches(it):
+                        haystacks = [it.get("topic"), it.get("question_pattern"), it.get("verified_answer")] + it.get("aliases", [])
+                        return any(needle in (h or "").lower() for h in haystacks)
+                    items = [it for it in items if matches(it)]
+            return items
+
+    def get_custom_qa(self, knowledge_id: int) -> Optional[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            row = conn.execute("SELECT * FROM learned_knowledge WHERE id = ?", (knowledge_id,)).fetchone()
+            if not row:
+                return None
+            item = dict(row)
+            item["aliases"] = self.get_learned_knowledge_aliases(knowledge_id)
+            return item
+
+    def _snapshot_version(self, conn, knowledge_id: int, current: Dict[str, Any], changed_by: Optional[str], reason: str) -> None:
+        row = conn.execute(
+            "SELECT COALESCE(MAX(version_number), 0) AS n FROM learned_knowledge_versions WHERE learned_knowledge_id = ?",
+            (knowledge_id,),
+        ).fetchone()
+        next_version = (row["n"] or 0) + 1
+        aliases = [a["alias_text"] for a in self.get_learned_knowledge_aliases(knowledge_id)]
+        conn.execute("""
+        INSERT INTO learned_knowledge_versions (
+            learned_knowledge_id, version_number, topic, primary_question, answer,
+            priority, status, aliases_snapshot, changed_at, changed_by, change_reason
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            knowledge_id, next_version, current.get("topic"), current.get("question_pattern"),
+            current.get("verified_answer"), current.get("priority"), current.get("status"),
+            json.dumps(aliases), datetime.utcnow().isoformat(), changed_by, reason,
+        ))
+
+    def update_custom_qa(
+        self,
+        knowledge_id: int,
+        topic: str,
+        primary_question: str,
+        answer: str,
+        aliases: List[str],
+        priority: str,
+        status: str,
+        updated_by: Optional[str],
+        change_reason: str = "edited",
+    ) -> bool:
+        """
+        Edits the SAME learned_knowledge record — never a new one. The prior
+        state (including its alias set) is snapshotted to
+        learned_knowledge_versions before anything is overwritten.
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            current = cursor.execute("SELECT * FROM learned_knowledge WHERE id = ?", (knowledge_id,)).fetchone()
+            if not current:
+                return False
+            self._snapshot_version(conn, knowledge_id, dict(current), updated_by, change_reason)
+
+            now = datetime.utcnow().isoformat()
+            cursor.execute("""
+            UPDATE learned_knowledge
+            SET topic = ?, question_pattern = ?, verified_answer = ?, priority = ?, status = ?,
+                normalized_question = ?, updated_by = ?, updated_at = ?
+            WHERE id = ?
+            """, (
+                (topic or "").strip(), (primary_question or "").strip().lower(), (answer or "").strip(),
+                (priority or "NORMAL").upper(), (status or "ACTIVE").upper(),
+                normalize_question(primary_question), updated_by, now, knowledge_id,
+            ))
+            cursor.execute("DELETE FROM learned_knowledge_aliases WHERE learned_knowledge_id = ?", (knowledge_id,))
+            for alias in (aliases or []):
+                alias = (alias or "").strip()
+                if not alias:
+                    continue
+                cursor.execute("""
+                INSERT INTO learned_knowledge_aliases (learned_knowledge_id, alias_text, normalized_alias, created_at, created_by)
+                VALUES (?, ?, ?, ?, ?)
+                """, (knowledge_id, alias, normalize_question(alias), now, updated_by))
+            conn.commit()
+            return True
+
+    def set_custom_qa_status(self, knowledge_id: int, status: str, actor: Optional[str], reason: Optional[str] = None) -> bool:
+        """Disable/enable/archive/reactivate — a lifecycle change, snapshotted like any other edit."""
+        status = (status or "").upper()
+        if status not in {"ACTIVE", "DISABLED", "ARCHIVED"}:
+            return False
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            current = cursor.execute("SELECT * FROM learned_knowledge WHERE id = ?", (knowledge_id,)).fetchone()
+            if not current:
+                return False
+            self._snapshot_version(conn, knowledge_id, dict(current), actor, reason or f"status_changed_to_{status.lower()}")
+            cursor.execute(
+                "UPDATE learned_knowledge SET status = ?, updated_by = ?, updated_at = ? WHERE id = ?",
+                (status, actor, datetime.utcnow().isoformat(), knowledge_id),
+            )
             conn.commit()
             return cursor.rowcount > 0
+
+    def get_learned_knowledge_versions(self, knowledge_id: int) -> List[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM learned_knowledge_versions WHERE learned_knowledge_id = ? ORDER BY version_number DESC",
+                (knowledge_id,),
+            ).fetchall()
+            result = []
+            for row in rows:
+                item = dict(row)
+                try:
+                    item["aliases_snapshot"] = json.loads(item.get("aliases_snapshot") or "[]")
+                except Exception:
+                    item["aliases_snapshot"] = []
+                result.append(item)
+            return result
+
+    def restore_learned_knowledge_version(self, knowledge_id: int, version_id: int, actor: Optional[str]) -> bool:
+        """
+        Restores a historical version's content onto the live row, under the
+        exact same id — the current state is preserved as a new version
+        first, so restoring is itself just another reviewable edit.
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            version = cursor.execute(
+                "SELECT * FROM learned_knowledge_versions WHERE version_id = ? AND learned_knowledge_id = ?",
+                (version_id, knowledge_id),
+            ).fetchone()
+            current = cursor.execute("SELECT * FROM learned_knowledge WHERE id = ?", (knowledge_id,)).fetchone()
+            if not version or not current:
+                return False
+            self._snapshot_version(conn, knowledge_id, dict(current), actor, f"restored_from_version_{version['version_number']}")
+
+            now = datetime.utcnow().isoformat()
+            cursor.execute("""
+            UPDATE learned_knowledge
+            SET topic = ?, question_pattern = ?, verified_answer = ?, priority = ?, status = ?,
+                normalized_question = ?, updated_by = ?, updated_at = ?
+            WHERE id = ?
+            """, (
+                version["topic"], version["primary_question"], version["answer"],
+                version["priority"], version["status"], normalize_question(version["primary_question"] or ""),
+                actor, now, knowledge_id,
+            ))
+            try:
+                restored_aliases = json.loads(version["aliases_snapshot"] or "[]")
+            except Exception:
+                restored_aliases = []
+            cursor.execute("DELETE FROM learned_knowledge_aliases WHERE learned_knowledge_id = ?", (knowledge_id,))
+            for alias in restored_aliases:
+                alias = (alias or "").strip()
+                if not alias:
+                    continue
+                cursor.execute("""
+                INSERT INTO learned_knowledge_aliases (learned_knowledge_id, alias_text, normalized_alias, created_at, created_by)
+                VALUES (?, ?, ?, ?, ?)
+                """, (knowledge_id, alias, normalize_question(alias), now, actor))
+            conn.commit()
+            return True
+
+    def add_learned_knowledge_alias(self, knowledge_id: int, alias_text: str, created_by: Optional[str] = None) -> Optional[int]:
+        alias_text = (alias_text or "").strip()
+        if not alias_text:
+            return None
+        with self.get_connection() as conn:
+            cursor = conn.execute("""
+            INSERT INTO learned_knowledge_aliases (learned_knowledge_id, alias_text, normalized_alias, created_at, created_by)
+            VALUES (?, ?, ?, ?, ?)
+            """, (knowledge_id, alias_text, normalize_question(alias_text), datetime.utcnow().isoformat(), created_by))
+            conn.commit()
+            return cursor.lastrowid
+
+    def remove_learned_knowledge_alias(self, alias_id: int) -> bool:
+        """Removes one alias only — the owning Q&A and its other aliases are untouched."""
+        with self.get_connection() as conn:
+            cursor = conn.execute("DELETE FROM learned_knowledge_aliases WHERE id = ?", (alias_id,))
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def find_learned_knowledge_duplicates(
+        self, primary_question: str, aliases: Optional[List[str]] = None, exclude_id: Optional[int] = None,
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """
+        Deterministic duplicate detection for Custom Q&A create/edit: an
+        exact match on normalized primary/alias text blocks the save, a
+        conservative token-overlap match only warns. No LLM decides two
+        pieces of business knowledge are equivalent.
+        """
+        candidates = [primary_question] + list(aliases or [])
+        normalized_candidates = {normalize_question(c) for c in candidates if (c or "").strip()}
+        if not normalized_candidates:
+            return {"exact": [], "similar": []}
+
+        with self.get_connection() as conn:
+            rows = conn.execute("SELECT * FROM learned_knowledge WHERE status != 'ARCHIVED'").fetchall()
+            items = [dict(row) for row in rows if exclude_id is None or row["id"] != exclude_id]
+            alias_rows = conn.execute("SELECT * FROM learned_knowledge_aliases").fetchall()
+            aliases_by_id: Dict[int, List[str]] = {}
+            for row in alias_rows:
+                aliases_by_id.setdefault(row["learned_knowledge_id"], []).append(row["alias_text"])
+
+        exact, similar = [], []
+        seen_ids = set()
+        for item in items:
+            item_aliases = aliases_by_id.get(item["id"], [])
+            item_normalized = {normalize_question(item.get("question_pattern") or "")} | {normalize_question(a) for a in item_aliases}
+            item_normalized.discard("")
+            if item_normalized & normalized_candidates:
+                exact.append({**item, "aliases": item_aliases})
+                seen_ids.add(item["id"])
+
+        candidate_tokens = set()
+        for c in normalized_candidates:
+            candidate_tokens |= set(c.split())
+        candidate_tokens -= self._LEARNED_STOP_WORDS
+
+        for item in items:
+            if item["id"] in seen_ids or not candidate_tokens:
+                continue
+            item_aliases = aliases_by_id.get(item["id"], [])
+            item_text_tokens = set(normalize_question(item.get("question_pattern") or "").split())
+            for a in item_aliases:
+                item_text_tokens |= set(normalize_question(a).split())
+            item_text_tokens -= self._LEARNED_STOP_WORDS
+            if not item_text_tokens:
+                continue
+            overlap = candidate_tokens & item_text_tokens
+            score = len(overlap) / max(len(candidate_tokens | item_text_tokens), 1)
+            if score >= 0.5:
+                similar.append({**item, "aliases": item_aliases})
+
+        return {"exact": exact, "similar": similar}
 
     def get_analytics(self) -> Dict[str, Any]:
         """Get summary analytics."""
