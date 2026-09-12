@@ -2784,6 +2784,7 @@ class Database:
             items = list(group); numeric_id = key.rsplit("#", 1)[-1]; knowledge = knowledge_rows.get(numeric_id, {})
             knowledge_signals.append({"knowledge_id": key, "topic": knowledge.get("topic"), "source": knowledge.get("source") or items[0].get("matched_knowledge_source"), "usage": knowledge.get("usage_count", 0), **outcome_counts(items), "knowledge_review_recommended": count(items, lambda row: row.get("status") == "REJECTED") >= 2})
         safety = {"source_routing_overrides": count(rows, lambda row: bool(row.get("source_route_present"))), "whatsapp_assisted_activity": count(rows, lambda row: str(row.get("channel")).lower() == "whatsapp"), "protected_order_flow": count(rows, lambda row: bool(row.get("protected_order_flow"))), "cam_interference": count(rows, lambda row: bool(row.get("cam_interference")))}
+        safety["order_flow_interference"] = safety["protected_order_flow"] + safety["cam_interference"]
         unsafe = count(rows, lambda row: bool(row.get("risk_flags")) and row.get("status") in {"REJECTED", "SENT_TO_HUMAN"})
         commitment_errors = count(rows, lambda row: any(flag in (row.get("risk_flags") or []) for flag in ("price", "discount", "delivery_commitment")) and row.get("status") in {"REJECTED", "SENT_TO_HUMAN", "EDITED_AND_APPROVED"})
         grounded_reviewed = len([row for row in reviewed if row.get("grounding_status") == "Grounded" and row.get("triage_category") in {"AUTO_RESOLVE", "AI_SUGGESTED"}])
