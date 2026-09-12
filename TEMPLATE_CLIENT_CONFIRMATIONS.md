@@ -1,17 +1,12 @@
-# Client Confirmation Required
+# Client Confirmation Status
 
-Please answer each item with the value requested. These are the remaining
-unresolved customer-facing claims; canonical weekly and Bento corrections are
-now applied from `data/menu.json`.
+All questions from the previous confirmation sheet were answered on
+2026-09-13. The confirmed Jolbhora prices/piece counts and approved A2,
+all-women, gifting, corporate, wedding/event, Porter-actuals and pre-order
+wording are now canonical and versioned in the Response Library.
 
-1. Current Jolbhora Aamar Mishti prices: 250g: ___ / 500g: ___ / 1kg: ___
-2. Current Jolbhora Signature prices: 250g: ___ / 500g: ___ / 1kg: ___
-3. Jolbhora piece counts: 250g: ___ / 500g: ___ / 1kg: ___
-4. Is the `desi A2 cow milk` statement approved for customer-facing use? YES / NO
-5. Is the `all-women team` statement approved? YES / NO
-6. Is gifting currently offered? YES / NO
-7. Are corporate/event orders currently offered? YES / NO
+No client confirmations remain outstanding for this audit slice.
 
-Until confirmed, availability, sourcing, handcrafted/mechanised, team,
-gifting/event and other operational claims remain human-confirmation items and
-must not be guessed by the bot.
+Claims not covered by that confirmation (for example current availability,
+specific sourcing details, and exact preparation/dispatch times) remain subject
+to the existing human-confirmation rules and have not been expanded here.

@@ -79,7 +79,7 @@ from camellia.knowledge import SOURCE_MAP
 from camellia.candidate_safety import candidate_eligibility, detect_business_commitment_warnings, validate_candidate_answer
 from camellia.assisted_resolution import create_suggestion
 from camellia.auto_resolve import simulate_auto_resolve
-from camellia.content_integrity import apply_safe_content_remediations
+from camellia.content_integrity import apply_confirmed_menu_facts, apply_safe_content_remediations
 
 log = get_logger("camellia.app")
 
@@ -135,6 +135,8 @@ async def lifespan(app: FastAPI):
     db_path = str(getattr(config, "DB_PATH", "")).replace("\\", "/")
     if db_path.startswith("/app/var/") or os.getenv("CONTENT_INTEGRITY_REMEDIATION") == "true":
         try:
+            if apply_confirmed_menu_facts(config.MENU_JSON_PATH, log):
+                responder.reload_data()
             apply_safe_content_remediations(
                 db, responder.menu_data, responder.qa_data.get("templates", []), log
             )

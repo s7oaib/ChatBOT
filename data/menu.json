@@ -360,33 +360,25 @@
     "bengali_bento": {
       "type_name": "Bengali Bento Meals",
       "pricing_note": "Includes GST, packaging, and portal charges; Porter delivery on actuals.",
-      "status": "pending_client_price_confirmation",
       "tiers": [
         {
           "tier_name": "Vegetarian Bento",
-          "price_inr": 350,
-          "includes": [
-            "6 Luchi or Steamed Rice",
-            "Chholar Daal / Niramish Curry of the day (Aloor Dom / Dhokar Dalna / Chhanar Kofta)",
-            "1 Artisanal Sondesh"
-          ]
-        },
-        {
-          "tier_name": "Chicken Bento",
           "price_inr": 400,
           "includes": [
-            "6 Luchi or Steamed Rice",
-            "Contai Dhaba Chicken Curry (2 pcs)",
-            "1 Artisanal Sondesh"
+            "6 Luchi",
+            "Chholar Daal",
+            "Tomato Aamsottwo Chatni",
+            "1 Classic Aamar Sondesh"
           ]
         },
         {
-          "tier_name": "Mangsho Bento",
-          "price_inr": 600,
+          "tier_name": "Non-Vegetarian Bento",
+          "price_inr": 700,
           "includes": [
-            "6 Luchi or Steamed Rice",
-            "Robibarer Mangsho / Kosha Mangsho (2 pcs tender mutton)",
-            "1 Artisanal Sondesh"
+            "6 Luchi",
+            "Mangsho (Mutton Kosha)",
+            "Tomato Aamsottwo Chatni",
+            "1 Classic Aamar Sondesh"
           ]
         }
       ]
@@ -431,6 +423,24 @@
       "Order minimums, lead time for orders, and cutoff times not shown on menu images",
       "Payment methods accepted",
       "Whether weekly menu items are also available for pack/courier delivery like the sondesh collections"
-    ]
+    ],
+    "client_confirmed_facts": {
+      "confirmed_at": "2026-09-13",
+      "jolbhora_prices_inr": {
+        "aamar_mishti": {"250g": 750, "500g": 1400, "1kg": 2500},
+        "signature": {"250g": 900, "500g": 1600, "1kg": 2900}
+      },
+      "jolbhora_pieces": {"250g": 6, "500g": 12, "1kg": 24},
+      "approved_customer_claims": [
+        "Signature Collection may be described as using desi A2 cow milk",
+        "An all-women team makes the Sondesh",
+        "Gifting is offered",
+        "Corporate orders are accepted",
+        "Wedding and event orders are accepted",
+        "Porter delivery charges are on actuals",
+        "Pre-ordering wording is approved where applicable"
+      ],
+      "medical_claims": "Do not make medical, diabetic, glycemic, or sugar-safety claims."
+    }
   }
 }

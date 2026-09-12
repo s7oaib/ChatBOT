@@ -7,6 +7,8 @@ operator's existing edit is never overwritten silently.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping, Optional
 
 
@@ -57,7 +59,16 @@ def _weekly_text(title: str, emoji: str, entries: Iterable[Mapping[str, Any]], c
     return "\n".join(lines)
 
 
-def canonical_override_responses(menu_data: Mapping[str, Any]) -> Dict[str, str]:
+CONFIRMED_COPY_TEMPLATES = (
+    "jolbhora", "jolbhora_talgash_details", "sondesh_price_detailed",
+    "aamar_mishti_collection", "signature_collection",
+    "pack_size_250g", "pack_size_500g", "pack_size_1kg",
+)
+
+
+def canonical_override_responses(
+    menu_data: Mapping[str, Any], templates: Optional[Iterable[Mapping[str, Any]]] = None
+) -> Dict[str, str]:
     """Build the four safe corrections from the current canonical menu file."""
     week = _week(menu_data)
     vegetarian = _weekly_text(
@@ -80,7 +91,7 @@ def canonical_override_responses(menu_data: Mapping[str, Any]) -> Dict[str, str]
         "\nWhich Bento meal would you like to order?",
     ])
     bento_text = "\n".join(bento_lines)
-    return {
+    result = {
         "weekly_menu_veg": vegetarian,
         "weekly_menu_nonveg": nonvegetarian,
         "combo_bento": bento_text,
@@ -92,6 +103,15 @@ def canonical_override_responses(menu_data: Mapping[str, Any]) -> Dict[str, str]
             "can check the ingredients with you."
         ),
     }
+    # These templates already contain the client-confirmed Jolbhora matrix.
+    # Materialising them as managed overrides makes the Response Library and
+    # its version history the same authoritative copy used by production.
+    if templates is not None:
+        for template in templates:
+            template_id = str(template.get("id") or "")
+            if template_id in CONFIRMED_COPY_TEMPLATES:
+                result[template_id] = template.get("response") or ((template.get("responses") or [""])[0])
+    return result
 
 
 def apply_safe_content_remediations(
@@ -107,7 +127,7 @@ def apply_safe_content_remediations(
     """
     defaults = {str(t.get("id")): (t.get("response") or ((t.get("responses") or [""])[0]))
                 for t in templates if t.get("id")}
-    desired = canonical_override_responses(menu_data)
+    desired = canonical_override_responses(menu_data, templates)
     actions: Dict[str, str] = {}
     unsafe_health_terms = (
         "glycemic", "diabetic-friendly", "sugar-safe", "healthier for diabetes",
@@ -146,3 +166,74 @@ def apply_safe_content_remediations(
             if action in {"created", "updated", "skipped"}:
                 logger.info("Content-integrity remediation %s: %s", template_id, action)
     return actions
+
+
+def apply_confirmed_menu_facts(menu_path: str, logger: Optional[Any] = None) -> bool:
+    """Merge only the newly confirmed facts into the durable menu file.
+
+    Weekly customer edits are left untouched.  The merge is intentionally
+    narrow: Jolbhora pricing/pieces, Bento tiers, and the confirmation record.
+    """
+    path = Path(menu_path)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    changed = False
+    collections = data.get("collections") or {}
+    targets = {
+        "aamar_mishti": {"250g": (6, 750), "500g": (12, 1400), "1kg": (24, 2500)},
+        "signature_collection": {"250g": (6, 900), "500g": (12, 1600), "1kg": (24, 2900)},
+    }
+    for collection_id, packs in targets.items():
+        for product in (collections.get(collection_id, {}).get("products") or []):
+            if str(product.get("item") or "").strip().lower() != "jolbhora":
+                continue
+            prices = product.setdefault("prices", [])
+            by_pack = {str(row.get("pack_size")): row for row in prices}
+            for pack, (pieces, price) in packs.items():
+                row = by_pack.get(pack)
+                if row is None:
+                    prices.append({"pack_size": pack, "pieces": pieces, "price_inr": price})
+                    changed = True
+                else:
+                    if row.get("pieces") != pieces or row.get("price_inr") != price:
+                        row.update({"pieces": pieces, "price_inr": price})
+                        changed = True
+    confirmed_bentos = [
+        {"name": "Veg Bento", "price_inr": 400, "includes": ["6 Luchi", "Chholar Daal", "Tomato Aamsottwo Chatni", "1 Classic Aamar Sondesh"]},
+        {"name": "Non-Veg Bento", "price_inr": 700, "includes": ["6 Luchi", "Mangsho (Mutton Kosha)", "Tomato Aamsottwo Chatni", "1 Classic Aamar Sondesh"]},
+    ]
+    weeks = data.get("weekly_menus") or []
+    if weeks and weeks[-1].get("bengali_bento") != confirmed_bentos:
+        weeks[-1]["bengali_bento"] = confirmed_bentos
+        changed = True
+    order_types = data.setdefault("order_types", {})
+    bento_type = order_types.setdefault("bengali_bento", {})
+    if bento_type.get("tiers") != [
+        {"tier_name": "Vegetarian Bento", "price_inr": 400, "includes": confirmed_bentos[0]["includes"]},
+        {"tier_name": "Non-Vegetarian Bento", "price_inr": 700, "includes": confirmed_bentos[1]["includes"]},
+    ]:
+        bento_type["tiers"] = [
+            {"tier_name": "Vegetarian Bento", "price_inr": 400, "includes": confirmed_bentos[0]["includes"]},
+            {"tier_name": "Non-Vegetarian Bento", "price_inr": 700, "includes": confirmed_bentos[1]["includes"]},
+        ]
+        bento_type.pop("status", None)
+        changed = True
+    meta = data.setdefault("meta", {})
+    facts = meta.setdefault("client_confirmed_facts", {})
+    if facts.get("confirmed_at") != "2026-09-13":
+        facts.update({"confirmed_at": "2026-09-13", "jolbhora_prices_inr": {
+            "aamar_mishti": {"250g": 750, "500g": 1400, "1kg": 2500},
+            "signature": {"250g": 900, "500g": 1600, "1kg": 2900},
+        }, "jolbhora_pieces": {"250g": 6, "500g": 12, "1kg": 24}})
+        changed = True
+    if changed:
+        try:
+            path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+            if logger:
+                logger.info("Applied client-confirmed Jolbhora/Bento facts to %s", path)
+            return True
+        except Exception:
+            return False
+    return False

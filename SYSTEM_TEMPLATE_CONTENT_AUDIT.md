@@ -34,9 +34,14 @@ client-authored override.
 | `bento_details` | ₹350/₹400/₹600 legacy details and fee claims | Same current Veg/Non-Veg Bento copy as `combo_bento` | `data/menu.json` → `weekly_menus[-1].bengali_bento` | Align contents/prices; omit unsupported fee claims | Created by `content_integrity_audit_2026-09-13` at deployment |
 | `sugar_free_options` | Lower-glycemic and diabetic guidance | Neutral ingredient/sugar-free limitation and ask-before-ordering wording | Audit finding: no approved medical evidence | Remove unsupported medical claim | Seed version 20 + managed override |
 
-Jolbhora pricing/piece-count and sourcing, team, availability, gifting and
-event/corporate claims remain `CLIENT CONFIRMATION REQUIRED`; no guessed copy
-was published.
+Jolbhora pricing/piece-count, A2 wording, all-women team, gifting,
+corporate/event acceptance, Porter actuals and pre-order wording are now
+client-confirmed. Unrelated availability, sourcing and exact preparation-time
+claims remain governed by the existing human-confirmation rules.
+
+The follow-up client confirmation added the Jolbhora matrix to canonical
+`data/menu.json` and materialised the affected Jolbhora/price-list templates as
+managed overrides with provenance `client confirmation 2026-09-13`.
 
 Risk summary: 7 critical, 24 high, 10 medium, and 2 low claim rows. See the claim matrix below for the actionable items.
 
@@ -132,7 +137,7 @@ Repeated occurrences in price tables are compared against the single canonical m
 | `delivery_area`, `signature_collection`, `sondesh_price_detailed` | Porter/courier charged on actuals | SUPPORTED | `menu.json` delivery.courier_note | HIGH | Keep; no fixed delivery promise |
 | `delivery_time`, `savoury_best_time_to_book` | Pre-order recommended/required to avoid sell-outs | SUPPORTED | client-confirmed source; menu quantities are finite | MEDIUM | Keep as recommendation, not a guarantee |
 | Sondesh price templates and pack-size templates | Sondesh prices and 9/18/36 piece counts | SUPPORTED | `menu.json` both collections | CRITICAL | Keep; use matrix below as regression oracle |
-| `jolbhora`, `jolbhora_talgash_details`, pack-size templates | Jolbhora prices and 6/12/24 counts | NEEDS CLIENT CONFIRMATION | Audit confirmation scope deliberately excludes repeated template tables; client approval still required | HIGH | Confirm current Aamar/Signature price table; do not infer from repetition |
+| `jolbhora`, `jolbhora_talgash_details`, pack-size templates | Jolbhora prices and 6/12/24 counts | SUPPORTED | Client confirmation 2026-09-13 and `menu.json` `client_confirmed_facts` | HIGH | Keep the shared matrix; update all presentations together |
 | `weekly_menu_veg` | Current vegetarian dish names/prices | SUPPORTED after remediation | Current `menu.json` weekly vegetarian block; applied as a managed override | CRITICAL | Keep override; re-run after each menu rotation |
 | `weekly_menu_nonveg` | Current non-vegetarian dish names/prices | SUPPORTED after remediation | Current `menu.json` weekly non-vegetarian block; applied as a managed override | CRITICAL | Keep override; re-run after each menu rotation |
 | `combo_bento`, `bento_details` | Bento contents/prices | SUPPORTED after remediation | Current `menu.json` Bengali Bento block; applied as a managed override | CRITICAL | Keep override; re-run after each menu rotation |
@@ -144,7 +149,7 @@ Repeated occurrences in price tables are compared against the single canonical m
 | `product_recommendation`, `nolen_gur_aamar` | Nolen Gur is seasonal/limited or “last batch” | NEEDS CLIENT CONFIRMATION | No season/stock field in `menu.json`; availability is human-only in `knowledge.py` | HIGH | Ask client for current availability; otherwise say availability must be checked |
 | `sondesh_classic_rose` | Fresh chhana, cardamom, organic rose petals | NEEDS CLIENT CONFIRMATION | No ingredient field in `menu.json` | HIGH | Confirm exact ingredients; remove “organic” if not certified |
 | `mahua_signature_special` | Forest mahua flowers | NEEDS CLIENT CONFIRMATION | Menu names Mahua but does not specify sourcing/flowers | MEDIUM | Confirm or remove the sourcing detail |
-| `bot_identity`, `GUARD_collection_differentiation`, `artisanal_differentiation` | Pure dairy milk / desi A2 cow milk | NEEDS CLIENT CONFIRMATION | Current menu does not carry milk-type fields; client card provenance is not an independently maintained fact table | HIGH | Confirm collection-specific milk statement |
+| `bot_identity`, `GUARD_collection_differentiation`, `artisanal_differentiation` | Pure dairy milk / desi A2 cow milk | SUPPORTED for Signature A2 wording | Client confirmation 2026-09-13; canonical `menu.json` approved facts | HIGH | Keep Signature A2 wording; do not broaden other sourcing claims |
 | `artisanal_differentiation`, `freshness_ingredients`, `GUARD_collection_differentiation` | Handcrafted end-to-end / partially mechanised | NEEDS CLIENT CONFIRMATION | Not present in `menu.json` | MEDIUM | Confirm approved marketing wording |
 | `artisanal_differentiation`, `freshness_ingredients`, `nolen_gur_aamar` | Small-batch farmers, trusted dairies, no general retail sourcing | NEEDS CLIENT CONFIRMATION | Not present in `menu.json`; appears only in provenance-labeled copy | MEDIUM | Confirm sourcing claim or remove detail |
 | `artisanal_differentiation`, `freshness_ingredients` | Made fresh daily/from scratch; no preservatives | NEEDS CLIENT CONFIRMATION | No production/ingredient fields in canonical menu | MEDIUM | Confirm operational/ingredient claim |
@@ -162,14 +167,16 @@ Repeated occurrences in price tables are compared against the single canonical m
 | `delivery_out_of_area` | No shipping outside Delhi NCR / cold-chain explanation | NEEDS CLIENT CONFIRMATION | `menu.json` states Delhi NCR delivery but no out-of-area policy | HIGH | Confirm current outside-NCR policy |
 | `previous_menus` | Two weeks of historical menus are available | NEEDS CLIENT CONFIRMATION | `menu.json` checkout has only the current week; persistence/history endpoint not verified here | MEDIUM | Confirm history retention and remove promise if absent |
 | `kolkata_expansion_info` | Gurgaon operation/team/recipes continue unchanged while founders move to Kolkata | NEEDS CLIENT CONFIRMATION | Client-confirmed provenance but no current operations source | MEDIUM | Re-confirm before retaining long-term operational claim |
-| `GUARD_collection_differentiation`, `signature_collection` | Gifting/celebration suitability | NEEDS CLIENT CONFIRMATION | Marketing intent, no event/gifting capability record; event/bulk is human-only | MEDIUM | Keep as preference language only; never promise event capacity |
+| `GUARD_collection_differentiation`, `signature_collection` | Gifting/celebration suitability | SUPPORTED | Client confirmation 2026-09-13 | MEDIUM | Keep preference wording; event/bulk requests still use human handoff |
 | `contact_social`, `order_next_steps`, `order_status_tracking`, `how_to_order` | Human WhatsApp handoff/order fields | SUPPORTED | Channel policy and order workflow; no automated WhatsApp bot | LOW | Keep; preserve HUMAN ONLY policy |
 | `savoury_crosssell_sondesh`, `sondesh_crosssell_savoury` | Fresh meals/Sondesh delivered across Delhi NCR | NEEDS CLIENT CONFIRMATION | Delivery area is supported, freshness/limited-quantity wording is not fully structured | MEDIUM | Confirm or soften freshness/quantity claims |
 | `GUARD_customization_flavour_mixing` | No factual answer; escalates | SUPPORTED | Human-only guard is the approved safe behavior | LOW | Keep escalation |
 
 ## Price-consistency matrix (canonical sources only)
 
-The standing Sondesh/Kanchagolla/Mahua prices below come from `data/menu.json`. Jolbhora prices are intentionally marked **not present in the canonical menu file** even though templates repeat a table; this is a client-confirmation gap, not a derived fact.
+The standing Sondesh/Kanchagolla/Mahua and Jolbhora prices below come from
+`data/menu.json`, with the Jolbhora rows additionally confirmed by the client
+on 2026-09-13.
 
 | Product / flavour | Collection | 250g | 500g | 1kg | Pieces | Source |
 |---|---|---:|---:|---:|---|---|
@@ -182,10 +189,11 @@ The standing Sondesh/Kanchagolla/Mahua prices below come from `data/menu.json`. 
 | Sondesh Mahua | Signature | ₹900 | ₹1600 | ₹2900 | 9 / 18 / 36 | menu.json |
 | Kanchagolla | Aamar Mishti | same as Sondesh | same as Sondesh | same as Sondesh | depends on Sondesh variety | menu.json pricing_note |
 | Kanchagolla | Signature | same as Sondesh | same as Sondesh | same as Sondesh | depends on Sondesh variety | menu.json pricing_note |
-| Jolbhora | Aamar Mishti | **not present** | **not present** | **not present** | **not present** | menu.json product has description only |
-| Jolbhora | Signature | **not present** | **not present** | **not present** | **not present** | menu.json product has description only |
+| Jolbhora | Aamar Mishti | ₹750 | ₹1400 | ₹2500 | 6 / 12 / 24 | menu.json + client confirmation 2026-09-13 |
+| Jolbhora | Signature | ₹900 | ₹1600 | ₹2900 | 6 / 12 / 24 | menu.json + client confirmation 2026-09-13 |
 
-Template price mismatches against this matrix: none for the Sondesh/Mahua rows; Jolbhora rows cannot be marked supported until the canonical menu/catalogue is populated. Weekly menu and bento prices are separately conflicting as described above.
+Template price mismatches against this matrix: none. Weekly menu and Bento
+prices are separately reconciled above.
 
 ## Duplicate/conflicting response groups
 
@@ -193,7 +201,7 @@ Template price mismatches against this matrix: none for the Sondesh/Mahua rows; 
 2. `weekly_menu_nonveg` vs current `menu.json` non-vegetarian week — conflicting dishes and prices.
 3. `combo_bento` vs `bento_details` vs current `menu.json` bento — conflicting contents/prices.
 4. `delivery_time` and `sondesh_dispatch_time` — duplicate Sondesh/Kanchagolla/Jolbhora timing claims; currently aligned, but both require the same operational confirmation.
-5. `jolbhora` and `jolbhora_talgash_details` — duplicate Jolbhora price table; canonical menu lacks the table.
+5. `jolbhora` and `jolbhora_talgash_details` — duplicate Jolbhora price table; both now use the confirmed canonical matrix.
 6. `sondesh_price_detailed`, `sondesh_*`, `aamar_mishti_collection`, `signature_collection`, and `pack_size_*` — intentional duplicate presentation of the same standing price matrix; the rows agree for Sondesh/Mahua.
 7. `bot_identity`, `bot_capabilities`, `artisanal_differentiation`, `freshness_ingredients`, and collection guards — overlapping milk, sourcing, handcrafted, and team claims with no single maintained fact record.
 8. Greeting rotation — ten approved variants are intentional; the editable `response_template_overrides` value is authoritative when present and must not be bypassed by a legacy response bank.
@@ -206,7 +214,9 @@ runtime logic, route data, menu data, or uncertain client-confirmation claim was
 changed.
 
 Conflict re-check: weekly vegetarian **RESOLVED**; weekly non-vegetarian
-**RESOLVED**; Bento **RESOLVED**; Jolbhora **CLIENT CONFIRMATION REQUIRED**.
+**RESOLVED**; Bento **RESOLVED**; Jolbhora **RESOLVED**. Remaining open rows
+are limited to facts not covered by the client confirmation (availability,
+specific sourcing/ingredient details and exact preparation-time claims).
 
 ## Response Library and runtime consistency
 
