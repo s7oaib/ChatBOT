@@ -3107,6 +3107,12 @@ def _system_template_public(template: Dict[str, Any], override: Optional[Dict[st
     template_id = str(template.get("id") or "")
     responses = template.get("responses") or []
     answer = (override or {}).get("response") or template.get("response") or (responses[0] if responses else "")
+    # Keep every shipped greeting variant searchable while presenting one
+    # canonical answer.  This lets an operator find legacy copy by its exact
+    # phrase without creating a duplicate Response Library row.
+    response_variants = list(responses) if responses else [answer]
+    if override and override.get("response"):
+        response_variants.insert(0, str(override["response"]))
     trigger_list = [str(t).strip() for t in (template.get("triggers") or []) if str(t).strip()]
     title = str(template.get("name") or template_id.replace("_", " ").title())
     category = str(template.get("category") or "System")
@@ -3121,6 +3127,7 @@ def _system_template_public(template: Dict[str, Any], override: Optional[Dict[st
         "aliases": trigger_list[1:],
         "triggers": trigger_list,
         "approved_answer": answer,
+        "response_variants": response_variants,
         "source": "system_template",
         "source_label": "System Template",
         "status": status,
@@ -3152,7 +3159,7 @@ def _response_library_search_score(query: Optional[str], item: Dict[str, Any]) -
         "alias": list(item.get("aliases") or []),
         "title": [item.get("title")],
         "id_category": [item.get("template_id"), item.get("category"), item.get("topic")],
-        "answer": [item.get("approved_answer")],
+        "answer": [item.get("approved_answer"), *(item.get("response_variants") or [])],
     }
     def normalized(value: Any) -> str:
         return " ".join(str(value or "").casefold().split())
@@ -3168,6 +3175,16 @@ def _response_library_search_score(query: Optional[str], item: Dict[str, Any]) -
         return 90
     if any(normalized(value) == needle for value in fields["id_category"]):
         return 85
+    # An exact customer-facing phrase is a strong diagnostic match (including
+    # a legacy variant retained on the same protected system-template card),
+    # but remains below exact trigger/title matches.
+    if any(normalized(value) == needle for value in fields["answer"]):
+        return 84
+    if len(query_tokens) > 1 and any(
+        re.search(r"(?<!\w)" + re.escape(needle) + r"(?!\w)", normalized(value))
+        for value in fields["answer"]
+    ):
+        return 82
     if set(query_tokens) & token_set(fields["primary"]):
         return 80
     if set(query_tokens) & token_set(fields["alias"]):
@@ -3292,8 +3309,8 @@ def preview_response_library_system_template(
     template = next((t for t in (responder.qa_data or {}).get("templates", []) if t.get("id") == template_id), None)
     if not template:
         raise HTTPException(status_code=404, detail="System template not found")
-    item = _system_template_public(template, db.get_response_template_override(template_id))
-    return {"preview_text": item["approved_answer"], "template_id": template_id, "note": "Preview only — nothing has been sent."}
+    preview_text, _images = responder.render_approved_template(template_id, channel="instagram")
+    return {"preview_text": preview_text, "template_id": template_id, "note": "Preview only — nothing has been sent."}
 
 
 @app.post("/admin/response-library/system/{template_id}/restore/{version_id:int}")
@@ -3349,10 +3366,13 @@ async def test_response_library_match(
     if not candidates:
         return {"matched": False, "template_id": None, "source": None, "score": 0.0, "response": "", "source_context_used": False}
     _length, item, matched_trigger = max(candidates, key=lambda candidate: candidate[0])
+    preview_response, _images = responder.render_approved_template(
+        item["template_id"], channel="instagram"
+    )
     return {
         "matched": True, "template_id": item["template_id"], "source": item["source_label"],
         "score": 1.0, "matched_via": matched_trigger,
-        "response": item["approved_answer"], "source_context_used": False,
+        "response": preview_response, "source_context_used": False,
     }
 
 

@@ -2626,16 +2626,26 @@ class DeterministicResponder:
                 facts["last_route_source"] = "legacy_trigger"
             if tmpl_id == "greeting":
                 responses = best_template.get("responses", [])
-                last_index = facts.get("last_greeting_index")
-                available_indices = [
-                    index for index in range(len(responses)) if index != last_index
-                ]
-                if available_indices:
-                    selected_index = random.choice(available_indices)
-                    raw_response = responses[selected_index]
-                    facts["last_greeting_index"] = selected_index
+                # Instagram's Response Library preview and live customer
+                # reply must resolve to the same approved copy.  Keep the
+                # long-standing WhatsApp/unit-test greeting rotation, but use
+                # the canonical first response for Instagram.  An active
+                # Response Library override already materializes as a
+                # one-item response bank and therefore wins on both channels.
+                if channel == "instagram" and responses:
+                    raw_response = responses[0]
+                    facts["last_greeting_index"] = 0
                 else:
-                    raw_response = None
+                    last_index = facts.get("last_greeting_index")
+                    available_indices = [
+                        index for index in range(len(responses)) if index != last_index
+                    ]
+                    if available_indices:
+                        selected_index = random.choice(available_indices)
+                        raw_response = responses[selected_index]
+                        facts["last_greeting_index"] = selected_index
+                    else:
+                        raw_response = None
             else:
                 raw_response = best_template.get("response")
 
@@ -3204,6 +3214,25 @@ class DeterministicResponder:
                 "caption_first": True,
             },
         ]
+
+    def render_approved_template(self, template_id: str, channel: str = "instagram") -> Tuple[str, Optional[Any]]:
+        """Render the same approved copy used by a live deterministic reply.
+
+        This is intentionally side-effect free for admin Preview/Dry-run.  It
+        resolves the managed Response Library override on every call (so an
+        edit is visible without a process restart) and selects the canonical
+        Instagram greeting variant used by ``match_and_respond``.
+        """
+        template = self._template_by_id(template_id)
+        if not template:
+            return "", None
+        responses = template.get("responses") or []
+        response = (responses[0] if responses else template.get("response")) or ""
+        rendered, images = self._format_dynamic_response(
+            template_id, response, user_id="__response_library_preview__",
+            channel=channel, user_message=(template.get("triggers") or [""])[0],
+        )
+        return _strip_flower_emoji(rendered), images
 
     def _format_dynamic_response(
         self, template_id: str, default_response: str, user_id: str = None, channel: str = None, user_message: str = ""

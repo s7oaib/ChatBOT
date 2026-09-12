@@ -170,6 +170,32 @@ class TestResponseLibrary:
         assert resp.json()["response"] == "Short approved greeting."
         assert isolated_db.get_analytics().get("total_conversations", 0) == before
 
+    def test_greeting_copy_is_identical_in_search_preview_dry_run_and_instagram(self, isolated_db, monkeypatch):
+        """The editable Greeting key is the one source used by every surface."""
+        monkeypatch.setattr(config, "BYPASS_AD_GATE", True)
+        copy = "Hello hello from Camellia Artisanal!"
+        assert client.patch(
+            "/admin/response-library/system/greeting",
+            json={"response": copy}, headers=_auth(),
+        ).status_code == 200
+
+        user_id = "response-library-instagram-consistency"
+        session_memory.clear_session(user_id, "instagram")
+        live = responder.match_and_respond("hi", user_id=user_id, channel="instagram")[0]
+        preview = client.post(
+            "/admin/response-library/system/greeting/preview", headers=_auth()
+        ).json()["preview_text"]
+        dry_run = client.post(
+            "/admin/response-library/test", json={"message": "hi"}, headers=_auth()
+        ).json()["response"]
+        search = client.get(
+            "/admin/response-library?search=Hello%20hello%20from%20Camellia%20Artisanal",
+            headers=_auth(),
+        ).json()["items"]
+
+        assert live == preview == dry_run == copy
+        assert search and search[0]["template_id"] == "greeting"
+
     def test_custom_trigger_conflict_includes_system_template(self, isolated_db):
         resp = client.post("/admin/custom-qa", json={
             "topic": "Conversation", "primary_question": "hi", "approved_answer": "Another greeting.",
