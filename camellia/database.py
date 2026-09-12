@@ -228,6 +228,40 @@ class Database:
             );
             """)
 
+            # One durable row per Instagram Meta send attempt.  The recipient
+            # value is a one-way hash (never the raw customer id); this table
+            # exists solely to connect an inbound conversation to Meta's exact
+            # response without storing credentials or message content.
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS instagram_outbound_audit (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                inbound_message_id INTEGER,
+                recipient_id TEXT,
+                response_type TEXT NOT NULL DEFAULT 'text',
+                send_attempted INTEGER NOT NULL DEFAULT 0,
+                http_status INTEGER,
+                success INTEGER,
+                meta_message_id TEXT,
+                meta_error_code TEXT,
+                meta_error_subcode TEXT,
+                meta_error_message TEXT,
+                meta_trace_id TEXT,
+                duration_ms REAL,
+                retry_count INTEGER NOT NULL DEFAULT 0,
+                exception_class TEXT,
+                exception_message TEXT
+            );
+            """)
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_ig_outbound_audit_created "
+                "ON instagram_outbound_audit(created_at DESC)"
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_ig_outbound_audit_inbound "
+                "ON instagram_outbound_audit(inbound_message_id)"
+            )
+
             # Human-reviewed assisted-resolution drafts. Separate from the
             # legacy candidate queue so every review action is auditable.
             cursor.execute("""
@@ -1643,6 +1677,134 @@ class Database:
                 cursor.execute("UPDATE analytics SET value = value + 1 WHERE key = 'escalations_count';")
                 
             conn.commit()
+            return int(cursor.lastrowid)
+
+    # --- Instagram outbound delivery audit -------------------------------
+
+    def create_instagram_outbound_audit(
+        self,
+        *,
+        inbound_message_id: Optional[int],
+        recipient_id: str,
+        response_type: str,
+        retry_count: int = 0,
+    ) -> int:
+        """Create the pending row immediately before a Meta API call."""
+        with self.get_connection() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO instagram_outbound_audit (
+                    inbound_message_id, recipient_id, response_type,
+                    send_attempted, retry_count
+                ) VALUES (?, ?, ?, 1, ?)
+                """,
+                (
+                    inbound_message_id,
+                    recipient_id,
+                    response_type or "text",
+                    max(0, int(retry_count or 0)),
+                ),
+            )
+            conn.commit()
+            return int(cursor.lastrowid)
+
+    def complete_instagram_outbound_audit(
+        self,
+        audit_id: int,
+        *,
+        http_status: Optional[int] = None,
+        success: bool = False,
+        meta_message_id: Optional[str] = None,
+        meta_error_code: Optional[Any] = None,
+        meta_error_subcode: Optional[Any] = None,
+        meta_error_message: Optional[str] = None,
+        meta_trace_id: Optional[str] = None,
+        duration_ms: Optional[float] = None,
+        exception_class: Optional[str] = None,
+        exception_message: Optional[str] = None,
+    ) -> None:
+        """Fill the pending row with the exact Meta result or safe exception."""
+        with self.get_connection() as conn:
+            conn.execute(
+                """
+                UPDATE instagram_outbound_audit
+                SET http_status = ?, success = ?, meta_message_id = ?,
+                    meta_error_code = ?, meta_error_subcode = ?,
+                    meta_error_message = ?, meta_trace_id = ?, duration_ms = ?,
+                    exception_class = ?, exception_message = ?
+                WHERE id = ?
+                """,
+                (
+                    http_status,
+                    int(bool(success)),
+                    str(meta_message_id) if meta_message_id is not None else None,
+                    str(meta_error_code) if meta_error_code is not None else None,
+                    str(meta_error_subcode) if meta_error_subcode is not None else None,
+                    meta_error_message,
+                    meta_trace_id,
+                    duration_ms,
+                    exception_class,
+                    exception_message,
+                    audit_id,
+                ),
+            )
+            conn.commit()
+
+    def get_instagram_outbound_audit(
+        self,
+        *,
+        limit: int = 50,
+        success: Optional[bool] = None,
+        inbound_message_id: Optional[int] = None,
+        since: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Read recent Instagram send attempts with optional diagnostics filters."""
+        clauses = ["1=1"]
+        params: List[Any] = []
+        if success is not None:
+            clauses.append("success = ?")
+            params.append(int(bool(success)))
+        if inbound_message_id is not None:
+            clauses.append("inbound_message_id = ?")
+            params.append(int(inbound_message_id))
+        if since:
+            clauses.append("created_at >= ?")
+            params.append(str(since))
+        params.append(max(1, min(int(limit or 50), 200)))
+        with self.get_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM instagram_outbound_audit "
+                f"WHERE {' AND '.join(clauses)} ORDER BY id DESC LIMIT ?",
+                tuple(params),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def instagram_outbound_health(self) -> Dict[str, Any]:
+        """Summarize send activity without making traffic absence unhealthy."""
+        with self.get_connection() as conn:
+            last_attempted = conn.execute(
+                "SELECT created_at FROM instagram_outbound_audit "
+                "WHERE send_attempted = 1 ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            last_success = conn.execute(
+                "SELECT created_at FROM instagram_outbound_audit "
+                "WHERE send_attempted = 1 AND success = 1 ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            last_failure = conn.execute(
+                "SELECT created_at FROM instagram_outbound_audit "
+                "WHERE send_attempted = 1 AND success = 0 ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            failures_24h = conn.execute(
+                "SELECT COUNT(*) AS count FROM instagram_outbound_audit "
+                "WHERE send_attempted = 1 AND success = 0 "
+                "AND created_at >= datetime('now', '-24 hours')"
+            ).fetchone()["count"]
+        return {
+            "last_attempted": last_attempted["created_at"] if last_attempted else None,
+            "last_success": last_success["created_at"] if last_success else None,
+            "last_failure": last_failure["created_at"] if last_failure else None,
+            "failures_last_24h": int(failures_24h or 0),
+        }
 
     def record_escalation(self, user_id: str, channel: str, user_message: str, reason: str, context_data: Optional[Dict[str, Any]] = None) -> int:
         """Record escalation for human review."""

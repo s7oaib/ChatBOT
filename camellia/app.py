@@ -498,11 +498,20 @@ def _process_instagram_event(
         logged_response = response_text
         if needs_escalation:
             logged_response = f"{response_text}\n\n{link_message}"
-        db.log_conversation(sender_id, "instagram", message_text, logged_response, was_matched, template_id, **trace)
+        conversation_id = db.log_conversation(
+            sender_id, "instagram", message_text, logged_response, was_matched,
+            template_id, **trace,
+        )
 
-        send_instagram_reply(sender_id, response_text, image_url=image_url)
+        send_instagram_reply(
+            sender_id, response_text, image_url=image_url,
+            inbound_message_id=conversation_id, response_type="reply",
+        )
         if needs_escalation:
-            send_instagram_reply(sender_id, link_message)
+            send_instagram_reply(
+                sender_id, link_message,
+                inbound_message_id=conversation_id, response_type="handoff",
+            )
     except Exception:
         # A background task that raises disappears silently, and the customer
         # is left with no reply and nothing in the logs explaining why.
@@ -542,11 +551,14 @@ def _reply_to_unreadable_attachment(sender_id: str) -> None:
         facts["attachment_notice_sent"] = True
 
         session_memory.add_turn(sender_id, "instagram", "[attachment]", _UNREADABLE_ATTACHMENT_REPLY)
-        db.log_conversation(
+        conversation_id = db.log_conversation(
             sender_id, "instagram", "[attachment]", _UNREADABLE_ATTACHMENT_REPLY,
             True, "unreadable_attachment", message_source="attachment",
         )
-        send_instagram_reply(sender_id, _UNREADABLE_ATTACHMENT_REPLY)
+        send_instagram_reply(
+            sender_id, _UNREADABLE_ATTACHMENT_REPLY,
+            inbound_message_id=conversation_id, response_type="attachment_notice",
+        )
     except Exception:
         log.exception("Failed to answer an unreadable attachment from %s.", sender_id)
 
@@ -1023,7 +1035,45 @@ async def handle_instagram_webhook(request: Request, background_tasks: Backgroun
 
     return _dispatch_instagram_payload(payload, background_tasks)
 
-def send_instagram_reply(recipient_id: str, text: str, image_url=None) -> Dict[str, Any]:
+def _audit_recipient_id(recipient_id: str) -> str:
+    """Return a stable, non-reversible identifier for outbound audit rows."""
+    digest = hashlib.sha256(str(recipient_id).encode("utf-8")).hexdigest()[:20]
+    return f"sha256:{digest}"
+
+
+def _safe_outbound_exception(exc: Exception) -> str:
+    """Keep exception summaries useful without persisting credentials."""
+    return _safe_outbound_text(str(exc or ""))
+
+
+def _safe_outbound_text(value: str) -> str:
+    """Redact credential-shaped values from persisted diagnostic text."""
+    summary = str(value or "")
+    summary = re.sub(r"(?i)(bearer\s+)[^\s]+", r"\1[REDACTED]", summary)
+    summary = re.sub(r"(?i)(access_token|token|secret|password)=?[^\s,;]+", r"\1=[REDACTED]", summary)
+    return summary[:500]
+
+
+def _meta_error_fields(payload: Any) -> Tuple[Any, Any, Optional[str]]:
+    error = payload.get("error") if isinstance(payload, dict) else None
+    if not isinstance(error, dict):
+        return None, None, None
+    return (
+        error.get("code"),
+        error.get("error_subcode"),
+        _safe_outbound_text(str(error.get("message") or "")) or None,
+    )
+
+
+def send_instagram_reply(
+    recipient_id: str,
+    text: str,
+    image_url=None,
+    *,
+    inbound_message_id: Optional[int] = None,
+    response_type: str = "text",
+    retry_count: int = 0,
+) -> Dict[str, Any]:
     """Sends text plus zero or more image cards via Meta Graph API to Instagram user."""
     # Instagram has no caption field on attachments, so a captioned card is sent
     # as the image followed by its own text message — same card, detail, card,
@@ -1092,37 +1142,91 @@ def send_instagram_reply(recipient_id: str, text: str, image_url=None) -> Dict[s
         with httpx.Client(timeout=10.0) as client:
             last = None
 
-            def send_text(body):
+            def send_request(body, *, kind: str):
                 nonlocal last
-                last = client.post(url, headers=headers, json={"recipient": {"id": recipient_id}, "message": {"text": body}})
-                last.raise_for_status()
+                audit_id = db.create_instagram_outbound_audit(
+                    inbound_message_id=inbound_message_id,
+                    recipient_id=_audit_recipient_id(recipient_id),
+                    response_type=kind or response_type,
+                    retry_count=retry_count,
+                )
+                started = time.perf_counter()
+                completed = False
+                resp = None
+                try:
+                    resp = client.post(url, headers=headers, json=body)
+                    last = resp
+                    payload = resp.json()
+                    code, subcode, message = _meta_error_fields(payload)
+                    status_code = int(getattr(resp, "status_code", 200))
+                    ok = 200 <= status_code < 300 and not (
+                        isinstance(payload, dict) and payload.get("error")
+                    )
+                    message_id = payload.get("message_id") or payload.get("id") if isinstance(payload, dict) else None
+                    payload_error = payload.get("error") if isinstance(payload, dict) else None
+                    trace_id = (
+                        getattr(resp, "headers", {}).get("x-fb-trace-id")
+                        or (payload_error or {}).get("fbtrace_id")
+                        or (payload.get("fbtrace_id") if isinstance(payload, dict) else None)
+                    )
+                    db.complete_instagram_outbound_audit(
+                        audit_id,
+                        http_status=status_code, success=bool(ok),
+                        meta_message_id=message_id, meta_error_code=code,
+                        meta_error_subcode=subcode, meta_error_message=message,
+                        meta_trace_id=trace_id,
+                        duration_ms=round((time.perf_counter() - started) * 1000, 2),
+                    )
+                    completed = True
+                    if not ok:
+                        log.error(
+                            "Instagram Meta API send failed: HTTP %s code=%s subcode=%s "
+                            "trace=%s message=%s",
+                            status_code, code, subcode, trace_id, message,
+                        )
+                    if hasattr(resp, "raise_for_status"):
+                        resp.raise_for_status()
+                    if isinstance(payload, dict) and payload.get("error"):
+                        raise RuntimeError(message or "Meta returned an error payload")
+                except Exception as exc:
+                    # If the HTTP call itself failed, the pending row still
+                    # records the exception and elapsed time for diagnosis.
+                    if not completed:
+                        db.complete_instagram_outbound_audit(
+                            audit_id,
+                            http_status=getattr(resp, "status_code", None) if resp is not None else None,
+                            success=False,
+                            meta_trace_id=getattr(resp, "headers", {}).get("x-fb-trace-id") if resp is not None else None,
+                            duration_ms=round((time.perf_counter() - started) * 1000, 2),
+                            exception_class=type(exc).__name__,
+                            exception_message=_safe_outbound_exception(exc),
+                        )
+                    raise
 
             if text and not cards_first:
-                send_text(text)
+                send_request({"recipient": {"id": recipient_id}, "message": {"text": text}}, kind="text")
 
             for img, caption in captioned:
                 if caption and caption_first:
-                    send_text(caption)
+                    send_request({"recipient": {"id": recipient_id}, "message": {"text": caption}}, kind="text")
                 # A rejected card must not cost the customer the whole reply.
                 # Meta refuses images for reasons outside our control — an
                 # unreachable host, an unsupported format, a size limit — and
                 # letting that raise meant the customer got silence instead of
                 # the answer we already had.
                 try:
-                    resp = client.post(url, headers=headers, json={
+                    send_request({
                         "recipient": {"id": recipient_id},
                         "message": {"attachment": {"type": "image", "payload": {"url": img, "is_reusable": True}}}
-                    })
-                    resp.raise_for_status()
-                    last = resp
+                    }, kind="image")
                 except Exception as img_error:
                     log.warning("Instagram rejected image card %s: %s", img, img_error)
                 if caption and not caption_first:
-                    send_text(caption)
+                    send_request({"recipient": {"id": recipient_id}, "message": {"text": caption}}, kind="text")
 
             # The closing question follows the cards it refers to.
             if text and cards_first:
-                send_text(text)
+                send_request({"recipient": {"id": recipient_id}, "message": {"text": text}}, kind="text")
 
             delivery_monitor.record_success("instagram")
             return last.json() if last is not None else {"status": "no_content"}
@@ -1603,6 +1707,7 @@ def health_check():
     signature = _webhook_signature_status()
     storage = _storage_durability()
     instagram_token = instagram_token_status()
+    instagram_outbound = db.instagram_outbound_health()
 
     # Which phone actually receives escalation alerts. The environment
     # overrides the code default, and the environment is a dashboard nothing
@@ -1708,6 +1813,9 @@ def health_check():
             "webhook_signature": signature,
             "outbound_delivery": outbound,
             "instagram_token": instagram_token,
+            # Diagnostic only: no traffic is not an outage, so this block never
+            # participates in the overall healthy/degraded calculation.
+            "instagram_outbound": instagram_outbound,
             "escalation_alerts_to": alert_destination,
             "router_shadow": router_shadow,
             "llm_triage": llm_triage,
@@ -2390,7 +2498,11 @@ def _send_assisted_answer(suggestion: Dict[str, Any], answer: str) -> None:
         raise HTTPException(status_code=400, detail="Assisted replies are Instagram-only.")
     if not answer.strip():
         raise HTTPException(status_code=400, detail="A final answer is required.")
-    send_instagram_reply(str(suggestion["user_id"]), answer.strip())
+    send_instagram_reply(
+        str(suggestion["user_id"]), answer.strip(),
+        inbound_message_id=suggestion.get("conversation_id"),
+        response_type="assisted_answer",
+    )
 
 
 @app.post("/admin/assisted-resolutions/{suggestion_id}/approve")
@@ -2680,6 +2792,26 @@ def get_conversations_list(
     convs = db.get_conversations(limit=limit, offset=offset, channel=channel, user_id=user_id)
     total = db.get_conversations_count(channel=channel, user_id=user_id)
     return {"count": len(convs), "total": total, "conversations": convs}
+
+
+@app.get("/admin/instagram-outbound-audit")
+def get_instagram_outbound_audit(
+    limit: int = 50,
+    success: Optional[bool] = None,
+    inbound_message_id: Optional[int] = None,
+    since: Optional[str] = None,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """Authenticated, read-only Meta send diagnostics."""
+    require_admin(x_admin_key, x_admin_pin)
+    audits = db.get_instagram_outbound_audit(
+        limit=limit,
+        success=success,
+        inbound_message_id=inbound_message_id,
+        since=since,
+    )
+    return {"count": len(audits), "audits": audits}
 
 @app.get("/admin/sessions")
 def get_sessions_list(
