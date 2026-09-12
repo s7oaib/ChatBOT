@@ -64,13 +64,29 @@ def test_dashboard_javascript_brackets_balance(script, opener, closer):
     )
 
 
-def test_the_dashboard_has_three_tabs(page):
+def test_the_dashboard_has_four_task_tabs(page):
     """
     Eight tabs needed 1655px of nav on a 347px phone, so most of the portal was
     unreachable on the handset the kitchen actually uses.
     """
     buttons = re.findall(r'<button class="tab-btn[^"]*" onclick="switchTab\(', page)
-    assert len(buttons) == 3, f"expected 3 tabs, found {len(buttons)}"
+    assert len(buttons) == 4, f"expected 4 tabs, found {len(buttons)}"
+
+
+def test_collections_tab_sits_between_menu_and_customers(page):
+    menu = page.index("switchTab('tab-image'")
+    collections = page.index("switchTab('tab-collections'")
+    customers = page.index("switchTab('tab-stats'")
+    assert menu < collections < customers
+
+
+def test_collections_tab_can_browse_and_replace_each_selection(page):
+    assert 'id="allMenuCatalogue"' in page
+    assert 'id="collectionBase"' in page
+    assert 'id="collectionBuilder"' in page
+    assert "function loadCollectionMenus" in page
+    assert "function changeCollectionSelection" in page
+    assert "function copyCollectionSummary" in page
 
 
 def test_menu_dashboard_explains_how_to_hide_the_current_week(page):

@@ -32,11 +32,13 @@ from camellia.responder import responder
 from camellia.ai_responder import ai_responder
 from camellia.whatsapp_adapter import whatsapp_adapter
 from camellia.escalator import escalator
+from camellia.assisted_resolution import create_suggestion
 from camellia.ad_routing import product_for_ad
 from camellia.sheet_sync import sheet_sync
 from camellia.menu_parser import menu_parser
 from camellia import weekly_flyer
 from camellia import menu_dates
+from camellia import menu_images
 from camellia.session_memory import session_memory
 from camellia.monitoring import get_logger, delivery_monitor, latency_monitor
 
@@ -457,6 +459,26 @@ def _process_instagram_event(
             message_text, user_id=sender_id, channel="instagram",
             referral_source="ADS", referral_ad_id=trace["ad_id"], referral_ad_title=trace["ad_title"],
         )
+
+        # Assisted Resolution is an Instagram-only review draft. It runs only
+        # after the deterministic responder declines to resolve the message,
+        # never on WhatsApp, and never for an active order/contact flow.
+        if (
+            config.LLM_ASSISTED_RESOLUTION_ENABLED
+            and not was_matched
+            and not awaiting_contact
+            and not supplied_contact
+            and not facts.get("cart")
+            and not facts.get("order_draft", {}).get("flavour")
+        ):
+            create_suggestion(
+                user_id=sender_id,
+                channel="instagram",
+                customer_message=message_text,
+                deterministic_resolved=False,
+                active_protected_flow=False,
+                source_routed=False,
+            )
 
         needs_escalation = awaiting_contact or not was_matched or template_id == "order_next_steps"
         if needs_escalation and not supplied_contact and not awaiting_contact:
@@ -1405,6 +1427,95 @@ def health_check():
 
 MAX_UPLOAD_SIZE = 10 * 1024 * 1024  # 10 MB limit for menu images
 
+
+@app.get("/admin/menu-manager/menus")
+def menu_manager_menus(x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    return {"status": "success", "menus": menu_images.list_menus()}
+
+
+@app.get("/admin/menu-manager/menus/{menu_key}")
+def menu_manager_preview(menu_key: str, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    try:
+        return {"status": "success", **menu_images.preview(menu_key)}
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Unknown menu")
+
+
+@app.get("/admin/menu-manager/menus/{menu_key}/preview")
+def menu_manager_preview_alias(menu_key: str, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    return menu_manager_preview(menu_key, x_admin_key, x_admin_pin)
+
+
+async def _save_menu_image_draft(menu_key: str, file: Optional[UploadFile], x_admin_key: Optional[str], x_admin_pin: Optional[str]):
+    require_admin(x_admin_key, x_admin_pin)
+    if file is None:
+        raise HTTPException(status_code=400, detail="No image file provided.")
+    data = await file.read()
+    if len(data) > MAX_UPLOAD_SIZE:
+        raise HTTPException(status_code=413, detail="File too large (maximum 10MB allowed).")
+    try:
+        return {"status": "success", "draft": menu_images.save_draft(menu_key, data, file.content_type or "", "admin")}
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Unknown menu")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/admin/menu-manager/menus/{menu_key}/draft")
+async def menu_manager_save_draft(menu_key: str, file: Optional[UploadFile] = File(None), x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    return await _save_menu_image_draft(menu_key, file, x_admin_key, x_admin_pin)
+
+
+@app.put("/admin/menu-manager/menus/{menu_key}/draft")
+async def menu_manager_save_draft_put(menu_key: str, file: Optional[UploadFile] = File(None), x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None),):
+    return await _save_menu_image_draft(menu_key, file, x_admin_key, x_admin_pin)
+
+
+@app.post("/admin/menu-manager/menus/{menu_key}/replace")
+async def menu_manager_replace(menu_key: str, file: Optional[UploadFile] = File(None), x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    return await _save_menu_image_draft(menu_key, file, x_admin_key, x_admin_pin)
+
+
+@app.post("/admin/menu-manager/menus/{menu_key}/publish")
+def menu_manager_publish(menu_key: str, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    try:
+        return {"status": "success", "menu": menu_images.publish(menu_key)}
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Unknown menu")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/admin/menu-manager/menus/{menu_key}/history")
+def menu_manager_history(menu_key: str, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    if menu_key not in menu_images.MENU_IMAGE_DEFINITIONS:
+        raise HTTPException(status_code=404, detail="Unknown menu")
+    return {"status": "success", "versions": menu_images.history(menu_key)}
+
+
+@app.post("/admin/menu-manager/menus/{menu_key}/archive")
+@app.delete("/admin/menu-manager/menus/{menu_key}")
+def menu_manager_archive(menu_key: str, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    if menu_key not in menu_images.MENU_IMAGE_DEFINITIONS:
+        raise HTTPException(status_code=404, detail="Unknown menu")
+    return {"status": "success", "menu": menu_images.archive(menu_key)}
+
+
+@app.post("/admin/menu-manager/menus/{menu_key}/restore/{version_id}")
+def menu_manager_restore(menu_key: str, version_id: int, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    if menu_key not in menu_images.MENU_IMAGE_DEFINITIONS:
+        raise HTTPException(status_code=404, detail="Unknown menu")
+    restored = menu_images.restore(menu_key, version_id)
+    if not restored:
+        raise HTTPException(status_code=404, detail="Version not found")
+    return {"status": "success", "menu": restored}
+
 @app.post("/admin/verify-pin")
 @limiter.limit("10/minute")
 async def verify_admin_pin(request: Request):
@@ -2151,6 +2262,193 @@ def get_candidate_templates(
     candidates = db.get_pending_candidates()
     return {"status": "success", "count": len(candidates), "candidates": candidates}
 
+
+@app.get("/admin/assisted-resolutions")
+def get_assisted_resolutions(
+    status: Optional[str] = None,
+    category: Optional[str] = None,
+    limit: int = 100,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """Returns the human-review queue for LLM Assisted Resolution."""
+    require_admin(x_admin_key, x_admin_pin)
+    if status:
+        status = status.strip().upper()
+    if category:
+        category = category.strip().upper()
+    return {
+        "status": "success",
+        "count": len(db.list_assisted_suggestions(status=status, category=category, limit=limit)),
+        "suggestions": db.list_assisted_suggestions(status=status, category=category, limit=limit),
+        "metrics": db.assisted_metrics(),
+    }
+
+
+@app.get("/admin/assisted-resolutions/metrics")
+def get_assisted_resolution_metrics(
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    require_admin(x_admin_key, x_admin_pin)
+    return {"status": "success", "metrics": db.assisted_metrics()}
+
+
+def _assisted_reviewer(x_admin_key: Optional[str], x_admin_pin: Optional[str]) -> str:
+    return (x_admin_key or x_admin_pin or "admin")[:120]
+
+
+def _send_assisted_answer(suggestion: Dict[str, Any], answer: str) -> None:
+    if suggestion.get("channel") != "instagram":
+        raise HTTPException(status_code=400, detail="Assisted replies are Instagram-only.")
+    if not answer.strip():
+        raise HTTPException(status_code=400, detail="A final answer is required.")
+    send_instagram_reply(str(suggestion["user_id"]), answer.strip())
+
+
+@app.post("/admin/assisted-resolutions/{suggestion_id}/approve")
+async def approve_assisted_resolution(
+    suggestion_id: int,
+    request: Request,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    require_admin(x_admin_key, x_admin_pin)
+    suggestion = db.get_assisted_suggestion(suggestion_id)
+    if not suggestion or suggestion.get("status") != "PENDING_REVIEW":
+        raise HTTPException(status_code=404, detail="Pending assisted suggestion not found.")
+    if suggestion.get("triage_category") in {"HUMAN_REQUIRED", "CONTACT_DETAIL", "TEACH_REQUIRED"}:
+        raise HTTPException(status_code=400, detail="This suggestion requires the matching human action before it can be resolved.")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    final_answer = str(body.get("final_answer") or suggestion.get("suggested_answer") or "").strip()
+    _send_assisted_answer(suggestion, final_answer)
+    edited = final_answer != str(suggestion.get("original_suggested_answer") or "").strip()
+    status = "EDITED_AND_APPROVED" if edited else "APPROVED"
+    if not db.review_assisted_suggestion(
+        suggestion_id, status=status, reviewed_by=_assisted_reviewer(x_admin_key, x_admin_pin),
+        final_answer=final_answer, resolution_action="EDITED_AND_APPROVED" if edited else "APPROVED",
+    ):
+        raise HTTPException(status_code=409, detail="Suggestion was already reviewed.")
+    knowledge_id = str(suggestion.get("matched_knowledge_id") or "")
+    if knowledge_id.startswith("learned_knowledge#"):
+        try:
+            db.increment_learned_knowledge_usage(int(knowledge_id.rsplit("#", 1)[1]))
+        except (TypeError, ValueError):
+            pass
+    if suggestion.get("escalation_id"):
+        db.update_escalation_status(int(suggestion["escalation_id"]), "resolved")
+    return {"status": status, "suggestion_id": suggestion_id, "final_answer": final_answer}
+
+
+@app.post("/admin/assisted-resolutions/{suggestion_id}/edit-resolve")
+async def edit_assisted_resolution(
+    suggestion_id: int,
+    request: Request,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not str(body.get("final_answer") or "").strip():
+        raise HTTPException(status_code=400, detail="final_answer is required for edit-and-resolve.")
+    # Edit-and-resolve is the same authenticated send gate as approve.
+    return await approve_assisted_resolution(suggestion_id, request, x_admin_key, x_admin_pin)
+
+
+@app.post("/admin/assisted-resolutions/{suggestion_id}/reject")
+async def reject_assisted_resolution(
+    suggestion_id: int,
+    request: Request,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    require_admin(x_admin_key, x_admin_pin)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    reason = str(body.get("reason") or "Other").strip()[:500]
+    if not db.review_assisted_suggestion(
+        suggestion_id, status="REJECTED", reviewed_by=_assisted_reviewer(x_admin_key, x_admin_pin),
+        resolution_action="REJECTED", rejection_reason=reason,
+    ):
+        raise HTTPException(status_code=404, detail="Pending assisted suggestion not found.")
+    return {"status": "REJECTED", "suggestion_id": suggestion_id}
+
+
+@app.post("/admin/assisted-resolutions/{suggestion_id}/send-to-human")
+def send_assisted_to_human(
+    suggestion_id: int,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    require_admin(x_admin_key, x_admin_pin)
+    suggestion = db.get_assisted_suggestion(suggestion_id)
+    if not suggestion or suggestion.get("status") != "PENDING_REVIEW":
+        raise HTTPException(status_code=404, detail="Pending assisted suggestion not found.")
+    escalator.handle_escalation(
+        user_id=str(suggestion["user_id"]), channel="instagram",
+        user_message=str(suggestion["customer_message"]),
+        reason="Assisted Resolution sent to human",
+        context_data={"suggestion_id": suggestion_id},
+    )
+    db.review_assisted_suggestion(
+        suggestion_id, status="SENT_TO_HUMAN", reviewed_by=_assisted_reviewer(x_admin_key, x_admin_pin),
+        resolution_action="SENT_TO_HUMAN",
+    )
+    return {"status": "SENT_TO_HUMAN", "suggestion_id": suggestion_id}
+
+
+@app.post("/admin/assisted-resolutions/{suggestion_id}/teach-and-resolve")
+async def teach_and_resolve_assisted(
+    suggestion_id: int,
+    request: Request,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    require_admin(x_admin_key, x_admin_pin)
+    suggestion = db.get_assisted_suggestion(suggestion_id)
+    if not suggestion or suggestion.get("status") != "PENDING_REVIEW":
+        raise HTTPException(status_code=404, detail="Pending assisted suggestion not found.")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    answer = str(body.get("verified_answer") or "").strip()
+    if not answer:
+        raise HTTPException(status_code=400, detail="verified_answer is required.")
+    topic = str(body.get("topic") or suggestion["customer_message"][:80]).strip()
+    pattern = str(body.get("question_pattern") or suggestion["customer_message"]).strip()
+    knowledge_id = db.add_learned_knowledge(topic, pattern, answer, source="assisted_resolution")
+    _send_assisted_answer(suggestion, answer)
+    db.review_assisted_suggestion(
+        suggestion_id, status="RESOLVED", reviewed_by=_assisted_reviewer(x_admin_key, x_admin_pin),
+        final_answer=answer, resolution_action="TEACH_AND_RESOLVE",
+    )
+    if suggestion.get("escalation_id"):
+        db.update_escalation_status(int(suggestion["escalation_id"]), "resolved")
+    return {"status": "RESOLVED", "suggestion_id": suggestion_id, "learned_knowledge_id": knowledge_id}
+
+
+@app.post("/admin/assisted-resolutions/{suggestion_id}/dismiss")
+def dismiss_assisted_resolution(
+    suggestion_id: int,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    require_admin(x_admin_key, x_admin_pin)
+    if not db.review_assisted_suggestion(
+        suggestion_id, status="REJECTED", reviewed_by=_assisted_reviewer(x_admin_key, x_admin_pin),
+        resolution_action="DISMISSED", rejection_reason="Non-actionable",
+    ):
+        raise HTTPException(status_code=404, detail="Pending assisted suggestion not found.")
+    return {"status": "DISMISSED", "suggestion_id": suggestion_id}
+
 @app.get("/admin/knowledge-gaps")
 def get_knowledge_gaps(
     status: str = "OPEN",
@@ -2660,6 +2958,30 @@ def get_admin_dashboard():
         }
         .badge-veg { background: #D1FAE5; color: #065F46; }
         .badge-nonveg { background: #FEE2E2; color: #991B1B; }
+
+        /* Collection browser and builder */
+        .collection-layout { display: grid; grid-template-columns: minmax(280px, 0.8fr) minmax(360px, 1.2fr); gap: 20px; }
+        .collection-box { background: #FCFBF9; border: 1px solid var(--border); border-radius: 14px; padding: 16px; }
+        .collection-box h3 { color: var(--primary); font-size: 1.05rem; margin-bottom: 6px; }
+        .collection-select { width: 100%; padding: 10px 12px; border: 1px solid var(--border); border-radius: 9px; background: white; font: inherit; }
+        .collection-slot { padding: 12px 0; border-bottom: 1px solid var(--border); }
+        .collection-slot:last-child { border-bottom: 0; }
+        .collection-slot label { display: block; font-size: 0.8rem; font-weight: 700; margin-bottom: 5px; }
+        .collection-choice-detail { color: var(--text-muted); font-size: 0.78rem; line-height: 1.4; margin-top: 5px; }
+        .catalogue-section { margin-top: 18px; }
+        .catalogue-section h3 { color: var(--primary); font-size: 1.05rem; margin-bottom: 8px; }
+        .catalogue-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 10px; }
+        .catalogue-item { border: 1px solid var(--border); border-radius: 10px; padding: 11px; background: #fff; font-size: 0.82rem; line-height: 1.45; }
+        .catalogue-item b { display: block; color: var(--text-dark); margin-bottom: 3px; }
+        .menu-manager-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 16px; }
+        .menu-manager-card { border: 1px solid var(--border); border-radius: 14px; overflow: hidden; background: #fff; box-shadow: 0 2px 8px rgba(0,0,0,.04); }
+        .menu-manager-card h3 { margin: 0; padding: 14px 14px 5px; color: var(--primary); font-size: 1rem; }
+        .menu-manager-image { display: block; width: 100%; height: 220px; object-fit: contain; background: #f6f3ef; cursor: zoom-in; }
+        .menu-manager-meta { padding: 0 14px 10px; color: var(--text-muted); font-size: .8rem; }
+        .menu-manager-actions { display: flex; flex-wrap: wrap; gap: 7px; padding: 0 14px 14px; }
+        .menu-manager-actions button { font-size: .78rem; padding: 7px 9px; }
+        .menu-manager-history { padding: 10px 14px; border-top: 1px solid var(--border); background: #fcfbf9; }
+        .menu-manager-history img { width: 76px; height: 58px; object-fit: cover; vertical-align: middle; margin-right: 8px; border-radius: 5px; }
         
         /* Analytics Table */
         table.data-table { width: 100%; border-collapse: collapse; margin-top: 16px; font-size: 0.86rem; }
@@ -2685,6 +3007,7 @@ def get_admin_dashboard():
             .tabs-nav { justify-content: flex-start; gap: 4px; padding: 4px; }
             .tab-btn { padding: 10px 8px; font-size: 0.8rem; gap: 4px; }
             .panel-card { padding: 20px 16px; }
+            .collection-layout { grid-template-columns: 1fr; }
         }
     </style>
 </head>
@@ -2746,9 +3069,19 @@ def get_admin_dashboard():
     <div class="main-container">
         <!-- Tab Navigation Bar -->
         <div class="tabs-nav">
-            <button class="tab-btn active" onclick="switchTab('tab-image', this)">🍱 Menu</button>
+            <button class="tab-btn active" onclick="switchTab('tab-image', this)">🖼️ Menu Manager</button>
+            <button class="tab-btn" onclick="switchTab('tab-collections', this)">🎁 Collections</button>
             <button class="tab-btn" onclick="switchTab('tab-stats', this)">💬 Customers</button>
             <button class="tab-btn" onclick="switchTab('tab-candidates', this)">✅ Answers <span id="candidateBadge" style="display:none; background: var(--danger); color: #fff; border-radius: 10px; padding: 1px 7px; font-size: 0.72rem; margin-left: 4px;"></span></button>
+        </div>
+
+        <div id="tab-menu-manager" class="panel-card" data-group="menu">
+            <div class="panel-header">
+                <h2>🖼️ Menu Manager</h2>
+                <p>Manage the actual menu images customers receive. Uploading an image never changes approved prices or business facts.</p>
+            </div>
+            <div id="menuManagerResult" class="result-box"></div>
+            <div id="menuManagerGrid" class="menu-manager-grid"><p style="color: var(--text-muted);">Loading menu images…</p></div>
         </div>
 
         <!-- MENU tab, panel 2 of 4: same job, for when there is no photo -->
@@ -2912,6 +3245,37 @@ THIS WEEK'S BENGAL SPECIALS
             </div>
         </div>
 
+        <!-- COLLECTIONS tab: browse every available option and tailor a collection -->
+        <div id="tab-collections" class="panel-card" data-group="collections" style="display: none;">
+            <div class="panel-header">
+                <h2>🎁 Review and tailor a collection</h2>
+                <p>Start with either Sondesh collection, then replace any selection with another available option of the same kind. The complete menu catalogue is shown below for reference.</p>
+            </div>
+
+            <div class="collection-layout">
+                <div class="collection-box">
+                    <h3>Build a new collection</h3>
+                    <p style="font-size: 0.82rem; color: var(--text-muted); margin-bottom: 12px;">Choose a starting collection. Every row can then be changed independently.</p>
+                    <label class="field-label" for="collectionBase">Start with</label>
+                    <select id="collectionBase" class="collection-select" onchange="startCollectionBuild(this.value)"></select>
+                    <div id="collectionBuilder"><p style="color: var(--text-muted); font-size: 0.84rem; margin-top: 12px;">Loading collection choices...</p></div>
+                    <div class="action-bar">
+                        <button class="btn-primary" type="button" onclick="copyCollectionSummary()">Copy collection summary</button>
+                    </div>
+                    <div id="collectionCopyResult" class="result-box"></div>
+                </div>
+
+                <div class="collection-box">
+                    <h3>Your selected collection</h3>
+                    <div id="collectionSummary"><p style="color: var(--text-muted); font-size: 0.84rem;">Choose a starting collection to review it here.</p></div>
+                </div>
+            </div>
+
+            <div id="allMenuCatalogue" style="margin-top: 22px;">
+                <p style="color: var(--text-muted); font-size: 0.84rem;">Loading all available menus...</p>
+            </div>
+        </div>
+
         <!-- CUSTOMERS tab, panel 1 of 2: who is waiting on a person -->
         <div id="tab-stats" class="panel-card" data-group="customers" style="display: none;">
             <div class="panel-header">
@@ -2951,6 +3315,38 @@ THIS WEEK'S BENGAL SPECIALS
                         <tr><td colspan="6" style="text-align: center; color: #888;">Loading escalations...</td></tr>
                     </tbody>
                 </table>
+            </div>
+
+            <div class="panel-card" id="assistedResolutionSection" data-group="answers" style="margin-top: 18px; border: 1px solid var(--border);">
+                <div class="panel-header">
+                    <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
+                        <div>
+                            <h2>🤝 AI Suggested — human review required</h2>
+                            <p>Instagram-only drafts grounded in approved knowledge. They are never sent automatically. WhatsApp is always HUMAN ONLY.</p>
+                        </div>
+                        <button class="btn-secondary" onclick="loadAssistedResolutions()">🔄 Refresh AI suggestions</button>
+                    </div>
+                    <div id="assistedResolutionMetrics" style="font-size:0.82rem;color:#666;margin-top:8px;">Loading review metrics...</div>
+                </div>
+                <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap;">
+                    <label for="assistedCategoryFilter" style="font-weight:600;">Category:</label>
+                    <select id="assistedCategoryFilter" onchange="loadAssistedResolutions()">
+                        <option value="">All</option>
+                        <option value="AUTO_RESOLVE">AUTO_RESOLVE (candidate only)</option>
+                        <option value="AI_SUGGESTED">AI_SUGGESTED</option>
+                        <option value="TEACH_REQUIRED">TEACH_REQUIRED</option>
+                        <option value="HUMAN_REQUIRED">HUMAN_REQUIRED</option>
+                        <option value="NON_ACTIONABLE">NON_ACTIONABLE</option>
+                        <option value="CONTACT_DETAIL">CONTACT_DETAIL</option>
+                        <option value="UNSUPPORTED">UNSUPPORTED</option>
+                    </select>
+                </div>
+                <div style="overflow-x:auto;">
+                    <table class="data-table">
+                        <thead><tr><th>Customer message</th><th>Suggested answer</th><th>Grounding</th><th>Matched Knowledge</th><th>Risk Flags</th><th>Action</th></tr></thead>
+                        <tbody id="assistedResolutionsTableBody"><tr><td colspan="6" style="text-align:center;color:#888;">Loading AI suggestions...</td></tr></tbody>
+                    </table>
+                </div>
             </div>
         </div>
 
@@ -3164,10 +3560,12 @@ THIS WEEK'S BENGAL SPECIALS
             refreshReaderStatus();
             if (currentAdminKey) {
                 document.getElementById('authOverlay').style.display = 'none';
+                loadMenuManager();
                 loadActiveMenu();
                 loadAdRoutes();
                 loadAnalytics();
                 refreshCandidateBadge();
+                loadAssistedResolutions();
             } else {
                 document.getElementById('authOverlay').style.display = 'flex';
             }
@@ -3193,10 +3591,12 @@ THIS WEEK'S BENGAL SPECIALS
                     currentAdminKey = pin;
                     document.getElementById('authOverlay').style.display = 'none';
                     safeStorageSet('camellia_admin_pin', pin);
+                    loadMenuManager();
                     loadActiveMenu();
                     loadAdRoutes();
                     loadAnalytics();
                     refreshCandidateBadge();
+                    loadAssistedResolutions();
                 } else {
                     const card = document.getElementById('authCard');
                     card.classList.add('shake');
@@ -3240,13 +3640,13 @@ THIS WEEK'S BENGAL SPECIALS
             return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
         }
 
-        // Eight tabs needed 1655px of nav on a 347px phone, so six of them were
-        // simply invisible to a kitchen working off a handset. Panels are now
-        // grouped three ways and a tab shows its whole group stacked. Each tab
+        // The old panel-per-tab navigation overflowed a kitchen handset. Panels
+        // are grouped by task and a tab shows its whole group stacked. Each tab
         // is named after the panel it leads with, so the panels themselves did
         // not have to move.
         const TAB_GROUPS = {
             'tab-image': 'menu',
+            'tab-collections': 'collections',
             'tab-stats': 'customers',
             'tab-candidates': 'answers'
         };
@@ -3267,8 +3667,265 @@ THIS WEEK'S BENGAL SPECIALS
             // Everything in the group is on screen at once, so everything in it
             // needs its data.
             if (group === 'menu') { loadActiveMenu(); loadAdRoutes(); }
+            if (group === 'menu') { loadMenuManager(); }
+            if (group === 'collections') { loadCollectionMenus(); }
             if (group === 'customers') { loadAnalytics(); loadConversations(); }
-            if (group === 'answers') { loadCandidates(); loadKnowledge(); }
+            if (group === 'answers') { loadCandidates(); loadAssistedResolutions(); loadKnowledge(); }
+        }
+
+        function managerRequest(url, options) {
+            options = options || {};
+            options.headers = Object.assign({}, getAuthHeaders(), options.headers || {});
+            return fetch(url, options);
+        }
+
+        async function loadMenuManager() {
+            const grid = document.getElementById('menuManagerGrid');
+            if (!grid) return;
+            try {
+                const response = await managerRequest('/admin/menu-manager/menus');
+                if (!response.ok) throw new Error('Could not load menu images');
+                const data = await response.json();
+                grid.innerHTML = (data.menus || []).map(menu => {
+                    const draft = menu.draft ? '<span style="color:#8a5a00;">Draft ready</span>' : '';
+                    const image = menu.image_url ? `<img class="menu-manager-image" src="${escapeHtml(menu.image_url)}" alt="${escapeHtml(menu.title)}" onclick="window.open('${escapeHtml(menu.image_url)}','_blank')">` : '<div class="menu-manager-image" style="display:grid;place-items:center;color:#888;">No published image</div>';
+                    return `<article class="menu-manager-card"><h3>${escapeHtml(menu.title)}</h3>${image}<div class="menu-manager-meta"><b>${escapeHtml(menu.status)}</b>${menu.published_at ? ` · Published ${escapeHtml(menu.published_at)}` : ''}${draft ? `<br>${draft}` : ''}</div><div class="menu-manager-actions"><button class="btn-primary" onclick="replaceMenuImage('${escapeHtml(menu.menu_key)}')">Replace Menu</button><button class="btn-secondary" onclick="showMenuHistory('${escapeHtml(menu.menu_key)}')">History</button><button class="btn-danger" onclick="archiveMenuImage('${escapeHtml(menu.menu_key)}')">Archive</button></div><div id="menu-history-${escapeHtml(menu.menu_key)}" class="menu-manager-history" style="display:none"></div></article>`;
+                }).join('');
+            } catch (error) { grid.innerHTML = `<p style="color:#a33">${escapeHtml(error.message)}</p>`; }
+        }
+
+        function replaceMenuImage(menuKey) {
+            const input = document.createElement('input'); input.type = 'file'; input.accept = 'image/jpeg,image/png,image/webp';
+            input.onchange = async () => {
+                const file = input.files && input.files[0]; if (!file) return;
+                const form = new FormData(); form.append('file', file);
+                const result = document.getElementById('menuManagerResult'); result.innerHTML = 'Uploading draft…';
+                const response = await managerRequest(`/admin/menu-manager/menus/${encodeURIComponent(menuKey)}/draft`, {method:'POST', body:form});
+                const data = await response.json();
+                if (!response.ok) { result.innerHTML = escapeHtml(data.detail || 'Upload failed'); return; }
+                const current = await managerRequest(`/admin/menu-manager/menus/${encodeURIComponent(menuKey)}`).then(r => r.json());
+                const draftUrl = data.draft.image_path;
+                result.innerHTML = `<div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-start"><div><b>Current Menu</b><br><img src="${escapeHtml(current.current || '')}" style="max-width:220px;max-height:260px"></div><div><b>New Menu</b><br><img src="${escapeHtml(draftUrl)}" style="max-width:220px;max-height:260px"></div></div><div class="action-bar"><button class="btn-secondary" onclick="loadMenuManager();document.getElementById('menuManagerResult').innerHTML=''">Cancel</button><button class="btn-secondary" onclick="previewMenuImage('${escapeHtml(menuKey)}')">Save Draft</button><button class="btn-primary" onclick="publishMenuImage('${escapeHtml(menuKey)}')">Publish New Menu</button></div>`;
+            }; input.click();
+        }
+
+        async function previewMenuImage(menuKey) { const data = await managerRequest(`/admin/menu-manager/menus/${encodeURIComponent(menuKey)}`).then(r=>r.json()); document.getElementById('menuManagerResult').innerHTML = data.draft ? `Draft saved for ${escapeHtml(menuKey)}. Publish when ready.` : 'No draft image.'; }
+        async function publishMenuImage(menuKey) { const response = await managerRequest(`/admin/menu-manager/menus/${encodeURIComponent(menuKey)}/publish`, {method:'POST'}); const data = await response.json(); document.getElementById('menuManagerResult').innerHTML = response.ok ? 'Published. Customers will receive the new image immediately.' : escapeHtml(data.detail || 'Publish failed'); loadMenuManager(); }
+        async function archiveMenuImage(menuKey) { if (!confirm('Are you sure you want to remove this menu from customer view?')) return; const response = await managerRequest(`/admin/menu-manager/menus/${encodeURIComponent(menuKey)}/archive`, {method:'POST'}); const data = await response.json(); document.getElementById('menuManagerResult').innerHTML = response.ok ? 'Menu archived. It remains available in History.' : escapeHtml(data.detail || 'Archive failed'); loadMenuManager(); }
+        async function showMenuHistory(menuKey) { const box = document.getElementById(`menu-history-${menuKey}`); if (!box) return; const data = await managerRequest(`/admin/menu-manager/menus/${encodeURIComponent(menuKey)}/history`).then(r=>r.json()); box.style.display = 'block'; box.innerHTML = (data.versions || []).length ? data.versions.map(v => `<div style="margin:7px 0"><img src="${escapeHtml(v.image_path)}"><span>Version ${v.version} — ${escapeHtml(v.status)}</span>${v.status !== 'current' ? ` <button class="btn-secondary" onclick="restoreMenuImage('${escapeHtml(menuKey)}',${v.id})">Restore</button>` : ''}</div>`).join('') : '<span>No image history yet.</span>'; }
+        async function restoreMenuImage(menuKey, versionId) { const response = await managerRequest(`/admin/menu-manager/menus/${encodeURIComponent(menuKey)}/restore/${versionId}`, {method:'POST'}); const data = await response.json(); document.getElementById('menuManagerResult').innerHTML = response.ok ? 'Previous menu restored.' : escapeHtml(data.detail || 'Restore failed'); loadMenuManager(); showMenuHistory(menuKey); }
+
+        let collectionCatalogue = null;
+        let collectionVariants = [];
+        let collectionSelections = [];
+
+        function priceLines(prices) {
+            return (prices || []).map(price => {
+                const size = price.pack_size || '';
+                const pieces = price.pieces ? `${price.pieces} pcs` : '';
+                const amount = price.price_inr != null ? `₹${price.price_inr}` : '';
+                return [size, pieces, amount].filter(Boolean).join(' · ');
+            }).join(', ');
+        }
+
+        function collectionOptionDetail(product, flavour) {
+            const prices = priceLines((flavour && flavour.prices) || product.prices);
+            return [prices, (flavour && flavour.note) || product.description || product.pricing_note || '']
+                .filter(Boolean).join(' — ');
+        }
+
+        function buildCollectionVariants(menu) {
+            const variants = [];
+            Object.entries(menu.collections || {}).forEach(([collectionKey, collection]) => {
+                (collection.products || []).forEach(product => {
+                    const type = String(product.item || 'Selection').toLowerCase();
+                    const flavours = product.flavours || [];
+                    if (flavours.length) {
+                        flavours.forEach(flavour => {
+                            const flavourName = typeof flavour === 'string' ? flavour : flavour.flavour;
+                            variants.push({
+                                collectionKey,
+                                collectionName: collection.collection_name || collectionKey,
+                                type,
+                                item: product.item || 'Selection',
+                                label: `${product.item}: ${flavourName}`,
+                                detail: collectionOptionDetail(product, typeof flavour === 'string' ? null : flavour)
+                            });
+                        });
+                    } else {
+                        variants.push({
+                            collectionKey,
+                            collectionName: collection.collection_name || collectionKey,
+                            type,
+                            item: product.item || 'Selection',
+                            label: product.item || 'Selection',
+                            detail: collectionOptionDetail(product, null)
+                        });
+                    }
+                });
+            });
+
+            const weeks = menu.weekly_menus || [];
+            const current = weeks.length ? weeks[weeks.length - 1] : {};
+            (current.norom_pak_sondesh || []).forEach(item => {
+                variants.push({
+                    collectionKey: 'weekly_norom_pak',
+                    collectionName: 'Weekly Norom Pak Sondesh',
+                    type: 'sondesh',
+                    item: 'Sondesh',
+                    label: `Sondesh: ${item.flavour || 'Weekly option'}`,
+                    detail: priceLines([item]) || item.pricing_note || item.status || ''
+                });
+            });
+            return variants;
+        }
+
+        function startCollectionBuild(collectionKey) {
+            if (!collectionCatalogue) return;
+            const collection = (collectionCatalogue.collections || {})[collectionKey];
+            if (!collection) return;
+
+            collectionSelections = (collection.products || []).map(product => {
+                const type = String(product.item || 'Selection').toLowerCase();
+                let selected = collectionVariants.findIndex(option =>
+                    option.collectionKey === collectionKey && option.type === type
+                );
+                if (selected < 0) selected = collectionVariants.findIndex(option => option.type === type);
+                return { type, item: product.item || 'Selection', selected };
+            }).filter(slot => slot.selected >= 0);
+            renderCollectionBuilder();
+        }
+
+        function renderCollectionBuilder() {
+            const builder = document.getElementById('collectionBuilder');
+            if (!builder) return;
+            if (!collectionSelections.length) {
+                builder.innerHTML = '<p style="color: var(--text-muted); font-size: 0.84rem; margin-top: 12px;">No selectable items are available in this collection.</p>';
+                renderCollectionSummary();
+                return;
+            }
+
+            builder.innerHTML = collectionSelections.map((slot, slotIndex) => {
+                const options = collectionVariants.map((option, optionIndex) => ({ option, optionIndex }))
+                    .filter(entry => entry.option.type === slot.type);
+                return `<div class="collection-slot">
+                    <label for="collectionSlot${slotIndex}">${escapeHtml(slot.item)}</label>
+                    <select id="collectionSlot${slotIndex}" class="collection-select" onchange="changeCollectionSelection(${slotIndex}, this.value)">
+                        ${options.map(entry => `<option value="${entry.optionIndex}" ${entry.optionIndex === slot.selected ? 'selected' : ''}>${escapeHtml(entry.option.collectionName)} — ${escapeHtml(entry.option.label)}</option>`).join('')}
+                    </select>
+                    <div class="collection-choice-detail">${escapeHtml((collectionVariants[slot.selected] || {}).detail || 'No price details listed')}</div>
+                </div>`;
+            }).join('');
+            renderCollectionSummary();
+        }
+
+        function changeCollectionSelection(slotIndex, variantIndex) {
+            const index = Number(variantIndex);
+            if (!collectionSelections[slotIndex] || !collectionVariants[index]) return;
+            collectionSelections[slotIndex].selected = index;
+            renderCollectionBuilder();
+        }
+
+        function collectionSummaryText() {
+            const base = document.getElementById('collectionBase');
+            const baseName = base && base.options[base.selectedIndex] ? base.options[base.selectedIndex].text : 'Custom collection';
+            const rows = collectionSelections.map((slot, index) => {
+                const choice = collectionVariants[slot.selected];
+                return `${index + 1}. ${choice.label} (${choice.collectionName})${choice.detail ? ` — ${choice.detail}` : ''}`;
+            });
+            return [`New collection — based on ${baseName}`, ...rows].join('\n');
+        }
+
+        function renderCollectionSummary() {
+            const summary = document.getElementById('collectionSummary');
+            if (!summary) return;
+            if (!collectionSelections.length) {
+                summary.innerHTML = '<p style="color: var(--text-muted); font-size: 0.84rem;">No selections yet.</p>';
+                return;
+            }
+            summary.innerHTML = collectionSelections.map((slot, index) => {
+                const choice = collectionVariants[slot.selected];
+                return `<div class="collection-slot"><b>${index + 1}. ${escapeHtml(choice.label)}</b><div class="collection-choice-detail">From ${escapeHtml(choice.collectionName)}${choice.detail ? ` · ${escapeHtml(choice.detail)}` : ''}</div></div>`;
+            }).join('');
+        }
+
+        async function copyCollectionSummary() {
+            const result = document.getElementById('collectionCopyResult');
+            if (!collectionSelections.length) return;
+            try {
+                await navigator.clipboard.writeText(collectionSummaryText());
+                result.className = 'result-box success';
+                result.innerText = 'Collection summary copied.';
+            } catch (e) {
+                result.className = 'result-box info';
+                result.innerText = collectionSummaryText();
+            }
+            result.style.display = 'block';
+        }
+
+        function catalogueCard(title, detail) {
+            return `<div class="catalogue-item"><b>${escapeHtml(title)}</b>${escapeHtml(detail || 'No additional details listed')}</div>`;
+        }
+
+        function renderAllMenuCatalogue(menu) {
+            const container = document.getElementById('allMenuCatalogue');
+            if (!container) return;
+            let html = '<h2 style="font-size: 1.2rem; color: var(--primary);">All available menus and items</h2>';
+
+            Object.values(menu.collections || {}).forEach(collection => {
+                let cards = '';
+                (collection.products || []).forEach(product => {
+                    const flavours = product.flavours || [];
+                    if (flavours.length) {
+                        flavours.forEach(flavour => {
+                            const name = typeof flavour === 'string' ? flavour : flavour.flavour;
+                            cards += catalogueCard(`${product.item}: ${name}`, collectionOptionDetail(product, typeof flavour === 'string' ? null : flavour));
+                        });
+                    } else {
+                        cards += catalogueCard(product.item, collectionOptionDetail(product, null));
+                    }
+                });
+                html += `<section class="catalogue-section"><h3>${escapeHtml(collection.collection_name || 'Sondesh collection')}</h3><div class="catalogue-list">${cards}</div></section>`;
+            });
+
+            const weeks = menu.weekly_menus || [];
+            if (weeks.length) {
+                const week = weeks[weeks.length - 1];
+                const weeklyGroups = [
+                    ['Vegetarian weekly menu', week.vegetarian || [], item => [item.item, [item.quantity, item.price_inr != null ? `₹${item.price_inr}` : '', item.description].filter(Boolean).join(' · ')]],
+                    ['Non-vegetarian weekly menu', week.non_vegetarian || [], item => [item.item, [item.quantity, item.price_inr != null ? `₹${item.price_inr}` : '', item.description].filter(Boolean).join(' · ')]],
+                    ['Bengali bento menu', week.bengali_bento || [], item => [item.name, [item.price_inr != null ? `₹${item.price_inr}` : '', (item.includes || []).join(', ')].filter(Boolean).join(' · ')]],
+                    ['Norom Pak Sondesh menu', week.norom_pak_sondesh || [], item => [item.flavour, priceLines([item]) || item.pricing_note || item.status || '']]
+                ];
+                weeklyGroups.forEach(([heading, items, describe]) => {
+                    if (!items.length) return;
+                    const cards = items.map(item => {
+                        const [title, detail] = describe(item);
+                        return catalogueCard(title, detail);
+                    }).join('');
+                    html += `<section class="catalogue-section"><h3>${escapeHtml(heading)}</h3><div class="catalogue-list">${cards}</div></section>`;
+                });
+            }
+            container.innerHTML = html;
+        }
+
+        async function loadCollectionMenus() {
+            try {
+                const resp = await fetch('/admin/menu/active', { headers: getAuthHeaders() });
+                if (!resp.ok) throw new Error('Could not load the menu catalogue.');
+                const data = await resp.json();
+                collectionCatalogue = data.menu || {};
+                collectionVariants = buildCollectionVariants(collectionCatalogue);
+
+                const base = document.getElementById('collectionBase');
+                const collections = Object.entries(collectionCatalogue.collections || {});
+                base.innerHTML = collections.map(([key, collection]) => `<option value="${escapeHtml(key)}">${escapeHtml(collection.collection_name || key)}</option>`).join('');
+                renderAllMenuCatalogue(collectionCatalogue);
+                if (collections.length) startCollectionBuild(base.value || collections[0][0]);
+            } catch (err) {
+                document.getElementById('collectionBuilder').innerHTML = `<p style="color: var(--danger); font-size: 0.84rem;">${escapeHtml(err.message || err)}</p>`;
+                document.getElementById('allMenuCatalogue').innerHTML = '<p style="color: var(--danger); font-size: 0.84rem;">The menu catalogue could not be loaded.</p>';
+            }
         }
 
         async function loadAdRoutes() {
@@ -4078,6 +4735,61 @@ Non-Veg:
                 tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: red;">Failed to load suggested answers.</td></tr>';
             }
         }
+
+        async function loadAssistedResolutions() {
+            const tbody = document.getElementById('assistedResolutionsTableBody');
+            if (!tbody) return;
+            tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:#888;">Loading AI suggestions...</td></tr>';
+            const category = (document.getElementById('assistedCategoryFilter') || {}).value || '';
+            try {
+                const query = category ? `&category=${encodeURIComponent(category)}` : '';
+                const resp = await fetch(`/admin/assisted-resolutions?status=PENDING_REVIEW${query}`, { headers: getAuthHeaders() });
+                if (!resp.ok) throw new Error('Could not load AI suggestions');
+                const data = await resp.json();
+                const metrics = data.metrics || {};
+                const metricsEl = document.getElementById('assistedResolutionMetrics');
+                if (metricsEl) metricsEl.textContent = `Reviewed: ${metrics.suggestions_reviewed || 0} · Approved: ${metrics.approved_as_is || 0} · Edited: ${metrics.edited_before_send || 0} · Rejected: ${metrics.rejected || 0} · Sent to human: ${metrics.sent_to_human || 0}`;
+                const items = data.suggestions || [];
+                if (!items.length) {
+                    tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:#888;">No pending AI suggestions.</td></tr>';
+                    return;
+                }
+                tbody.innerHTML = items.map(item => {
+                    const categoryLabel = escapeHtml(item.triage_category || 'UNSUPPORTED');
+                    const grounding = escapeHtml(item.grounding_status || 'Not Grounded');
+                    const source = escapeHtml(item.matched_knowledge_source || '—');
+                    const risks = escapeHtml((item.risk_flags || []).join(', ') || 'None');
+                    let actions = '';
+                    if (item.triage_category === 'HUMAN_REQUIRED' || item.triage_category === 'CONTACT_DETAIL') {
+                        actions += `<button class="btn-secondary" style="padding:4px 8px;font-size:.72rem" onclick="sendAssistedToHuman(${item.id})">Send to Human</button>`;
+                    } else if (item.triage_category === 'NON_ACTIONABLE') {
+                        actions += `<button class="btn-secondary" style="padding:4px 8px;font-size:.72rem" onclick="dismissAssisted(${item.id})">Dismiss</button>`;
+                    } else {
+                        actions += `<button class="btn-primary" style="padding:4px 8px;font-size:.72rem" onclick="approveAssisted(${item.id})">Approve &amp; Resolve</button> `;
+                        actions += `<button class="btn-secondary" style="padding:4px 8px;font-size:.72rem" onclick="editAssisted(${item.id})">Edit &amp; Resolve</button> `;
+                        actions += `<button class="btn-secondary" style="padding:4px 8px;font-size:.72rem" onclick="teachAssisted(${item.id})">Teach &amp; Resolve</button>`;
+                    }
+                    actions += ` <button class="btn-secondary" style="padding:4px 8px;font-size:.72rem;color:var(--danger)" onclick="rejectAssisted(${item.id})">Reject Suggestion</button>`;
+                    return `<tr><td style="max-width:190px;white-space:pre-wrap"><b>${escapeHtml(item.customer_message || '—')}</b><br><span class="badge badge-veg">${categoryLabel}</span></td><td style="max-width:260px;white-space:pre-wrap;font-size:.82rem">${escapeHtml(item.suggested_answer || '—')}<br><small>${escapeHtml(item.grounding_details || '')}</small></td><td>${grounding}</td><td>${source}</td><td>${risks}</td><td style="white-space:nowrap">${actions}</td></tr>`;
+                }).join('');
+            } catch (err) {
+                tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:red;">Failed to load AI suggestions.</td></tr>';
+            }
+        }
+
+        async function assistedAction(id, path, body) {
+            const options = { method: 'POST', headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' } };
+            if (body) options.body = JSON.stringify(body);
+            const resp = await fetch(`/admin/assisted-resolutions/${id}/${path}`, options);
+            if (!resp.ok) { const err = await resp.json().catch(() => ({})); throw new Error(err.detail || resp.status); }
+            await loadAssistedResolutions();
+        }
+        async function approveAssisted(id) { if (confirm('Approve and send this Instagram answer now?')) { try { await assistedAction(id, 'approve', {}); } catch (e) { alert(e); } } }
+        async function editAssisted(id) { const answer = prompt('Edit the final answer before sending:'); if (answer && answer.trim()) { try { await assistedAction(id, 'edit-resolve', { final_answer: answer.trim() }); } catch (e) { alert(e); } } }
+        async function rejectAssisted(id) { const reason = prompt('Why reject this suggestion?', 'Not approved'); if (reason !== null) { try { await assistedAction(id, 'reject', { reason }); } catch (e) { alert(e); } } }
+        async function sendAssistedToHuman(id) { if (confirm('Send this case to a human? No Instagram answer will be sent by AI.')) { try { await assistedAction(id, 'send-to-human', {}); } catch (e) { alert(e); } } }
+        async function teachAssisted(id) { const answer = prompt('Enter the verified answer to teach and send:'); if (answer && answer.trim()) { try { await assistedAction(id, 'teach-and-resolve', { verified_answer: answer.trim() }); } catch (e) { alert(e); } } }
+        async function dismissAssisted(id) { if (confirm('Dismiss this non-actionable message?')) { try { await assistedAction(id, 'dismiss', {}); } catch (e) { alert(e); } } }
 
         function updateCandidateBadge(count) {
             const badge = document.getElementById('candidateBadge');

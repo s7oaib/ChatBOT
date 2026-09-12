@@ -231,6 +231,55 @@ class Database:
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
             """)
+            self._ensure_column(cursor, "learned_knowledge", "usage_count", "INTEGER DEFAULT 0")
+
+            # Human-reviewed LLM drafts. This queue is deliberately separate
+            # from candidate_templates so assisted decisions retain the full
+            # audit trail without changing the existing RAG approval flow.
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS assisted_resolution_suggestions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                escalation_id INTEGER,
+                conversation_id INTEGER,
+                user_id TEXT NOT NULL,
+                channel TEXT NOT NULL,
+                customer_message TEXT NOT NULL,
+                triage_category TEXT NOT NULL,
+                detected_intent TEXT,
+                confidence REAL DEFAULT 0.0,
+                matched_knowledge_id TEXT,
+                matched_knowledge_source TEXT,
+                grounding_status TEXT NOT NULL DEFAULT 'Not Grounded',
+                grounding_details TEXT,
+                suggested_answer TEXT,
+                original_suggested_answer TEXT,
+                status TEXT NOT NULL DEFAULT 'PENDING_REVIEW',
+                risk_flags TEXT NOT NULL DEFAULT '[]',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                reviewed_at TIMESTAMP,
+                reviewed_by TEXT,
+                final_answer TEXT,
+                resolution_action TEXT,
+                rejection_reason TEXT,
+                model TEXT,
+                source_routing_id TEXT
+            );
+            """)
+
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS menu_image_versions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                menu_key TEXT NOT NULL,
+                image_path TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'draft',
+                version INTEGER NOT NULL,
+                uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                uploaded_by TEXT,
+                published_at TIMESTAMP,
+                archived_at TIMESTAMP
+            );
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_menu_image_versions_key ON menu_image_versions(menu_key, version DESC)")
 
             # Seed counters if empty
             cursor.execute("INSERT OR IGNORE INTO analytics (key, value) VALUES ('total_messages', 0);")
@@ -240,6 +289,73 @@ class Database:
             self._create_indexes(cursor)
 
             conn.commit()
+
+    def get_menu_image_current(self, menu_key: str) -> Optional[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            row = conn.execute("SELECT * FROM menu_image_versions WHERE menu_key = ? AND status = 'current' ORDER BY version DESC LIMIT 1", (menu_key,)).fetchone()
+            return dict(row) if row else None
+
+    def get_menu_image_draft(self, menu_key: str) -> Optional[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            row = conn.execute("SELECT * FROM menu_image_versions WHERE menu_key = ? AND status = 'draft' ORDER BY id DESC LIMIT 1", (menu_key,)).fetchone()
+            return dict(row) if row else None
+
+    def has_menu_image_archive(self, menu_key: str) -> bool:
+        with self.get_connection() as conn:
+            return conn.execute("SELECT 1 FROM menu_image_versions WHERE menu_key = ? AND status = 'archived' LIMIT 1", (menu_key,)).fetchone() is not None
+
+    def save_menu_image_draft(self, menu_key: str, image_path: str, uploaded_by: str) -> Dict[str, Any]:
+        now = datetime.utcnow().isoformat()
+        with self.get_connection() as conn:
+            conn.execute("DELETE FROM menu_image_versions WHERE menu_key = ? AND status = 'draft'", (menu_key,))
+            next_version = (conn.execute("SELECT COALESCE(MAX(version), 0) + 1 AS n FROM menu_image_versions WHERE menu_key = ?", (menu_key,)).fetchone()["n"])
+            cur = conn.execute("INSERT INTO menu_image_versions (menu_key, image_path, status, version, uploaded_at, uploaded_by) VALUES (?, ?, 'draft', ?, ?, ?)", (menu_key, image_path, next_version, now, uploaded_by))
+            conn.commit()
+            return dict(conn.execute("SELECT * FROM menu_image_versions WHERE id = ?", (cur.lastrowid,)).fetchone())
+
+    def publish_menu_image(self, menu_key: str) -> Optional[Dict[str, Any]]:
+        now = datetime.utcnow().isoformat()
+        with self.get_connection() as conn:
+            draft = conn.execute("SELECT * FROM menu_image_versions WHERE menu_key = ? AND status = 'draft' ORDER BY id DESC LIMIT 1", (menu_key,)).fetchone()
+            if not draft:
+                return None
+            conn.execute("UPDATE menu_image_versions SET status = 'archived', archived_at = ? WHERE menu_key = ? AND status = 'current'", (now, menu_key))
+            conn.execute("UPDATE menu_image_versions SET status = 'current', published_at = ? WHERE id = ?", (now, draft["id"]))
+            conn.commit()
+            return dict(conn.execute("SELECT * FROM menu_image_versions WHERE id = ?", (draft["id"],)).fetchone())
+
+    def archive_menu_image(self, menu_key: str) -> Optional[Dict[str, Any]]:
+        now = datetime.utcnow().isoformat()
+        with self.get_connection() as conn:
+            row = conn.execute("SELECT * FROM menu_image_versions WHERE menu_key = ? AND status = 'current' ORDER BY version DESC LIMIT 1", (menu_key,)).fetchone()
+            if not row:
+                return None
+            conn.execute("UPDATE menu_image_versions SET status = 'archived', archived_at = ? WHERE id = ?", (now, row["id"]))
+            conn.commit()
+            return dict(conn.execute("SELECT * FROM menu_image_versions WHERE id = ?", (row["id"],)).fetchone())
+
+    def create_menu_image_archive(self, menu_key: str, image_path: str, uploaded_by: str) -> Dict[str, Any]:
+        now = datetime.utcnow().isoformat()
+        with self.get_connection() as conn:
+            version = conn.execute("SELECT COALESCE(MAX(version), 0) + 1 AS n FROM menu_image_versions WHERE menu_key = ?", (menu_key,)).fetchone()["n"]
+            cur = conn.execute("INSERT INTO menu_image_versions (menu_key, image_path, status, version, uploaded_at, uploaded_by, archived_at) VALUES (?, ?, 'archived', ?, ?, ?, ?)", (menu_key, image_path, version, now, uploaded_by, now))
+            conn.commit()
+            return dict(conn.execute("SELECT * FROM menu_image_versions WHERE id = ?", (cur.lastrowid,)).fetchone())
+
+    def list_menu_image_history(self, menu_key: str) -> list[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            return [dict(row) for row in conn.execute("SELECT * FROM menu_image_versions WHERE menu_key = ? AND status != 'draft' ORDER BY version DESC", (menu_key,)).fetchall()]
+
+    def restore_menu_image(self, menu_key: str, version_id: int) -> Optional[Dict[str, Any]]:
+        now = datetime.utcnow().isoformat()
+        with self.get_connection() as conn:
+            target = conn.execute("SELECT * FROM menu_image_versions WHERE id = ? AND menu_key = ? AND status = 'archived'", (version_id, menu_key)).fetchone()
+            if not target:
+                return None
+            conn.execute("UPDATE menu_image_versions SET status = 'archived', archived_at = ? WHERE menu_key = ? AND status = 'current'", (now, menu_key))
+            conn.execute("UPDATE menu_image_versions SET status = 'current', published_at = ?, archived_at = NULL WHERE id = ?", (now, version_id))
+            conn.commit()
+            return dict(conn.execute("SELECT * FROM menu_image_versions WHERE id = ?", (version_id,)).fetchone())
 
     def set_ad_product_route(self, ad_id: str, product: str) -> Dict[str, Any]:
         """Creates or updates the product shown first for one Meta ad ID."""
@@ -1086,6 +1202,111 @@ class Database:
             affected = cursor.rowcount
             conn.commit()
             return affected > 0
+
+    # --- LLM Assisted Resolution ------------------------------------------
+
+    def create_assisted_suggestion(self, **fields: Any) -> int:
+        """Create one pending suggestion, deduplicating the same open issue."""
+        with self.get_connection() as conn:
+            existing = conn.execute(
+                """SELECT id FROM assisted_resolution_suggestions
+                   WHERE user_id = ? AND channel = ? AND customer_message = ?
+                     AND status = 'PENDING_REVIEW'
+                   ORDER BY id DESC LIMIT 1""",
+                (str(fields.get("user_id")), str(fields.get("channel")), fields.get("customer_message", "")),
+            ).fetchone()
+            if existing:
+                return int(existing["id"])
+            columns = [
+                "escalation_id", "conversation_id", "user_id", "channel", "customer_message",
+                "triage_category", "detected_intent", "confidence", "matched_knowledge_id",
+                "matched_knowledge_source", "grounding_status", "grounding_details",
+                "suggested_answer", "original_suggested_answer", "status", "risk_flags",
+                "reviewed_at", "reviewed_by", "final_answer", "resolution_action",
+                "rejection_reason", "model", "source_routing_id",
+            ]
+            values = [fields.get(column) for column in columns]
+            values[5] = fields.get("triage_category") or "UNSUPPORTED"
+            values[7] = float(fields.get("confidence") or 0.0)
+            values[10] = fields.get("grounding_status") or "Not Grounded"
+            values[14] = fields.get("status") or "PENDING_REVIEW"
+            values[15] = json.dumps(fields.get("risk_flags") or [], ensure_ascii=False)
+            cursor = conn.execute(
+                f"INSERT INTO assisted_resolution_suggestions ({', '.join(columns)}) VALUES ({', '.join('?' for _ in columns)})",
+                values,
+            )
+            conn.commit()
+            return int(cursor.lastrowid)
+
+    @staticmethod
+    def _decode_assisted(row: sqlite3.Row) -> Dict[str, Any]:
+        item = dict(row)
+        try:
+            item["risk_flags"] = json.loads(item.get("risk_flags") or "[]")
+        except (TypeError, json.JSONDecodeError):
+            item["risk_flags"] = []
+        return item
+
+    def get_assisted_suggestion(self, suggestion_id: int) -> Optional[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM assisted_resolution_suggestions WHERE id = ?", (suggestion_id,)
+            ).fetchone()
+        return self._decode_assisted(row) if row else None
+
+    def list_assisted_suggestions(self, status: Optional[str] = None, category: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
+        query = "SELECT * FROM assisted_resolution_suggestions WHERE 1=1"
+        params: List[Any] = []
+        if status:
+            query += " AND status = ?"
+            params.append(status)
+        if category:
+            query += " AND triage_category = ?"
+            params.append(category)
+        query += " ORDER BY created_at DESC, id DESC LIMIT ?"
+        params.append(max(1, min(int(limit), 200)))
+        with self.get_connection() as conn:
+            rows = conn.execute(query, tuple(params)).fetchall()
+        return [self._decode_assisted(row) for row in rows]
+
+    def review_assisted_suggestion(self, suggestion_id: int, *, status: str, reviewed_by: str,
+                                   final_answer: Optional[str] = None, resolution_action: Optional[str] = None,
+                                   rejection_reason: Optional[str] = None) -> bool:
+        now = datetime.utcnow().isoformat()
+        with self.get_connection() as conn:
+            cursor = conn.execute(
+                """UPDATE assisted_resolution_suggestions
+                   SET status = ?, reviewed_at = ?, reviewed_by = ?, final_answer = ?,
+                       resolution_action = ?, rejection_reason = ?
+                   WHERE id = ? AND status = 'PENDING_REVIEW'""",
+                (status, now, reviewed_by, final_answer, resolution_action, rejection_reason, suggestion_id),
+            )
+            conn.commit()
+        return cursor.rowcount > 0
+
+    def assisted_metrics(self) -> Dict[str, int]:
+        with self.get_connection() as conn:
+            rows = conn.execute(
+                "SELECT status, COUNT(*) AS count FROM assisted_resolution_suggestions GROUP BY status"
+            ).fetchall()
+        counts = {str(row["status"]): int(row["count"]) for row in rows}
+        return {
+            "suggestions_reviewed": sum(counts.get(key, 0) for key in ("APPROVED", "EDITED_AND_APPROVED", "REJECTED", "SENT_TO_HUMAN", "TEACH_REQUIRED", "RESOLVED")),
+            "approved_as_is": counts.get("APPROVED", 0),
+            "edited_before_send": counts.get("EDITED_AND_APPROVED", 0),
+            "rejected": counts.get("REJECTED", 0),
+            "sent_to_human": counts.get("SENT_TO_HUMAN", 0),
+            "teach_required": counts.get("TEACH_REQUIRED", 0),
+        }
+
+    def increment_learned_knowledge_usage(self, knowledge_id: int) -> bool:
+        with self.get_connection() as conn:
+            cursor = conn.execute(
+                "UPDATE learned_knowledge SET usage_count = COALESCE(usage_count, 0) + 1, updated_at = ? WHERE id = ?",
+                (datetime.utcnow().isoformat(), knowledge_id),
+            )
+            conn.commit()
+        return cursor.rowcount > 0
 
     def log_rag_audit(
         self,

@@ -126,6 +126,14 @@ class Config:
     # is to measure where the two disagree before anything depends on it.
     # Off by default: it costs a Groq call per message.
     ROUTER_SHADOW_ENABLED: bool = os.getenv("ROUTER_SHADOW_ENABLED", "false").lower() in ("true", "1", "t", "yes")
+    # Compatibility controls for the Phase 3 assisted-resolution rollout.
+    # Triage remains shadow-only; automatic model resolution is never enabled
+    # by this slice and has no customer-send path.
+    LLM_TRIAGE_ENABLED: bool = os.getenv("LLM_TRIAGE_ENABLED", "true").lower() in ("true", "1", "t", "yes")
+    LLM_AUTO_RESOLVE_ENABLED: bool = os.getenv("LLM_AUTO_RESOLVE_ENABLED", "false").lower() in ("true", "1", "t", "yes")
+    # Assisted Resolution drafts suggestions for an authenticated human review
+    # queue. It never sends a model-generated customer reply by itself.
+    LLM_ASSISTED_RESOLUTION_ENABLED: bool = os.getenv("LLM_ASSISTED_RESOLUTION_ENABLED", "false").lower() in ("true", "1", "t", "yes")
     # The router runs on every message, so it is the call most likely to hit a
     # per-minute token ceiling — and it is a different job from writing a
     # reply, so it gets its own model rather than sharing GROQ_MODEL.
