@@ -64,7 +64,14 @@ def test_authenticated_approval_is_the_only_send_path(monkeypatch, tmp_path):
     monkeypatch.setattr(app_module, "db", database)
     monkeypatch.setattr(config, "ADMIN_PIN", "assisted-test-pin")
     sent = []
-    monkeypatch.setattr(app_module, "send_instagram_reply", lambda user_id, text, image_url=None: sent.append((user_id, text)))
+    # The production sender accepts correlation/audit metadata as keyword-only
+    # arguments.  Keep this test focused on the approval gate while allowing
+    # those observability fields to pass through the mock.
+    monkeypatch.setattr(
+        app_module,
+        "send_instagram_reply",
+        lambda user_id, text, image_url=None, **kwargs: sent.append((user_id, text)),
+    )
     suggestion_id = database.create_assisted_suggestion(
         user_id="u3", channel="instagram", customer_message="What is Jolbhora?",
         triage_category="AUTO_RESOLVE", suggested_answer="Jolbhora is a sweet.",
