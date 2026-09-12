@@ -1,6 +1,7 @@
 # Camellia Artisanal Chatbot v1.0 — Final Acceptance
 
 Date: 2026-09-13  
+Accepted production commit: `6d22cbc6dac3efd17a28f49b08e85b8df51c718c`  
 Verified production baseline: `c1aa23edeb9fb31e7d3e14d3a63821563e7eaa60`  
 Business-data implementation: `d0f13058cbbf1bbb1f35db09ad82d9baf69a52ee`
 
@@ -16,7 +17,7 @@ omitted or answered with a neutral confirmation request.
 
 ## Automated acceptance
 
-- Full suite: **1,382 passed**, 1 deprecation warning.
+- Full suite: **1,390 passed**, 1 deprecation warning.
 - Deterministic 50-scenario pack: **50 passed, 0 failed**.
 - Reel/Post/Ad, referential-intent, order/CAM and channel-policy tests:
   **162 passed**.
