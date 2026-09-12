@@ -269,6 +269,42 @@ class Database:
             self._ensure_column(cursor, "assisted_resolution_suggestions", "source_route_present", "INTEGER DEFAULT 0")
             self._ensure_column(cursor, "assisted_resolution_suggestions", "cam_interference", "INTEGER DEFAULT 0")
 
+            # Phase 4: durable Auto Resolve simulation/audit decisions.  These
+            # rows are evidence only while the production send flag is off.
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS auto_resolve_decisions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                assisted_suggestion_id INTEGER,
+                conversation_id INTEGER,
+                user_id TEXT,
+                channel TEXT NOT NULL,
+                customer_message TEXT NOT NULL,
+                matched_knowledge_id TEXT,
+                category TEXT,
+                confidence REAL,
+                grounding_status TEXT,
+                risk_flags TEXT NOT NULL DEFAULT '[]',
+                eligibility TEXT NOT NULL,
+                eligibility_reasons TEXT NOT NULL DEFAULT '[]',
+                simulated INTEGER DEFAULT 1,
+                would_auto_resolve INTEGER DEFAULT 0,
+                actually_sent INTEGER DEFAULT 0,
+                response_text TEXT,
+                final_human_outcome TEXT,
+                idempotency_key TEXT UNIQUE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+            self._ensure_column(cursor, "auto_resolve_decisions", "assisted_suggestion_id", "INTEGER")
+
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS auto_resolve_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+
             # RAG audit log table
             cursor.execute("""
             CREATE TABLE IF NOT EXISTS rag_audit_logs (
@@ -2726,7 +2762,12 @@ class Database:
             edit_score = round(1.0 - (similarity.ratio() if hasattr(similarity, "ratio") else similarity), 4)
             edit_severity = "Minor Edit" if edit_score <= 0.10 else ("Moderate Edit" if edit_score <= 0.30 else "Major Edit")
         with self.get_connection() as conn:
-            cur = conn.execute("UPDATE assisted_resolution_suggestions SET status=?, reviewed_at=?, reviewed_by=?, final_answer=?, resolution_action=?, rejection_reason=? WHERE id=? AND status='PENDING_REVIEW'", (status, datetime.utcnow().isoformat(), reviewed_by, final_answer, resolution_action, rejection_reason, suggestion_id)); conn.commit(); return cur.rowcount > 0
+            cur = conn.execute("UPDATE assisted_resolution_suggestions SET status=?, reviewed_at=?, reviewed_by=?, final_answer=?, resolution_action=?, rejection_reason=?, edit_score=COALESCE(?, edit_score), edit_severity=COALESCE(?, edit_severity) WHERE id=? AND status='PENDING_REVIEW'", (status, datetime.utcnow().isoformat(), reviewed_by, final_answer, resolution_action, rejection_reason, edit_score, edit_severity, suggestion_id))
+            if cur.rowcount:
+                # Keep the simulation-vs-human comparison joined by the same
+                # durable suggestion id; a pending row can only be reviewed once.
+                conn.execute("UPDATE auto_resolve_decisions SET final_human_outcome=? WHERE assisted_suggestion_id=?", (status, suggestion_id))
+            conn.commit(); return cur.rowcount > 0
 
     def record_assisted_edit_metrics(self, suggestion_id: int, original: str, final: str) -> Dict[str, Any]:
         similarity = SequenceMatcher(None, original or "", final or "").ratio()
@@ -2746,7 +2787,7 @@ class Database:
         """Read-only quality and safety rollups for the review dashboard."""
         with self.get_connection() as conn:
             rows = [self._decode_assisted(row) for row in conn.execute("SELECT * FROM assisted_resolution_suggestions ORDER BY created_at DESC, id DESC").fetchall()]
-            knowledge_rows = {str(row["id"]): dict(row) for row in conn.execute("SELECT id, topic, source, usage_count FROM learned_knowledge").fetchall()}
+            knowledge_rows = {str(row["id"]): dict(row) for row in conn.execute("SELECT id, topic, source, usage_count, last_used_at, updated_at, status FROM learned_knowledge").fetchall()}
         reviewed_statuses = {"APPROVED", "EDITED_AND_APPROVED", "REJECTED", "SENT_TO_HUMAN", "RESOLVED"}
         reviewed = [row for row in rows if row.get("status") in reviewed_statuses]
         count = lambda values, predicate: sum(1 for value in values if predicate(value))
@@ -2782,14 +2823,130 @@ class Database:
         knowledge_signals = []
         for key, group in __import__("itertools").groupby(sorted([row for row in rows if str(row.get("matched_knowledge_id") or "").startswith("learned_knowledge#")], key=lambda row: str(row.get("matched_knowledge_id"))), key=lambda row: str(row.get("matched_knowledge_id"))):
             items = list(group); numeric_id = key.rsplit("#", 1)[-1]; knowledge = knowledge_rows.get(numeric_id, {})
-            knowledge_signals.append({"knowledge_id": key, "topic": knowledge.get("topic"), "source": knowledge.get("source") or items[0].get("matched_knowledge_source"), "usage": knowledge.get("usage_count", 0), **outcome_counts(items), "knowledge_review_recommended": count(items, lambda row: row.get("status") == "REJECTED") >= 2})
+            signals = outcome_counts(items)
+            repeated_rejections = signals["rejected"] >= 2
+            major_edits = count(items, lambda row: row.get("edit_severity") == "Major Edit")
+            stale = not knowledge.get("last_used_at") and bool(knowledge.get("updated_at"))
+            knowledge_signals.append({"knowledge_id": key, "topic": knowledge.get("topic"), "source": knowledge.get("source") or items[0].get("matched_knowledge_source"), "usage": knowledge.get("usage_count", 0), "last_used": knowledge.get("last_used_at"), "last_updated": knowledge.get("updated_at"), "assisted_approvals": signals["approved_as_is"], "edits": signals["edited"], "major_edits": major_edits, "rejections": signals["rejected"], "simulation_eligible": any(row.get("would_auto_resolve") for row in rows if row.get("matched_knowledge_id") == key), "health": "Not Eligible for Auto Resolve" if repeated_rejections or major_edits >= 2 or knowledge.get("status") != "ACTIVE" else ("Review Recommended" if stale else "Healthy"), **signals, "knowledge_review_recommended": repeated_rejections})
         safety = {"source_routing_overrides": count(rows, lambda row: bool(row.get("source_route_present"))), "whatsapp_assisted_activity": count(rows, lambda row: str(row.get("channel")).lower() == "whatsapp"), "protected_order_flow": count(rows, lambda row: bool(row.get("protected_order_flow"))), "cam_interference": count(rows, lambda row: bool(row.get("cam_interference")))}
         safety["order_flow_interference"] = safety["protected_order_flow"] + safety["cam_interference"]
         unsafe = count(rows, lambda row: bool(row.get("risk_flags")) and row.get("status") in {"REJECTED", "SENT_TO_HUMAN"})
         commitment_errors = count(rows, lambda row: any(flag in (row.get("risk_flags") or []) for flag in ("price", "discount", "delivery_commitment")) and row.get("status") in {"REJECTED", "SENT_TO_HUMAN", "EDITED_AND_APPROVED"})
         grounded_reviewed = len([row for row in reviewed if row.get("grounding_status") == "Grounded" and row.get("triage_category") in {"AUTO_RESOLVE", "AI_SUGGESTED"}])
         readiness = {"reviewed_grounded_suggestions": {"value": grounded_reviewed, "target": 100}, "unsafe_factual_suggestions": unsafe, "high_confidence_rejected": len(high_confidence), "price_discount_delivery_errors": commitment_errors, "whatsapp_ai_activity": safety["whatsapp_assisted_activity"], "source_routing_overrides": safety["source_routing_overrides"], "order_flow_interference": safety["protected_order_flow"] + safety["cam_interference"], "target_gate": {"grounded_reviewed": ">= 100", "unsafe_factual": 0, "price_discount_delivery": 0, "whatsapp_activity": 0, "source_routing_overrides": 0, "order_flow_interference": 0, "high_confidence_false_decisions": "near 0"}}
-        return {"performance": performance, "confidence_buckets": confidence_buckets, "category_breakdown": category_breakdown, "grounding_breakdown": grounding_breakdown, "risk_breakdown": risk_breakdown, "high_confidence_problems": [{key: row.get(key) for key in ("id", "customer_message", "confidence", "triage_category", "grounding_status", "matched_knowledge_source", "suggested_answer", "final_answer", "status", "rejection_reason", "edit_severity")} for row in high_confidence], "shadow_vs_assisted": shadow_comparison, "knowledge_signals": knowledge_signals, "safety": safety, "readiness": readiness}
+        auto_eval = self.auto_resolve_evaluation()
+        safety.update({
+            "auto_resolve_source_routing_overrides": auto_eval["source_routing_overrides"],
+            "auto_resolve_whatsapp_activity": auto_eval["whatsapp_ai_activity"],
+            "auto_resolve_order_flow_interference": auto_eval["order_cam_interference"],
+        })
+        readiness.update({
+            "simulated_eligible_cases": auto_eval["simulated_eligible_cases"],
+            "simulation_false_positives": auto_eval["simulation_false_positives"],
+            "human_handoffs": performance["sent_to_human"],
+            "major_edits": count(rows, lambda row: row.get("edit_severity") == "Major Edit"),
+            "risk_violations": auto_eval["risk_violations"],
+            "readiness_status": auto_eval["readiness_status"],
+        })
+        return {"performance": performance, "confidence_buckets": confidence_buckets, "category_breakdown": category_breakdown, "grounding_breakdown": grounding_breakdown, "risk_breakdown": risk_breakdown, "high_confidence_problems": [{key: row.get(key) for key in ("id", "customer_message", "confidence", "triage_category", "grounding_status", "matched_knowledge_source", "suggested_answer", "final_answer", "status", "rejection_reason", "edit_severity")} for row in high_confidence], "shadow_vs_assisted": shadow_comparison, "knowledge_signals": knowledge_signals, "safety": safety, "readiness": readiness, "auto_resolve": auto_eval}
+
+    @staticmethod
+    def _decode_auto_resolve(row: sqlite3.Row) -> Dict[str, Any]:
+        item = dict(row)
+        for key in ("risk_flags", "eligibility_reasons"):
+            try:
+                item[key] = json.loads(item.get(key) or "[]")
+            except (TypeError, json.JSONDecodeError):
+                item[key] = []
+        for key in ("simulated", "would_auto_resolve", "actually_sent"):
+            item[key] = bool(item.get(key))
+        return item
+
+    def record_auto_resolve_decision(self, **fields: Any) -> Dict[str, Any]:
+        """Insert one decision, returning the existing row on webhook replay."""
+        key = str(fields.get("idempotency_key") or "")[:300]
+        columns = [
+            "assisted_suggestion_id", "conversation_id", "user_id", "channel",
+            "customer_message", "matched_knowledge_id", "category", "confidence",
+            "grounding_status", "risk_flags", "eligibility", "eligibility_reasons",
+            "simulated", "would_auto_resolve", "actually_sent", "response_text", "idempotency_key",
+        ]
+        values = [fields.get(c) for c in columns]
+        values[9] = json.dumps(fields.get("risk_flags") or [], ensure_ascii=False)
+        values[11] = json.dumps(fields.get("eligibility_reasons") or [], ensure_ascii=False)
+        values[12:15] = [int(bool(fields.get("simulated", True))), int(bool(fields.get("would_auto_resolve"))), int(bool(fields.get("actually_sent")))]
+        with self.get_connection() as conn:
+            existing = conn.execute("SELECT * FROM auto_resolve_decisions WHERE idempotency_key=?", (key,)).fetchone() if key else None
+            if existing:
+                return self._decode_auto_resolve(existing)
+            try:
+                cur = conn.execute(f"INSERT INTO auto_resolve_decisions ({', '.join(columns)}) VALUES ({', '.join('?' for _ in columns)})", values)
+            except sqlite3.IntegrityError:
+                existing = conn.execute("SELECT * FROM auto_resolve_decisions WHERE idempotency_key=?", (key,)).fetchone()
+                if existing:
+                    return self._decode_auto_resolve(existing)
+                raise
+            conn.commit()
+            return self._decode_auto_resolve(conn.execute("SELECT * FROM auto_resolve_decisions WHERE id=?", (cur.lastrowid,)).fetchone())
+
+    def list_auto_resolve_decisions(self, limit: int = 200) -> List[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            rows = conn.execute("SELECT * FROM auto_resolve_decisions ORDER BY id DESC LIMIT ?", (max(1, min(int(limit), 500)),)).fetchall()
+        return [self._decode_auto_resolve(row) for row in rows]
+
+    def auto_resolve_evaluation(self) -> Dict[str, Any]:
+        with self.get_connection() as conn:
+            rows = [self._decode_auto_resolve(row) for row in conn.execute("SELECT * FROM auto_resolve_decisions ORDER BY id DESC").fetchall()]
+        simulated = [row for row in rows if row.get("simulated")]
+        eligible = [row for row in simulated if row.get("would_auto_resolve")]
+        false_positive_statuses = {"REJECTED", "SENT_TO_HUMAN", "TEACH_REQUIRED"}
+        false_positives = [row for row in eligible if row.get("final_human_outcome") in false_positive_statuses or (row.get("final_human_outcome") == "EDITED_AND_APPROVED" and "Major" in str(row.get("edit_severity") or ""))]
+        source_overrides = sum(1 for row in rows if "source_route_precedence" not in (row.get("eligibility_reasons") or []) and str(row.get("channel")).lower() == "instagram" and row.get("would_auto_resolve") and row.get("matched_knowledge_id") and row.get("category") in {"AUTO_RESOLVE", "GENERAL_FAQ"} and row.get("eligibility_reasons") == [])
+        whatsapp_activity = sum(1 for row in rows if str(row.get("channel")).lower() == "whatsapp" and (row.get("actually_sent") or row.get("would_auto_resolve")))
+        order_interference = sum(1 for row in rows if any(reason in (row.get("eligibility_reasons") or []) for reason in ("protected_order_flow", "cam_handoff_conflict")) and row.get("actually_sent"))
+        risk_violations = sum(1 for row in rows if row.get("would_auto_resolve") and set(row.get("risk_flags") or set()) )
+        reviewed_grounded = sum(1 for row in rows if row.get("final_human_outcome") and str(row.get("grounding_status")).lower() == "grounded")
+        if reviewed_grounded >= 100 and len(eligible) >= 50 and not false_positives and not source_overrides and not whatsapp_activity and not order_interference and not risk_violations:
+            readiness_status = "PILOT ELIGIBLE"
+        elif rows:
+            readiness_status = "OBSERVING"
+        else:
+            readiness_status = "NOT READY"
+        return {
+            "decisions": len(rows), "simulated_eligible_cases": len(eligible),
+            "simulation_false_positives": len(false_positives), "source_routing_overrides": source_overrides,
+            "whatsapp_ai_activity": whatsapp_activity, "order_cam_interference": order_interference,
+            "risk_violations": risk_violations, "reviewed_grounded_cases": reviewed_grounded,
+            "approved_as_is": sum(1 for row in rows if row.get("final_human_outcome") == "APPROVED"),
+            "edited_cases": sum(1 for row in rows if row.get("final_human_outcome") == "EDITED_AND_APPROVED"),
+            "rejected_cases": sum(1 for row in rows if row.get("final_human_outcome") == "REJECTED"),
+            "human_handoffs": sum(1 for row in rows if row.get("final_human_outcome") == "SENT_TO_HUMAN"),
+            "readiness_status": readiness_status, "false_positive_rows": false_positives,
+        }
+
+    def knowledge_resolution_problems(self, knowledge_id: str) -> Dict[str, int]:
+        with self.get_connection() as conn:
+            rows = conn.execute("SELECT status, edit_severity FROM assisted_resolution_suggestions WHERE matched_knowledge_id=?", (knowledge_id,)).fetchall()
+        return {
+            "repeated_rejections": sum(1 for row in rows if row["status"] == "REJECTED") >= 2,
+            "major_edits": sum(1 for row in rows if row["edit_severity"] == "Major Edit") >= 2,
+        }
+
+    def get_auto_resolve_settings(self) -> Dict[str, Any]:
+        defaults = {"kill_switch": True, "category_controls": {"GENERAL_FAQ": False, "PRODUCT_DESCRIPTION": False, "MENU_EXPLANATION": False, "GENERAL_BRAND_INFORMATION": False, "AUTO_RESOLVE": False}}
+        with self.get_connection() as conn:
+            rows = {row["key"]: row["value"] for row in conn.execute("SELECT key, value FROM auto_resolve_settings").fetchall()}
+        try: defaults["kill_switch"] = json.loads(rows.get("kill_switch", "true"))
+        except Exception: pass
+        try: defaults["category_controls"].update(json.loads(rows.get("category_controls", "{}")))
+        except Exception: pass
+        defaults.update({"simulation_enabled": bool(config.LLM_AUTO_RESOLVE_SIMULATION_ENABLED), "actual_enabled": bool(config.LLM_AUTO_RESOLVE_ENABLED and defaults["kill_switch"]), "min_confidence": config.LLM_AUTO_RESOLVE_MIN_CONFIDENCE})
+        return defaults
+
+    def set_auto_resolve_setting(self, key: str, value: Any) -> None:
+        with self.get_connection() as conn:
+            conn.execute("INSERT INTO auto_resolve_settings (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at", (key, json.dumps(value), datetime.utcnow().isoformat()))
+            conn.commit()
 
     def increment_learned_knowledge_usage(self, knowledge_id: int) -> bool:
         with self.get_connection() as conn:

@@ -175,6 +175,17 @@ class Config:
     # answer by itself; automatic resolution remains explicitly disabled.
     LLM_ASSISTED_RESOLUTION_ENABLED: bool = os.getenv("LLM_ASSISTED_RESOLUTION_ENABLED", "false").lower() in ("true", "1", "t", "yes")
     LLM_AUTO_RESOLVE_ENABLED: bool = os.getenv("LLM_AUTO_RESOLVE_ENABLED", "false").lower() in ("true", "1", "t", "yes")
+    # Phase 4: evaluate every deterministic eligibility gate in shadow mode,
+    # but never send a customer reply. Actual sending remains independently
+    # disabled by LLM_AUTO_RESOLVE_ENABLED and the category controls below.
+    LLM_AUTO_RESOLVE_SIMULATION_ENABLED: bool = os.getenv("LLM_AUTO_RESOLVE_SIMULATION_ENABLED", "true").lower() in ("true", "1", "t", "yes")
+    try:
+        LLM_AUTO_RESOLVE_MIN_CONFIDENCE: float = max(0.0, min(1.0, float(os.getenv("LLM_AUTO_RESOLVE_MIN_CONFIDENCE", "0.95"))))
+    except ValueError:
+        LLM_AUTO_RESOLVE_MIN_CONFIDENCE: float = 0.95
+    # Comma-separated category names are deliberately empty by default: a
+    # future pilot must opt a single safe category in explicitly.
+    LLM_AUTO_RESOLVE_ALLOWED_CATEGORIES: str = os.getenv("LLM_AUTO_RESOLVE_ALLOWED_CATEGORIES", "")
     # Its own model for the same reason the router has one: a different job,
     # a different rate-limit bucket, and freedom to change one without
     # touching the other.

@@ -74,6 +74,7 @@ from camellia.monitoring import get_logger, delivery_monitor, latency_monitor
 from camellia.knowledge import SOURCE_MAP
 from camellia.candidate_safety import candidate_eligibility, detect_business_commitment_warnings, validate_candidate_answer
 from camellia.assisted_resolution import create_suggestion
+from camellia.auto_resolve import simulate_auto_resolve
 
 log = get_logger("camellia.app")
 
@@ -412,12 +413,17 @@ def _process_instagram_event(
         # Human-gated assisted resolution: unresolved Instagram messages only.
         # The draft is durable and reviewable; it is never sent from this path.
         protected_flow = bool(facts.get("cart") or facts.get("order_draft")) or template_id in ("order_draft_receipt", "order_next_steps")
-        if config.LLM_ASSISTED_RESOLUTION_ENABLED and not was_matched and not protected_flow and not source_route:
-            create_suggestion(
+        if (config.LLM_ASSISTED_RESOLUTION_ENABLED or config.LLM_AUTO_RESOLVE_SIMULATION_ENABLED) and not was_matched and not protected_flow and not source_route:
+            assisted_suggestion = create_suggestion(
                 user_id=sender_id, channel="instagram", customer_message=message_text,
                 deterministic_resolved=False, active_protected_flow=protected_flow,
                 source_routed=bool(source_route), source_routing_id=trace.get("source_routing_id"),
             )
+            # Full deterministic eligibility runs in simulation, but this call
+            # only records an audit row.  It never sends an automatic reply;
+            # the normal human-gated assisted workflow below remains intact.
+            if assisted_suggestion and config.LLM_AUTO_RESOLVE_SIMULATION_ENABLED:
+                simulate_auto_resolve(assisted_suggestion, protected_order_flow=protected_flow, source_routed=bool(source_route))
 
         # Channel policy: Instagram is the only AI chatbot channel. When it
         # cannot answer — an unsupported question, or an order/event ask that
@@ -1704,6 +1710,12 @@ def health_check():
             "escalation_alerts_to": alert_destination,
             "router_shadow": router_shadow,
             "llm_triage": llm_triage,
+            "auto_resolve": {
+                "simulation_enabled": config.LLM_AUTO_RESOLVE_SIMULATION_ENABLED,
+                "actual_enabled": bool(config.LLM_AUTO_RESOLVE_ENABLED and db.get_auto_resolve_settings().get("kill_switch", True)),
+                "min_confidence": config.LLM_AUTO_RESOLVE_MIN_CONFIDENCE,
+                "readiness": db.auto_resolve_evaluation().get("readiness_status", "NOT READY"),
+            },
             "language_understanding": {
                 "structured_nlu_enabled": config.STRUCTURED_NLU_ENABLED,
                 "rollout_percent": config.STRUCTURED_NLU_ROLLOUT_PERCENT,
@@ -2314,7 +2326,52 @@ def get_assisted_resolution_metrics(x_admin_key: Optional[str] = Header(None), x
 @app.get("/admin/assisted-resolutions/analytics")
 def get_assisted_resolution_evaluation(x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
     require_admin(x_admin_key, x_admin_pin)
-    return {"status": "success", "evaluation": db.assisted_evaluation(), "auto_resolve_enabled": bool(config.LLM_AUTO_RESOLVE_ENABLED)}
+    return {"status": "success", "evaluation": db.assisted_evaluation(), "auto_resolve_enabled": bool(config.LLM_AUTO_RESOLVE_ENABLED), "auto_resolve_settings": db.get_auto_resolve_settings()}
+
+
+@app.get("/admin/auto-resolve/evaluation")
+def get_auto_resolve_evaluation(x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    """Authenticated, read-only simulation and readiness evidence."""
+    require_admin(x_admin_key, x_admin_pin)
+    return {"status": "success", "evaluation": db.auto_resolve_evaluation(), "settings": db.get_auto_resolve_settings(), "decisions": db.list_auto_resolve_decisions()}
+
+
+@app.get("/admin/auto-resolve/settings")
+def get_auto_resolve_settings(x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    settings = db.get_auto_resolve_settings()
+    settings["state_label"] = "AUTO RESOLVE: ON" if settings["actual_enabled"] else "AUTO RESOLVE: OFF"
+    return {"status": "success", "settings": settings}
+
+
+@app.post("/admin/auto-resolve/kill-switch")
+async def set_auto_resolve_kill_switch(request: Request, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    enabled = bool(body.get("enabled", False))
+    db.set_auto_resolve_setting("kill_switch", enabled)
+    settings = db.get_auto_resolve_settings()
+    return {"status": "success", "kill_switch": enabled, "settings": settings}
+
+
+@app.post("/admin/auto-resolve/category-controls")
+async def set_auto_resolve_category_controls(request: Request, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    controls = body.get("category_controls") if isinstance(body, dict) else None
+    if not isinstance(controls, dict):
+        raise HTTPException(status_code=400, detail="category_controls must be an object")
+    # Real category activation is intentionally blocked while the global env
+    # switch is false.  Operators may still save a pilot plan for later.
+    normalized = {str(k).strip().upper(): bool(v) for k, v in controls.items() if str(k).strip()}
+    db.set_auto_resolve_setting("category_controls", normalized)
+    return {"status": "success", "settings": db.get_auto_resolve_settings(), "actual_send_enabled": bool(config.LLM_AUTO_RESOLVE_ENABLED)}
 
 
 def _assisted_reviewer(x_admin_key: Optional[str], x_admin_pin: Optional[str]) -> str:
@@ -3371,8 +3428,15 @@ def create_db_backup(
     backup_path = f"{src_path}.backup-{stamp}"
     shutil.copy2(src_path, backup_path)
     size_bytes = os.path.getsize(backup_path)
+    integrity_check = "unknown"
+    try:
+        with sqlite3.connect(backup_path) as verify_conn:
+            integrity_check = str(verify_conn.execute("PRAGMA integrity_check;").fetchone()[0])
+    except Exception as e:
+        log.warning("Database backup integrity check failed: %s", e)
+        integrity_check = f"error:{type(e).__name__}"
     log.info("Database backed up to %s (%d bytes)", backup_path, size_bytes)
-    return {"status": "backed_up", "backup_path": backup_path, "size_bytes": size_bytes, "source_path": src_path}
+    return {"status": "backed_up", "backup_path": backup_path, "size_bytes": size_bytes, "source_path": src_path, "integrity_check": integrity_check, "verified": integrity_check.lower() == "ok" and size_bytes > 0}
 
 @app.get("/admin/knowledge-gaps")
 def get_knowledge_gaps(
@@ -4891,6 +4955,8 @@ THIS WEEK'S BENGAL SPECIALS
                 </div>
                 <div id="assistedPerformanceSummary" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:14px 0;"></div>
                 <div id="assistedReadiness" style="padding:12px;border:1px solid var(--border);border-radius:10px;margin-bottom:14px;"><b>Auto Resolve Readiness</b><span id="assistedReadinessBody">Loading…</span></div>
+                <div id="autoResolveControlState" style="padding:12px;border:1px solid #FDE68A;background:#FFFBEB;border-radius:10px;margin-bottom:14px;"><b>AUTO RESOLVE: OFF</b><span id="autoResolveControlDetail" style="margin-left:8px;color:var(--text-muted);">Simulation status loading…</span></div>
+                <div id="autoResolveMetrics" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:14px;"></div>
                 <div style="overflow-x:auto;margin-bottom:14px;"><table class="data-table"><thead><tr><th>Confidence Bucket</th><th>Reviewed</th><th>Approved As-Is</th><th>Edited</th><th>Rejected</th><th>Human Handoff</th></tr></thead><tbody id="assistedConfidenceTable"></tbody></table></div>
                 <div style="overflow-x:auto;margin-bottom:14px;"><table class="data-table"><thead><tr><th>Category</th><th>Total</th><th>Approved</th><th>Edited</th><th>Rejected</th><th>Human Final Action</th></tr></thead><tbody id="assistedCategoryTable"></tbody></table></div>
                 <div style="overflow-x:auto;margin-bottom:14px;"><table class="data-table"><thead><tr><th>Grounding</th><th>Reviewed</th><th>Approved</th><th>Edited</th><th>Rejected</th><th>Sent to Human</th></tr></thead><tbody id="assistedGroundingTable"></tbody></table></div>
@@ -7311,13 +7377,23 @@ Non-Veg:
                 const resp = await fetch('/admin/assisted-resolutions/evaluation', { headers: getAuthHeaders() });
                 if (!resp.ok) throw new Error('evaluation unavailable');
                 const data = await resp.json();
-                const ev = data.evaluation || {}, p = ev.performance || {}, readiness = ev.readiness || {}, safety = ev.safety || {};
+                const ev = data.evaluation || {}, p = ev.performance || {}, readiness = ev.readiness || {}, safety = ev.safety || {}, ar = ev.auto_resolve || {};
                 const card = (label, value) => `<div style="padding:10px;border:1px solid var(--border);border-radius:10px;text-align:center"><small>${escapeHtml(label)}</small><h3 style="margin:4px 0">${escapeHtml(value)}</h3></div>`;
                 document.getElementById('assistedPerformanceSummary').innerHTML = [
                     card('Suggestions Generated', p.suggestions_generated || 0), card('Reviewed', p.reviewed || 0), card('Approved As-Is', p.approved_as_is || 0), card('Edited & Approved', p.edited_and_approved || 0), card('Rejected', p.rejected || 0), card('Sent to Human', p.sent_to_human || 0), card('Teach & Resolve', p.teach_and_resolve || 0), card('Non-Actionable Dismissed', p.non_actionable_dismissed || 0),
                 ].join('');
                 const readinessText = readiness.reviewed_grounded_suggestions ? `${readiness.reviewed_grounded_suggestions.value} / ${readiness.reviewed_grounded_suggestions.target} grounded human-reviewed suggestions · unsafe facts ${readiness.unsafe_factual_suggestions || 0} · high-confidence problems ${readiness.high_confidence_rejected || 0} · price/discount/delivery errors ${readiness.price_discount_delivery_errors || 0} · Auto Resolve: ${data.auto_resolve_enabled ? 'ENABLED (unexpected)' : 'OFF'}` : 'No data yet.';
                 document.getElementById('assistedReadinessBody').innerHTML = ` <span style="font-weight:400;margin-left:8px">${escapeHtml(readinessText)}</span>`;
+                const settings = data.auto_resolve_settings || {};
+                const state = document.getElementById('autoResolveControlState');
+                if (state) {
+                    state.innerHTML = `<b>${escapeHtml(settings.state_label || (settings.actual_enabled ? 'AUTO RESOLVE: ON' : 'AUTO RESOLVE: OFF'))}</b><span id="autoResolveControlDetail" style="margin-left:8px;color:var(--text-muted)">Simulation ${settings.simulation_enabled ? 'ON' : 'OFF'} · Readiness ${escapeHtml(readiness.readiness_status || ar.readiness_status || 'NOT READY')} · ${ar.simulated_eligible_cases || 0} simulated eligible · ${ar.simulation_false_positives || 0} false positives</span>`;
+                }
+                const metricTarget = document.getElementById('autoResolveMetrics');
+                if (metricTarget) {
+                    const metric = (label, value) => `<div style="padding:10px;border:1px solid var(--border);border-radius:10px;text-align:center"><small>${escapeHtml(label)}</small><h3 style="margin:4px 0">${escapeHtml(value)}</h3></div>`;
+                    metricTarget.innerHTML = [metric('Simulated Eligible', ar.simulated_eligible_cases || 0), metric('False Positives', ar.simulation_false_positives || 0), metric('Grounded Reviewed', ar.reviewed_grounded_cases || 0), metric('Risk Violations', ar.risk_violations || 0), metric('Source Overrides', ar.source_routing_overrides || 0), metric('WhatsApp AI', ar.whatsapp_ai_activity || 0), metric('Order/CAM Interference', ar.order_cam_interference || 0)].join('');
+                }
                 const rows = (obj, labels) => labels.map(label => { const x = obj[label] || {}; return `<tr><td>${escapeHtml(label)}</td><td>${x.reviewed ?? x.total ?? 0}</td><td>${x.approved_as_is || x.approved || 0}</td><td>${x.edited || 0}</td><td>${x.rejected || 0}</td><td>${x.human_handoff || x.sent_to_human || 0}</td></tr>`; }).join('');
                 document.getElementById('assistedConfidenceTable').innerHTML = rows(ev.confidence_buckets || {}, Object.keys(ev.confidence_buckets || {}));
                 document.getElementById('assistedCategoryTable').innerHTML = rows(ev.category_breakdown || {}, Object.keys(ev.category_breakdown || {}));

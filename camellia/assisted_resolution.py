@@ -25,6 +25,10 @@ def business_risk_flags(message: str) -> list[str]:
         ("allergen", r"\b(allerg|nut|gluten|dairy|ingredient)\w*\b"),
         ("custom_order", r"\b(custom|customise|customize|bespoke|special order)\b"),
         ("order_change", r"\b(change|modify|amend|swap|remove)\b.*\b(order|box|item|flavour|delivery)\b"),
+        ("quantity", r"\b(?:\d+|one|two|three|four|five|ten|twenty|fifty|hundred)\s+(?:boxes?|pieces?|packs?|orders?)\b|\bhow many\b|\bquantity\b"),
+        ("complaint", r"\b(complaint|complain|unhappy|disappointed|bad experience|wrong order)\b"),
+        ("escalation", r"\b(escalat|urgent|immediately|manager)\w*\b"),
+        ("human", r"\b(human|person|agent|representative|speak to|talk to)\b"),
     )
     return [name for name, pattern in patterns if re.search(pattern, text, re.IGNORECASE)]
 
