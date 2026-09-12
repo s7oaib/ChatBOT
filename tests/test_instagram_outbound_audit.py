@@ -85,6 +85,54 @@ def test_instagram_sender_records_meta_error_without_credentials_in_audit():
     assert completed[0][1]["meta_trace_id"] == "trace.error"
 
 
+def test_instagram_sender_chunks_text_at_meta_limit():
+    from camellia import app as app_module
+
+    class Response:
+        status_code = 200
+        headers = {"x-fb-trace-id": "trace.ok"}
+
+        def __init__(self, message_id):
+            self.message_id = message_id
+
+        def json(self):
+            return {"message_id": self.message_id}
+
+        def raise_for_status(self):
+            return None
+
+    class Client:
+        bodies = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def post(self, *args, **kwargs):
+            body = kwargs["json"]["message"]["text"]
+            self.bodies.append(body)
+            return Response(f"mid.{len(self.bodies)}")
+
+    client = Client()
+    created = []
+    completed = []
+    text = ("A" * 600) + "\n\n" + ("B" * 600)
+
+    with patch.object(config, "INSTAGRAM_ACCESS_TOKEN", "token-value"), \
+         patch.object(app_module.httpx, "Client", lambda *args, **kwargs: client), \
+         patch.object(app_module.db, "create_instagram_outbound_audit", side_effect=lambda **kwargs: created.append(kwargs) or len(created)), \
+         patch.object(app_module.db, "complete_instagram_outbound_audit", side_effect=lambda *args, **kwargs: completed.append((args, kwargs))):
+        result = app_module.send_instagram_reply("customer-123", text, inbound_message_id=42)
+
+    assert result["message_id"] == "mid.2"
+    assert len(client.bodies) == 2
+    assert all(len(chunk) <= 1000 for chunk in client.bodies)
+    assert "".join(client.bodies) == text
+    assert len(created) == len(completed) == 2
+
+
 def test_admin_outbound_audit_is_authenticated_and_read_only():
     client = TestClient(app)
     assert client.get("/admin/instagram-outbound-audit").status_code == 403

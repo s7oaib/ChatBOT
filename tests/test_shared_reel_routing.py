@@ -199,6 +199,28 @@ def test_shared_reel_sets_session_context_for_the_next_message(routed_db, monkey
     assert stored["source_match_method"] == "shared_media_url"
 
 
+def test_fresh_reel_then_tell_me_more_uses_source_context_and_dispatches(routed_db, monkeypatch):
+    sender_id = "sender_reel_acceptance"
+    identity = shared_reel_identity({"attachments": [_reel_attachment(CONFIGURED_URL)]})
+    assert app_module._establish_shared_reel_context(sender_id, identity) is True
+
+    logged = []
+    sent = []
+    monkeypatch.setattr(app_module.db, "log_conversation", lambda *args, **kwargs: logged.append((args, kwargs)) or 901)
+    monkeypatch.setattr(app_module, "send_instagram_reply", lambda *args, **kwargs: sent.append((args, kwargs)))
+
+    app_module._process_instagram_event(sender_id, "Tell me more", None)
+
+    assert sent
+    assert sent[0][1]["inbound_message_id"] == 901
+    assert sent[0][0][1]
+    trace = logged[0][1]
+    assert trace["source_context_used"] is True
+    assert trace["source_routing_id"] is not None
+    assert trace["source_match_method"] == "shared_media_url"
+    assert "can't open photos" not in sent[0][0][1].lower()
+
+
 def test_unconfigured_reel_leaves_the_session_untouched(routed_db, monkeypatch):
     stored = {}
     monkeypatch.setattr(app_module.session_memory, "get_facts", lambda uid, ch: stored)

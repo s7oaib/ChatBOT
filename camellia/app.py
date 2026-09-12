@@ -1065,6 +1065,32 @@ def _meta_error_fields(payload: Any) -> Tuple[Any, Any, Optional[str]]:
     )
 
 
+_INSTAGRAM_MAX_TEXT_CHARS = 1000
+
+
+def _split_instagram_text(text: str, limit: int = _INSTAGRAM_MAX_TEXT_CHARS) -> List[str]:
+    """Split text into Meta-safe messages without changing its content."""
+    value = str(text or "")
+    if len(value) <= limit:
+        return [value] if value else []
+
+    chunks: List[str] = []
+    while value:
+        if len(value) <= limit:
+            chunks.append(value)
+            break
+        # Keep paragraph/line boundaries where possible, while guaranteeing
+        # every outbound Instagram text message is within Meta's limit.
+        cut = value.rfind("\n", 0, limit + 1)
+        if cut <= limit // 2:
+            cut = limit
+        else:
+            cut += 1
+        chunks.append(value[:cut])
+        value = value[cut:]
+    return chunks
+
+
 def send_instagram_reply(
     recipient_id: str,
     text: str,
@@ -1203,12 +1229,19 @@ def send_instagram_reply(
                         )
                     raise
 
+            def send_text_body(body: str):
+                for chunk in _split_instagram_text(body):
+                    send_request(
+                        {"recipient": {"id": recipient_id}, "message": {"text": chunk}},
+                        kind="text",
+                    )
+
             if text and not cards_first:
-                send_request({"recipient": {"id": recipient_id}, "message": {"text": text}}, kind="text")
+                send_text_body(text)
 
             for img, caption in captioned:
                 if caption and caption_first:
-                    send_request({"recipient": {"id": recipient_id}, "message": {"text": caption}}, kind="text")
+                    send_text_body(caption)
                 # A rejected card must not cost the customer the whole reply.
                 # Meta refuses images for reasons outside our control — an
                 # unreachable host, an unsupported format, a size limit — and
@@ -1222,11 +1255,11 @@ def send_instagram_reply(
                 except Exception as img_error:
                     log.warning("Instagram rejected image card %s: %s", img, img_error)
                 if caption and not caption_first:
-                    send_request({"recipient": {"id": recipient_id}, "message": {"text": caption}}, kind="text")
+                    send_text_body(caption)
 
             # The closing question follows the cards it refers to.
             if text and cards_first:
-                send_request({"recipient": {"id": recipient_id}, "message": {"text": text}}, kind="text")
+                send_text_body(text)
 
             delivery_monitor.record_success("instagram")
             return last.json() if last is not None else {"status": "no_content"}
