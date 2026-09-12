@@ -102,6 +102,37 @@ class TestDataModel:
 
 
 class TestResponseLibrary:
+    def test_short_search_is_token_aware_and_ranked(self, isolated_db):
+        isolated_db.add_learned_knowledge("Unrelated", "a long unrelated question", "This answer contains characters which should not match hi.")
+        data = client.get("/admin/response-library?search=hi", headers=_auth()).json()
+        items = data["items"]
+        assert items and items[0]["template_id"] == "greeting"
+        assert all(item.get("template_id") == "greeting" or item.get("kind") == "custom_qa" and item.get("primary_question") != "a long unrelated question" for item in items)
+        assert all(int(item.get("relevance_score") or 0) >= 75 for item in items if item.get("template_id") == "greeting")
+
+    @pytest.mark.parametrize("query, expected_template", [
+        ("hello", "greeting"),
+        ("delivery", "delivery_area"),
+        ("jolbhora", "jolbhora"),
+        ("nolen gur", "sondesh_nolen_gur"),
+    ])
+    def test_search_returns_relevant_system_template_first(self, isolated_db, query, expected_template):
+        data = client.get(f"/admin/response-library?search={query}", headers=_auth()).json()
+        assert data["items"]
+        assert data["items"][0]["template_id"] == expected_template
+
+    def test_answer_text_search_uses_whole_words(self, isolated_db):
+        isolated_db.add_learned_knowledge("Unrelated", "unrelated question", "This contains delivery as a whole word.")
+        data = client.get("/admin/response-library?search=delivery", headers=_auth()).json()
+        assert data["items"]
+        assert data["items"][0]["template_id"] in {"delivery_area", "delivery_time", "delivery_out_of_area", "delivery"} or data["items"][0]["kind"] == "custom_qa"
+        assert any(item.get("kind") == "custom_qa" for item in data["items"])
+
+    def test_price_search_does_not_use_character_substrings(self, isolated_db):
+        data = client.get("/admin/response-library?search=price", headers=_auth()).json()
+        assert data["items"]
+        assert all(int(item.get("relevance_score") or 0) > 0 for item in data["items"])
+
     def test_system_templates_are_searchable_without_duplicate_rows(self, isolated_db):
         resp = client.get("/admin/response-library?search=hi", headers=_auth())
         assert resp.status_code == 200

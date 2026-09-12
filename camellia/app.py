@@ -3135,6 +3135,52 @@ def _system_template_public(template: Dict[str, Any], override: Optional[Dict[st
     }
 
 
+def _response_library_search_score(query: Optional[str], item: Dict[str, Any]) -> int:
+    """Rank library discovery fields without matching character substrings."""
+    needle = " ".join(str(query or "").casefold().split())
+    if not needle:
+        return 1
+    query_tokens = re.findall(r"[\w]+", needle, flags=re.UNICODE)
+    if not query_tokens:
+        return 0
+    # One- and two-character searches are intentionally strict: they may
+    # identify a trigger/title token, but never scan answer paragraphs or use
+    # fuzzy matching. This prevents `hi` from matching `this`/`which`.
+    short = len(needle.replace(" ", "")) <= 2
+    fields = {
+        "primary": [item.get("primary_question")],
+        "alias": list(item.get("aliases") or []),
+        "title": [item.get("title")],
+        "id_category": [item.get("template_id"), item.get("category"), item.get("topic")],
+        "answer": [item.get("approved_answer")],
+    }
+    def normalized(value: Any) -> str:
+        return " ".join(str(value or "").casefold().split())
+    def token_set(values: List[Any]) -> set:
+        return {token for value in values for token in re.findall(r"[\w]+", normalized(value), flags=re.UNICODE)}
+
+    # Primary question is the first trigger; additional triggers are aliases.
+    if any(normalized(value) == needle for value in fields["primary"]):
+        return 100
+    if any(normalized(value) == needle for value in fields["alias"]):
+        return 95
+    if any(normalized(value) == needle for value in fields["title"]):
+        return 90
+    if any(normalized(value) == needle for value in fields["id_category"]):
+        return 85
+    if set(query_tokens) & token_set(fields["primary"]):
+        return 80
+    if set(query_tokens) & token_set(fields["alias"]):
+        return 75
+    if set(query_tokens) & token_set(fields["title"]):
+        return 70
+    if set(query_tokens) & token_set(fields["id_category"]):
+        return 65
+    if not short and set(query_tokens) & token_set(fields["answer"]):
+        return 40
+    return 0
+
+
 def _response_library_system_items(status: str = "ALL", search: Optional[str] = None) -> List[Dict[str, Any]]:
     overrides = db.list_response_template_overrides()
     items = []
@@ -3142,15 +3188,12 @@ def _response_library_system_items(status: str = "ALL", search: Optional[str] = 
         item = _system_template_public(template, overrides.get(str(template.get("id"))))
         if status and status.upper() != "ALL" and item["status"] != status.upper():
             continue
-        if search:
-            needle = search.strip().lower()
-            haystack = " ".join(str(item.get(key) or "") for key in (
-                "title", "template_id", "topic", "primary_question", "approved_answer", "source_label",
-            )) + " " + " ".join(item.get("aliases") or [])
-            if needle and needle not in haystack.lower():
-                continue
+        score = _response_library_search_score(search, item)
+        if search and not score:
+            continue
+        item["relevance_score"] = score
         items.append(item)
-    return items
+    return sorted(items, key=lambda item: (-int(item.get("relevance_score") or 0), item.get("title") or ""))
 
 
 def _system_trigger_conflicts(primary_question: str, aliases: List[str]) -> List[Dict[str, Any]]:
@@ -3185,13 +3228,17 @@ def list_response_library(
         items.extend(_response_library_system_items(status=status, search=search))
     if not source or source not in {"system_template", "system"}:
         learned_status = status if status else "ALL"
-        learned = db.list_custom_qa(status=learned_status, source=None if source in {"system_template", "system"} else source, topic=category, search=search, limit=limit)
+        learned = db.list_custom_qa(status=learned_status, source=None if source in {"system_template", "system"} else source, topic=category, search=None, limit=limit)
         for item in learned:
             shaped = _custom_qa_public(item)
             shaped.update({"library_id": f"custom:{item.get('id')}", "kind": "custom_qa", "title": item.get("topic") or item.get("question_pattern"), "category": item.get("topic")})
-            items.append(shaped)
+            score = _response_library_search_score(search, shaped)
+            if not search or score:
+                shaped["relevance_score"] = score
+                items.append(shaped)
     if category and (not source or source in {"system_template", "system"}):
         items = [item for item in items if str(item.get("topic") or item.get("category") or "").lower() == category.lower()]
+    items.sort(key=lambda item: (-int(item.get("relevance_score") or 0), item.get("title") or item.get("topic") or ""))
     return {"status": "success", "count": len(items[:limit]), "items": items[:limit]}
 
 
@@ -3322,9 +3369,16 @@ def list_custom_qa(
 ):
     """The Custom Q&A tab's list — the same learned_knowledge rows AI Resolution & Answers' Approved Answers filter reads, with aliases attached."""
     require_admin(x_admin_key, x_admin_pin)
-    items = db.list_custom_qa(status=status, source=source, priority=priority, topic=topic, search=search, limit=limit)
+    items = db.list_custom_qa(status=status, source=source, priority=priority, topic=topic, search=None, limit=limit)
+    shaped_items = []
+    for item in items:
+        shaped = _custom_qa_public(item)
+        score = _response_library_search_score(search, {**shaped, "title": item.get("topic"), "category": item.get("topic")})
+        if not search or score:
+            shaped["relevance_score"] = score
+            shaped_items.append(shaped)
     return {
-        "status": "success", "count": len(items), "items": [_custom_qa_public(i) for i in items],
+        "status": "success", "count": len(shaped_items), "items": shaped_items,
         # Kept as a separate field for backwards compatibility: existing
         # Custom Q&A consumers still receive only learned rows in `items`,
         # while the tab can show the same protected system templates through
@@ -8258,6 +8312,31 @@ Non-Veg:
             loadCustomQa();
         }
 
+        function responseLibrarySearchScore(query, item) {
+            const needle = (query || '').toLowerCase().trim().replace(/\s+/g, ' ');
+            if (!needle) return 1;
+            const tokens = needle.match(/[\w]+/g) || [];
+            if (!tokens.length) return 0;
+            const norm = value => String(value || '').toLowerCase().trim().replace(/\s+/g, ' ');
+            const tokenSet = values => new Set(values.flatMap(value => (norm(value).match(/[\w]+/g) || [])));
+            const primary = [item.primary_question];
+            const aliases = item.aliases || [];
+            const title = [item.title];
+            const category = [item.category, item.topic, item.template_id];
+            const answer = [item.approved_answer];
+            if (primary.some(v => norm(v) === needle)) return 100;
+            if (aliases.some(v => norm(v) === needle)) return 95;
+            if (title.some(v => norm(v) === needle)) return 90;
+            if (category.some(v => norm(v) === needle)) return 85;
+            const q = new Set(tokens);
+            if ([...q].some(v => tokenSet(primary).has(v))) return 80;
+            if ([...q].some(v => tokenSet(aliases).has(v))) return 75;
+            if ([...q].some(v => tokenSet(title).has(v))) return 70;
+            if ([...q].some(v => tokenSet(category).has(v))) return 65;
+            if (needle.replace(/\s/g, '').length > 2 && [...q].some(v => tokenSet(answer).has(v))) return 40;
+            return 0;
+        }
+
         function renderCustomQaList() {
             const tbody = document.getElementById('customQaTableBody');
             const query = (document.getElementById('customQaSearch').value || '').trim().toLowerCase();
@@ -8270,10 +8349,10 @@ Non-Veg:
             else if (source) items = items.filter(i => i.source === source);
             if (topic) items = items.filter(i => i.topic === topic);
             if (priority) items = items.filter(i => i.priority === priority);
-            if (query) {
-                items = items.filter(i => [i.topic, i.primary_question, i.approved_answer, ...(i.aliases || [])]
-                    .filter(Boolean).some(t => t.toLowerCase().includes(query)));
-            }
+            if (query) items = items.map(i => ({ item: i, score: responseLibrarySearchScore(query, { ...i, title: i.topic, category: i.topic }) }))
+                .filter(entry => entry.score > 0)
+                .sort((a, b) => b.score - a.score)
+                .map(entry => entry.item);
 
             if (!items.length) {
                 tbody.innerHTML = '<tr><td colspan="9" style="text-align: center; color: #888;">Nothing here yet.</td></tr>';
@@ -8291,13 +8370,12 @@ Non-Veg:
             const topic = document.getElementById('cqaTopicFilter').value;
             const priority = document.getElementById('cqaPriorityFilter').value;
             if (source && source !== 'system_template') { box.innerHTML = ''; return; }
-            const items = systemResponseItems.filter(item => {
+            const items = systemResponseItems.map(item => ({ item, score: responseLibrarySearchScore(query, item) })).filter(entry => {
+                const item = entry.item;
                 if (priority && priority !== 'PROTECTED') return false;
                 if (topic && String(item.topic || item.category || '') !== topic) return false;
-                if (!query) return true;
-                return [item.title, item.template_id, item.topic, item.primary_question, item.approved_answer, item.source_label, ...(item.aliases || [])]
-                    .filter(Boolean).some(value => String(value).toLowerCase().includes(query));
-            });
+                return !query || entry.score > 0;
+            }).sort((a, b) => b.score - a.score).map(entry => entry.item);
             if (!items.length) { box.innerHTML = '<div style="font-size:.82rem;color:var(--text-muted);">No matching system templates.</div>'; return; }
             box.innerHTML = items.map(renderSystemResponseCard).join('');
         }
