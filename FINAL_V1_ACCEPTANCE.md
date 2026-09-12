@@ -2,22 +2,23 @@
 
 Date: 2026-09-13  
 Accepted production commit: `6d22cbc6dac3efd17a28f49b08e85b8df51c718c`  
+Current deployed HEAD (docs-only checklist update): `15458c202d956a7fdf9d35e0252705b1eb24ebde`  
 Verified production baseline: `c1aa23edeb9fb31e7d3e14d3a63821563e7eaa60`  
 Business-data implementation: `d0f13058cbbf1bbb1f35db09ad82d9baf69a52ee`
 
 ## Release status
 
-Automated acceptance is complete. Manual Instagram account testing remains
-with the account owner; no live customer messages were sent by automation.
-The release is **NOT READY — BLOCKERS REMAIN** until the account owner signs
-off the live Instagram checklist and a production SQLite backup is created and
-verified. The remaining legacy sourcing/ingredient/availability/operational
-claims are now behind a versioned content-integrity quarantine; they are
-omitted or answered with a neutral confirmation request.
+Automated acceptance and the production backup gate are complete. Manual
+Instagram account testing remains with the account owner; no live customer
+messages were sent by automation. The release is **READY FOR V1.0 — MANUAL
+INSTAGRAM SIGN-OFF PENDING**. The remaining legacy
+sourcing/ingredient/availability/operational claims are behind a versioned
+content-integrity quarantine; they are omitted or answered with a neutral
+confirmation request.
 
 ## Automated acceptance
 
-- Full suite: **1,390 passed**, 1 deprecation warning.
+- Full suite: **1,390 passed**, 0 failed, 1 deprecation warning.
 - Deterministic 50-scenario pack: **50 passed, 0 failed**.
 - Reel/Post/Ad, referential-intent, order/CAM and channel-policy tests:
   **162 passed**.
@@ -39,9 +40,9 @@ Bento tiers and approved customer claims. Versioned Response Library
 overrides preserve provenance and make library, preview, dry-run and runtime
 copies consistent. Medical/diabetic/low-glycemic claims remain excluded.
 
-Production checks: `/health` returned HTTP 200 with `status=healthy`,
-`answering.ready=true`, seed `20/20`, no warnings, durable database, and a
-valid Instagram token. `ENABLE_WEB_TESTER=false`,
+Production checks: three consecutive `/health` calls returned HTTP 200 with
+`status=healthy`, `answering.ready=true`, live delivery, seed `20/20`, no
+warnings, durable database, and a valid Instagram token. `ENABLE_WEB_TESTER=false`,
 `LLM_AUTO_RESOLVE_ENABLED=false`, `WHATSAPP_CHATBOT_ENABLED=false`, and
 `WHATSAPP_CHATBOT_ENABLE_CONFIRM=false`; WhatsApp remains HUMAN ONLY.
 
@@ -53,10 +54,12 @@ referential follow-up, explicit Kanchagolla override and human handoff.
 
 ## Backup and rollback
 
-Production SQLite backup: **PENDING OPERATOR ACTION**. Railway's current plan
-does not expose volume backups/PITR, and the authenticated application backup
-endpoint requires the production admin credential. Do not treat a local test
-database copy as a production backup.
+Production SQLite backup: **VERIFIED** via the authenticated application
+backup endpoint. Path: `/app/var/camellia.db.backup-20260912_220436`;
+timestamp: `2026-09-12 22:04:36 UTC`; size: `1,937,408` bytes;
+`PRAGMA integrity_check`: `ok`. The live database remains
+`/app/var/camellia.db`; the backup operation copies without deleting prior
+backups. Railway volume PITR is not available on the current plan.
 
 Rollback target: `d0f13058cbbf1bbb1f35db09ad82d9baf69a52ee` (business-data
 implementation) or the previously verified `c1aa23edeb9fb31e7d3e14d3a63821563e7eaa60`
@@ -65,9 +68,7 @@ runtime baseline. Follow `V1_PRODUCTION_RUNBOOK.md`.
 ## Release blockers
 
 1. Account owner must complete the manual Instagram checklist.
-2. An authenticated operator must create and verify the production SQLite
-   backup; Railway PITR is unavailable on the current plan.
-3. No content blocker remains from the audited legacy-claim set; any future
+2. No content blocker remains from the audited legacy-claim set; any future
    business claim must be confirmed before its quarantine is removed.
 
 ## Architecture summary

@@ -63,3 +63,26 @@ Before a schema migration, an authenticated operator should call
 `PRAGMA integrity_check` is `ok`. Railway volume PITR is not available on the
 current plan, so retain the returned file on durable storage and never
 overwrite an earlier backup.
+
+## v1.0 release verification (2026-09-13)
+
+- Accepted production code commit: `6d22cbc6dac3efd17a28f49b08e85b8df51c718c`.
+- Current deployed HEAD (docs-only checklist update):
+  `15458c202d956a7fdf9d35e0252705b1eb24ebde`.
+- Authenticated backup: `/app/var/camellia.db.backup-20260912_220436`.
+- Backup timestamp: `2026-09-12 22:04:36 UTC`.
+- Backup size: `1,937,408` bytes; `PRAGMA integrity_check`: `ok`.
+- Live database remains `/app/var/camellia.db`; prior backups are retained.
+- Three consecutive production health checks: HTTP 200, healthy, answering
+  ready, live delivery, and no warnings/startup or migration errors.
+- Safety flags: `ENABLE_WEB_TESTER=false`,
+  `LLM_AUTO_RESOLVE_ENABLED=false`,
+  `WHATSAPP_CHATBOT_ENABLED=false`,
+  `WHATSAPP_CHATBOT_ENABLE_CONFIRM=false`; WhatsApp remains HUMAN ONLY.
+- Full automated suite: **1,390 passed, 0 failed, 1 warning**.
+- Instagram live acceptance: **MANUAL INSTAGRAM SIGN-OFF REQUIRED**. Use
+  `docs/MANUAL_INSTAGRAM_ACCEPTANCE.md`; no automated customer messages were
+  sent.
+- Rollback commit: `c1aa23edeb9fb31e7d3e14d3a63821563e7eaa60` (verified runtime
+  baseline); business-data rollback point:
+  `d0f13058cbbf1bbb1f35db09ad82d9baf69a52ee`.
