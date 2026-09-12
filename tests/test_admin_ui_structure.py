@@ -266,6 +266,32 @@ def test_the_dashboard_is_never_cached():
     assert "no-store" in cache, f"dashboard is cacheable: {cache!r}"
 
 
+def test_instagram_routing_has_a_simple_client_first_default_view(page):
+    """The normal route workflow is link -> topic -> save; technical fields stay disclosed."""
+    section = page[page.index('id="tab-ad-routing"'):page.index('<!-- MENU tab, panel 3 of 4')]
+    assert "Instagram Link" in section
+    assert "Instagram Post / Reel Link" not in section
+    assert ">Identify<" not in section
+    assert "id=\"igTopicPicker\"" in section and "+ Add Topic" in section
+    assert "Save Routing" in section
+    assert "Preview Reply" in section
+    assert "Preview Customer Response" not in section
+    assert '<details id="igCustomize"' in section and '<details id="igCustomize" open' not in section
+    assert '<details id="igAdvancedSettings"' in section and '<details id="igAdvancedSettings" open' not in section
+    assert "Advanced settings are normally filled automatically" in section
+
+
+def test_instagram_routing_keeps_client_friendly_cards_and_existing_actions(page):
+    section = page[page.index('async function loadAdRoutes'):page.index('// Shared-post pairing')]
+    assert "View Details" in section
+    for action in ("Edit", "Disable", "Archive", "Status:", "Menu:", "Priority:"):
+        assert action in section
+    assert "/admin/instagram-routes/${id}/active" in page
+    assert "/admin/instagram-routes/${id}" in page
+    assert "/admin/instagram-routes/${routingId}/pairing/start" in page
+    assert "Save Changes" in page
+
+
 def test_both_dashboard_routes_send_the_same_no_cache_headers():
     """/admin and /admin/dashboard are the same page; one must not be stale."""
     for path in ("/admin", "/admin/dashboard"):

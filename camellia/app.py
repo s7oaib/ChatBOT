@@ -4534,47 +4534,51 @@ def get_admin_dashboard():
         <div id="tab-ad-routing" class="panel-card" data-group="menu" style="display: none;">
             <div class="panel-header">
                 <h2>📣 Instagram Content Routing</h2>
-                <p>Paste the Instagram link, pick a Topic, and save. The Topic fills in the menu, description and priority products for you.</p>
+                <p>Connect an Instagram post or reel to a Topic.</p>
             </div>
             <div class="ad-routing-form">
                 <div>
-                    <label class="field-label" for="igRouteUrl">Instagram Post / Reel Link</label>
-                    <input class="field-control" id="igRouteUrl" autocomplete="off" placeholder="https://www.instagram.com/reel/…/">
+                    <label class="field-label" for="igRouteUrl">Instagram Link</label>
+                    <input class="field-control" id="igRouteUrl" autocomplete="off" placeholder="https://www.instagram.com/reel/DdAnO6MTok1/" onblur="identifyInstagramRoute()" onchange="identifyInstagramRoute()">
                 </div>
-                <button class="btn-secondary" type="button" onclick="identifyInstagramRoute()">Identify</button>
             </div>
-            <div id="igRouteIdentity" style="font-size:0.82rem; margin:10px 0; color:var(--text-muted);"></div>
+            <div id="igRouteIdentity" aria-live="polite" style="font-size:0.82rem; margin:10px 0; color:var(--text-muted);"></div>
             <div id="igPostConnectionStatus" style="display:none; font-size:0.82rem; margin:10px 0; padding:8px 10px; border-radius:8px;"></div>
 
-            <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-top:8px;">
-                <div>
-                    <label class="field-label" for="igTopicPicker">Topic</label>
-                    <div style="display:flex; gap:8px;">
-                        <select class="field-control" id="igTopicPicker" onchange="onIgTopicChange()"><option value="">Select Topic</option></select>
-                        <button class="btn-secondary" type="button" onclick="openTopicModal()">+ Add Topic</button>
-                    </div>
+            <div style="margin-top:14px;">
+                <label class="field-label" for="igTopicPicker">Topic</label>
+                <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                    <select class="field-control" id="igTopicPicker" onchange="onIgTopicChange()" style="flex:1; min-width:220px;"><option value="">Select Topic</option></select>
+                    <button class="btn-secondary" type="button" onclick="openTopicModal()">+ Add Topic</button>
                 </div>
-                <div>
+            </div>
+
+            <div id="igTopicPreview" style="display:none; margin-top:14px; background:#FCFBF9; border:1px solid var(--border); border-radius:10px; padding:14px; font-size:0.85rem;">
+                <div style="font-size:0.76rem; color:var(--text-muted); margin-bottom:6px;">Topic preview</div>
+                <h3 id="igTopicPreviewName" style="margin:0; font-size:1rem; color:var(--primary);"></h3>
+                <div style="margin-top:8px;"><b>Menu:</b> <span id="igTopicPreviewMenu">—</span></div>
+                <div style="margin-top:4px;"><b>Priority:</b> <span id="igTopicPreviewPriority">—</span></div>
+                <div style="margin-top:4px; white-space:pre-wrap;"><b>Description:</b> <span id="igTopicPreviewDescription">—</span></div>
+                <button class="btn-secondary" type="button" onclick="previewInstagramRoute()" style="margin-top:10px;">Preview Reply</button>
+                <div id="igPreviewBox" style="display:none; margin-top:10px; background:#fff; border:1px solid var(--border); border-radius:8px; padding:10px; font-size:0.84rem;"></div>
+            </div>
+
+            <details id="igCustomize" style="margin-top:12px;"><summary style="cursor:pointer;"><b>Customize</b></summary>
+                <div style="margin-top:10px;">
                     <label class="field-label" for="igMenuPicker">Menu to Show</label>
                     <div style="display:flex; gap:8px;">
                         <select class="field-control" id="igMenuPicker"><option value="">Select Menu</option></select>
                         <button class="btn-secondary" type="button" onclick="openMenuModal()">+ Add Menu</button>
                     </div>
+                    <label class="field-label" for="igTopicDescription" style="margin-top:10px;">Topic Description</label>
+                    <textarea class="field-control" id="igTopicDescription" rows="2" placeholder="Select a Topic to see its description"></textarea>
+                    <label class="field-label" style="margin-top:10px;">Priority Products</label>
+                    <div style="display:flex; gap:8px;"><select class="field-control" id="igProductPicker"></select><button class="btn-secondary" type="button" onclick="addIgPriorityProduct()">+ Add Product</button></div>
+                    <div id="igPriorityProducts" class="ad-route-list" style="margin-top:8px;"></div>
                 </div>
-            </div>
+            </details>
 
-            <div style="margin-top:12px;">
-                <label class="field-label" for="igTopicDescription">Topic Description</label>
-                <textarea class="field-control" id="igTopicDescription" rows="2" placeholder="Select or create a Topic to see its description"></textarea>
-            </div>
-
-            <div style="margin-top:12px;">
-                <label class="field-label">Priority Products <span style="font-weight:normal;">(ordered, optional — defaults from the Topic)</span></label>
-                <div style="display:flex; gap:8px;"><select class="field-control" id="igProductPicker"></select><button class="btn-secondary" type="button" onclick="addIgPriorityProduct()">+ Add Product</button></div>
-                <div id="igPriorityProducts" class="ad-route-list" style="margin-top:8px;"></div>
-            </div>
-
-            <details style="margin-top:12px;"><summary><b>Advanced Settings</b> — Media ID, Ad ID, Campaign ID, escalation policy, knowledge scope</summary>
+            <details id="igAdvancedSettings" style="margin-top:12px;"><summary style="cursor:pointer;"><b>Advanced Settings</b></summary>
                 <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:10px; margin-top:10px;">
                     <input class="field-control" id="igMediaId" placeholder="Verified Media / Story ID">
                     <input class="field-control" id="igAdId" placeholder="Meta Ad ID">
@@ -4582,15 +4586,12 @@ def get_admin_dashboard():
                     <select class="field-control" id="igEscalationPolicy"><option value="human_if_unsupported">Human if unsupported</option><option value="canonical">Normal canonical rules</option><option value="always_human">Always offer human help</option></select>
                     <select class="field-control" id="igKnowledgeScope" multiple title="Optional canonical knowledge scope"></select>
                 </div>
-                <p style="font-size:0.76rem;color:var(--text-muted);">Runtime webhooks provide Ad ID or Story Media ID—not the pasted URL or shortcode. Add an identifier here when Meta supplies one.</p>
+                <p style="font-size:0.76rem;color:var(--text-muted);">Advanced settings are normally filled automatically. Only change these when instructed.</p>
             </details>
 
-            <div id="igPreviewBox" style="display:none; margin-top:14px; background:#FCFBF9; border:1px solid var(--border); border-radius:10px; padding:14px; font-size:0.85rem;"></div>
-
             <div class="action-bar">
-                <button class="btn-secondary" type="button" onclick="previewInstagramRoute()">Preview Customer Response</button>
-                <button class="btn-primary" type="button" onclick="saveInstagramRoute()">Save Routing</button>
-                <button class="btn-secondary" type="button" onclick="resetInstagramRouteForm()">Cancel edit</button>
+                <button class="btn-primary" id="igSaveButton" type="button" onclick="saveInstagramRoute()">Save Routing</button>
+                <button class="btn-secondary" type="button" onclick="resetInstagramRouteForm()">Cancel</button>
             </div>
             <div id="adRouteResult" class="result-box"></div>
             <div style="display:flex; gap:8px; margin-top:16px; border-bottom:1px solid var(--border);">
@@ -5306,7 +5307,7 @@ THIS WEEK'S BENGAL SPECIALS
             </details>
             <div style="display: flex; gap: 8px; justify-content: flex-end; margin-top:16px;">
                 <button class="btn-secondary" onclick="closeTopicModal()">Cancel</button>
-                <button class="btn-primary" onclick="submitTopic()">Create Topic</button>
+                <button class="btn-primary" onclick="submitTopic()">Save Topic</button>
             </div>
             <div id="topicModalResult" class="result-box"></div>
         </div>
@@ -5788,26 +5789,44 @@ THIS WEEK'S BENGAL SPECIALS
             } catch (err) { /* dropdowns just stay empty; the rest of the tab still works */ }
         }
 
-        function onIgTopicChange() {
+        function onIgTopicChange(preservePriority = false) {
             const topicId = document.getElementById('igTopicPicker').value;
             const topic = igTopics.find(t => t.topic_id === topicId);
             document.getElementById('igTopicDescription').value = topic ? (topic.description || '') : '';
             if (topic && topic.default_menu_id) {
                 document.getElementById('igMenuPicker').value = topic.default_menu_id;
             }
-            // Priority Products default from the Topic, but only fill an
-            // empty list — the client's own choices on this route are never
-            // silently overwritten by switching Topics.
-            if (topic && !igPriority.length && (topic.priority_products || []).length) {
+            // A new Topic owns the normal defaults. Edit mode passes true so
+            // an existing route override is preserved until the client changes
+            // it in Customize.
+            if (topic && !preservePriority) {
                 igPriority = [...topic.priority_products];
                 renderIgPriorityProducts();
             }
+            renderIgTopicPreview();
+        }
+
+        function renderIgTopicPreview() {
+            const box = document.getElementById('igTopicPreview');
+            const topic = igTopics.find(t => t.topic_id === document.getElementById('igTopicPicker').value);
+            if (!box || !topic) { if (box) box.style.display = 'none'; return; }
+            const menuId = document.getElementById('igMenuPicker').value || topic.default_menu_id;
+            const menu = igMenus.find(item => item.menu_id === menuId);
+            const labels = igPriority.map(id => {
+                const product = igProducts.find(item => item.id === id);
+                return product ? product.label : id;
+            });
+            document.getElementById('igTopicPreviewName').innerText = topic.name || '';
+            document.getElementById('igTopicPreviewMenu').innerText = menu ? menu.name : 'No menu selected';
+            document.getElementById('igTopicPreviewPriority').innerText = labels.length ? labels.join(' → ') : 'Normal conversation routing';
+            document.getElementById('igTopicPreviewDescription').innerText = document.getElementById('igTopicDescription').value || '—';
+            box.style.display = 'block';
         }
 
         function renderIgPriorityProducts() {
             const box = document.getElementById('igPriorityProducts');
             if (!box) return;
-            if (!igPriority.length) { box.innerHTML = '<small>No priority products. Normal conversation routing will apply.</small>'; return; }
+            if (!igPriority.length) { box.innerHTML = '<small>No priority products. Normal conversation routing will apply.</small>'; renderIgTopicPreview(); return; }
             box.innerHTML = igPriority.map((id, index) => {
                 const product = igProducts.find(item => item.id === id);
                 const label = product ? product.label : `${id} (currently unavailable)`;
@@ -5816,6 +5835,7 @@ THIS WEEK'S BENGAL SPECIALS
                     <button class="btn-secondary" type="button" onclick="moveIgPriority(${index},1)" ${index === igPriority.length - 1 ? 'disabled' : ''}>↓</button>
                     <button class="btn-danger" type="button" onclick="removeIgPriority(${index})">Remove</button></span></div>`;
             }).join('');
+            renderIgTopicPreview();
         }
 
         function addIgPriorityProduct() {
@@ -5836,6 +5856,11 @@ THIS WEEK'S BENGAL SPECIALS
             Array.from(document.getElementById('igKnowledgeScope').options).forEach(option => option.selected=false);
             document.getElementById('igRouteIdentity').innerHTML='';
             document.getElementById('igPreviewBox').style.display = 'none';
+            document.getElementById('igTopicPreview').style.display = 'none';
+            document.getElementById('igCustomize').open = false;
+            document.getElementById('igAdvancedSettings').open = false;
+            const saveButton = document.getElementById('igSaveButton');
+            if (saveButton) saveButton.innerText = 'Save Routing';
             const status = document.getElementById('igPostConnectionStatus');
             if (status) status.style.display = 'none';
             renderIgPriorityProducts();
@@ -5844,15 +5869,14 @@ THIS WEEK'S BENGAL SPECIALS
         async function identifyInstagramRoute() {
             const url=document.getElementById('igRouteUrl').value.trim();
             const box=document.getElementById('igRouteIdentity');
+            if (!url) { box.innerHTML=''; return; }
             const resp=await fetch('/admin/instagram-routes/identify',{method:'POST',headers:{...getAuthHeaders(),'Content-Type':'application/json'},body:JSON.stringify({url})});
             const data=await resp.json().catch(()=>({}));
-            if(!resp.ok){box.innerHTML=`<span style="color:var(--danger);">${escapeHtml(data.detail||'Could not identify link.')}</span>`;return;}
+            if(!resp.ok){box.innerHTML=`<span style="color:var(--danger);">Could not identify this link. Check the Instagram URL.</span>`;return;}
             document.getElementById('igRouteUrl').value=data.canonical_url;
             if(data.verified_media_identifier) document.getElementById('igMediaId').value=data.verified_media_identifier;
-            const metadata = data.thumbnail_url || data.caption
-                ? ` · Thumbnail: ${data.thumbnail_url ? `<a href="${escapeHtml(data.thumbnail_url)}" target="_blank">available</a>` : 'not available'} · Caption: ${escapeHtml(data.caption || 'not available')}`
-                : ' · Thumbnail/caption: not retrievable';
-            box.innerHTML=`Canonical: <b>${escapeHtml(data.canonical_url)}</b> · Type: ${escapeHtml(data.source_type)} · Shortcode: ${escapeHtml(data.shortcode)} · Verified Media ID: ${escapeHtml(data.verified_media_identifier||'not available')}${metadata}`;
+            const detected = data.source_type === 'reel' ? 'Reel' : data.source_type === 'post' ? 'Instagram post' : 'Instagram content';
+            box.innerHTML=`<span style="color:#166534;">✓ ${detected} detected</span>`;
         }
 
         function editInstagramRoute(id) {
@@ -5868,7 +5892,10 @@ THIS WEEK'S BENGAL SPECIALS
             document.getElementById('igCampaignId').value=route.campaign_id||'';
             document.getElementById('igEscalationPolicy').value=route.escalation_policy||'human_if_unsupported';
             Array.from(document.getElementById('igKnowledgeScope').options).forEach(option=>option.selected=(route.knowledge_scope||[]).includes(option.value));
-            renderIgPriorityProducts(); document.getElementById('igRouteUrl').scrollIntoView({behavior:'smooth'});
+            renderIgPriorityProducts(); onIgTopicChange(true);
+            const saveButton = document.getElementById('igSaveButton');
+            if (saveButton) saveButton.innerText = 'Save Changes';
+            document.getElementById('igRouteUrl').scrollIntoView({behavior:'smooth'});
         }
 
         async function saveInstagramRoute() {
@@ -5877,7 +5904,15 @@ THIS WEEK'S BENGAL SPECIALS
             const resp=await fetch('/admin/instagram-routes',{method:'POST',headers:{...getAuthHeaders(),'Content-Type':'application/json'},body:JSON.stringify(payload)});
             const data=await resp.json().catch(()=>({})); result.style.display='block';
             if(!resp.ok){result.className='result-box error';result.innerText=data.detail||'Could not save route.';return;}
-            result.className='result-box success';result.innerText='Routing configuration saved.'; resetInstagramRouteForm(); loadAdRoutes();
+            const saved = data.route || {};
+            const topic = igTopics.find(item => item.topic_id === saved.topic_id) || {};
+            const menu = igMenus.find(item => item.menu_id === (saved.menu_id || payload.menu_id)) || {};
+            const content = saved.source_type === 'reel' ? 'Reel' : saved.source_type === 'post' ? 'Post' : 'Instagram content';
+            const label = saved.shortcode ? `${content} ${saved.shortcode}` : content;
+            resetInstagramRouteForm();
+            result.style.display='block'; result.className='result-box success';
+            result.innerHTML=`<b>✓ Instagram content connected successfully</b><br><small>Instagram content: ${escapeHtml(label)}<br>Topic: ${escapeHtml(topic.name || saved.routing_topic || '—')}<br>Menu: ${escapeHtml(menu.name || saved.menu_id || '—')}</small>`;
+            loadAdRoutes();
         }
 
         async function previewInstagramRoute() {
@@ -6094,9 +6129,13 @@ THIS WEEK'S BENGAL SPECIALS
                 if (igRouteTab === 'archived') {
                     if (!routes.length) { list.innerHTML='<p style="color:var(--text-muted);font-size:0.84rem;">No archived routes.</p>'; return; }
                     list.innerHTML = routes.map(route => `
-                        <div class="ad-route-row">
-                            <span><b>${escapeHtml(route.canonical_url||route.ad_id||route.media_id)}</b><br><small>${escapeHtml(route.source_type)} · ${escapeHtml(route.shortcode||'no shortcode')} · ${escapeHtml(route.routing_topic||'no topic')} · priorities: ${escapeHtml((route.priority_products||[]).join(', ')||'none')} · archived ${escapeHtml(route.archived_at||'')}</small></span>
-                            <span><button class="btn-secondary" type="button" onclick="restoreInstagramRoute(${route.routing_id})">Restore</button> <button class="btn-danger" type="button" onclick="openIgRemoveModal(${route.routing_id})">Remove Permanently</button></span>
+                        <div class="ad-route-row" style="display:block;">
+                            <div style="display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap; align-items:flex-start;">
+                                <span><b>${escapeHtml(route.routing_topic || 'Instagram content')}</b><br><small>${route.source_type === 'reel' ? 'Instagram Reel' : route.source_type === 'post' ? 'Instagram Post' : 'Instagram Ad'} · Archived</small></span>
+                                <span><button class="btn-secondary" type="button" onclick="restoreInstagramRoute(${route.routing_id})">Restore</button> <button class="btn-danger" type="button" onclick="openIgRemoveModal(${route.routing_id})">Remove Permanently</button></span>
+                            </div>
+                            <div style="margin-top:8px;"><b>Menu:</b> ${escapeHtml((igMenus.find(m => m.menu_id === route.menu_id) || {}).name || route.menu_id || '—')}</div>
+                            <div style="margin-top:4px;"><b>Priority:</b> ${escapeHtml((route.priority_products||[]).map(id => ((igProducts.find(p => p.id === id) || {}).label || id)).join(' → ') || 'Normal conversation routing')}</div>
                         </div>`).join('');
                     return;
                 }
@@ -6104,7 +6143,8 @@ THIS WEEK'S BENGAL SPECIALS
                 if (!routes.length && !(data.legacy_ad_routes||[]).length) { list.innerHTML='<p style="color:var(--text-muted);font-size:0.84rem;">No Instagram routes added yet.</p>'; return; }
                 list.innerHTML = routes.map(route => {
                     const menuName = (igMenus.find(m => m.menu_id === route.menu_id) || {}).name;
-                    const summary = `${escapeHtml(route.source_type)} · ${escapeHtml(route.shortcode||'no shortcode')} · ${escapeHtml(route.routing_topic||'no topic')}${menuName?` · menu: ${escapeHtml(menuName)}`:''} · priorities: ${escapeHtml((route.priority_products||[]).join(', ')||'none')}`;
+                    const sourceLabel = route.source_type==='reel' ? 'Instagram Reel' : route.source_type==='post' ? 'Instagram Post' : 'Instagram Ad';
+                    const priorityLabels = (route.priority_products||[]).map(id => ((igProducts.find(p => p.id === id) || {}).label || id));
                     // A post's connection is a client-friendly status, not a raw
                     // Meta id — the id itself stays inside Advanced Settings
                     // (the Media ID field, populated when you press Edit).
@@ -6114,12 +6154,18 @@ THIS WEEK'S BENGAL SPECIALS
                     const connectBtn = route.source_type==='post'
                         ? ` <button class="btn-secondary" type="button" onclick="pairInstagramPost(${route.routing_id})">${route.media_id?'Reconnect Post':'Connect Post'}</button>`
                         : '';
-                    return `<div class="ad-route-row">
-                        <span><b>${escapeHtml(route.canonical_url||route.ad_id||route.media_id)}</b><br><small>${summary}</small></span>
-                        <span><button class="btn-secondary" type="button" onclick="editInstagramRoute(${route.routing_id})">Edit</button> <button class="btn-secondary" type="button" onclick="setInstagramRouteActive(${route.routing_id},${!route.active})">${route.active?'Disable':'Enable'}</button> <button class="btn-danger" type="button" onclick="archiveInstagramRoute(${route.routing_id})">Archive</button> <button class="btn-danger" type="button" onclick="openIgRemoveModal(${route.routing_id})">Remove</button>${connectBtn}</span>
-                        ${postStatus}
+                    const technical = `<details style="margin-top:8px;"><summary style="cursor:pointer; font-size:0.8rem;">View Details</summary><div style="margin-top:6px; font-size:0.78rem; color:var(--text-muted); line-height:1.6;">Shortcode: ${escapeHtml(route.shortcode||'—')}<br>Media ID: ${escapeHtml(route.media_id||'—')}<br>Ad ID: ${escapeHtml(route.ad_id||'—')}<br>Campaign ID: ${escapeHtml(route.campaign_id||'—')}<br>Knowledge scope: ${escapeHtml((route.knowledge_scope||[]).join(', ')||'—')}</div></details>`;
+                    return `<div class="ad-route-row" style="display:block;">
+                        <div style="display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap; align-items:flex-start;">
+                            <span><b>${escapeHtml(route.routing_topic || 'Instagram content')}</b><br><small>${sourceLabel}</small></span>
+                            <span><button class="btn-secondary" type="button" onclick="editInstagramRoute(${route.routing_id})">Edit</button> <button class="btn-secondary" type="button" onclick="setInstagramRouteActive(${route.routing_id},${!route.active})">${route.active?'Disable':'Enable'}</button> <button class="btn-danger" type="button" onclick="archiveInstagramRoute(${route.routing_id})">Archive</button>${connectBtn}</span>
+                        </div>
+                        <div style="margin-top:8px;"><b>Menu:</b> ${escapeHtml(menuName || route.menu_id || '—')}</div>
+                        <div style="margin-top:4px;"><b>Priority:</b> ${escapeHtml(priorityLabels.join(' → ') || 'Normal conversation routing')}</div>
+                        <div style="margin-top:4px;"><b>Status:</b> ${route.active ? 'Active' : 'Disabled'}</div>
+                        ${postStatus}${technical}
                     </div>`;
-                }).join('') + (data.legacy_ad_routes||[]).map(route=>`<div class="ad-route-row"><span><b>Legacy Ad ID ${escapeHtml(route.ad_id)}</b><br><small>Priority: ${escapeHtml(route.product)} · managed under Advanced compatibility</small></span></div>`).join('');
+                }).join('') + (data.legacy_ad_routes||[]).map(route=>`<div class="ad-route-row" style="display:block;"><b>Instagram Ad</b><br><small>Priority: ${escapeHtml(route.product || 'Normal conversation routing')}</small><details style="margin-top:8px;"><summary style="cursor:pointer; font-size:0.8rem;">View Details</summary><div style="margin-top:6px; font-size:0.78rem; color:var(--text-muted);">Ad ID: ${escapeHtml(route.ad_id || '—')}</div></details></div>`).join('');
             } catch (err) {
                 list.innerHTML = `<p style="color: var(--danger); font-size: 0.84rem;">${escapeHtml(err.message || err)}</p>`;
             }
