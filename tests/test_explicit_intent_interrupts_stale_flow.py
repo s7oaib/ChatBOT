@@ -21,6 +21,7 @@ def deterministic(monkeypatch):
         ("awaiting_area_confirmation", "tell me more about Jolbhora", "jolbhora"),
         ("awaiting_menu_choice", "show me Sondesh", "sondesh_price_detailed"),
         ("awaiting_product_price", "Jolbhora price", "jolbhora"),
+        ("awaiting_name", "hi tell me more about Kanchagolla", "kanchagolla"),
     ],
 )
 def test_explicit_subject_interrupts_unrelated_stale_flow(

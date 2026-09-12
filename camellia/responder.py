@@ -1719,7 +1719,7 @@ class DeterministicResponder:
                 "awaiting_area_confirmation", "awaiting_product_price",
                 "awaiting_menu_choice", "awaiting_subscription_booking",
                 "subscription_context", "awaiting_instagram_contact",
-                "awaiting_instagram_contact_confirmation",
+                "awaiting_instagram_contact_confirmation", "awaiting_name",
             ):
                 if facts.get(flow_flag):
                     facts[flow_flag] = False
