@@ -1669,6 +1669,71 @@ class DeterministicResponder:
         # turn's decision is reset here.
         facts["source_context_used"] = False
         facts["source_referential_intent"] = None
+
+        # A new, explicit business subject must be able to interrupt a stale
+        # conversational slot before any slot handler runs. Without this
+        # boundary a persisted contact, menu, price, or area confirmation can
+        # consume a substantive request (for example, ``hi tell me more
+        # about Kanchagolla``) as though it were an answer to an older
+        # yes/no prompt. Bare confirmations remain untouched and continue
+        # through their normal flow.
+        explicit_subject_match = EXPLICIT_SUBJECT_RE.search(
+            semantic_remainder or user_message
+        )
+        normalized_slot_answer = re.sub(
+            r"[?!.,]+$", "", " ".join((semantic_remainder or user_message).lower().split())
+        ).strip()
+        is_relevant_slot_answer = (
+            (
+                facts.get("awaiting_area_confirmation")
+                and _looks_like_an_area_answer(user_message)
+                and not (
+                    explicit_subject_match
+                    and GENERIC_DETAIL_WRAPPER_RE.search(semantic_remainder or user_message)
+                )
+            )
+            or (
+                facts.get("awaiting_product_price")
+                and normalized_slot_answer in {"meals", "meal", "sondesh", "sweets", "mishti", "mithai"}
+            )
+            or (
+                facts.get("awaiting_menu_choice")
+                and normalized_slot_answer in {
+                    "veg", "vegetarian", "niramish", "veg menu",
+                    "non veg", "non-veg", "nonveg", "non vegetarian", "non-vegetarian",
+                    "non veg menu", "non-veg menu", "nonveg menu",
+                }
+            )
+            or (
+                (facts.get("awaiting_subscription_booking") or facts.get("subscription_context"))
+                and bool(
+                    SUBSCRIPTION_OPTION_RE.search(normalized_slot_answer)
+                    or SUBSCRIPTION_BOOKING_INTENT_RE.search(normalized_slot_answer)
+                    or SUBSCRIPTION_DATE_CHANGE_RE.search(normalized_slot_answer)
+                )
+            )
+        )
+        if explicit_subject_match and not is_relevant_slot_answer:
+            interrupted_flags = []
+            for flow_flag in (
+                "awaiting_area_confirmation", "awaiting_product_price",
+                "awaiting_menu_choice", "awaiting_subscription_booking",
+                "subscription_context", "awaiting_instagram_contact",
+                "awaiting_instagram_contact_confirmation",
+            ):
+                if facts.get(flow_flag):
+                    facts[flow_flag] = False
+                    interrupted_flags.append(flow_flag)
+            if facts.get("pending_instagram_escalation") is not None:
+                facts["pending_instagram_escalation"] = None
+                interrupted_flags.append("pending_instagram_escalation")
+            if interrupted_flags:
+                facts["last_flow_interrupted"] = interrupted_flags
+                log.info(
+                    "INTENT_INTERRUPT subject=%r flags=%s",
+                    explicit_subject_match.group(0), interrupted_flags,
+                )
+
         ad_product = product_for_ad(referral_ad_id, referral_ad_title) or facts.get("ad_product")
         if ad_product:
             facts["ad_product"] = ad_product
