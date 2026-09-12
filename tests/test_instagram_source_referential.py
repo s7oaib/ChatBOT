@@ -288,3 +288,62 @@ def test_composite_greeting_keeps_menu_and_handoff_intents(deterministic_respond
     reply, matched, template_id, _images = _reply(uid, "hi I want to talk to a human")
     assert template_id == "explicit_escalation"
     assert "whatsapp" in reply.lower()
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("hi tell me more about Kanchagolla", "kanchagolla"),
+    ("tell me more about Kanchagolla", "kanchagolla"),
+    ("tell me more about Jolbhora", "jolbhora"),
+    ("tell me more about Sondesh", "sondesh_price_detailed"),
+])
+def test_named_subject_precedes_generic_detail_nlu(
+    deterministic_responder, monkeypatch, text, expected,
+):
+    """A provider's generic know-more result cannot hide an explicit entity."""
+    monkeypatch.setattr(config, "STRUCTURED_NLU_ENABLED", True)
+    uid = "detail_entity_precedence_" + expected
+    facts = _set_source(uid)
+    facts["source_route"]["routing_topic"] = "Bengali Home Table"
+
+    def stale_generic(*_args, **_kwargs):
+        return "stale Home Table response", True, "know_more", None
+
+    monkeypatch.setattr(responder, "_structured_nlu_response", stale_generic)
+    reply, matched, template_id, _images = _reply(uid, text)
+
+    assert matched is True
+    assert ("sondesh" if expected.startswith("sondesh_") else expected) in reply.lower()
+    assert template_id == expected
+    assert facts["source_context_used"] is False
+
+
+def test_explicit_weekly_menu_precedes_generic_detail_nlu(deterministic_responder, monkeypatch):
+    monkeypatch.setattr(config, "STRUCTURED_NLU_ENABLED", True)
+    uid = "detail_weekly_menu_precedence"
+    session_memory.clear_session(uid, "instagram")
+    monkeypatch.setattr(
+        responder, "_structured_nlu_response",
+        lambda *_args, **_kwargs: ("stale Home Table response", True, "know_more", None),
+    )
+    reply, matched, template_id, _images = _reply(uid, "can you tell me more about the weekly menu")
+    assert matched is True
+    assert template_id in {"weekly_menu_veg", "weekly_menu_nonveg", "savoury_food_intro"}
+    assert "menu" in reply.lower()
+
+
+def test_explicit_home_table_precedes_generic_detail_nlu(deterministic_responder, monkeypatch):
+    monkeypatch.setattr(config, "STRUCTURED_NLU_ENABLED", True)
+    uid = "detail_home_table_precedence"
+    facts = _set_source(uid)
+    facts["source_route"]["routing_topic"] = "Wedding / Event Sondesh"
+    monkeypatch.setattr(
+        responder, "_structured_nlu_response",
+        lambda *_args, **_kwargs: ("stale Home Table response", True, "know_more", None),
+    )
+    reply, matched, template_id, _images = _reply(
+        uid, "can you tell me more about the Kolkata Home Table event",
+    )
+    assert matched is True
+    assert template_id == "kolkata_expansion_info"
+    assert "kolkata" in reply.lower()
+    assert facts["source_context_used"] is False

@@ -376,6 +376,25 @@ def split_conversational_opener(text: str) -> Tuple[Optional[str], str]:
         opener = "hey"
     return opener, remainder
 
+
+# Generic detail wording must not outrank a named subject.  This guard is
+# intentionally limited to the wrapper phrases that previously reached the
+# semantic router as ``know_more`` before the deterministic product/topic
+# matcher had a chance to see the entity.
+GENERIC_DETAIL_WRAPPER_RE = re.compile(
+    r"\b(?:tell\s+me\s+more|more\s+details?|i\s+(?:want|would\s+like)\s+to\s+know\s+more|"
+    r"can\s+you\s+explain(?:\s+more)?)\b",
+    re.IGNORECASE,
+)
+
+EXPLICIT_SUBJECT_RE = re.compile(
+    r"\b(?:sondesh|mishti|mithai|sweet(?:s)?|jolbhora|kanchagolla|nolen\s+gur|mahua|"
+    r"aamar|signature|bento|meal(?:s)?|savoury|savory|curry|veg|non[ -]?veg|"
+    r"weekly\s+(?:veg(?:etarian)?|non[ -]?veg(?:etarian)?)?\s*menu(?:s)?|"
+    r"(?:bengali|kolkata)\s+home\s+table|home\s+table|the\s+event)\b",
+    re.IGNORECASE,
+)
+
 # A shared Instagram attachment gives the next message a subject, but only
 # when the customer's wording is actually referential.  Keep this as a small
 # deterministic intent layer rather than a growing list of whole sentences:
@@ -1994,7 +2013,12 @@ class DeterministicResponder:
         # escalation keywords. Complaints/refunds are not eligible here and
         # continue into the deterministic guard below. An open slot is
         # excluded: its own handler owns the customer's answer.
-        if not active_conversation_flow:
+        semantic_resolution_text = semantic_remainder or user_message
+        explicit_subject_in_detail_wrapper = bool(
+            EXPLICIT_SUBJECT_RE.search(semantic_resolution_text)
+            and GENERIC_DETAIL_WRAPPER_RE.search(semantic_resolution_text)
+        )
+        if not active_conversation_flow and not explicit_subject_in_detail_wrapper:
             structured = self._structured_nlu_response(
                 user_message, user_id, channel, intro_greeting_prefix,
             )
@@ -2608,6 +2632,16 @@ class DeterministicResponder:
                 # Tier-3 menu template on "today" alone.
                 elif tmpl_id == "know_more" and re.search(r'\bmenu\b', lowered_text) and re.search(r"\b(today|today's|todays)\b", lowered_text):
                     score += 200
+
+            # ``weekly menu`` is an explicit subject even when wrapped in a
+            # generic detail request.  It is not duplicated in every menu
+            # template's trigger list, so seed a deterministic score here to
+            # keep it ahead of the generic ``know_more`` fallback.
+            if tmpl_id == "savoury_food_intro" and re.search(
+                r"\b(?:weekly|this\s+week(?:'s)?|current|today(?:'s)?)\s+menu\b",
+                lowered_text,
+            ):
+                score = max(score, 140)
 
             # Calculate Tier Multiplier
             if tmpl_id in TIER_1_GUARDS:
