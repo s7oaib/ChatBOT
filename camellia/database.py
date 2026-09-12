@@ -22,6 +22,54 @@ class Database:
         os.makedirs(parent, exist_ok=True)
         self.init_db()
 
+    def _retire_outdated_home_table_knowledge(self) -> int:
+        """Archive the retired Bengali Home Table event answers once.
+
+        This is deliberately narrower than a blanket Kolkata cleanup: only
+        active learned answers that contain the known event signature are
+        retired. Their prior content and aliases remain in version history,
+        while the parent status prevents both direct and alias retrieval.
+        """
+        strong_markers = (
+            "4th & 11th October 2026",
+            "diamond park",
+            "male folk deities of bengal",
+            "bengali omakase",
+            "durga pujo",
+        )
+        retired = 0
+        with self.get_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM learned_knowledge WHERE status = 'ACTIVE'"
+            ).fetchall()
+            for row in rows:
+                text = " ".join(
+                    str(row[key] or "")
+                    for key in ("topic", "question_pattern", "verified_answer", "source")
+                ).lower()
+                has_home_table = "bengali home table" in text or "home table" in text
+                marker_count = sum(marker.lower() in text for marker in strong_markers)
+                if not has_home_table or marker_count < 1:
+                    continue
+                self._snapshot_version(
+                    conn, int(row["id"]), dict(row),
+                    "system:retire_home_table_event",
+                    "retired_outdated_home_table_event",
+                )
+                conn.execute(
+                    "UPDATE learned_knowledge SET status = 'ARCHIVED', "
+                    "updated_by = ?, updated_at = ? WHERE id = ?",
+                    (
+                        "system:retire_home_table_event",
+                        datetime.utcnow().isoformat(),
+                        int(row["id"]),
+                    ),
+                )
+                retired += 1
+            if retired:
+                conn.commit()
+        return retired
+
     @classmethod
     def _ensure_instagram_outbound_audit_schema(cls, conn: sqlite3.Connection) -> None:
         """Ensure only the additive outbound-audit schema on this connection.
@@ -723,6 +771,11 @@ class Database:
             self._create_indexes(cursor)
 
             conn.commit()
+
+        # Retire only the explicitly identified, outdated Home Table event
+        # answers after the base schema is committed. This keeps startup
+        # migration-safe and leaves current Kolkata/business knowledge intact.
+        self._retire_outdated_home_table_knowledge()
 
     def set_ad_product_route(self, ad_id: str, product: str) -> Dict[str, Any]:
         """Creates or updates the product shown first for one Meta ad ID."""

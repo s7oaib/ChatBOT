@@ -569,6 +569,7 @@ SONDESH_CONTEXT_WORDS = (
 # without that pairing, "who is the founder" or "is the kitchen open"
 # would wrongly pull in the Kolkata answer instead of their own template.
 KOLKATA_UNAMBIGUOUS_RE = re.compile(r'\b(kolkata|relocat\w*|shutting down|shut down)\b', re.IGNORECASE)
+BENGALI_HOME_TABLE_RETIRED_RE = re.compile(r'\bbengali\s+home\s+table\b', re.IGNORECASE)
 KOLKATA_MOVE_VERB_RE = re.compile(r'\b(mov(e|ing)|leav(e|ing)|leaves|clos(e|ing))\b', re.IGNORECASE)
 KOLKATA_SUBJECT_RE = re.compile(
     r'\b(kitchen|gurgaon|founder|founders|recipes|recipe|quality|standards|team|somdeb)\b',
@@ -1671,6 +1672,20 @@ class DeterministicResponder:
         ad_product = product_for_ad(referral_ad_id, referral_ad_title) or facts.get("ad_product")
         if ad_product:
             facts["ad_product"] = ad_product
+
+        # The former Bengali Home Table event is retired. Keep a deterministic
+        # neutral answer for explicit mentions so stale learned/custom answers
+        # or source context can never resurrect its October event details.
+        if BENGALI_HOME_TABLE_RETIRED_RE.search(lowered_text):
+            retired_event_notice = (
+                "That Bengali Home Table event information is no longer current. "
+                "Please contact our team if you'd like to know about any upcoming events."
+            )
+            facts["last_route_source"] = "retired_content_guard"
+            facts["last_intents"] = [Intent.UNKNOWN.value]
+            facts["source_context_used"] = False
+            session_memory.add_turn(user_id, channel, user_message, retired_event_notice)
+            return retired_event_notice, True, "retired_home_table_event", None
 
         # A direct human request always outranks an active order slot.  Without
         # this guard, "I need an agent" after a receipt could be treated as a

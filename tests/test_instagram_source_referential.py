@@ -347,3 +347,15 @@ def test_explicit_home_table_precedes_generic_detail_nlu(deterministic_responder
     assert template_id == "kolkata_expansion_info"
     assert "kolkata" in reply.lower()
     assert facts["source_context_used"] is False
+
+
+def test_retired_home_table_event_is_neutral_even_with_stale_source(deterministic_responder):
+    uid = "retired_home_table_guard"
+    facts = _set_source(uid)
+    facts["source_route"]["routing_topic"] = "Bengali Home Table"
+    reply, matched, template_id, _images = _reply(uid, "Tell me about Bengali Home Table")
+    assert matched is True
+    assert template_id == "retired_home_table_event"
+    assert "no longer current" in reply.lower()
+    assert "4th & 11th October 2026" not in reply
+    assert facts["source_context_used"] is False
