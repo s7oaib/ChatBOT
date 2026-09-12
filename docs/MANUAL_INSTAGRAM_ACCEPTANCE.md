@@ -1,19 +1,34 @@
 # Manual Instagram acceptance checklist
 
-This checklist is intentionally manual. The acceptance agent must not log in to Instagram, send messages, or share posts/reels.
+This checklist is intentionally manual. The acceptance agent must not log in to Instagram, send messages, or share posts/reels. An account owner should run the following exact sequence from the real customer account against the configured source route.
 
-## Reel route
+## Required sequence
 
-- [ ] An admin opens the configured reel containing `DdAnO6MTok1` from the real Instagram account.
-- [ ] Send `Tell me more` from the customer account and capture the reply, route, and timestamp.
-- [ ] Send `What about kanchagolla?` and capture the reply, route, and timestamp.
-- [ ] Confirm the reply is grounded in the intended reel route and that no source-routing override is recorded.
+1. Send `hi`.
+2. Send `Jolbhora price`.
+3. Share the configured reel.
+4. Send `Tell me more`.
+5. Send `hi`.
+6. Send `Tell me more`.
+7. Send `What about Kanchagolla?`.
+8. Send `I want to talk to a human`.
 
-## Post route
+Capture the customer-visible reply, timestamp, and route/evidence for each step.
 
-- [ ] An admin confirms the post containing `Dc2PmrQE3Y4` is paired through the dashboard and the pairing window is active.
-- [ ] Share the post during the pairing window, send `Tell me more`, and capture the reply, route, and timestamp.
-- [ ] Confirm the post route is used and no unrelated route takes precedence.
+## Expected results
+
+- Greeting is the approved greeting copy.
+- Jolbhora prices match the canonical menu.
+- The configured reel context is used by the first `Tell me more`.
+- The greeting does not consume or replace source context.
+- The source context remains available for the subsequent `Tell me more` when the existing session rules allow it.
+- `What about Kanchagolla?` uses explicit Kanchagolla intent rather than the reel priority.
+- The final request follows the safe human-handoff flow.
+
+## Optional route evidence
+
+- [ ] Confirm the configured reel contains `DdAnO6MTok1` and capture its route ID.
+- [ ] If post routing is also being signed off, confirm the configured post contains `Dc2PmrQE3Y4`, share it during the pairing window, and capture the `Tell me more` reply.
 
 ## Safety checks after the manual run
 
