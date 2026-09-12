@@ -2,6 +2,7 @@ import os
 import re
 import sqlite3
 import json
+from difflib import SequenceMatcher
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional, Tuple
 from camellia.config import config
@@ -258,6 +259,15 @@ class Database:
                 source_routing_id TEXT
             );
             """)
+            # Slice 4 evaluation fields are additive so existing review rows
+            # remain intact across the production migration.
+            self._ensure_column(cursor, "assisted_resolution_suggestions", "edit_score", "REAL")
+            self._ensure_column(cursor, "assisted_resolution_suggestions", "edit_severity", "TEXT")
+            self._ensure_column(cursor, "assisted_resolution_suggestions", "shadow_category", "TEXT")
+            self._ensure_column(cursor, "assisted_resolution_suggestions", "shadow_confidence", "REAL")
+            self._ensure_column(cursor, "assisted_resolution_suggestions", "protected_order_flow", "INTEGER DEFAULT 0")
+            self._ensure_column(cursor, "assisted_resolution_suggestions", "source_route_present", "INTEGER DEFAULT 0")
+            self._ensure_column(cursor, "assisted_resolution_suggestions", "cam_interference", "INTEGER DEFAULT 0")
 
             # RAG audit log table
             cursor.execute("""
@@ -2676,10 +2686,15 @@ class Database:
             existing = conn.execute("SELECT id FROM assisted_resolution_suggestions WHERE user_id=? AND channel=? AND customer_message=? AND status='PENDING_REVIEW' ORDER BY id DESC LIMIT 1", (str(fields.get("user_id")), str(fields.get("channel")), fields.get("customer_message", ""))).fetchone()
             if existing:
                 return int(existing["id"])
-            columns = ["escalation_id", "conversation_id", "user_id", "channel", "customer_message", "triage_category", "detected_intent", "confidence", "matched_knowledge_id", "matched_knowledge_source", "grounding_status", "grounding_details", "suggested_answer", "original_suggested_answer", "status", "risk_flags", "model", "source_routing_id"]
+            columns = ["escalation_id", "conversation_id", "user_id", "channel", "customer_message", "triage_category", "detected_intent", "confidence", "matched_knowledge_id", "matched_knowledge_source", "grounding_status", "grounding_details", "suggested_answer", "original_suggested_answer", "status", "risk_flags", "model", "source_routing_id", "shadow_category", "shadow_confidence", "protected_order_flow", "source_route_present", "cam_interference"]
             values = [fields.get(c) for c in columns]
-            values[5] = fields.get("triage_category") or "UNSUPPORTED"; values[7] = float(fields.get("confidence") or 0.0); values[10] = fields.get("grounding_status") or "Not Grounded"; values[14] = fields.get("status") or "PENDING_REVIEW"; values[15] = json.dumps(fields.get("risk_flags") or [], ensure_ascii=False)
+            values[5] = fields.get("triage_category") or "UNSUPPORTED"; values[7] = float(fields.get("confidence") or 0.0); values[10] = fields.get("grounding_status") or "Not Grounded"; values[14] = fields.get("status") or "PENDING_REVIEW"; values[15] = json.dumps(fields.get("risk_flags") or [], ensure_ascii=False); values[20] = int(bool(fields.get("protected_order_flow"))); values[21] = int(bool(fields.get("source_route_present"))); values[22] = int(bool(fields.get("cam_interference")))
             cur = conn.execute(f"INSERT INTO assisted_resolution_suggestions ({', '.join(columns)}) VALUES ({', '.join('?' for _ in columns)})", values); conn.commit(); return int(cur.lastrowid)
+
+    def latest_triage_shadow_for(self, user_id: str, channel: str, user_message: str) -> Optional[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            row = conn.execute("SELECT category, confidence, reasoning FROM triage_shadow WHERE user_id=? AND channel=? AND user_message=? ORDER BY id DESC LIMIT 1", (str(user_id), str(channel), user_message)).fetchone()
+        return dict(row) if row else None
 
     @staticmethod
     def _decode_assisted(row: sqlite3.Row) -> Dict[str, Any]:
@@ -2701,13 +2716,79 @@ class Database:
         return [self._decode_assisted(row) for row in rows]
 
     def review_assisted_suggestion(self, suggestion_id: int, *, status: str, reviewed_by: str, final_answer: Optional[str] = None, resolution_action: Optional[str] = None, rejection_reason: Optional[str] = None) -> bool:
+        original = self.get_assisted_suggestion(suggestion_id) or {}
+        edit_score = None
+        edit_severity = None
+        if status == "EDITED_AND_APPROVED":
+            before = str(original.get("original_suggested_answer") or "")
+            after = str(final_answer or "")
+            similarity = SequenceMatcher(None, before, after) if before or after else 1.0
+            edit_score = round(1.0 - (similarity.ratio() if hasattr(similarity, "ratio") else similarity), 4)
+            edit_severity = "Minor Edit" if edit_score <= 0.10 else ("Moderate Edit" if edit_score <= 0.30 else "Major Edit")
         with self.get_connection() as conn:
-            cur = conn.execute("UPDATE assisted_resolution_suggestions SET status=?, reviewed_at=?, reviewed_by=?, final_answer=?, resolution_action=?, rejection_reason=? WHERE id=? AND status='PENDING_REVIEW'", (status, datetime.utcnow().isoformat(), reviewed_by, final_answer, resolution_action, rejection_reason)); conn.commit(); return cur.rowcount > 0
+            cur = conn.execute("UPDATE assisted_resolution_suggestions SET status=?, reviewed_at=?, reviewed_by=?, final_answer=?, resolution_action=?, rejection_reason=? WHERE id=? AND status='PENDING_REVIEW'", (status, datetime.utcnow().isoformat(), reviewed_by, final_answer, resolution_action, rejection_reason, suggestion_id)); conn.commit(); return cur.rowcount > 0
+
+    def record_assisted_edit_metrics(self, suggestion_id: int, original: str, final: str) -> Dict[str, Any]:
+        similarity = SequenceMatcher(None, original or "", final or "").ratio()
+        score = round(1.0 - similarity, 4)
+        severity = "Minor Edit" if score <= 0.10 else ("Moderate Edit" if score <= 0.30 else "Major Edit")
+        with self.get_connection() as conn:
+            conn.execute("UPDATE assisted_resolution_suggestions SET edit_score=?, edit_severity=? WHERE id=?", (score, severity, suggestion_id))
+            conn.commit()
+        return {"edit_score": score, "edit_severity": severity}
 
     def assisted_metrics(self) -> Dict[str, int]:
         with self.get_connection() as conn: rows = conn.execute("SELECT status, COUNT(*) AS count FROM assisted_resolution_suggestions GROUP BY status").fetchall()
         c = {str(r["status"]): int(r["count"]) for r in rows}
         return {"suggestions_reviewed": sum(c.get(k, 0) for k in ("APPROVED", "EDITED_AND_APPROVED", "REJECTED", "SENT_TO_HUMAN", "RESOLVED")), "approved_as_is": c.get("APPROVED", 0), "edited_before_send": c.get("EDITED_AND_APPROVED", 0), "rejected": c.get("REJECTED", 0), "sent_to_human": c.get("SENT_TO_HUMAN", 0), "teach_required": c.get("TEACH_REQUIRED", 0)}
+
+    def assisted_evaluation(self) -> Dict[str, Any]:
+        """Read-only quality and safety rollups for the review dashboard."""
+        with self.get_connection() as conn:
+            rows = [self._decode_assisted(row) for row in conn.execute("SELECT * FROM assisted_resolution_suggestions ORDER BY created_at DESC, id DESC").fetchall()]
+            knowledge_rows = {str(row["id"]): dict(row) for row in conn.execute("SELECT id, topic, source, usage_count FROM learned_knowledge").fetchall()}
+        reviewed_statuses = {"APPROVED", "EDITED_AND_APPROVED", "REJECTED", "SENT_TO_HUMAN", "RESOLVED"}
+        reviewed = [row for row in rows if row.get("status") in reviewed_statuses]
+        count = lambda values, predicate: sum(1 for value in values if predicate(value))
+        status_counts = {status: count(rows, lambda row, status=status: row.get("status") == status) for status in ("PENDING_REVIEW", "APPROVED", "EDITED_AND_APPROVED", "REJECTED", "SENT_TO_HUMAN", "TEACH_REQUIRED", "RESOLVED")}
+        def rate(n: int) -> float:
+            return round(n / len(reviewed), 4) if reviewed else 0.0
+        performance = {
+            "suggestions_generated": len(rows), "reviewed": len(reviewed),
+            "approved_as_is": status_counts["APPROVED"], "edited_and_approved": status_counts["EDITED_AND_APPROVED"],
+            "rejected": status_counts["REJECTED"], "sent_to_human": status_counts["SENT_TO_HUMAN"],
+            "teach_and_resolve": count(rows, lambda row: row.get("resolution_action") == "TEACH_AND_RESOLVE"),
+            "non_actionable_dismissed": count(rows, lambda row: row.get("resolution_action") == "DISMISSED"),
+            "approval_rate": rate(status_counts["APPROVED"]), "edit_rate": rate(status_counts["EDITED_AND_APPROVED"]),
+            "rejection_rate": rate(status_counts["REJECTED"]), "human_escalation_rate": rate(status_counts["SENT_TO_HUMAN"]),
+        }
+        buckets = (("0-49%", 0.0, 0.50), ("50-69%", 0.50, 0.70), ("70-84%", 0.70, 0.85), ("85-94%", 0.85, 0.95), ("95-100%", 0.95, 1.01))
+        def outcome_counts(items: List[Dict[str, Any]]) -> Dict[str, int]:
+            return {"total": len(items), "reviewed": count(items, lambda row: row.get("status") in reviewed_statuses), "approved_as_is": count(items, lambda row: row.get("status") == "APPROVED"), "edited": count(items, lambda row: row.get("status") == "EDITED_AND_APPROVED"), "rejected": count(items, lambda row: row.get("status") == "REJECTED"), "human_handoff": count(items, lambda row: row.get("status") == "SENT_TO_HUMAN")}
+        confidence_buckets = {label: outcome_counts([row for row in rows if low <= float(row.get("confidence") or 0.0) < high]) for label, low, high in buckets}
+        categories = ("AUTO_RESOLVE", "AI_SUGGESTED", "TEACH_REQUIRED", "HUMAN_REQUIRED", "NON_ACTIONABLE", "CONTACT_DETAIL", "UNSUPPORTED")
+        category_breakdown = {category: outcome_counts([row for row in rows if row.get("triage_category") == category]) for category in categories}
+        grounding_breakdown = {value: outcome_counts([row for row in rows if (row.get("grounding_status") or "Not Grounded") == value]) for value in ("Grounded", "Not Grounded")}
+        risk_names = {"price": "Price", "discount": "Discount", "delivery_commitment": "Delivery", "availability": "Availability", "payment": "Payment", "event_date": "Event Date", "hiring": "Hiring", "allergen": "Ingredient / Allergen", "custom_order": "Custom Order", "order_change": "Order Change"}
+        risk_breakdown = {label: outcome_counts([row for row in rows if key in (row.get("risk_flags") or [])]) for key, label in risk_names.items()}
+        def severity(row: Dict[str, Any]) -> str:
+            if row.get("edit_severity"): return str(row["edit_severity"])
+            before, after = str(row.get("original_suggested_answer") or ""), str(row.get("final_answer") or "")
+            if not before or not after: return "Major Edit"
+            score = 1.0 - SequenceMatcher(None, before, after).ratio()
+            return "Minor Edit" if score <= 0.10 else ("Moderate Edit" if score <= 0.30 else "Major Edit")
+        high_confidence = [row for row in rows if float(row.get("confidence") or 0.0) >= 0.85 and (row.get("status") == "REJECTED" or row.get("status") == "SENT_TO_HUMAN" or (row.get("status") == "EDITED_AND_APPROVED" and severity(row) != "Minor Edit"))]
+        shadow_comparison = [{"id": row.get("id"), "shadow_prediction": row.get("shadow_category"), "assisted_prediction": row.get("triage_category"), "human_final_decision": row.get("status"), "confidence": row.get("confidence")} for row in rows if row.get("shadow_category")]
+        knowledge_signals = []
+        for key, group in __import__("itertools").groupby(sorted([row for row in rows if str(row.get("matched_knowledge_id") or "").startswith("learned_knowledge#")], key=lambda row: str(row.get("matched_knowledge_id"))), key=lambda row: str(row.get("matched_knowledge_id"))):
+            items = list(group); numeric_id = key.rsplit("#", 1)[-1]; knowledge = knowledge_rows.get(numeric_id, {})
+            knowledge_signals.append({"knowledge_id": key, "topic": knowledge.get("topic"), "source": knowledge.get("source") or items[0].get("matched_knowledge_source"), "usage": knowledge.get("usage_count", 0), **outcome_counts(items), "knowledge_review_recommended": count(items, lambda row: row.get("status") == "REJECTED") >= 2})
+        safety = {"source_routing_overrides": count(rows, lambda row: bool(row.get("source_route_present"))), "whatsapp_assisted_activity": count(rows, lambda row: str(row.get("channel")).lower() == "whatsapp"), "protected_order_flow": count(rows, lambda row: bool(row.get("protected_order_flow"))), "cam_interference": count(rows, lambda row: bool(row.get("cam_interference")))}
+        unsafe = count(rows, lambda row: bool(row.get("risk_flags")) and row.get("status") in {"REJECTED", "SENT_TO_HUMAN"})
+        commitment_errors = count(rows, lambda row: any(flag in (row.get("risk_flags") or []) for flag in ("price", "discount", "delivery_commitment")) and row.get("status") in {"REJECTED", "SENT_TO_HUMAN", "EDITED_AND_APPROVED"})
+        grounded_reviewed = len([row for row in reviewed if row.get("grounding_status") == "Grounded" and row.get("triage_category") in {"AUTO_RESOLVE", "AI_SUGGESTED"}])
+        readiness = {"reviewed_grounded_suggestions": {"value": grounded_reviewed, "target": 100}, "unsafe_factual_suggestions": unsafe, "high_confidence_rejected": len(high_confidence), "price_discount_delivery_errors": commitment_errors, "whatsapp_ai_activity": safety["whatsapp_assisted_activity"], "source_routing_overrides": safety["source_routing_overrides"], "order_flow_interference": safety["protected_order_flow"] + safety["cam_interference"], "target_gate": {"grounded_reviewed": ">= 100", "unsafe_factual": 0, "price_discount_delivery": 0, "whatsapp_activity": 0, "source_routing_overrides": 0, "order_flow_interference": 0, "high_confidence_false_decisions": "near 0"}}
+        return {"performance": performance, "confidence_buckets": confidence_buckets, "category_breakdown": category_breakdown, "grounding_breakdown": grounding_breakdown, "risk_breakdown": risk_breakdown, "high_confidence_problems": [{key: row.get(key) for key in ("id", "customer_message", "confidence", "triage_category", "grounding_status", "matched_knowledge_source", "suggested_answer", "final_answer", "status", "rejection_reason", "edit_severity")} for row in high_confidence], "shadow_vs_assisted": shadow_comparison, "knowledge_signals": knowledge_signals, "safety": safety, "readiness": readiness}
 
     def increment_learned_knowledge_usage(self, knowledge_id: int) -> bool:
         with self.get_connection() as conn:

@@ -87,7 +87,8 @@ def create_suggestion(*, user_id: str, channel: str, customer_message: str, esca
         category = "AI_SUGGESTED"
     if category not in ALLOWED_CATEGORIES:
         category = "UNSUPPORTED"
-    sid = db.create_assisted_suggestion(escalation_id=escalation_id, conversation_id=conversation_id, user_id=user_id, channel=channel, customer_message=customer_message, triage_category=category, detected_intent=category.lower(), confidence=float(match.get("confidence") or 0.0), matched_knowledge_id=match.get("knowledge_id"), matched_knowledge_source=match.get("source"), grounding_status="Grounded" if grounded else "Not Grounded", grounding_details=details, suggested_answer=answer, original_suggested_answer=answer, risk_flags=risks, model="approved_knowledge" if match else config.GROQ_MODEL, source_routing_id=source_routing_id)
+    shadow = db.latest_triage_shadow_for(user_id, channel, customer_message)
+    sid = db.create_assisted_suggestion(escalation_id=escalation_id, conversation_id=conversation_id, user_id=user_id, channel=channel, customer_message=customer_message, triage_category=category, detected_intent=category.lower(), confidence=float(match.get("confidence") or 0.0), matched_knowledge_id=match.get("knowledge_id"), matched_knowledge_source=match.get("source"), grounding_status="Grounded" if grounded else "Not Grounded", grounding_details=details, suggested_answer=answer, original_suggested_answer=answer, risk_flags=risks, model="approved_knowledge" if match else config.GROQ_MODEL, source_routing_id=source_routing_id, shadow_category=(shadow or {}).get("category"), shadow_confidence=(shadow or {}).get("confidence"), source_route_present=bool(source_routing_id))
     return db.get_assisted_suggestion(sid)
 
 

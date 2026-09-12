@@ -2301,13 +2301,20 @@ def get_assisted_resolutions(status: Optional[str] = None, category: Optional[st
     require_admin(x_admin_key, x_admin_pin)
     status = status.strip().upper() if status else None; category = category.strip().upper() if category else None
     items = db.list_assisted_suggestions(status=status, category=category, limit=limit)
-    return {"status": "success", "count": len(items), "suggestions": items, "metrics": db.assisted_metrics()}
+    return {"status": "success", "count": len(items), "suggestions": items, "metrics": db.assisted_metrics(), "evaluation": db.assisted_evaluation()}
 
 
 @app.get("/admin/assisted-resolutions/metrics")
 def get_assisted_resolution_metrics(x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
     require_admin(x_admin_key, x_admin_pin)
-    return {"status": "success", "metrics": db.assisted_metrics()}
+    return {"status": "success", "metrics": db.assisted_metrics(), "evaluation": db.assisted_evaluation()}
+
+
+@app.get("/admin/assisted-resolutions/evaluation")
+@app.get("/admin/assisted-resolutions/analytics")
+def get_assisted_resolution_evaluation(x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    return {"status": "success", "evaluation": db.assisted_evaluation(), "auto_resolve_enabled": bool(config.LLM_AUTO_RESOLVE_ENABLED)}
 
 
 def _assisted_reviewer(x_admin_key: Optional[str], x_admin_pin: Optional[str]) -> str:
@@ -2334,6 +2341,8 @@ async def approve_assisted_resolution(suggestion_id: int, request: Request, x_ad
     _send_assisted_answer(suggestion, final_answer)
     edited = final_answer != str(suggestion.get("original_suggested_answer") or "").strip(); status = "EDITED_AND_APPROVED" if edited else "APPROVED"
     if not db.review_assisted_suggestion(suggestion_id, status=status, reviewed_by=_assisted_reviewer(x_admin_key, x_admin_pin), final_answer=final_answer, resolution_action=status): raise HTTPException(status_code=409, detail="Suggestion was already reviewed.")
+    if edited:
+        db.record_assisted_edit_metrics(suggestion_id, str(suggestion.get("original_suggested_answer") or ""), final_answer)
     kid = str(suggestion.get("matched_knowledge_id") or "")
     if kid.startswith("learned_knowledge#"):
         try: db.increment_learned_knowledge_usage(int(kid.rsplit("#", 1)[1]))
@@ -2354,7 +2363,10 @@ async def reject_assisted_resolution(suggestion_id: int, request: Request, x_adm
     require_admin(x_admin_key, x_admin_pin)
     try: body = await request.json()
     except Exception: body = {}
-    if not db.review_assisted_suggestion(suggestion_id, status="REJECTED", reviewed_by=_assisted_reviewer(x_admin_key, x_admin_pin), resolution_action="REJECTED", rejection_reason=str(body.get("reason") or "Other")[:500]): raise HTTPException(status_code=404, detail="Pending assisted suggestion not found.")
+    reason_code = str(body.get("reason_code") or body.get("reason") or "Other").strip()[:80]
+    notes = str(body.get("notes") or "").strip()[:400]
+    rejection_reason = f"{reason_code}: {notes}" if notes else reason_code
+    if not db.review_assisted_suggestion(suggestion_id, status="REJECTED", reviewed_by=_assisted_reviewer(x_admin_key, x_admin_pin), resolution_action="REJECTED", rejection_reason=rejection_reason): raise HTTPException(status_code=404, detail="Pending assisted suggestion not found.")
     return {"status": "REJECTED", "suggestion_id": suggestion_id}
 
 
@@ -4871,6 +4883,22 @@ THIS WEEK'S BENGAL SPECIALS
                     </table>
                 </div>
             </div>
+
+            <div id="assisted-evaluation-section" style="margin-top:28px;padding-top:20px;border-top:2px solid var(--border);">
+                <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
+                    <div><h3 style="margin:0;">📊 Assisted Resolution Performance</h3><p style="font-size:.82rem;color:var(--text-muted);margin-top:4px;">Read-only evaluation. Approval rate is not model accuracy; Auto Resolve remains informational only.</p></div>
+                    <button class="btn-secondary" onclick="loadAssistedEvaluation()">🔄 Refresh evaluation</button>
+                </div>
+                <div id="assistedPerformanceSummary" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:14px 0;"></div>
+                <div id="assistedReadiness" style="padding:12px;border:1px solid var(--border);border-radius:10px;margin-bottom:14px;"><b>Auto Resolve Readiness</b><span id="assistedReadinessBody">Loading…</span></div>
+                <div style="overflow-x:auto;margin-bottom:14px;"><table class="data-table"><thead><tr><th>Confidence Bucket</th><th>Reviewed</th><th>Approved As-Is</th><th>Edited</th><th>Rejected</th><th>Human Handoff</th></tr></thead><tbody id="assistedConfidenceTable"></tbody></table></div>
+                <div style="overflow-x:auto;margin-bottom:14px;"><table class="data-table"><thead><tr><th>Category</th><th>Total</th><th>Approved</th><th>Edited</th><th>Rejected</th><th>Human Final Action</th></tr></thead><tbody id="assistedCategoryTable"></tbody></table></div>
+                <div style="overflow-x:auto;margin-bottom:14px;"><table class="data-table"><thead><tr><th>Grounding</th><th>Reviewed</th><th>Approved</th><th>Edited</th><th>Rejected</th><th>Sent to Human</th></tr></thead><tbody id="assistedGroundingTable"></tbody></table></div>
+                <div style="overflow-x:auto;margin-bottom:14px;"><table class="data-table"><thead><tr><th>Risk Flag</th><th>Total</th><th>Approved</th><th>Edited</th><th>Rejected</th><th>Sent to Human</th></tr></thead><tbody id="assistedRiskTable"></tbody></table></div>
+                <h4>High Confidence Problems</h4><div id="assistedHighConfidenceProblems" style="font-size:.82rem;color:var(--text-muted);">None recorded.</div>
+                <h4>Shadow vs Assisted Comparison</h4><div id="assistedShadowComparison" style="font-size:.82rem;color:var(--text-muted);">No correlated records.</div>
+                <h4>Safety Metrics</h4><div id="assistedSafetyMetrics" style="font-size:.82rem;color:var(--text-muted);">Loading…</div>
+            </div>
         </div>
 
         <!-- CUSTOM Q&A: the client-managed reusable knowledge library. This
@@ -4899,6 +4927,7 @@ THIS WEEK'S BENGAL SPECIALS
             <div style="margin-bottom:12px;">
                 <input type="text" id="customQaSearch" class="field-control" placeholder="🔎 Search questions, answers or topics…" style="max-width:420px;" oninput="renderCustomQaList()">
             </div>
+            <div id="customQaAiSignals" style="padding:10px;border:1px solid var(--border);border-radius:10px;margin-bottom:12px;font-size:.82rem;">AI Review Signal: loading…</div>
 
             <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:10px;">
                 <button class="tab-btn active" type="button" id="cqaStatusBtn-ACTIVE" onclick="setCustomQaStatusFilter('ACTIVE')">Active</button>
@@ -5402,7 +5431,7 @@ THIS WEEK'S BENGAL SPECIALS
             if (group === 'customers') { loadAnalytics(); loadConversations(); }
             if (group === 'answers') { loadCandidates(); loadKnowledge(); }
             if (group === 'ai_resolution') { loadAiResolution(); loadTriageShadow(); }
-            if (group === 'custom_qa') { loadCustomQa(); }
+            if (group === 'custom_qa') { loadCustomQa(); loadAssistedEvaluation(); }
         }
 
         // MENU MANAGER tab: every menu is edited as a draft (server-side, in
@@ -7118,6 +7147,7 @@ Non-Veg:
                 updateAiResolutionBadge(needsAttention);
 
                 renderAiResolution();
+                loadAssistedEvaluation();
             } catch (err) {
                 tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: red;">Failed to load AI Resolution &amp; Answers.</td></tr>';
             }
@@ -7274,6 +7304,35 @@ Non-Veg:
             const resp = await fetch(`/admin/assisted-resolutions/${id}/${path}`, options);
             if (!resp.ok) { const err = await resp.json().catch(() => ({})); throw new Error(err.detail || resp.status); }
             await loadAiResolution();
+        }
+
+        async function loadAssistedEvaluation() {
+            try {
+                const resp = await fetch('/admin/assisted-resolutions/evaluation', { headers: getAuthHeaders() });
+                if (!resp.ok) throw new Error('evaluation unavailable');
+                const data = await resp.json();
+                const ev = data.evaluation || {}, p = ev.performance || {}, readiness = ev.readiness || {}, safety = ev.safety || {};
+                const card = (label, value) => `<div style="padding:10px;border:1px solid var(--border);border-radius:10px;text-align:center"><small>${escapeHtml(label)}</small><h3 style="margin:4px 0">${escapeHtml(value)}</h3></div>`;
+                document.getElementById('assistedPerformanceSummary').innerHTML = [
+                    card('Suggestions Generated', p.suggestions_generated || 0), card('Reviewed', p.reviewed || 0), card('Approved As-Is', p.approved_as_is || 0), card('Edited & Approved', p.edited_and_approved || 0), card('Rejected', p.rejected || 0), card('Sent to Human', p.sent_to_human || 0), card('Teach & Resolve', p.teach_and_resolve || 0), card('Non-Actionable Dismissed', p.non_actionable_dismissed || 0),
+                ].join('');
+                const readinessText = readiness.reviewed_grounded_suggestions ? `${readiness.reviewed_grounded_suggestions.value} / ${readiness.reviewed_grounded_suggestions.target} grounded human-reviewed suggestions · unsafe facts ${readiness.unsafe_factual_suggestions || 0} · high-confidence problems ${readiness.high_confidence_rejected || 0} · price/discount/delivery errors ${readiness.price_discount_delivery_errors || 0} · Auto Resolve: ${data.auto_resolve_enabled ? 'ENABLED (unexpected)' : 'OFF'}` : 'No data yet.';
+                document.getElementById('assistedReadinessBody').innerHTML = ` <span style="font-weight:400;margin-left:8px">${escapeHtml(readinessText)}</span>`;
+                const rows = (obj, labels) => labels.map(label => { const x = obj[label] || {}; return `<tr><td>${escapeHtml(label)}</td><td>${x.reviewed ?? x.total ?? 0}</td><td>${x.approved_as_is || x.approved || 0}</td><td>${x.edited || 0}</td><td>${x.rejected || 0}</td><td>${x.human_handoff || x.sent_to_human || 0}</td></tr>`; }).join('');
+                document.getElementById('assistedConfidenceTable').innerHTML = rows(ev.confidence_buckets || {}, Object.keys(ev.confidence_buckets || {}));
+                document.getElementById('assistedCategoryTable').innerHTML = rows(ev.category_breakdown || {}, Object.keys(ev.category_breakdown || {}));
+                document.getElementById('assistedGroundingTable').innerHTML = rows(ev.grounding_breakdown || {}, Object.keys(ev.grounding_breakdown || {}));
+                document.getElementById('assistedRiskTable').innerHTML = rows(ev.risk_breakdown || {}, Object.keys(ev.risk_breakdown || {}));
+                const problems = ev.high_confidence_problems || [];
+                document.getElementById('assistedHighConfidenceProblems').innerHTML = problems.length ? problems.map(x => `<div style="padding:6px;border-bottom:1px solid var(--border)"><b>${escapeHtml(x.confidence)}</b> · ${escapeHtml(x.triage_category)} · ${escapeHtml(x.status)} · ${escapeHtml(x.customer_message)}<br><small>Grounding: ${escapeHtml(x.grounding_status)} · Knowledge: ${escapeHtml(x.matched_knowledge_source || '—')} · Reason: ${escapeHtml(x.rejection_reason || x.edit_severity || '—')}</small></div>`).join('') : 'None recorded.';
+                const comparisons = ev.shadow_vs_assisted || [];
+                document.getElementById('assistedShadowComparison').innerHTML = comparisons.length ? comparisons.map(x => `<div>${escapeHtml(x.shadow_prediction)} → ${escapeHtml(x.assisted_prediction)} → ${escapeHtml(x.human_final_decision || 'Pending')}</div>`).join('') : 'No correlated records.';
+                document.getElementById('assistedSafetyMetrics').innerHTML = `Source Routing Overrides by AI: <b>${safety.source_routing_overrides || 0}</b> · WhatsApp Assisted AI Activity: <b>${safety.whatsapp_assisted_activity || 0}</b> · Protected order flow: <b>${safety.protected_order_flow || 0}</b> · CAM interference: <b>${safety.cam_interference || 0}</b>`;
+                const signal = document.getElementById('customQaAiSignals');
+                if (signal) signal.innerHTML = 'AI Review Signal: ' + ((ev.knowledge_signals || []).length ? (ev.knowledge_signals || []).map(k => `${escapeHtml(k.topic || k.knowledge_id)} — Used in ${k.total || 0} assisted suggestions; Approved ${k.approved_as_is || 0}; Edited ${k.edited || 0}; Rejected ${k.rejected || 0}${k.knowledge_review_recommended ? ' · <b>Knowledge Review Recommended</b>' : ''}`).join('<br>') : 'No Custom Q&A usage yet.');
+            } catch (err) {
+                const target = document.getElementById('assistedSafetyMetrics'); if (target) target.textContent = 'Evaluation unavailable.';
+            }
         }
         async function approveAssisted(id) { if (confirm('Approve and send this Instagram answer now?')) { try { await assistedAction(id,'approve',{}); } catch(e) { alert(e); } } }
         async function editAssisted(id) { const answer = prompt('Edit the final answer before sending:'); if (answer && answer.trim()) { try { await assistedAction(id,'edit-resolve',{final_answer:answer.trim()}); } catch(e) { alert(e); } } }
