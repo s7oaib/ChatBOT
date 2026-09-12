@@ -227,6 +227,38 @@ class Database:
             );
             """)
 
+            # Human-reviewed assisted-resolution drafts. Separate from the
+            # legacy candidate queue so every review action is auditable.
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS assisted_resolution_suggestions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                escalation_id INTEGER,
+                conversation_id INTEGER,
+                user_id TEXT NOT NULL,
+                channel TEXT NOT NULL,
+                customer_message TEXT NOT NULL,
+                triage_category TEXT NOT NULL,
+                detected_intent TEXT,
+                confidence REAL DEFAULT 0.0,
+                matched_knowledge_id TEXT,
+                matched_knowledge_source TEXT,
+                grounding_status TEXT NOT NULL DEFAULT 'Not Grounded',
+                grounding_details TEXT,
+                suggested_answer TEXT,
+                original_suggested_answer TEXT,
+                status TEXT NOT NULL DEFAULT 'PENDING_REVIEW',
+                risk_flags TEXT NOT NULL DEFAULT '[]',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                reviewed_at TIMESTAMP,
+                reviewed_by TEXT,
+                final_answer TEXT,
+                resolution_action TEXT,
+                rejection_reason TEXT,
+                model TEXT,
+                source_routing_id TEXT
+            );
+            """)
+
             # RAG audit log table
             cursor.execute("""
             CREATE TABLE IF NOT EXISTS rag_audit_logs (
@@ -2637,6 +2669,49 @@ class Database:
             affected = cursor.rowcount
             conn.commit()
             return affected > 0
+
+    # --- Human-gated assisted resolution ---------------------------------
+    def create_assisted_suggestion(self, **fields: Any) -> int:
+        with self.get_connection() as conn:
+            existing = conn.execute("SELECT id FROM assisted_resolution_suggestions WHERE user_id=? AND channel=? AND customer_message=? AND status='PENDING_REVIEW' ORDER BY id DESC LIMIT 1", (str(fields.get("user_id")), str(fields.get("channel")), fields.get("customer_message", ""))).fetchone()
+            if existing:
+                return int(existing["id"])
+            columns = ["escalation_id", "conversation_id", "user_id", "channel", "customer_message", "triage_category", "detected_intent", "confidence", "matched_knowledge_id", "matched_knowledge_source", "grounding_status", "grounding_details", "suggested_answer", "original_suggested_answer", "status", "risk_flags", "model", "source_routing_id"]
+            values = [fields.get(c) for c in columns]
+            values[5] = fields.get("triage_category") or "UNSUPPORTED"; values[7] = float(fields.get("confidence") or 0.0); values[10] = fields.get("grounding_status") or "Not Grounded"; values[14] = fields.get("status") or "PENDING_REVIEW"; values[15] = json.dumps(fields.get("risk_flags") or [], ensure_ascii=False)
+            cur = conn.execute(f"INSERT INTO assisted_resolution_suggestions ({', '.join(columns)}) VALUES ({', '.join('?' for _ in columns)})", values); conn.commit(); return int(cur.lastrowid)
+
+    @staticmethod
+    def _decode_assisted(row: sqlite3.Row) -> Dict[str, Any]:
+        item = dict(row)
+        try: item["risk_flags"] = json.loads(item.get("risk_flags") or "[]")
+        except (TypeError, json.JSONDecodeError): item["risk_flags"] = []
+        return item
+
+    def get_assisted_suggestion(self, suggestion_id: int) -> Optional[Dict[str, Any]]:
+        with self.get_connection() as conn: row = conn.execute("SELECT * FROM assisted_resolution_suggestions WHERE id=?", (suggestion_id,)).fetchone()
+        return self._decode_assisted(row) if row else None
+
+    def list_assisted_suggestions(self, status: Optional[str] = None, category: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
+        query = "SELECT * FROM assisted_resolution_suggestions WHERE 1=1"; params: List[Any] = []
+        if status: query += " AND status=?"; params.append(status)
+        if category: query += " AND triage_category=?"; params.append(category)
+        query += " ORDER BY created_at DESC, id DESC LIMIT ?"; params.append(max(1, min(int(limit), 200)))
+        with self.get_connection() as conn: rows = conn.execute(query, tuple(params)).fetchall()
+        return [self._decode_assisted(row) for row in rows]
+
+    def review_assisted_suggestion(self, suggestion_id: int, *, status: str, reviewed_by: str, final_answer: Optional[str] = None, resolution_action: Optional[str] = None, rejection_reason: Optional[str] = None) -> bool:
+        with self.get_connection() as conn:
+            cur = conn.execute("UPDATE assisted_resolution_suggestions SET status=?, reviewed_at=?, reviewed_by=?, final_answer=?, resolution_action=?, rejection_reason=? WHERE id=? AND status='PENDING_REVIEW'", (status, datetime.utcnow().isoformat(), reviewed_by, final_answer, resolution_action, rejection_reason)); conn.commit(); return cur.rowcount > 0
+
+    def assisted_metrics(self) -> Dict[str, int]:
+        with self.get_connection() as conn: rows = conn.execute("SELECT status, COUNT(*) AS count FROM assisted_resolution_suggestions GROUP BY status").fetchall()
+        c = {str(r["status"]): int(r["count"]) for r in rows}
+        return {"suggestions_reviewed": sum(c.get(k, 0) for k in ("APPROVED", "EDITED_AND_APPROVED", "REJECTED", "SENT_TO_HUMAN", "RESOLVED")), "approved_as_is": c.get("APPROVED", 0), "edited_before_send": c.get("EDITED_AND_APPROVED", 0), "rejected": c.get("REJECTED", 0), "sent_to_human": c.get("SENT_TO_HUMAN", 0), "teach_required": c.get("TEACH_REQUIRED", 0)}
+
+    def increment_learned_knowledge_usage(self, knowledge_id: int) -> bool:
+        with self.get_connection() as conn:
+            cur = conn.execute("UPDATE learned_knowledge SET usage_count=COALESCE(usage_count,0)+1, last_used_at=? WHERE id=?", (datetime.utcnow().isoformat(), knowledge_id)); conn.commit(); return cur.rowcount > 0
 
     def log_rag_audit(
         self,

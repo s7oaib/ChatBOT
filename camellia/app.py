@@ -73,6 +73,7 @@ from camellia.session_memory import session_memory
 from camellia.monitoring import get_logger, delivery_monitor, latency_monitor
 from camellia.knowledge import SOURCE_MAP
 from camellia.candidate_safety import candidate_eligibility, detect_business_commitment_warnings, validate_candidate_answer
+from camellia.assisted_resolution import create_suggestion
 
 log = get_logger("camellia.app")
 
@@ -407,6 +408,16 @@ def _process_instagram_event(
             message_text, user_id=sender_id, channel="instagram",
             referral_source="ADS", referral_ad_id=trace["ad_id"], referral_ad_title=trace["ad_title"],
         )
+
+        # Human-gated assisted resolution: unresolved Instagram messages only.
+        # The draft is durable and reviewable; it is never sent from this path.
+        protected_flow = bool(facts.get("cart") or facts.get("order_draft")) or template_id in ("order_draft_receipt", "order_next_steps")
+        if config.LLM_ASSISTED_RESOLUTION_ENABLED and not was_matched and not protected_flow and not source_route:
+            create_suggestion(
+                user_id=sender_id, channel="instagram", customer_message=message_text,
+                deterministic_resolved=False, active_protected_flow=protected_flow,
+                source_routed=bool(source_route), source_routing_id=trace.get("source_routing_id"),
+            )
 
         # Channel policy: Instagram is the only AI chatbot channel. When it
         # cannot answer — an unsupported question, or an order/event ask that
@@ -2283,6 +2294,97 @@ def get_triage_shadow_report(
     if not config.LLM_TRIAGE_ENABLED and not report["classified"]:
         report["note"] = "LLM_TRIAGE_ENABLED is off, so nothing is being classified."
     return report
+
+
+@app.get("/admin/assisted-resolutions")
+def get_assisted_resolutions(status: Optional[str] = None, category: Optional[str] = None, limit: int = 100, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    status = status.strip().upper() if status else None; category = category.strip().upper() if category else None
+    items = db.list_assisted_suggestions(status=status, category=category, limit=limit)
+    return {"status": "success", "count": len(items), "suggestions": items, "metrics": db.assisted_metrics()}
+
+
+@app.get("/admin/assisted-resolutions/metrics")
+def get_assisted_resolution_metrics(x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    return {"status": "success", "metrics": db.assisted_metrics()}
+
+
+def _assisted_reviewer(x_admin_key: Optional[str], x_admin_pin: Optional[str]) -> str:
+    return (x_admin_key or x_admin_pin or "admin")[:120]
+
+
+def _send_assisted_answer(suggestion: Dict[str, Any], answer: str) -> None:
+    if str(suggestion.get("channel")).lower() != "instagram":
+        raise HTTPException(status_code=400, detail="Assisted replies are Instagram-only.")
+    if not answer.strip():
+        raise HTTPException(status_code=400, detail="A final answer is required.")
+    send_instagram_reply(str(suggestion["user_id"]), answer.strip())
+
+
+@app.post("/admin/assisted-resolutions/{suggestion_id}/approve")
+async def approve_assisted_resolution(suggestion_id: int, request: Request, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    suggestion = db.get_assisted_suggestion(suggestion_id)
+    if not suggestion or suggestion.get("status") != "PENDING_REVIEW": raise HTTPException(status_code=404, detail="Pending assisted suggestion not found.")
+    if suggestion.get("triage_category") in {"HUMAN_REQUIRED", "CONTACT_DETAIL", "TEACH_REQUIRED"}: raise HTTPException(status_code=400, detail="This suggestion requires human handling before resolution.")
+    try: body = await request.json()
+    except Exception: body = {}
+    final_answer = str(body.get("final_answer") or suggestion.get("suggested_answer") or "").strip()
+    _send_assisted_answer(suggestion, final_answer)
+    edited = final_answer != str(suggestion.get("original_suggested_answer") or "").strip(); status = "EDITED_AND_APPROVED" if edited else "APPROVED"
+    if not db.review_assisted_suggestion(suggestion_id, status=status, reviewed_by=_assisted_reviewer(x_admin_key, x_admin_pin), final_answer=final_answer, resolution_action=status): raise HTTPException(status_code=409, detail="Suggestion was already reviewed.")
+    kid = str(suggestion.get("matched_knowledge_id") or "")
+    if kid.startswith("learned_knowledge#"):
+        try: db.increment_learned_knowledge_usage(int(kid.rsplit("#", 1)[1]))
+        except (TypeError, ValueError): pass
+    return {"status": status, "suggestion_id": suggestion_id, "final_answer": final_answer}
+
+
+@app.post("/admin/assisted-resolutions/{suggestion_id}/edit-resolve")
+async def edit_assisted_resolution(suggestion_id: int, request: Request, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    try: body = await request.json()
+    except Exception: body = {}
+    if not str(body.get("final_answer") or "").strip(): raise HTTPException(status_code=400, detail="final_answer is required for edit-and-resolve.")
+    return await approve_assisted_resolution(suggestion_id, request, x_admin_key, x_admin_pin)
+
+
+@app.post("/admin/assisted-resolutions/{suggestion_id}/reject")
+async def reject_assisted_resolution(suggestion_id: int, request: Request, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    try: body = await request.json()
+    except Exception: body = {}
+    if not db.review_assisted_suggestion(suggestion_id, status="REJECTED", reviewed_by=_assisted_reviewer(x_admin_key, x_admin_pin), resolution_action="REJECTED", rejection_reason=str(body.get("reason") or "Other")[:500]): raise HTTPException(status_code=404, detail="Pending assisted suggestion not found.")
+    return {"status": "REJECTED", "suggestion_id": suggestion_id}
+
+
+@app.post("/admin/assisted-resolutions/{suggestion_id}/send-to-human")
+def send_assisted_to_human(suggestion_id: int, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin); suggestion = db.get_assisted_suggestion(suggestion_id)
+    if not suggestion or suggestion.get("status") != "PENDING_REVIEW": raise HTTPException(status_code=404, detail="Pending assisted suggestion not found.")
+    escalator.handle_escalation(user_id=str(suggestion["user_id"]), channel="instagram", user_message=str(suggestion["customer_message"]), reason="Assisted Resolution sent to human", context_data={"suggestion_id": suggestion_id})
+    db.review_assisted_suggestion(suggestion_id, status="SENT_TO_HUMAN", reviewed_by=_assisted_reviewer(x_admin_key, x_admin_pin), resolution_action="SENT_TO_HUMAN")
+    return {"status": "SENT_TO_HUMAN", "suggestion_id": suggestion_id}
+
+
+@app.post("/admin/assisted-resolutions/{suggestion_id}/teach-and-resolve")
+async def teach_and_resolve_assisted(suggestion_id: int, request: Request, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin); suggestion = db.get_assisted_suggestion(suggestion_id)
+    if not suggestion or suggestion.get("status") != "PENDING_REVIEW": raise HTTPException(status_code=404, detail="Pending assisted suggestion not found.")
+    try: body = await request.json()
+    except Exception: body = {}
+    answer = str(body.get("verified_answer") or "").strip()
+    if not answer: raise HTTPException(status_code=400, detail="verified_answer is required.")
+    kid = db.add_learned_knowledge(str(body.get("topic") or suggestion["customer_message"][:80]), str(body.get("question_pattern") or suggestion["customer_message"]), answer, source="assisted_resolution")
+    _send_assisted_answer(suggestion, answer); db.review_assisted_suggestion(suggestion_id, status="RESOLVED", reviewed_by=_assisted_reviewer(x_admin_key, x_admin_pin), final_answer=answer, resolution_action="TEACH_AND_RESOLVE")
+    return {"status": "RESOLVED", "suggestion_id": suggestion_id, "learned_knowledge_id": kid}
+
+
+@app.post("/admin/assisted-resolutions/{suggestion_id}/dismiss")
+def dismiss_assisted_resolution(suggestion_id: int, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    if not db.review_assisted_suggestion(suggestion_id, status="REJECTED", reviewed_by=_assisted_reviewer(x_admin_key, x_admin_pin), resolution_action="DISMISSED", rejection_reason="Non-actionable"): raise HTTPException(status_code=404, detail="Pending assisted suggestion not found.")
+    return {"status": "DISMISSED", "suggestion_id": suggestion_id}
 
 # The four prompts Instagram shows before a customer types anything. Each one
 # was run through the matcher first: an opener the bot answers badly is worse
@@ -6978,13 +7080,14 @@ Non-Veg:
             const tbody = document.getElementById('aiResolutionTableBody');
             tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: #888;">Loading...</td></tr>';
             try {
-                const [candResp, escResp, gapResp, approvedResp, rejectedResp, analyticsResp] = await Promise.all([
+                const [candResp, escResp, gapResp, approvedResp, rejectedResp, analyticsResp, assistedResp] = await Promise.all([
                     fetch('/admin/candidates', { headers: getAuthHeaders() }),
                     fetch('/admin/escalations?status=pending&limit=100', { headers: getAuthHeaders() }),
                     fetch('/admin/knowledge-gaps?status=OPEN&limit=100', { headers: getAuthHeaders() }),
                     fetch('/admin/learned-knowledge?limit=100', { headers: getAuthHeaders() }),
                     fetch('/admin/candidates?status=REJECTED', { headers: getAuthHeaders() }),
                     fetch('/admin/analytics', { headers: getAuthHeaders() }),
+                    fetch('/admin/assisted-resolutions?status=PENDING_REVIEW', { headers: getAuthHeaders() }),
                 ]);
                 const candData = candResp.ok ? await candResp.json() : { candidates: [] };
                 const escData = escResp.ok ? await escResp.json() : { escalations: [] };
@@ -6992,6 +7095,7 @@ Non-Veg:
                 const approvedData = approvedResp.ok ? await approvedResp.json() : { learned_knowledge: [] };
                 const rejectedData = rejectedResp.ok ? await rejectedResp.json() : { candidates: [] };
                 const analytics = analyticsResp.ok ? await analyticsResp.json() : {};
+                const assistedData = assistedResp.ok ? await assistedResp.json() : { suggestions: [] };
 
                 const candidates = candData.candidates || [];
                 const escalations = escData.escalations || [];
@@ -7000,6 +7104,7 @@ Non-Veg:
                 aiResolutionRejected = rejectedData.candidates || [];
 
                 aiResolutionItems = [
+                    ...(assistedData.suggestions || []).map(s => ({ kind: 'assisted', category: (s.triage_category || 'UNSUPPORTED').toLowerCase(), data: s })),
                     ...candidates.map(c => ({ kind: 'candidate', category: 'ai_suggested', data: c })),
                     ...escalations.map(e => ({ kind: 'escalation', category: 'human_required', data: e })),
                     ...gaps.map(g => ({ kind: 'gap', category: 'teach_required', data: g })),
@@ -7074,6 +7179,17 @@ Non-Veg:
 
         function renderAiResolutionRow(item) {
             const label = AI_CATEGORY_LABEL[item.category];
+            if (item.kind === 'assisted') {
+                const s = item.data;
+                const category = (s.triage_category || 'UNSUPPORTED').toLowerCase();
+                const risk = (s.risk_flags || []).join(', ') || 'None';
+                let actions = '';
+                if (category === 'human_required' || category === 'contact_detail') actions += `<button class="btn-secondary" style="padding:4px 8px;font-size:.72rem" onclick="sendAssistedToHuman(${s.id})">Send to Human</button>`;
+                else if (category === 'non_actionable') actions += `<button class="btn-secondary" style="padding:4px 8px;font-size:.72rem" onclick="dismissAssisted(${s.id})">Dismiss</button>`;
+                else actions += `<button class="btn-primary" style="padding:4px 8px;font-size:.72rem" onclick="approveAssisted(${s.id})">Approve &amp; Resolve</button> <button class="btn-secondary" style="padding:4px 8px;font-size:.72rem" onclick="editAssisted(${s.id})">Edit &amp; Resolve</button> <button class="btn-secondary" style="padding:4px 8px;font-size:.72rem" onclick="teachAssisted(${s.id})">Teach &amp; Resolve</button>`;
+                actions += ` <button class="btn-secondary" style="padding:4px 8px;font-size:.72rem;color:var(--danger)" onclick="rejectAssisted(${s.id})">Reject Suggestion</button>`;
+                return `<tr><td><span class="badge badge-veg">${escapeHtml(label || category)}</span></td><td style="max-width:220px;white-space:pre-wrap">${escapeHtml(s.customer_message || '—')}<br><small>Grounding: ${escapeHtml(s.grounding_status || 'Not Grounded')} · Matched Knowledge: ${escapeHtml(s.matched_knowledge_source || '—')} · Risk Flags: ${escapeHtml(risk)}</small></td><td style="max-width:300px;white-space:pre-wrap">${escapeHtml(s.suggested_answer || '—')}<br><small>${escapeHtml(s.grounding_details || '')}</small></td><td>${Math.round((s.confidence || 0) * 100)}%</td><td style="white-space:nowrap">${actions}</td></tr>`;
+            }
             if (item.kind === 'candidate') {
                 const c = item.data;
                 const confidence = Math.round((c.confidence || 0) * 100);
@@ -7150,6 +7266,20 @@ Non-Veg:
                 <td style="font-size:0.78rem; color:var(--text-muted);">No longer editable</td>
             </tr>`;
         }
+
+        async function assistedAction(id, path, body) {
+            const options = { method:'POST', headers:{...getAuthHeaders(), 'Content-Type':'application/json'} };
+            if (body) options.body = JSON.stringify(body);
+            const resp = await fetch(`/admin/assisted-resolutions/${id}/${path}`, options);
+            if (!resp.ok) { const err = await resp.json().catch(() => ({})); throw new Error(err.detail || resp.status); }
+            await loadAiResolution();
+        }
+        async function approveAssisted(id) { if (confirm('Approve and send this Instagram answer now?')) { try { await assistedAction(id,'approve',{}); } catch(e) { alert(e); } } }
+        async function editAssisted(id) { const answer = prompt('Edit the final answer before sending:'); if (answer && answer.trim()) { try { await assistedAction(id,'edit-resolve',{final_answer:answer.trim()}); } catch(e) { alert(e); } } }
+        async function rejectAssisted(id) { const reason = prompt('Why reject this suggestion?','Not approved'); if (reason !== null) { try { await assistedAction(id,'reject',{reason}); } catch(e) { alert(e); } } }
+        async function sendAssistedToHuman(id) { if (confirm('Send this case to a human? No AI answer will be sent.')) { try { await assistedAction(id,'send-to-human',{}); } catch(e) { alert(e); } } }
+        async function teachAssisted(id) { const answer = prompt('Enter the verified answer to teach and send:'); if (answer && answer.trim()) { try { await assistedAction(id,'teach-and-resolve',{verified_answer:answer.trim()}); } catch(e) { alert(e); } } }
+        async function dismissAssisted(id) { if (confirm('Dismiss this non-actionable message?')) { try { await assistedAction(id,'dismiss',{}); } catch(e) { alert(e); } } }
 
         async function aiApproveCandidate(id) {
             if (!confirm('Approve this answer?\n\nIt will be added to the bot\'s verified knowledge and sent to customers who ask this from now on.')) return;

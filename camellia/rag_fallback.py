@@ -280,11 +280,12 @@ class RAGFallbackEngine:
     ) -> bool:
         return self.grounding_report(answer, context_chunks, strict=strict)[0]
 
-    def retrieve(self, user_message: str) -> RAGResult:
+    def retrieve(self, user_message: str, *, persist_candidate: bool = True) -> RAGResult:
         """
         Retrieves relevant context chunks strictly from approved source documents,
         calculates similarity/confidence scores, checks for conflicting sources,
-        and creates a candidate template with status 'PENDING_APPROVAL'.
+        and (when ``persist_candidate`` is true) creates a candidate template
+        with status 'PENDING_APPROVAL'.
         """
         result = RAGResult()
         if not user_message or not user_message.strip():
@@ -406,7 +407,7 @@ class RAGFallbackEngine:
             result.approval_status = "APPROVED_SOURCE"
 
         # High / Medium confidence -> Create Candidate Template with PENDING_APPROVAL status (Section 3)
-        if result.confidence_score >= MEDIUM_CONFIDENCE_THRESHOLD and not result.auto_response:
+        if persist_candidate and result.confidence_score >= MEDIUM_CONFIDENCE_THRESHOLD and not result.auto_response:
             try:
                 candidate_id = db.save_candidate_template(
                     name=result.proposed_intent,

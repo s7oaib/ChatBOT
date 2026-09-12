@@ -171,6 +171,10 @@ class Config:
     # reply path reads. Off by default: it costs a Groq call per unmatched
     # message.
     LLM_TRIAGE_ENABLED: bool = os.getenv("LLM_TRIAGE_ENABLED", "false").lower() in ("true", "1", "t", "yes")
+    # Human-gated assisted-resolution drafts. This queue never sends an AI
+    # answer by itself; automatic resolution remains explicitly disabled.
+    LLM_ASSISTED_RESOLUTION_ENABLED: bool = os.getenv("LLM_ASSISTED_RESOLUTION_ENABLED", "false").lower() in ("true", "1", "t", "yes")
+    LLM_AUTO_RESOLVE_ENABLED: bool = os.getenv("LLM_AUTO_RESOLVE_ENABLED", "false").lower() in ("true", "1", "t", "yes")
     # Its own model for the same reason the router has one: a different job,
     # a different rate-limit bucket, and freedom to change one without
     # touching the other.
