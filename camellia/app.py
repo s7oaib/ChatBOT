@@ -2365,12 +2365,18 @@ async def set_auto_resolve_category_controls(request: Request, x_admin_key: Opti
     except Exception:
         body = {}
     controls = body.get("category_controls") if isinstance(body, dict) else None
-    if not isinstance(controls, dict):
-        raise HTTPException(status_code=400, detail="category_controls must be an object")
-    # Real category activation is intentionally blocked while the global env
-    # switch is false.  Operators may still save a pilot plan for later.
-    normalized = {str(k).strip().upper(): bool(v) for k, v in controls.items() if str(k).strip()}
-    db.set_auto_resolve_setting("category_controls", normalized)
+    category_settings = body.get("category_settings") if isinstance(body, dict) else None
+    if controls is not None:
+        if not isinstance(controls, dict):
+            raise HTTPException(status_code=400, detail="category_controls must be an object")
+        # Real category activation is intentionally blocked while the global
+        # env switch is false. Operators may still save a pilot plan for later.
+        normalized = {str(k).strip().upper(): bool(v) for k, v in controls.items() if str(k).strip()}
+        db.set_auto_resolve_setting("category_controls", normalized)
+    if category_settings is not None:
+        if not isinstance(category_settings, dict):
+            raise HTTPException(status_code=400, detail="category_settings must be an object")
+        db.set_auto_resolve_setting("category_settings", category_settings)
     return {"status": "success", "settings": db.get_auto_resolve_settings(), "actual_send_enabled": bool(config.LLM_AUTO_RESOLVE_ENABLED)}
 
 
@@ -2763,7 +2769,7 @@ def _source_label(source: Optional[str]) -> str:
 
 def _custom_qa_public(item: Dict[str, Any]) -> Dict[str, Any]:
     """Shapes a learned_knowledge row for the Custom Q&A tab — no bare DB id up front."""
-    return {
+    result = {
         "id": item.get("id"),
         "topic": item.get("topic"),
         "primary_question": item.get("question_pattern"),
@@ -2780,6 +2786,11 @@ def _custom_qa_public(item: Dict[str, Any]) -> Dict[str, Any]:
         "updated_at": item.get("updated_at"),
         "updated_by": item.get("updated_by"),
     }
+    try:
+        result["auto_resolve_health"] = db.knowledge_health(int(item["id"]))
+    except (TypeError, ValueError):
+        result["auto_resolve_health"] = {"health": "Review Recommended"}
+    return result
 
 
 @app.get("/admin/custom-qa")

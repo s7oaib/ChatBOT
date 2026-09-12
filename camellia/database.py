@@ -2922,6 +2922,15 @@ class Database:
             "rejected_cases": sum(1 for row in rows if row.get("final_human_outcome") == "REJECTED"),
             "human_handoffs": sum(1 for row in rows if row.get("final_human_outcome") == "SENT_TO_HUMAN"),
             "readiness_status": readiness_status, "false_positive_rows": false_positives,
+            "false_positive_count": len(false_positives),
+            "simulation_accuracy": round((len(eligible) - len(false_positives)) / len(eligible), 4) if eligible else 0.0,
+            "alerts": [
+                *(["WhatsApp AI activity > 0"] if whatsapp_activity else []),
+                *(["Source-routing override > 0"] if source_overrides else []),
+                *(["Order/CAM interference > 0"] if order_interference else []),
+                *(["Unsafe risk candidate marked eligible"] if risk_violations else []),
+                *(["Simulation false positive"] if false_positives else []),
+            ],
         }
 
     def knowledge_resolution_problems(self, knowledge_id: str) -> Dict[str, int]:
@@ -2932,13 +2941,38 @@ class Database:
             "major_edits": sum(1 for row in rows if row["edit_severity"] == "Major Edit") >= 2,
         }
 
+    def knowledge_health(self, knowledge_id: int) -> Dict[str, Any]:
+        """Operational health for one Custom Q&A without changing its state."""
+        key = f"learned_knowledge#{int(knowledge_id)}"
+        with self.get_connection() as conn:
+            rows = [dict(row) for row in conn.execute("SELECT status, edit_severity FROM assisted_resolution_suggestions WHERE matched_knowledge_id=?", (key,)).fetchall()]
+            decisions = [self._decode_auto_resolve(row) for row in conn.execute("SELECT * FROM auto_resolve_decisions WHERE matched_knowledge_id=?", (key,)).fetchall()]
+        approvals = sum(1 for row in rows if row.get("status") == "APPROVED")
+        edits = sum(1 for row in rows if row.get("status") == "EDITED_AND_APPROVED")
+        major_edits = sum(1 for row in rows if row.get("edit_severity") == "Major Edit")
+        rejections = sum(1 for row in rows if row.get("status") == "REJECTED")
+        not_eligible = rejections >= 2 or major_edits >= 2
+        return {
+            "usage_count": len(rows), "assisted_approvals": approvals, "edits": edits,
+            "major_edits": major_edits, "rejections": rejections,
+            "simulation_eligibility": any(row.get("would_auto_resolve") for row in decisions),
+            "last_used": max((row.get("created_at") for row in decisions), default=None),
+            "health": "Not Eligible for Auto Resolve" if not_eligible else ("Review Recommended" if edits or rejections else "Healthy"),
+        }
+
     def get_auto_resolve_settings(self) -> Dict[str, Any]:
-        defaults = {"kill_switch": True, "category_controls": {"GENERAL_FAQ": False, "PRODUCT_DESCRIPTION": False, "MENU_EXPLANATION": False, "GENERAL_BRAND_INFORMATION": False, "AUTO_RESOLVE": False}}
+        default_categories = {"GENERAL_FAQ": False, "PRODUCT_DESCRIPTION": False, "MENU_EXPLANATION": False, "GENERAL_BRAND_INFORMATION": False, "AUTO_RESOLVE": False}
+        defaults = {"kill_switch": True, "category_controls": default_categories.copy(), "category_settings": {key: {"simulation_enabled": True, "actual_enabled": False, "min_confidence": config.LLM_AUTO_RESOLVE_MIN_CONFIDENCE} for key in default_categories}}
         with self.get_connection() as conn:
             rows = {row["key"]: row["value"] for row in conn.execute("SELECT key, value FROM auto_resolve_settings").fetchall()}
         try: defaults["kill_switch"] = json.loads(rows.get("kill_switch", "true"))
         except Exception: pass
         try: defaults["category_controls"].update(json.loads(rows.get("category_controls", "{}")))
+        except Exception: pass
+        try:
+            for key, value in json.loads(rows.get("category_settings", "{}") or "{}").items():
+                if key in defaults["category_settings"] and isinstance(value, dict):
+                    defaults["category_settings"][key].update(value)
         except Exception: pass
         defaults.update({"simulation_enabled": bool(config.LLM_AUTO_RESOLVE_SIMULATION_ENABLED), "actual_enabled": bool(config.LLM_AUTO_RESOLVE_ENABLED and defaults["kill_switch"]), "min_confidence": config.LLM_AUTO_RESOLVE_MIN_CONFIDENCE})
         return defaults
