@@ -239,9 +239,15 @@ class Database:
                 inbound_message_id INTEGER,
                 recipient_id TEXT,
                 response_type TEXT NOT NULL DEFAULT 'text',
+                parent_send_id TEXT,
+                chunk_number INTEGER,
+                total_chunks INTEGER,
+                character_count INTEGER,
                 send_attempted INTEGER NOT NULL DEFAULT 0,
                 http_status INTEGER,
                 success INTEGER,
+                overall_success INTEGER,
+                overall_failure_chunk INTEGER,
                 meta_message_id TEXT,
                 meta_error_code TEXT,
                 meta_error_subcode TEXT,
@@ -261,6 +267,15 @@ class Database:
                 "CREATE INDEX IF NOT EXISTS idx_ig_outbound_audit_inbound "
                 "ON instagram_outbound_audit(inbound_message_id)"
             )
+            for column, declaration in (
+                ("parent_send_id", "TEXT"),
+                ("chunk_number", "INTEGER"),
+                ("total_chunks", "INTEGER"),
+                ("character_count", "INTEGER"),
+                ("overall_success", "INTEGER"),
+                ("overall_failure_chunk", "INTEGER"),
+            ):
+                self._ensure_column(cursor, "instagram_outbound_audit", column, declaration)
 
             # Human-reviewed assisted-resolution drafts. Separate from the
             # legacy candidate queue so every review action is auditable.
@@ -1689,6 +1704,10 @@ class Database:
         recipient_id: str,
         response_type: str,
         retry_count: int = 0,
+        parent_send_id: Optional[str] = None,
+        chunk_number: Optional[int] = None,
+        total_chunks: Optional[int] = None,
+        character_count: Optional[int] = None,
     ) -> int:
         """Create the pending row immediately before a Meta API call."""
         with self.get_connection() as conn:
@@ -1696,13 +1715,18 @@ class Database:
                 """
                 INSERT INTO instagram_outbound_audit (
                     inbound_message_id, recipient_id, response_type,
+                    parent_send_id, chunk_number, total_chunks, character_count,
                     send_attempted, retry_count
-                ) VALUES (?, ?, ?, 1, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)
                 """,
                 (
                     inbound_message_id,
                     recipient_id,
                     response_type or "text",
+                    parent_send_id,
+                    chunk_number,
+                    total_chunks,
+                    character_count,
                     max(0, int(retry_count or 0)),
                 ),
             )
@@ -1723,6 +1747,8 @@ class Database:
         duration_ms: Optional[float] = None,
         exception_class: Optional[str] = None,
         exception_message: Optional[str] = None,
+        overall_success: Optional[bool] = None,
+        overall_failure_chunk: Optional[int] = None,
     ) -> None:
         """Fill the pending row with the exact Meta result or safe exception."""
         with self.get_connection() as conn:
@@ -1732,7 +1758,8 @@ class Database:
                 SET http_status = ?, success = ?, meta_message_id = ?,
                     meta_error_code = ?, meta_error_subcode = ?,
                     meta_error_message = ?, meta_trace_id = ?, duration_ms = ?,
-                    exception_class = ?, exception_message = ?
+                    exception_class = ?, exception_message = ?,
+                    overall_success = ?, overall_failure_chunk = ?
                 WHERE id = ?
                 """,
                 (
@@ -1746,8 +1773,29 @@ class Database:
                     duration_ms,
                     exception_class,
                     exception_message,
+                    int(bool(overall_success)) if overall_success is not None else None,
+                    overall_failure_chunk,
                     audit_id,
                 ),
+            )
+            conn.commit()
+
+    def finalize_instagram_outbound_audit(
+        self,
+        parent_send_id: str,
+        *,
+        overall_success: bool,
+        overall_failure_chunk: Optional[int] = None,
+    ) -> None:
+        """Mark every attempt in one logical send with its aggregate outcome."""
+        with self.get_connection() as conn:
+            conn.execute(
+                """
+                UPDATE instagram_outbound_audit
+                SET overall_success = ?, overall_failure_chunk = ?
+                WHERE parent_send_id = ?
+                """,
+                (int(bool(overall_success)), overall_failure_chunk, parent_send_id),
             )
             conn.commit()
 

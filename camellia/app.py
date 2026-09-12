@@ -7,6 +7,7 @@ import json
 import os
 import re
 import time
+import uuid
 import httpx
 from datetime import datetime
 from contextlib import asynccontextmanager
@@ -1065,30 +1066,83 @@ def _meta_error_fields(payload: Any) -> Tuple[Any, Any, Optional[str]]:
     )
 
 
+_INSTAGRAM_PREFERRED_CHUNK_SIZE = 950
 _INSTAGRAM_MAX_TEXT_CHARS = 1000
 
 
-def _split_instagram_text(text: str, limit: int = _INSTAGRAM_MAX_TEXT_CHARS) -> List[str]:
-    """Split text into Meta-safe messages without changing its content."""
+def _split_instagram_text(
+    text: str,
+    preferred_chunk_size: int = _INSTAGRAM_PREFERRED_CHUNK_SIZE,
+) -> List[str]:
+    """Split text at natural boundaries while preserving it byte-for-byte."""
     value = str(text or "")
-    if len(value) <= limit:
+    preferred = max(1, min(int(preferred_chunk_size or _INSTAGRAM_PREFERRED_CHUNK_SIZE), _INSTAGRAM_MAX_TEXT_CHARS))
+    if len(value) <= preferred:
         return [value] if value else []
 
     chunks: List[str] = []
     while value:
-        if len(value) <= limit:
+        if len(value) <= preferred:
             chunks.append(value)
             break
-        # Keep paragraph/line boundaries where possible, while guaranteeing
-        # every outbound Instagram text message is within Meta's limit.
-        cut = value.rfind("\n", 0, limit + 1)
-        if cut <= limit // 2:
-            cut = limit
-        else:
-            cut += 1
+        # Keep the chunk close to the preferred size. A boundary in the
+        # latter half is preferable to a very short first message; if there
+        # is no such boundary, the final fallback still avoids breaking a
+        # word whenever possible.
+        cut = _instagram_natural_split(value, preferred)
         chunks.append(value[:cut])
         value = value[cut:]
     return chunks
+
+
+def _instagram_natural_split(value: str, limit: int) -> int:
+    """Return a content-preserving split point at or before ``limit``."""
+    minimum = max(1, limit // 2)
+
+    def choose(candidate: int) -> Optional[int]:
+        if candidate <= 0 or candidate > limit:
+            return None
+        return candidate if candidate >= minimum else None
+
+    # Paragraph and line boundaries include their line break in the first
+    # chunk, so joining chunks reproduces the original text exactly.
+    for marker in ("\n\n", "\n"):
+        position = value.rfind(marker, 0, limit + 1)
+        candidate = choose(position + len(marker)) if position >= 0 else None
+        if candidate:
+            return candidate
+
+    # A sentence boundary is punctuation followed by whitespace (or the end
+    # of the complete value), never punctuation embedded in a number/table.
+    sentence_candidate = None
+    for index, character in enumerate(value[:limit]):
+        if character not in ".?!":
+            continue
+        if index + 1 >= len(value) or value[index + 1].isspace():
+            sentence_candidate = index + 1
+    candidate = choose(sentence_candidate or 0)
+    if candidate:
+        return candidate
+
+    whitespace_candidate = None
+    for index, character in enumerate(value[:limit]):
+        if character.isspace():
+            whitespace_candidate = index + 1
+    candidate = choose(whitespace_candidate or 0)
+    if candidate:
+        return candidate
+
+    # Prefer a smaller natural boundary to splitting through a word when the
+    # message has an unusually long opening block.
+    for marker in ("\n\n", "\n"):
+        position = value.rfind(marker, 0, limit + 1)
+        if position >= 0 and 0 < position + len(marker) <= limit:
+            return position + len(marker)
+    if sentence_candidate:
+        return sentence_candidate
+    if whitespace_candidate:
+        return whitespace_candidate
+    return min(limit, _INSTAGRAM_MAX_TEXT_CHARS)
 
 
 def send_instagram_reply(
@@ -1163,18 +1217,31 @@ def send_instagram_reply(
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json"
     }
+    parent_send_id = uuid.uuid4().hex
+    failed_chunk_number = None
 
     try:
         with httpx.Client(timeout=10.0) as client:
             last = None
 
-            def send_request(body, *, kind: str):
+            def send_request(
+                body,
+                *,
+                kind: str,
+                chunk_number: Optional[int] = None,
+                total_chunks: Optional[int] = None,
+                character_count: Optional[int] = None,
+            ):
                 nonlocal last
                 audit_id = db.create_instagram_outbound_audit(
                     inbound_message_id=inbound_message_id,
                     recipient_id=_audit_recipient_id(recipient_id),
                     response_type=kind or response_type,
                     retry_count=retry_count,
+                    parent_send_id=parent_send_id,
+                    chunk_number=chunk_number,
+                    total_chunks=total_chunks,
+                    character_count=character_count,
                 )
                 started = time.perf_counter()
                 completed = False
@@ -1229,12 +1296,38 @@ def send_instagram_reply(
                         )
                     raise
 
+            text_groups = []
+            if text and not cards_first:
+                text_groups.append(_split_instagram_text(text))
+            for _img, caption in captioned:
+                if caption:
+                    text_groups.append(_split_instagram_text(caption))
+            if text and cards_first:
+                text_groups.append(_split_instagram_text(text))
+            total_text_chunks = sum(len(group) for group in text_groups)
+            text_group_index = 0
+            next_chunk_number = 0
+
             def send_text_body(body: str):
-                for chunk in _split_instagram_text(body):
-                    send_request(
-                        {"recipient": {"id": recipient_id}, "message": {"text": chunk}},
-                        kind="text",
-                    )
+                nonlocal text_group_index, next_chunk_number, failed_chunk_number
+                # The groups are precomputed in the same order as the sends
+                # below, so every text chunk shares one parent sequence even
+                # when images are interleaved between caption groups.
+                chunks = text_groups[text_group_index]
+                text_group_index += 1
+                for chunk in chunks:
+                    next_chunk_number += 1
+                    try:
+                        send_request(
+                            {"recipient": {"id": recipient_id}, "message": {"text": chunk}},
+                            kind="text",
+                            chunk_number=next_chunk_number,
+                            total_chunks=total_text_chunks,
+                            character_count=len(chunk),
+                        )
+                    except Exception:
+                        failed_chunk_number = next_chunk_number
+                        raise
 
             if text and not cards_first:
                 send_text_body(text)
@@ -1261,9 +1354,20 @@ def send_instagram_reply(
             if text and cards_first:
                 send_text_body(text)
 
+            db.finalize_instagram_outbound_audit(
+                parent_send_id, overall_success=True,
+            )
             delivery_monitor.record_success("instagram")
             return last.json() if last is not None else {"status": "no_content"}
     except Exception as e:
+        try:
+            db.finalize_instagram_outbound_audit(
+                parent_send_id,
+                overall_success=False,
+                overall_failure_chunk=failed_chunk_number,
+            )
+        except Exception:
+            log.exception("Failed to finalize Instagram outbound audit %s.", parent_send_id)
         delivery_monitor.record_failure("instagram", str(e))
         if hasattr(e, "response") and getattr(e, "response", None) is not None:
             log.error("Instagram Meta API Error Body: %s", e.response.text)
