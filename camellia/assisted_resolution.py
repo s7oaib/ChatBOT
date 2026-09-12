@@ -15,7 +15,10 @@ def business_risk_flags(message: str) -> list[str]:
     text = (message or "").lower()
     patterns = (
         ("price", r"\b(price|prices|cost|rate|rs\.?|inr)\b|₹"),
-        ("discount", r"\b(discount|offer|cheaper)\b"),
+        # "offer" by itself is ordinary catalogue language (for example,
+        # "What do you offer?").  Only explicit pricing/promotion language
+        # should block assisted resolution.
+        ("discount", r"\b(discount|cheaper|coupon|voucher|promo|promotion|promotional\s+price|special\s+price|reduced\s+price|price\s+reduction|deal|discount\s+code)\b|\b\d+(?:\.\d+)?\s*%\s*(?:off|discount)\b|\bspecial\s+offer\b"),
         ("delivery_commitment", r"\b(deliver|delivery|courier|dispatch|arrive|free delivery)\b"),
         ("availability", r"\b(available|availability|in stock|sold out)\b"),
         ("event_date", r"\b(wedding|event|party|function|date|bulk|boxes)\b"),
