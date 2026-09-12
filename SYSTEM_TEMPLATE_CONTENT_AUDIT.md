@@ -2,13 +2,14 @@
 
 Audit date: 2026-09-13  
 Audited seed before remediation: `data/qa_templates.json`, `seed_version=19`
+Post-remediation review: `d0f1305` (client-confirmed facts applied)
 Production health before remediation: HTTP 200, `status=healthy`, 58 templates loaded, seed warning cleared (`live_seed_version=19`). The remediation deployment bumps the seed to 20 for the neutral dietary copy.
 
 ## Executive summary
 
 All 58 system templates in the production seed were inventoried. The audit reviewed 43 grouped atomic claim families (repeated price rows are counted once per canonical family rather than once per occurrence). No uncertain business copy was automatically rewritten. The only production change made before this audit was the deployment-required seed-version bump from 18 to 19; it delivered the already-approved greeting change and did not reseed the database destructively.
 
-| Classification | Count |
+| Classification (pre-remediation baseline) | Count |
 |---|---:|
 | SUPPORTED | 22 |
 | OUTDATED | 0 |
@@ -163,11 +164,11 @@ Repeated occurrences in price tables are compared against the single canonical m
 | `GUARD_staff_names_manager_contact` | Guru Dayal Singh and kitchen email | SUPPORTED | client-confirmed source/tests | HIGH | Keep; verify contact remains current |
 | `subscription_details`, `subscription_booking_steps` | Subscription plans/prices, 11th meal gift, date-change notice | SUPPORTED | client-confirmed source/tests | HIGH | Keep only while client confirms plan is active |
 | `savoury_food_intro` | ₹1500/5 meal subscription, GST and “no other charges” | NEEDS CLIENT CONFIRMATION | No subscription object in `menu.json`; template is client-confirmed but not catalogue-backed | HIGH | Confirm current plan, tax, and fee wording |
-| `bento_details` | All prices include GST/packaging/Porter; specific ₹350/400/600 meals | CONFLICTING | Conflicts with current weekly/bento menu and lacks canonical GST fields | CRITICAL | Reconcile before serving |
+| `bento_details` | Current Veg/Non-Veg Bento contents and ₹400/₹700 prices | SUPPORTED after remediation | `menu.json` Bengali Bento block; client-confirmed canonical override | CRITICAL | Keep managed override; Porter charges remain on actuals |
 | `delivery_out_of_area` | No shipping outside Delhi NCR / cold-chain explanation | NEEDS CLIENT CONFIRMATION | `menu.json` states Delhi NCR delivery but no out-of-area policy | HIGH | Confirm current outside-NCR policy |
 | `previous_menus` | Two weeks of historical menus are available | NEEDS CLIENT CONFIRMATION | `menu.json` checkout has only the current week; persistence/history endpoint not verified here | MEDIUM | Confirm history retention and remove promise if absent |
 | `kolkata_expansion_info` | Gurgaon operation/team/recipes continue unchanged while founders move to Kolkata | NEEDS CLIENT CONFIRMATION | Client-confirmed provenance but no current operations source | MEDIUM | Re-confirm before retaining long-term operational claim |
-| `GUARD_collection_differentiation`, `signature_collection` | Gifting/celebration suitability | SUPPORTED | Client confirmation 2026-09-13 | MEDIUM | Keep preference wording; event/bulk requests still use human handoff |
+| `GUARD_collection_differentiation`, `signature_collection` | Gifting/celebration suitability; corporate and wedding/event orders accepted | SUPPORTED | Client confirmation 2026-09-13; canonical `menu.json` confirmation record | MEDIUM | Keep approved acceptance wording; collect event/bulk details through human handoff |
 | `contact_social`, `order_next_steps`, `order_status_tracking`, `how_to_order` | Human WhatsApp handoff/order fields | SUPPORTED | Channel policy and order workflow; no automated WhatsApp bot | LOW | Keep; preserve HUMAN ONLY policy |
 | `savoury_crosssell_sondesh`, `sondesh_crosssell_savoury` | Fresh meals/Sondesh delivered across Delhi NCR | NEEDS CLIENT CONFIRMATION | Delivery area is supported, freshness/limited-quantity wording is not fully structured | MEDIUM | Confirm or soften freshness/quantity claims |
 | `GUARD_customization_flavour_mixing` | No factual answer; escalates | SUPPORTED | Human-only guard is the approved safe behavior | LOW | Keep escalation |
@@ -197,9 +198,9 @@ prices are separately reconciled above.
 
 ## Duplicate/conflicting response groups
 
-1. `weekly_menu_veg` vs current `menu.json` vegetarian week — conflicting dishes and prices.
-2. `weekly_menu_nonveg` vs current `menu.json` non-vegetarian week — conflicting dishes and prices.
-3. `combo_bento` vs `bento_details` vs current `menu.json` bento — conflicting contents/prices.
+1. `weekly_menu_veg` vs current `menu.json` vegetarian week — reconciled by the managed canonical override.
+2. `weekly_menu_nonveg` vs current `menu.json` non-vegetarian week — reconciled by the managed canonical override.
+3. `combo_bento` vs `bento_details` vs current `menu.json` bento — reconciled by the managed canonical override.
 4. `delivery_time` and `sondesh_dispatch_time` — duplicate Sondesh/Kanchagolla/Jolbhora timing claims; currently aligned, but both require the same operational confirmation.
 5. `jolbhora` and `jolbhora_talgash_details` — duplicate Jolbhora price table; both now use the confirmed canonical matrix.
 6. `sondesh_price_detailed`, `sondesh_*`, `aamar_mishti_collection`, `signature_collection`, and `pack_size_*` — intentional duplicate presentation of the same standing price matrix; the rows agree for Sondesh/Mahua.
@@ -236,4 +237,8 @@ The production SQLite database is on `/app/var/camellia.db` with durable storage
 
 ## Final production recommendation
 
-Keep the current runtime unchanged, but do not approve the conflicting weekly/bento copy or unverified marketing/availability claims as canonical. First confirm the concise questions in `TEMPLATE_CLIENT_CONFIRMATIONS.md`, then update only the affected source data or editable copy through the existing versioned workflows. Re-run the focused content and routing regression suites after any approved copy change.
+The confirmed Jolbhora/Bento facts and approved customer-facing wording are now
+canonical and versioned. No unresolved conflicts remain in the weekly menu,
+Bento, or Jolbhora price/piece groups. Availability, specific sourcing or
+ingredient details, and exact preparation-time claims remain human-confirmation
+domains and are not expanded by this change.
