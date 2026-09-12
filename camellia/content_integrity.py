@@ -8,12 +8,173 @@ operator's existing edit is never overwritten silently.
 from __future__ import annotations
 
 import json
+import os
+import re
 from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping, Optional
 
 
 ACTOR = "content_integrity_audit_2026-09-13"
 REASON = "approved_canonical_content_correction"
+
+# These claims were identified by the production content audit as requiring
+# current operator evidence.  They are deliberately narrow: confirmed facts
+# (prices, Porter actuals, gifting/events, A2 and the all-women-team wording)
+# are not matched here.  The same helper is used for Response Library seed
+# migration and the runtime's last-mile safety check, so an old template or a
+# stale database override cannot put these claims back in front of a customer.
+UNCONFIRMED_CLAIM_PATTERNS = (
+    r"small[- ]batch artisanal farmers",
+    r"trusted dairies",
+    r"carefully selected partners",
+    r"general retail sourcing",
+    r"sourced directly from",
+    r"fresh artisanal chhana",
+    r"organic rose petals?",
+    r"forest mahua flowers?",
+    r"partially mechanised",
+    r"hand\s*-?crafted end to end",
+    r"completely hand\s*-?crafted",
+    r"\bhand\s*-?crafted\b",
+    r"made from scratch",
+    r"made in[- ]house",
+    r"made fresh daily",
+    r"freshly made to order",
+    r"freshly cooked",
+    r"small batches",
+    r"zero artificial preservatives?",
+    r"not\s+(?:been\s+)?industrially processed",
+    r"limited season",
+    r"limited quantities",
+    r"run out of stock",
+    r"sell out",
+    r"available only for",
+    r"quantities are limited",
+    r"un[- ]processed desi a2",
+    r"unadulterated desi a2",
+    r"never milk powder",
+    r"commercial stabilizers",
+    # Exact preparation/dispatch timings are not maintained in menu.json;
+    # leave the approved pre-order guidance, but quarantine stale time claims.
+    r"within\s+15\s+minutes",
+    r"within\s+30\s+minutes",
+    r"within\s+45\s+minutes",
+    r"within\s+an\s+hour",
+    r"takes\s+about\s+30\s+minutes",
+    r"takes\s+about\s+an\s+hour",
+    r"delivery time after that depends",
+    r"delivery time can be at your convenience",
+    r"exactly as you'd like",
+    r"exactly what you want",
+    r"all milk protein",
+    r"no added fat",
+    r"subtle natural flavours?",
+)
+_UNCONFIRMED_RE = re.compile("|".join(f"(?:{p})" for p in UNCONFIRMED_CLAIM_PATTERNS), re.IGNORECASE)
+
+QUARANTINE_TEMPLATE_FALLBACKS = {
+    "GUARD_dietary_suitability": (
+        "Please tell us the exact dietary requirement. Our team will confirm the "
+        "ingredients for the specific item before ordering."
+    ),
+    "delivery_out_of_area": (
+        "Please share your city and area so our team can confirm the current "
+        "delivery options for you."
+    ),
+    "kolkata_expansion_info": (
+        "Our all-women team can confirm current operations. For the latest details, "
+        "please contact Guru Dayal Singh at camellia.artisanal.gurgaon@gmail.com."
+    ),
+    "delivery_time": (
+        "Please share the item and order details so our team can confirm the current "
+        "preparation and dispatch information. Pre-ordering is recommended where applicable."
+    ),
+    "sondesh_dispatch_time": (
+        "Please share the item and order details so our team can confirm the current "
+        "preparation and dispatch information. Pre-ordering is recommended where applicable."
+    ),
+    "savoury_delivery_time": (
+        "Please share the item and order details so our team can confirm the current "
+        "preparation and dispatch information. Pre-ordering is recommended where applicable."
+    ),
+    "freshness_ingredients": (
+        "Signature Collection may be described as using desi A2 cow milk. For exact "
+        "ingredients and current preparation details, please ask our team before ordering."
+    ),
+    "savoury_crosssell_sondesh": (
+        "We also offer Sondesh. Please ask our team for the current flavour and "
+        "ingredient details."
+    ),
+    "sondesh_crosssell_savoury": (
+        "We also offer Bengali meals across Delhi NCR. Please ask our team for the "
+        "current menu and availability."
+    ),
+    "savoury_best_time_to_book": (
+        "We always recommend pre-ordering. Please share your preferred items and "
+        "date so our team can confirm the current options."
+    ),
+    "GUARD_collection_differentiation": (
+        "Aamar Mishti is our everyday sweets collection. Signature Collection is "
+        "for special occasions and gifting, and may be described as using desi "
+        "A2 cow milk. Please ask our team for current product details."
+    ),
+}
+
+
+def contains_unconfirmed_claim(text: Any) -> bool:
+    """Return whether customer-visible copy contains an unaudited claim."""
+    return bool(_UNCONFIRMED_RE.search(str(text or "")))
+
+
+def runtime_quarantine_enabled(db_path: str = "") -> bool:
+    """Enable the last-mile guard for production/durable remediation paths.
+
+    Unit tests intentionally exercise legacy seed copies in isolated local
+    databases.  Production uses the durable `/app/var` database; explicit
+    remediation mode enables the same guard for local acceptance runs.
+    """
+    normalized = str(db_path or "").replace("\\", "/")
+    return normalized.startswith("/app/var/") or os.getenv("CONTENT_INTEGRITY_REMEDIATION") == "true"
+
+
+def quarantine_unconfirmed_claims(text: str) -> str:
+    """Remove only unsupported claim sentences/lines, preserving safe copy.
+
+    Templates often put an approved sentence beside one unaudited marketing
+    sentence.  Split on sentence/line boundaries first and drop only the
+    offending unit.  If a paragraph has no safe text left it is omitted rather
+    than replaced with a guessed business fact.
+    """
+    if not text:
+        return text
+    if not contains_unconfirmed_claim(text):
+        return str(text)
+    # Remove an unaudited qualifier without dropping the confirmed fact that
+    # surrounds it (especially the approved Signature A2 wording).
+    source = str(text)
+    source = re.sub(r"\s*\(?that has not been industrially processed\)?", "", source, flags=re.IGNORECASE)
+    source = re.sub(r",?\s*(?:completely\s+)?hand\s*-?crafted(?:\s+end to end)?", "", source, flags=re.IGNORECASE)
+    source = re.sub(r",?\s*partially mechanised", "", source, flags=re.IGNORECASE)
+    source = re.sub(r",?\s*made in[- ]house", "", source, flags=re.IGNORECASE)
+    source = re.sub(r"\s*from scratch", "", source, flags=re.IGNORECASE)
+    source = re.sub(r"(?i)\b(?:the mishti is|it is)\s*\.", "", source)
+
+    paragraphs = re.split(r"\n\s*\n", source)
+    kept_paragraphs = []
+    for paragraph in paragraphs:
+        units = re.split(r"(?<=[.!?])\s+|\n", paragraph)
+        kept_units = [unit.strip() for unit in units if unit.strip() and not contains_unconfirmed_claim(unit)]
+        if kept_units:
+            kept_paragraphs.append("\n".join(kept_units))
+    return "\n\n".join(kept_paragraphs).strip()
+
+
+def quarantine_template_response(template_id: str, text: str) -> str:
+    """Apply a whole-template safe fallback where every claim is unverified."""
+    fallback = QUARANTINE_TEMPLATE_FALLBACKS.get(str(template_id or ""))
+    if fallback and text:
+        return fallback
+    return quarantine_unconfirmed_claims(text)
 
 # Preserved in version history when the seed was already upgraded before the
 # durable override migration ran. This is audit evidence only and is never
@@ -110,7 +271,20 @@ def canonical_override_responses(
         for template in templates:
             template_id = str(template.get("id") or "")
             if template_id in CONFIRMED_COPY_TEMPLATES:
-                result[template_id] = template.get("response") or ((template.get("responses") or [""])[0])
+                source_copy = template.get("response") or ((template.get("responses") or [""])[0])
+                result[template_id] = (
+                    quarantine_template_response(template_id, source_copy)
+                    if contains_unconfirmed_claim(source_copy) else source_copy
+                )
+            else:
+                # Materialise a safe managed copy for every template that still
+                # carries an unaudited sourcing/ingredient/availability or
+                # process claim.  This keeps the Response Library searchable
+                # and editable while ensuring the active runtime override is
+                # the quarantined version.
+                source_copy = template.get("response") or ((template.get("responses") or [""])[0])
+                if contains_unconfirmed_claim(source_copy):
+                    result[template_id] = quarantine_template_response(template_id, source_copy)
     return result
 
 
@@ -143,8 +317,11 @@ def apply_safe_content_remediations(
             # Never overwrite a client-authored copy.  The audit can be rerun
             # after confirmation without destroying a deliberate edit.
             current_copy = (current.get("response") or "").strip()
-            unsafe_existing = template_id == "sugar_free_options" and any(
-                term in current_copy.lower() for term in unsafe_health_terms
+            unsafe_existing = (
+                (template_id == "sugar_free_options" and any(
+                    term in current_copy.lower() for term in unsafe_health_terms
+                ))
+                or contains_unconfirmed_claim(current_copy)
             )
             managed_existing = str(current.get("updated_by") or "") == ACTOR
             if current_copy != default.strip() and not unsafe_existing and not managed_existing:

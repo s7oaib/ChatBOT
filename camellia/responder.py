@@ -27,6 +27,11 @@ from camellia.menu_images import current_url as current_menu_image
 from camellia import semantic_fallback
 from camellia.understanding import BusinessAction, Intent, understanding_engine
 from camellia.knowledge import HUMAN_ONLY_INTENTS, approved_knowledge
+from camellia.content_integrity import (
+    quarantine_template_response,
+    quarantine_unconfirmed_claims,
+    runtime_quarantine_enabled,
+)
 
 log = get_logger("camellia.responder")
 
@@ -129,6 +134,20 @@ _CONFIRMED_BENTO_SUBSTITUTION_RE = re.compile(
 # reply path is not the only place text reaches the client's people.
 _FLOWER_RE = FLOWER_RE
 _strip_flower_emoji = strip_flower_emoji
+
+
+def _quarantine_image_claims(images: Any) -> Any:
+    """Apply content-integrity quarantine to card captions as well as text."""
+    if isinstance(images, list):
+        return [_quarantine_image_claims(item) for item in images]
+    if isinstance(images, dict):
+        result = dict(images)
+        if result.get("caption"):
+            result["caption"] = quarantine_unconfirmed_claims(str(result["caption"]))
+            if not result["caption"]:
+                result.pop("caption", None)
+        return result
+    return images
 
 
 def _normalise_reply(text: str) -> str:
@@ -1391,7 +1410,7 @@ class DeterministicResponder:
             )
         return response_text, knowledge_sufficient, template_id, image_value
 
-    def match_and_respond(
+    def _match_and_respond_raw(
         self,
         user_message: str,
         user_id: str = None,
@@ -3232,7 +3251,11 @@ class DeterministicResponder:
             template_id, response, user_id="__response_library_preview__",
             channel=channel, user_message=(template.get("triggers") or [""])[0],
         )
-        return _strip_flower_emoji(rendered), images
+        if runtime_quarantine_enabled(getattr(db, "db_path", "")):
+            rendered = quarantine_template_response(template_id, _strip_flower_emoji(rendered))
+        else:
+            rendered = _strip_flower_emoji(rendered)
+        return rendered, _quarantine_image_claims(images)
 
     def _format_dynamic_response(
         self, template_id: str, default_response: str, user_id: str = None, channel: str = None, user_message: str = ""
@@ -3548,6 +3571,37 @@ class DeterministicResponder:
             return formatted_text, target_images
 
         return formatted_text, None
+
+    def match_and_respond(
+        self,
+        user_message: str,
+        user_id: str = None,
+        channel: str = None,
+        referral_source: str = None,
+        referral_ad_id: str = None,
+        referral_ad_title: str = None,
+    ):
+        """Resolve a message, applying the last-mile content quarantine.
+
+        The raw resolver remains unchanged for routing/evidence.  This wrapper
+        is the single public entry point used by Instagram, WhatsApp and the
+        admin dry-run, so unaudited legacy claims cannot leak through a stale
+        template, dynamic caption or generated refinement.
+        """
+        text, matched, template_id, image_url = self._match_and_respond_raw(
+            user_message, user_id, channel, referral_source, referral_ad_id, referral_ad_title
+        )
+        if runtime_quarantine_enabled(getattr(db, "db_path", "")):
+            safe_text = quarantine_template_response(template_id, text or "")
+            safe_images = _quarantine_image_claims(image_url)
+        else:
+            safe_text, safe_images = text or "", image_url
+        if safe_text != (text or "") or safe_images != image_url:
+            log.warning(
+                "CONTENT_INTEGRITY_QUARANTINE template=%s channel=%s",
+                template_id, channel,
+            )
+        return safe_text, matched, template_id, safe_images
 
     def respond(
         self,

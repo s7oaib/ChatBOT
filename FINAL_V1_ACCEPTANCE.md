@@ -9,9 +9,10 @@ Business-data implementation: `d0f13058cbbf1bbb1f35db09ad82d9baf69a52ee`
 Automated acceptance is complete. Manual Instagram account testing remains
 with the account owner; no live customer messages were sent by automation.
 The release is **NOT READY — BLOCKERS REMAIN** until the account owner signs
-off the live Instagram checklist, a production SQLite backup is created, and
-the remaining legacy sourcing/ingredient/availability/operational claims are
-either confirmed or moved behind human-confirmation handling.
+off the live Instagram checklist and a production SQLite backup is created and
+verified. The remaining legacy sourcing/ingredient/availability/operational
+claims are now behind a versioned content-integrity quarantine; they are
+omitted or answered with a neutral confirmation request.
 
 ## Automated acceptance
 
@@ -23,8 +24,8 @@ either confirmed or moved behind human-confirmation handling.
 - Instagram outbound audit/chunking/backup tests: **13 passed**.
 - Unsupported active medical claims: **0**.
 - Canonical pricing/menu/Bento/Jolbhora conflicts: **0**.
-- Unconfirmed legacy business-claim templates: **present** (not silently
-  rewritten; see the audit matrix and `TEMPLATE_CLIENT_CONFIRMATIONS.md`).
+- Unconfirmed legacy business-claim templates: **quarantined** (0 emitted;
+  see the post-quarantine section in the audit matrix).
 
 The previous assisted-resolution failure was fixed in the test fixture: the
 mock now accepts the sender's existing audit/correlation keyword arguments.
@@ -65,9 +66,8 @@ runtime baseline. Follow `V1_PRODUCTION_RUNBOOK.md`.
 1. Account owner must complete the manual Instagram checklist.
 2. An authenticated operator must create and verify the production SQLite
    backup; Railway PITR is unavailable on the current plan.
-3. Confirm or safely quarantine the remaining legacy sourcing, ingredient,
-   availability and operational claims before declaring customer-facing
-   content fully approved.
+3. No content blocker remains from the audited legacy-claim set; any future
+   business claim must be confirmed before its quarantine is removed.
 
 ## Architecture summary
 

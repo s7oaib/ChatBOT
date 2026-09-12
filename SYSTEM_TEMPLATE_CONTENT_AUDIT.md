@@ -40,6 +40,31 @@ corporate/event acceptance, Porter actuals and pre-order wording are now
 client-confirmed. Unrelated availability, sourcing and exact preparation-time
 claims remain governed by the existing human-confirmation rules.
 
+## Legacy-claim quarantine (2026-09-13)
+
+The remaining rows previously marked **NEEDS CLIENT CONFIRMATION** are now
+fail-closed at the customer boundary.  Versioned Response Library overrides
+are materialised for the affected templates and the runtime/preview renderer
+applies the same last-mile filter to stale copies and card captions.  The
+quarantine removes (rather than rewrites) unsupported sourcing, ingredient,
+availability, preparation/dispatch-time, freshness/process and operational
+guarantee sentences.  Confirmed A2, all-women-team, gifting, corporate/event,
+Porter-actuals and pre-order wording remain available.
+
+Post-quarantine checks:
+
+- Unconfirmed active legacy claims emitted: **0**
+- Unsupported medical claims emitted: **0**
+- Pricing conflicts: **0**
+- Weekly-menu/Bento conflicts: **0**
+- Jolbhora price/piece conflicts: **0**
+
+Templates covered include the legacy collection/sourcing descriptions,
+ingredient/freshness copy, exact preparation/dispatch-time answers, outside-NCR
+delivery explanation, dietary-suitability guard, cross-sell freshness claims,
+and the Kolkata operations narrative.  Their triggers remain intact; an
+uncertain question receives a neutral confirmation request or human handoff.
+
 The follow-up client confirmation added the Jolbhora matrix to canonical
 `data/menu.json` and materialised the affected Jolbhora/price-list templates as
 managed overrides with provenance `client confirmation 2026-09-13`.
