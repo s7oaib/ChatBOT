@@ -77,7 +77,9 @@ def create_suggestion(*, user_id: str, channel: str, customer_message: str, esca
     if category in {"NON_ACTIONABLE", "CONTACT_DETAIL", "HUMAN_REQUIRED"}:
         answer = ""; grounded = False; details = "Human review is required for this message."
     elif not answer:
-        category = "UNSUPPORTED"
+        category = "TEACH_REQUIRED" if category == "TEACH_REQUIRED" else "UNSUPPORTED"
+    elif category == "TEACH_REQUIRED":
+        category = "TEACH_REQUIRED"
     elif not risks and grounded:
         category = "AUTO_RESOLVE"
     else:
