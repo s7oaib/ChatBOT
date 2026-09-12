@@ -1,5 +1,6 @@
 import asyncio
 import csv
+import difflib
 import hmac
 import hashlib
 import io
@@ -3154,6 +3155,17 @@ def _response_library_search_score(query: Optional[str], item: Dict[str, Any]) -
     # identify a trigger/title token, but never scan answer paragraphs or use
     # fuzzy matching. This prevents `hi` from matching `this`/`which`.
     short = len(needle.replace(" ", "")) <= 2
+    search_synonyms = {
+        "sweets": ["sondesh", "kanchagolla", "jolbhora"],
+        "shipping": ["delivery"],
+        "cost": ["price"],
+        "rate": ["price"],
+        "menu": ["weekly menu", "meal menu"],
+    }
+    expanded_tokens = query_tokens + [
+        token for synonym in search_synonyms.get(needle, [])
+        for token in re.findall(r"[\w]+", synonym.casefold())
+    ]
     fields = {
         "primary": [item.get("primary_question")],
         "alias": list(item.get("aliases") or []),
@@ -3165,6 +3177,21 @@ def _response_library_search_score(query: Optional[str], item: Dict[str, Any]) -
         return " ".join(str(value or "").casefold().split())
     def token_set(values: List[Any]) -> set:
         return {token for value in values for token in re.findall(r"[\w]+", normalized(value), flags=re.UNICODE)}
+    def prefix_match(values: List[Any]) -> bool:
+        words = token_set(values)
+        if short and len(needle.replace(" ", "")) > 1:
+            return any(query_token and query_token in words for query_token in expanded_tokens)
+        return any(query_token and any(word.startswith(query_token) for word in words) for query_token in expanded_tokens)
+    def short_social_prefix(values: List[Any]) -> bool:
+        return short and any(word in {"hi", "hello", "hey"} for word in token_set(values))
+    def fuzzy_match(values: List[Any]) -> bool:
+        if short:
+            return False
+        words = token_set(values)
+        return all(
+            any(difflib.SequenceMatcher(None, query_token, word).ratio() >= 0.75 for word in words)
+            for query_token in query_tokens
+        )
 
     # Primary question is the first trigger; additional triggers are aliases.
     if any(normalized(value) == needle for value in fields["primary"]):
@@ -3185,6 +3212,18 @@ def _response_library_search_score(query: Optional[str], item: Dict[str, Any]) -
         for value in fields["answer"]
     ):
         return 82
+    if short_social_prefix(fields["primary"]):
+        return 92
+    if short_social_prefix(fields["alias"]):
+        return 91
+    if prefix_match(fields["primary"]):
+        return 80
+    if prefix_match(fields["alias"]):
+        return 76
+    if prefix_match(fields["title"]):
+        return 72
+    if prefix_match(fields["id_category"]):
+        return 68
     if set(query_tokens) & token_set(fields["primary"]):
         return 80
     if set(query_tokens) & token_set(fields["alias"]):
@@ -3193,6 +3232,10 @@ def _response_library_search_score(query: Optional[str], item: Dict[str, Any]) -
         return 70
     if set(query_tokens) & token_set(fields["id_category"]):
         return 65
+    if fuzzy_match(fields["primary"]) or fuzzy_match(fields["alias"]):
+        return 60
+    if fuzzy_match(fields["title"]):
+        return 55
     if not short and set(query_tokens) & token_set(fields["answer"]):
         return 40
     return 0
@@ -3256,6 +3299,10 @@ def list_response_library(
     if category and (not source or source in {"system_template", "system"}):
         items = [item for item in items if str(item.get("topic") or item.get("category") or "").lower() == category.lower()]
     items.sort(key=lambda item: (-int(item.get("relevance_score") or 0), item.get("title") or item.get("topic") or ""))
+    # A one-character type-ahead query is a suggestion surface, not a full
+    # result dump. Keep the API response small so the client remains instant.
+    if search and len("".join(str(search).split())) <= 1:
+        items = [item for item in items if int(item.get("relevance_score") or 0) >= 90][:8]
     return {"status": "success", "count": len(items[:limit]), "items": items[:limit]}
 
 
@@ -5629,7 +5676,11 @@ THIS WEEK'S BENGAL SPECIALS
             </div>
 
             <div style="margin-bottom:12px;">
-                <input type="text" id="customQaSearch" class="field-control" placeholder="🔎 Search questions, triggers, answers, category or template ID…" style="max-width:560px;" oninput="renderCustomQaList(); renderSystemResponseLibrary()">
+                <div id="responseLibrarySearchWrap" style="position:relative; max-width:560px;">
+                    <input type="text" id="customQaSearch" class="field-control" placeholder="🔎 Search questions, triggers, answers, category or template ID…" autocomplete="off" style="max-width:560px;" oninput="scheduleResponseLibrarySearch()" onkeydown="responseLibrarySearchKeydown(event)">
+                    <div id="responseLibrarySuggestions" role="listbox" aria-label="Response Library suggestions" style="display:none; position:absolute; z-index:20; left:0; right:0; top:calc(100% + 3px); max-height:320px; overflow:auto; background:#fff; border:1px solid var(--border); border-radius:10px; box-shadow:0 10px 25px rgba(15,23,42,.14);"></div>
+                </div>
+                <div id="responseLibraryResultCount" style="font-size:.78rem;color:var(--text-muted);margin-top:5px;"></div>
             </div>
             <div id="customQaAiSignals" style="padding:10px;border:1px solid var(--border);border-radius:10px;margin-bottom:12px;font-size:.82rem;">AI Review Signal: loading…</div>
 
@@ -8281,6 +8332,17 @@ Non-Veg:
         let systemResponseItems = [];
         let customQaStatusFilter = 'ACTIVE';
         let cqaAliasesDraft = [];
+        let responseLibrarySearchTimer = null;
+        let responseLibrarySuggestionIndex = -1;
+        let responseLibraryVisibleLimit = 20;
+
+        const RESPONSE_LIBRARY_SYNONYMS = {
+            sweets: ['sondesh', 'kanchagolla', 'jolbhora'],
+            shipping: ['delivery'],
+            cost: ['price'],
+            rate: ['price'],
+            menu: ['weekly menu', 'meal menu'],
+        };
 
         // Linked from AI Resolution & Answers' Approved Answers filter --
         // one editor for learned_knowledge, not two. Switches tabs and opens
@@ -8318,6 +8380,7 @@ Non-Veg:
 
                 renderCustomQaList();
                 renderSystemResponseLibrary();
+                renderResponseLibrarySuggestions();
             } catch (err) {
                 tbody.innerHTML = '<tr><td colspan="9" style="text-align: center; color: red;">Failed to load Custom Q&amp;A.</td></tr>';
             }
@@ -8332,29 +8395,70 @@ Non-Veg:
             loadCustomQa();
         }
 
+        function responseLibraryNormalise(value) {
+            return String(value || '').toLowerCase().replaceAll("’", '').replaceAll("'", '').replace(/[^\p{L}\p{N}]+/gu, ' ').trim().replace(/\s+/g, ' ');
+        }
+
+        function responseLibraryEditDistance(a, b) {
+            const prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+            for (let i = 1; i <= a.length; i++) {
+                const row = [i];
+                for (let j = 1; j <= b.length; j++) row[j] = a[i - 1] === b[j - 1] ? prev[j - 1] : 1 + Math.min(prev[j], row[j - 1], prev[j - 1]);
+                for (let j = 0; j <= b.length; j++) prev[j] = row[j];
+            }
+            return prev[b.length];
+        }
+
         function responseLibrarySearchScore(query, item) {
-            const needle = (query || '').toLowerCase().trim().replace(/\s+/g, ' ');
+            const needle = responseLibraryNormalise(query);
             if (!needle) return 1;
-            const tokens = needle.match(/[\w]+/g) || [];
-            if (!tokens.length) return 0;
-            const norm = value => String(value || '').toLowerCase().trim().replace(/\s+/g, ' ');
-            const tokenSet = values => new Set(values.flatMap(value => (norm(value).match(/[\w]+/g) || [])));
-            const primary = [item.primary_question];
-            const aliases = item.aliases || [];
-            const title = [item.title];
-            const category = [item.category, item.topic, item.template_id];
-            const answer = [item.approved_answer];
-            if (primary.some(v => norm(v) === needle)) return 100;
-            if (aliases.some(v => norm(v) === needle)) return 95;
-            if (title.some(v => norm(v) === needle)) return 90;
-            if (category.some(v => norm(v) === needle)) return 85;
-            const q = new Set(tokens);
-            if ([...q].some(v => tokenSet(primary).has(v))) return 80;
-            if ([...q].some(v => tokenSet(aliases).has(v))) return 75;
-            if ([...q].some(v => tokenSet(title).has(v))) return 70;
-            if ([...q].some(v => tokenSet(category).has(v))) return 65;
-            if (needle.replace(/\s/g, '').length > 2 && [...q].some(v => tokenSet(answer).has(v))) return 40;
+            const queryTokens = needle.split(' ').filter(Boolean);
+            const expanded = [...queryTokens, ...(RESPONSE_LIBRARY_SYNONYMS[needle] || []).flatMap(v => responseLibraryNormalise(v).split(' '))];
+            const fields = {
+                primary: [item.primary_question], aliases: item.aliases || [],
+                title: [item.title], category: [item.category, item.topic, item.template_id],
+                answer: [item.approved_answer, ...(item.response_variants || [])],
+            };
+            const words = values => values.flatMap(value => responseLibraryNormalise(value).split(' ').filter(Boolean));
+            const exact = values => values.some(value => responseLibraryNormalise(value) === needle);
+            const prefix = values => expanded.some(q => q && (needle.replace(/\s/g, '').length > 2 ? words(values).some(word => word.startsWith(q)) : words(values).includes(q)));
+            const shortSocialPrefix = values => needle.length <= 2 && words(values).some(word => ['hi', 'hello', 'hey'].includes(word));
+            const fuzzy = values => queryTokens.length > 0 && queryTokens.every(q => words(values).some(word => q.length > 2 && responseLibraryEditDistance(q, word) <= Math.max(1, Math.floor(q.length / 4))));
+            if (exact(fields.primary)) return 100;
+            if (exact(fields.aliases)) return 95;
+            if (shortSocialPrefix(fields.primary)) return 92;
+            if (shortSocialPrefix(fields.aliases)) return 91;
+            if (prefix(fields.primary)) return 80;
+            if (prefix(fields.aliases)) return 76;
+            if (exact(fields.title)) return 86;
+            if (prefix(fields.title)) return 82;
+            if (exact(fields.category)) return 78;
+            if (prefix(fields.category)) return 74;
+            if (fuzzy(fields.primary) || fuzzy(fields.aliases)) return 68;
+            if (fuzzy(fields.title)) return 62;
+            if (needle.replace(/\s/g, '').length > 2 && queryTokens.some(q => words(fields.answer).includes(q))) return 40;
             return 0;
+        }
+
+        function responseLibraryHighlight(value, query) {
+            const text = escapeHtml(value || '');
+            const needle = responseLibraryNormalise(query);
+            if (!needle) return text;
+            const token = needle.split(' ')[0];
+            if (!token || token.length < 1) return text;
+            // `token` comes from responseLibraryNormalise and is therefore
+            // composed only of letters/numbers; no regex escaping is needed.
+            return text.replace(new RegExp(`(${token})`, 'ig'), '<mark>$1</mark>');
+        }
+
+        function scheduleResponseLibrarySearch() {
+            clearTimeout(responseLibrarySearchTimer);
+            responseLibrarySearchTimer = setTimeout(() => {
+                responseLibraryVisibleLimit = 20;
+                renderCustomQaList();
+                renderSystemResponseLibrary();
+                renderResponseLibrarySuggestions();
+            }, 200);
         }
 
         function renderCustomQaList() {
@@ -8370,7 +8474,7 @@ Non-Veg:
             if (topic) items = items.filter(i => i.topic === topic);
             if (priority) items = items.filter(i => i.priority === priority);
             if (query) items = items.map(i => ({ item: i, score: responseLibrarySearchScore(query, { ...i, title: i.topic, category: i.topic }) }))
-                .filter(entry => entry.score > 0)
+                .filter(entry => entry.score >= (query.replace(/\s/g, '').length <= 1 ? 90 : 1))
                 .sort((a, b) => b.score - a.score)
                 .map(entry => entry.item);
 
@@ -8390,25 +8494,36 @@ Non-Veg:
             const topic = document.getElementById('cqaTopicFilter').value;
             const priority = document.getElementById('cqaPriorityFilter').value;
             if (source && source !== 'system_template') { box.innerHTML = ''; return; }
-            const items = systemResponseItems.map(item => ({ item, score: responseLibrarySearchScore(query, item) })).filter(entry => {
+            const ranked = systemResponseItems.map(item => ({ item, score: responseLibrarySearchScore(query, item) })).filter(entry => {
                 const item = entry.item;
                 if (priority && priority !== 'PROTECTED') return false;
                 if (topic && String(item.topic || item.category || '') !== topic) return false;
-                return !query || entry.score > 0;
-            }).sort((a, b) => b.score - a.score).map(entry => entry.item);
+                return !query || entry.score >= (query.replace(/\s/g, '').length <= 1 ? 90 : 1);
+            }).sort((a, b) => b.score - a.score || String(a.item.title || '').localeCompare(String(b.item.title || '')));
+            const items = ranked.slice(0, responseLibraryVisibleLimit).map(entry => entry.item);
+            const count = document.getElementById('responseLibraryResultCount');
+            if (count) count.textContent = `${ranked.length} matching response${ranked.length === 1 ? '' : 's'}`;
             if (!items.length) { box.innerHTML = '<div style="font-size:.82rem;color:var(--text-muted);">No matching system templates.</div>'; return; }
-            box.innerHTML = items.map(renderSystemResponseCard).join('');
+            box.innerHTML = items.map(renderSystemResponseCard).join('') + (ranked.length > items.length
+                ? `<button class="btn-secondary" style="grid-column:1/-1;justify-self:start;" onclick="responseLibraryVisibleLimit += 20; renderSystemResponseLibrary();">Load more</button>` : '');
         }
 
         function renderSystemResponseCard(item) {
             const status = item.status || 'ACTIVE';
             const aliases = (item.aliases || []).slice(0, 5).map(escapeHtml).join(', ') || '—';
             const editButton = item.editable ? `<button class="btn-secondary" style="padding:4px 8px;font-size:.72rem;" onclick="openSystemResponseEditor('${escapeHtml(item.template_id)}')">Edit</button>` : '';
-            return `<div style="border:1px solid var(--border);border-radius:10px;padding:12px;background:#fff;">
-                <div style="display:flex;justify-content:space-between;gap:8px;align-items:center;"><b>${escapeHtml(item.title || item.template_id)}</b><span class="badge badge-veg">${escapeHtml(status)}</span></div>
-                <div style="font-size:.78rem;color:var(--text-muted);margin:5px 0;">${escapeHtml(item.primary_question || '')} · ${escapeHtml(item.template_id || '')}</div>
+            const query = (document.getElementById('customQaSearch') || {}).value || '';
+            const full = escapeHtml(item.approved_answer || '');
+            const preview = full.length > 260 ? `${full.slice(0, 260)}…` : full;
+            const expandButton = full.length > 260
+                ? '<button class="btn-secondary" style="padding:3px 7px;font-size:.7rem;" onclick="toggleSystemResponse(\'' + escapeHtml(item.template_id) + '\', this)" data-full-response="' + full.replace(/"/g, '&quot;') + '">View full response</button>'
+                : '';
+            return `<div id="response-card-${escapeHtml(item.template_id)}" style="border:1px solid var(--border);border-radius:10px;padding:12px;background:#fff;">
+                <div style="display:flex;justify-content:space-between;gap:8px;align-items:center;"><b>${responseLibraryHighlight(item.title || item.template_id, query)}</b><span class="badge badge-veg">${escapeHtml(status)}</span></div>
+                <div style="font-size:.78rem;color:var(--text-muted);margin:5px 0;">${responseLibraryHighlight(item.primary_question || '', query)} · ${responseLibraryHighlight(item.template_id || '', query)}</div>
                 <div style="font-size:.76rem;color:var(--text-muted);">Aliases: ${aliases}</div>
-                <div style="white-space:pre-wrap;font-size:.82rem;margin:8px 0;">${escapeHtml(item.approved_answer || '')}</div>
+                <div id="response-copy-${escapeHtml(item.template_id)}" data-collapsed="true" style="white-space:pre-wrap;font-size:.82rem;margin:8px 0;">${preview}</div>
+                ${expandButton}
                 <div style="display:flex;gap:6px;flex-wrap:wrap;">
                     ${editButton}
                     <button class="btn-secondary" style="padding:4px 8px;font-size:.72rem;" onclick="previewSystemResponse('${escapeHtml(item.template_id)}')">Preview</button>
@@ -8417,6 +8532,86 @@ Non-Veg:
                 </div>
             </div>`;
         }
+
+        function renderResponseLibrarySuggestions() {
+            const box = document.getElementById('responseLibrarySuggestions');
+            const input = document.getElementById('customQaSearch');
+            if (!box || !input) return;
+            const query = input.value.trim();
+            if (!query) { box.style.display = 'none'; box.innerHTML = ''; return; }
+            const source = document.getElementById('cqaSourceFilter').value;
+            const topic = document.getElementById('cqaTopicFilter').value;
+            const ranked = systemResponseItems.concat(customQaItems.map(item => ({ ...item, title: item.topic, category: item.topic, kind: 'custom_qa' })))
+                .filter(item => !source || (source === 'system_template' ? item.kind === 'system_template' : item.source === source))
+                .filter(item => !topic || String(item.topic || item.category || '') === topic)
+                .map(item => ({ item, score: responseLibrarySearchScore(query, item) }))
+                .filter(entry => entry.score >= (query.replace(/\s/g, '').length <= 1 ? 90 : 1))
+                .sort((a, b) => b.score - a.score || String(a.item.title || '').localeCompare(String(b.item.title || '')))
+                .slice(0, 8);
+            responseLibrarySuggestionIndex = -1;
+            if (!ranked.length) { box.style.display = 'none'; box.innerHTML = ''; return; }
+            box.innerHTML = ranked.map((entry, index) => {
+                const item = entry.item;
+                const id = item.template_id || item.id;
+                const primary = item.primary_question || item.question_pattern || '—';
+                const sourceLabel = item.source_label || (item.kind === 'system_template' ? 'System Template' : 'Client Q&A');
+                return `<button type="button" class="response-library-suggestion" role="option" data-index="${index}" onclick="chooseResponseLibrarySuggestion('${escapeHtml(id)}','${escapeHtml(item.kind || 'custom_qa')}')" style="display:block;width:100%;text-align:left;border:0;border-bottom:1px solid #EEF2F7;background:#fff;padding:9px 11px;cursor:pointer;">
+                    <b>${responseLibraryHighlight(item.title || id, query)}</b><br><small>${responseLibraryHighlight(primary, query)} · ${escapeHtml(sourceLabel)}</small>
+                </button>`;
+            }).join('');
+            box.style.display = 'block';
+        }
+
+        function chooseResponseLibrarySuggestion(id, kind) {
+            const input = document.getElementById('customQaSearch');
+            const box = document.getElementById('responseLibrarySuggestions');
+            if (box) box.style.display = 'none';
+            if (kind === 'system_template') {
+                const item = systemResponseItems.find(entry => entry.template_id === id);
+                if (item) input.value = item.title || item.primary_question || id;
+            } else {
+                const item = customQaItems.find(entry => String(entry.id) === String(id));
+                if (item) input.value = item.primary_question || item.topic || id;
+            }
+            responseLibraryVisibleLimit = 20;
+            renderCustomQaList();
+            renderSystemResponseLibrary();
+            setTimeout(() => document.getElementById(`response-card-${id}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 0);
+        }
+
+        function responseLibrarySearchKeydown(event) {
+            const box = document.getElementById('responseLibrarySuggestions');
+            if (!box || box.style.display === 'none') return;
+            const options = [...box.querySelectorAll('.response-library-suggestion')];
+            if (event.key === 'Escape') { box.style.display = 'none'; return; }
+            if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp' && event.key !== 'Enter') return;
+            event.preventDefault();
+            if (event.key === 'ArrowDown') responseLibrarySuggestionIndex = Math.min(responseLibrarySuggestionIndex + 1, options.length - 1);
+            if (event.key === 'ArrowUp') responseLibrarySuggestionIndex = Math.max(responseLibrarySuggestionIndex - 1, 0);
+            options.forEach((option, index) => option.style.background = index === responseLibrarySuggestionIndex ? '#F1F5F9' : '#fff');
+            if (event.key === 'Enter' && responseLibrarySuggestionIndex >= 0) options[responseLibrarySuggestionIndex].click();
+        }
+
+        function toggleSystemResponse(templateId, button) {
+            const copy = document.getElementById(`response-copy-${templateId}`);
+            if (!copy || !button) return;
+            if (copy.dataset.collapsed === 'true') {
+                copy.innerText = button.dataset.fullResponse || copy.innerText;
+                copy.dataset.collapsed = 'false';
+                button.innerText = 'Collapse response';
+            } else {
+                const full = button.dataset.fullResponse || '';
+                copy.innerText = `${full.slice(0, 260)}${full.length > 260 ? '…' : ''}`;
+                copy.dataset.collapsed = 'true';
+                button.innerText = 'View full response';
+            }
+        }
+
+        document.addEventListener('click', event => {
+            const wrap = document.getElementById('responseLibrarySearchWrap');
+            const box = document.getElementById('responseLibrarySuggestions');
+            if (wrap && box && !wrap.contains(event.target)) box.style.display = 'none';
+        });
 
         async function openSystemResponseEditor(templateId) {
             const item = systemResponseItems.find(i => i.template_id === templateId);

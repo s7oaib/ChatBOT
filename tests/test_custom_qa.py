@@ -142,6 +142,18 @@ class TestResponseLibrary:
         assert greeting["protected_runtime"] is True
         assert isolated_db.list_custom_qa(status="ALL") == []
 
+    @pytest.mark.parametrize("query, expected_template", [
+        ("h", "greeting"), ("sond", "sondesh_classic_rose"),
+        ("jol", "jolbhora"), ("kanch", "kanchagolla"),
+        ("deliv", "delivery_area"), ("sondes", "sondesh_classic_rose"),
+        ("jolbora", "jolbhora"),
+    ])
+    def test_typeahead_prefix_and_fuzzy_queries_are_relevant(self, isolated_db, query, expected_template):
+        response = client.get("/admin/response-library", params={"search": query}, headers=_auth())
+        assert response.status_code == 200
+        items = response.json()["items"]
+        assert items and items[0]["template_id"] == expected_template
+
     def test_system_response_override_is_live_and_versioned(self, isolated_db):
         replacement = "Hi there! Welcome to Camellia Artisanal. How can I help you today?"
         resp = client.patch("/admin/response-library/system/greeting", json={"response": replacement}, headers=_auth())
