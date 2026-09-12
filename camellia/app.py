@@ -1233,16 +1233,26 @@ def send_instagram_reply(
                 character_count: Optional[int] = None,
             ):
                 nonlocal last
-                audit_id = db.create_instagram_outbound_audit(
-                    inbound_message_id=inbound_message_id,
-                    recipient_id=_audit_recipient_id(recipient_id),
-                    response_type=kind or response_type,
-                    retry_count=retry_count,
-                    parent_send_id=parent_send_id,
-                    chunk_number=chunk_number,
-                    total_chunks=total_chunks,
-                    character_count=character_count,
-                )
+                audit_id = None
+                try:
+                    audit_id = db.create_instagram_outbound_audit(
+                        inbound_message_id=inbound_message_id,
+                        recipient_id=_audit_recipient_id(recipient_id),
+                        response_type=kind or response_type,
+                        retry_count=retry_count,
+                        parent_send_id=parent_send_id,
+                        chunk_number=chunk_number,
+                        total_chunks=total_chunks,
+                        character_count=character_count,
+                    )
+                except Exception as audit_error:
+                    # Audit is observability only. A replaced/locked SQLite
+                    # file must never prevent the real Meta send.
+                    log.warning(
+                        "Could not create Instagram outbound audit row; "
+                        "continuing with Meta send: %s",
+                        _safe_outbound_exception(audit_error),
+                    )
                 started = time.perf_counter()
                 completed = False
                 resp = None
@@ -1262,14 +1272,21 @@ def send_instagram_reply(
                         or (payload_error or {}).get("fbtrace_id")
                         or (payload.get("fbtrace_id") if isinstance(payload, dict) else None)
                     )
-                    db.complete_instagram_outbound_audit(
-                        audit_id,
-                        http_status=status_code, success=bool(ok),
-                        meta_message_id=message_id, meta_error_code=code,
-                        meta_error_subcode=subcode, meta_error_message=message,
-                        meta_trace_id=trace_id,
-                        duration_ms=round((time.perf_counter() - started) * 1000, 2),
-                    )
+                    if audit_id is not None:
+                        try:
+                            db.complete_instagram_outbound_audit(
+                                audit_id,
+                                http_status=status_code, success=bool(ok),
+                                meta_message_id=message_id, meta_error_code=code,
+                                meta_error_subcode=subcode, meta_error_message=message,
+                                meta_trace_id=trace_id,
+                                duration_ms=round((time.perf_counter() - started) * 1000, 2),
+                            )
+                        except Exception as audit_error:
+                            log.warning(
+                                "Could not complete Instagram outbound audit row %s: %s",
+                                audit_id, _safe_outbound_exception(audit_error),
+                            )
                     completed = True
                     if not ok:
                         log.error(
@@ -1284,16 +1301,22 @@ def send_instagram_reply(
                 except Exception as exc:
                     # If the HTTP call itself failed, the pending row still
                     # records the exception and elapsed time for diagnosis.
-                    if not completed:
-                        db.complete_instagram_outbound_audit(
-                            audit_id,
-                            http_status=getattr(resp, "status_code", None) if resp is not None else None,
-                            success=False,
-                            meta_trace_id=getattr(resp, "headers", {}).get("x-fb-trace-id") if resp is not None else None,
-                            duration_ms=round((time.perf_counter() - started) * 1000, 2),
-                            exception_class=type(exc).__name__,
-                            exception_message=_safe_outbound_exception(exc),
-                        )
+                    if not completed and audit_id is not None:
+                        try:
+                            db.complete_instagram_outbound_audit(
+                                audit_id,
+                                http_status=getattr(resp, "status_code", None) if resp is not None else None,
+                                success=False,
+                                meta_trace_id=getattr(resp, "headers", {}).get("x-fb-trace-id") if resp is not None else None,
+                                duration_ms=round((time.perf_counter() - started) * 1000, 2),
+                                exception_class=type(exc).__name__,
+                                exception_message=_safe_outbound_exception(exc),
+                            )
+                        except Exception as audit_error:
+                            log.warning(
+                                "Could not record Instagram outbound exception for audit row %s: %s",
+                                audit_id, _safe_outbound_exception(audit_error),
+                            )
                     raise
 
             text_groups = []
@@ -1354,9 +1377,15 @@ def send_instagram_reply(
             if text and cards_first:
                 send_text_body(text)
 
-            db.finalize_instagram_outbound_audit(
-                parent_send_id, overall_success=True,
-            )
+            try:
+                db.finalize_instagram_outbound_audit(
+                    parent_send_id, overall_success=True,
+                )
+            except Exception as audit_error:
+                log.warning(
+                    "Could not finalize Instagram outbound audit %s: %s",
+                    parent_send_id, _safe_outbound_exception(audit_error),
+                )
             delivery_monitor.record_success("instagram")
             return last.json() if last is not None else {"status": "no_content"}
     except Exception as e:
@@ -1366,8 +1395,11 @@ def send_instagram_reply(
                 overall_success=False,
                 overall_failure_chunk=failed_chunk_number,
             )
-        except Exception:
-            log.exception("Failed to finalize Instagram outbound audit %s.", parent_send_id)
+        except Exception as audit_error:
+            log.warning(
+                "Could not finalize failed Instagram outbound audit %s: %s",
+                parent_send_id, _safe_outbound_exception(audit_error),
+            )
         delivery_monitor.record_failure("instagram", str(e))
         if hasattr(e, "response") and getattr(e, "response", None) is not None:
             log.error("Instagram Meta API Error Body: %s", e.response.text)
@@ -1778,6 +1810,30 @@ _IG_TOKEN_TIMEOUT_SECONDS = 6.0
 _ig_token_state: Dict[str, Any] = {"checked_at": 0.0, "result": None}
 
 
+def _check_instagram_token(token: str, url: str, identity: str) -> Dict[str, Any]:
+    """Perform one real Meta token check; isolated for health-test mocking."""
+    try:
+        with httpx.Client(timeout=_IG_TOKEN_TIMEOUT_SECONDS) as client:
+            resp = client.get(url, params={"fields": "ice_breakers", "access_token": token})
+        if resp.status_code == 200:
+            return {"state": "valid", "identity": identity, "detail": "Meta accepted the token."}
+        error = (resp.json() or {}).get("error", {}) if resp.content else {}
+        code = error.get("code")
+        state = "invalid" if code == 190 or error.get("type") == "OAuthException" else "unknown"
+        return {
+            "state": state,
+            "identity": identity,
+            "detail": error.get("message") or f"HTTP {resp.status_code}",
+            "meta_code": code,
+        }
+    except Exception as e:
+        return {
+            "state": "unknown",
+            "identity": identity,
+            "detail": f"Could not reach Meta: {type(e).__name__}",
+        }
+
+
 def instagram_token_status(force: bool = False) -> Dict[str, Any]:
     """
     Whether Meta still accepts the Instagram token, cached for ten minutes.
@@ -1799,31 +1855,7 @@ def instagram_token_status(force: bool = False) -> Dict[str, Any]:
         return {**cached, "checked_seconds_ago": round(now - _ig_token_state["checked_at"], 1)}
 
     url, identity = _instagram_profile_url_and_identity()
-    try:
-        with httpx.Client(timeout=_IG_TOKEN_TIMEOUT_SECONDS) as client:
-            resp = client.get(url, params={"fields": "ice_breakers", "access_token": token})
-        if resp.status_code == 200:
-            result = {"state": "valid", "identity": identity, "detail": "Meta accepted the token."}
-        else:
-            error = (resp.json() or {}).get("error", {}) if resp.content else {}
-            code = error.get("code")
-            # 190 is the credential itself being rejected — expired, revoked,
-            # or invalidated by a password change. Other statuses may be a
-            # permission or a path problem, which is a different conversation.
-            state = "invalid" if code == 190 or error.get("type") == "OAuthException" else "unknown"
-            result = {
-                "state": state,
-                "identity": identity,
-                "detail": error.get("message") or f"HTTP {resp.status_code}",
-                "meta_code": code,
-            }
-    except Exception as e:
-        result = {
-            "state": "unknown",
-            "identity": identity,
-            "detail": f"Could not reach Meta: {type(e).__name__}",
-        }
-
+    result = _check_instagram_token(token, url, identity)
     _ig_token_state["result"] = result
     _ig_token_state["checked_at"] = now
     if result["state"] == "invalid":

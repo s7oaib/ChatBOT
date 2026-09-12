@@ -1,11 +1,14 @@
 from unittest.mock import patch
 import json
+import logging
+import sqlite3
 
 from camellia.config import config
 from camellia.database import Database
 from fastapi.testclient import TestClient
 from camellia.app import app
 from camellia import app as app_module
+from camellia.monitoring import delivery_monitor
 
 
 def test_instagram_outbound_audit_round_trip_and_health(tmp_path):
@@ -228,6 +231,104 @@ def test_instagram_sender_stops_after_failed_chunk_and_marks_overall_failure():
     assert len(client.bodies) == 2
     assert [row["chunk_number"] for row in created] == [1, 2]
     assert finalized[-1][1] == {"overall_success": False, "overall_failure_chunk": 2}
+
+
+def test_audit_insert_failure_does_not_block_customer_send(caplog):
+    class Response:
+        status_code = 200
+        headers = {"x-fb-trace-id": "trace.send"}
+
+        def json(self):
+            return {"message_id": "mid.send"}
+
+        def raise_for_status(self):
+            return None
+
+    class Client:
+        calls = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def post(self, *args, **kwargs):
+            self.calls += 1
+            return Response()
+
+    client = Client()
+    with caplog.at_level(logging.WARNING), \
+         patch.object(config, "INSTAGRAM_ACCESS_TOKEN", "token-value"), \
+         patch.object(app_module.httpx, "Client", lambda *args, **kwargs: client), \
+         patch.object(app_module.db, "create_instagram_outbound_audit", side_effect=sqlite3.OperationalError("no such table")), \
+         patch.object(app_module.db, "finalize_instagram_outbound_audit", side_effect=sqlite3.OperationalError("no such table")):
+        result = app_module.send_instagram_reply("customer-123", "hello", inbound_message_id=42)
+
+    assert result["message_id"] == "mid.send"
+    assert client.calls == 1
+    assert delivery_monitor.snapshot()["consecutive_failures"].get("instagram", 0) == 0
+    assert "Could not create Instagram outbound audit row" in caplog.text
+
+
+def test_audit_final_update_failure_does_not_turn_successful_send_into_failure(caplog):
+    class Response:
+        status_code = 200
+        headers = {}
+
+        def json(self):
+            return {"message_id": "mid.complete"}
+
+        def raise_for_status(self):
+            return None
+
+    class Client:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def post(self, *args, **kwargs):
+            return Response()
+
+    with caplog.at_level(logging.WARNING), \
+         patch.object(config, "INSTAGRAM_ACCESS_TOKEN", "token-value"), \
+         patch.object(app_module.httpx, "Client", lambda *args, **kwargs: Client()), \
+         patch.object(app_module.db, "complete_instagram_outbound_audit", side_effect=sqlite3.OperationalError("audit update down")), \
+         patch.object(app_module.db, "finalize_instagram_outbound_audit", side_effect=sqlite3.OperationalError("audit finalize down")):
+        result = app_module.send_instagram_reply("customer-123", "hello", inbound_message_id=42)
+
+    assert result["message_id"] == "mid.complete"
+    assert delivery_monitor.snapshot()["consecutive_failures"].get("instagram", 0) == 0
+    assert "Could not complete Instagram outbound audit row" in caplog.text
+    assert "Could not finalize Instagram outbound audit" in caplog.text
+
+
+def test_audit_schema_self_heals_on_a_fresh_replaced_database(tmp_path):
+    path = tmp_path / "fresh.db"
+    database = Database(str(path))
+    database.db_path = str(tmp_path / "replaced.db")
+
+    assert database.instagram_outbound_health() == {
+        "last_attempted": None,
+        "last_success": None,
+        "last_failure": None,
+        "failures_last_24h": 0,
+    }
+    audit_id = database.create_instagram_outbound_audit(
+        inbound_message_id=7,
+        recipient_id="sha256:fresh",
+        response_type="text",
+        parent_send_id="fresh-parent",
+        chunk_number=1,
+        total_chunks=1,
+        character_count=5,
+    )
+    database.complete_instagram_outbound_audit(audit_id, http_status=200, success=True)
+    database.finalize_instagram_outbound_audit("fresh-parent", overall_success=True)
+    rows = database.get_instagram_outbound_audit(inbound_message_id=7)
+    assert rows[0]["overall_success"] == 1
 
 
 def test_admin_outbound_audit_is_authenticated_and_read_only():

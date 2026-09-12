@@ -22,6 +22,61 @@ class Database:
         os.makedirs(parent, exist_ok=True)
         self.init_db()
 
+    @classmethod
+    def _ensure_instagram_outbound_audit_schema(cls, conn: sqlite3.Connection) -> None:
+        """Ensure only the additive outbound-audit schema on this connection.
+
+        The long-lived application Database can outlive a test or recovery
+        workflow that swaps the SQLite file underneath it. Keeping this small
+        helper idempotent lets audit reads/writes heal that file without
+        rerunning the full application schema migration on every send.
+        """
+        cursor = conn.cursor()
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS instagram_outbound_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            inbound_message_id INTEGER,
+            recipient_id TEXT,
+            response_type TEXT NOT NULL DEFAULT 'text',
+            parent_send_id TEXT,
+            chunk_number INTEGER,
+            total_chunks INTEGER,
+            character_count INTEGER,
+            send_attempted INTEGER NOT NULL DEFAULT 0,
+            http_status INTEGER,
+            success INTEGER,
+            overall_success INTEGER,
+            overall_failure_chunk INTEGER,
+            meta_message_id TEXT,
+            meta_error_code TEXT,
+            meta_error_subcode TEXT,
+            meta_error_message TEXT,
+            meta_trace_id TEXT,
+            duration_ms REAL,
+            retry_count INTEGER NOT NULL DEFAULT 0,
+            exception_class TEXT,
+            exception_message TEXT
+        )
+        """)
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ig_outbound_audit_created "
+            "ON instagram_outbound_audit(created_at DESC)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ig_outbound_audit_inbound "
+            "ON instagram_outbound_audit(inbound_message_id)"
+        )
+        for column, declaration in (
+            ("parent_send_id", "TEXT"),
+            ("chunk_number", "INTEGER"),
+            ("total_chunks", "INTEGER"),
+            ("character_count", "INTEGER"),
+            ("overall_success", "INTEGER"),
+            ("overall_failure_chunk", "INTEGER"),
+        ):
+            cls._ensure_column(cursor, "instagram_outbound_audit", column, declaration)
+
     def get_connection(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=10.0)
         conn.row_factory = sqlite3.Row
@@ -228,54 +283,9 @@ class Database:
             );
             """)
 
-            # One durable row per Instagram Meta send attempt.  The recipient
-            # value is a one-way hash (never the raw customer id); this table
-            # exists solely to connect an inbound conversation to Meta's exact
-            # response without storing credentials or message content.
-            cursor.execute("""
-            CREATE TABLE IF NOT EXISTS instagram_outbound_audit (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                inbound_message_id INTEGER,
-                recipient_id TEXT,
-                response_type TEXT NOT NULL DEFAULT 'text',
-                parent_send_id TEXT,
-                chunk_number INTEGER,
-                total_chunks INTEGER,
-                character_count INTEGER,
-                send_attempted INTEGER NOT NULL DEFAULT 0,
-                http_status INTEGER,
-                success INTEGER,
-                overall_success INTEGER,
-                overall_failure_chunk INTEGER,
-                meta_message_id TEXT,
-                meta_error_code TEXT,
-                meta_error_subcode TEXT,
-                meta_error_message TEXT,
-                meta_trace_id TEXT,
-                duration_ms REAL,
-                retry_count INTEGER NOT NULL DEFAULT 0,
-                exception_class TEXT,
-                exception_message TEXT
-            );
-            """)
-            cursor.execute(
-                "CREATE INDEX IF NOT EXISTS idx_ig_outbound_audit_created "
-                "ON instagram_outbound_audit(created_at DESC)"
-            )
-            cursor.execute(
-                "CREATE INDEX IF NOT EXISTS idx_ig_outbound_audit_inbound "
-                "ON instagram_outbound_audit(inbound_message_id)"
-            )
-            for column, declaration in (
-                ("parent_send_id", "TEXT"),
-                ("chunk_number", "INTEGER"),
-                ("total_chunks", "INTEGER"),
-                ("character_count", "INTEGER"),
-                ("overall_success", "INTEGER"),
-                ("overall_failure_chunk", "INTEGER"),
-            ):
-                self._ensure_column(cursor, "instagram_outbound_audit", column, declaration)
+            # One durable row per Instagram Meta send attempt. The recipient
+            # is a one-way hash; this table stores no credentials or content.
+            self._ensure_instagram_outbound_audit_schema(conn)
 
             # Human-reviewed assisted-resolution drafts. Separate from the
             # legacy candidate queue so every review action is auditable.
@@ -1711,6 +1721,7 @@ class Database:
     ) -> int:
         """Create the pending row immediately before a Meta API call."""
         with self.get_connection() as conn:
+            self._ensure_instagram_outbound_audit_schema(conn)
             cursor = conn.execute(
                 """
                 INSERT INTO instagram_outbound_audit (
@@ -1752,6 +1763,7 @@ class Database:
     ) -> None:
         """Fill the pending row with the exact Meta result or safe exception."""
         with self.get_connection() as conn:
+            self._ensure_instagram_outbound_audit_schema(conn)
             conn.execute(
                 """
                 UPDATE instagram_outbound_audit
@@ -1789,6 +1801,7 @@ class Database:
     ) -> None:
         """Mark every attempt in one logical send with its aggregate outcome."""
         with self.get_connection() as conn:
+            self._ensure_instagram_outbound_audit_schema(conn)
             conn.execute(
                 """
                 UPDATE instagram_outbound_audit
@@ -1821,6 +1834,7 @@ class Database:
             params.append(str(since))
         params.append(max(1, min(int(limit or 50), 200)))
         with self.get_connection() as conn:
+            self._ensure_instagram_outbound_audit_schema(conn)
             rows = conn.execute(
                 "SELECT * FROM instagram_outbound_audit "
                 f"WHERE {' AND '.join(clauses)} ORDER BY id DESC LIMIT ?",
@@ -1831,6 +1845,7 @@ class Database:
     def instagram_outbound_health(self) -> Dict[str, Any]:
         """Summarize send activity without making traffic absence unhealthy."""
         with self.get_connection() as conn:
+            self._ensure_instagram_outbound_audit_schema(conn)
             last_attempted = conn.execute(
                 "SELECT created_at FROM instagram_outbound_audit "
                 "WHERE send_attempted = 1 ORDER BY id DESC LIMIT 1"
