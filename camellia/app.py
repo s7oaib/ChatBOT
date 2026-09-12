@@ -1,15 +1,19 @@
 import asyncio
+import csv
 import hmac
 import hashlib
+import io
 import json
 import os
 import re
 import time
+import uuid
 import httpx
 from datetime import datetime
 from contextlib import asynccontextmanager
 from pathlib import Path
-from fastapi import FastAPI, Request, Response, Query, Header, HTTPException, File, UploadFile, BackgroundTasks
+from urllib.parse import urlsplit
+from fastapi import FastAPI, Request, Response, Query, Header, HTTPException, File, Form, UploadFile, BackgroundTasks
 from fastapi.responses import PlainTextResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from typing import Dict, Any, List, Optional, Tuple
@@ -28,50 +32,54 @@ from camellia.ice_breakers import (
     MAX_ICE_BREAKERS,
     MAX_ICE_BREAKER_CHARS,
 )
-from camellia.responder import responder
+import camellia.responder as responder_module
+from camellia.responder import compose_topic_response, responder
 from camellia.ai_responder import ai_responder
 from camellia.whatsapp_adapter import whatsapp_adapter
 from camellia.escalator import escalator
-from camellia.assisted_resolution import create_suggestion
+from camellia.handoff import (
+    customer_facing_link_message,
+    customer_facing_notice,
+    get_or_create_handoff,
+    mark_referred,
+    retire_order_state,
+    staff_summary,
+)
 from camellia.ad_routing import product_for_ad
+from camellia.instagram_routing import (
+    InstagramTopicError,
+    create_topic,
+    decode_route,
+    decode_topic,
+    lookup_instagram_media,
+    migrate_legacy_routing_topics,
+    normalize_instagram_url,
+    product_catalogue,
+    route_for_inbound,
+    route_template_id,
+    RESPONSE_ORDERS,
+    shared_post_media_id,
+    shared_reel_identity,
+    update_topic,
+    validate_route_payload,
+    verify_media_by_id,
+)
 from camellia.sheet_sync import sheet_sync
 from camellia.menu_parser import menu_parser
 from camellia import weekly_flyer
 from camellia import menu_dates
+from camellia import menu_manager
 from camellia import menu_images
+from camellia import menu_catalogue
+from camellia.menu_catalogue import MenuCatalogueError
 from camellia.session_memory import session_memory
 from camellia.monitoring import get_logger, delivery_monitor, latency_monitor
+from camellia.knowledge import SOURCE_MAP
+from camellia.candidate_safety import candidate_eligibility, detect_business_commitment_warnings, validate_candidate_answer
+from camellia.assisted_resolution import create_suggestion
+from camellia.auto_resolve import simulate_auto_resolve
 
 log = get_logger("camellia.app")
-
-_INSTAGRAM_CONTACT_REQUEST = "Could you share your WhatsApp number so our team can reach you directly?"
-_INSTAGRAM_CONTACT_CONFIRM = "I have your WhatsApp number as {number}. Is this correct? Reply yes or no."
-_INDIAN_MOBILE_RE = re.compile(
-    r"(?<!\d)(?:(?:\+|00)?91[\s-]*)?0?[\s-]*"
-    r"([6-9](?:[\s-]*\d){9})(?!\d)"
-)
-
-
-def _extract_whatsapp_number(text: str) -> Optional[str]:
-    """Return a normalized Indian WhatsApp number from an Instagram reply."""
-    match = _INDIAN_MOBILE_RE.search(text or "")
-    if not match:
-        return None
-    digits = re.sub(r"\D", "", match.group(1))
-    return f"+91{digits}" if len(digits) == 10 else None
-
-
-def _extract_contact_number_from_event(messaging_event: dict) -> Optional[str]:
-    """Read a phone number from an Instagram contact-card attachment, if present."""
-    message = messaging_event.get("message") or {}
-    attachments = message.get("attachments") or []
-    if not attachments:
-        return None
-    # Meta has used more than one attachment shape for shared/contact cards.
-    # Searching the serialized attachment is deliberately limited to the
-    # contact-collection state by the caller, so image URLs from normal chats
-    # cannot accidentally become phone numbers.
-    return _extract_whatsapp_number(json.dumps(attachments, ensure_ascii=False))
 
 
 def _prune_expired_weekly_menus() -> None:
@@ -116,6 +124,13 @@ async def lifespan(app: FastAPI):
     _prune_expired_weekly_menus()
 
     db.init_db()
+    # Built-in menu catalogue rows are seeded inside init_db() itself (every
+    # Database instance gets them, test fixtures included); only the
+    # Topic-backfill migration needs a separate call here.
+    try:
+        migrate_legacy_routing_topics()
+    except Exception:
+        log.exception("Could not migrate legacy Instagram routing topics.")
     if not config.META_APP_SECRET and not config.REQUIRE_WEBHOOK_SIGNATURE:
         # CRITICAL rather than WARNING: an unsigned webhook endpoint on a public
         # domain lets anyone POST fake customer messages, which this bot turns
@@ -350,9 +365,6 @@ def _process_instagram_event(
     """
     try:
         facts = session_memory.get_facts(sender_id, "instagram")
-        awaiting_contact = facts.get("awaiting_instagram_contact", False)
-        awaiting_contact_confirmation = facts.get("awaiting_instagram_contact_confirmation", False)
-        supplied_contact = _extract_whatsapp_number(message_text)
 
         # How this message was composed, and which ad it came from, recorded on
         # every row this function writes. Phase 1 of the router rollout: until
@@ -365,158 +377,143 @@ def _process_instagram_event(
             # The ad on this event, else the one this session arrived on.
             "ad_id": entry.ad_id or ad_id,
             "ad_title": entry.ad_title or facts.get("ad_title"),
+            "media_id": entry.media_id,
         }
         if entry.ad_title and not facts.get("ad_title"):
             facts["ad_title"] = entry.ad_title
         ad_product = product_for_ad(trace["ad_id"], trace["ad_title"])
         if ad_product:
             facts["ad_product"] = ad_product
+        source_route, source_match_method = route_for_inbound(
+            ad_id=trace["ad_id"], media_id=trace["media_id"],
+        )
+        if source_route:
+            facts["source_route"] = source_route
+        elif isinstance(facts.get("source_route"), dict):
+            source_route = facts["source_route"]
+            # A reel shared a moment ago is why this route is in the session
+            # at all, so the follow-up message is attributed to the share
+            # rather than to the vaguer "it was already here".
+            source_match_method = facts.get("source_match_method") or "session"
+        facts["source_context_used"] = False
+        trace.update({
+            "source_routing_id": (source_route or {}).get("routing_id"),
+            "source_match_method": source_match_method,
+            "source_type": (source_route or {}).get("source_type"),
+            "shortcode": (source_route or {}).get("shortcode"),
+            "routing_topic": (source_route or {}).get("routing_topic"),
+        })
         log.info(
             "Instagram inbound from %s: source=%s ad_id=%s ad_title=%r payload=%r",
             sender_id, entry.source, trace["ad_id"], trace["ad_title"], entry.raw_payload,
         )
-
-        if awaiting_contact_confirmation:
-            candidate = facts.get("pending_instagram_contact")
-            lowered = " ".join((message_text or "").lower().split())
-            if supplied_contact:
-                candidate = supplied_contact
-                facts["pending_instagram_contact"] = candidate
-                response_text = _INSTAGRAM_CONTACT_CONFIRM.format(number=candidate)
-                db.log_conversation(sender_id, "instagram", message_text, response_text, True, "instagram_contact_confirmation", **trace)
-                send_instagram_reply(sender_id, response_text)
-                return
-            if re.search(r"\b(?:yes|yeah|yep|correct|right|haan|confirm|ok|okay)\b", lowered) and candidate:
-                pending = facts.get("pending_instagram_escalation") or {}
-                facts["awaiting_instagram_contact_confirmation"] = False
-                facts["pending_instagram_contact"] = None
-                facts["awaiting_instagram_contact"] = False
-                facts["pending_instagram_escalation"] = None
-                response_text = pending.get("response_text") or _INSTAGRAM_CONTACT_REQUEST
-                was_matched = pending.get("was_matched", False)
-                template_id = pending.get("template_id")
-                user_message_for_escalation = pending.get("user_message", message_text)
-                reason = pending.get("reason", "Unmatched Instagram Query / Sensitive Request")
-                session_memory.add_turn(sender_id, "instagram", message_text, response_text)
-                escalator.handle_escalation(
-                    user_id=sender_id,
-                    channel="instagram",
-                    user_message=user_message_for_escalation,
-                    reason=reason,
-                    context_data={
-                        "ad_id": ad_id,
-                        "sender_id": sender_id,
-                        "template_id": template_id,
-                        "customer_whatsapp_number": candidate,
-                    },
-                )
-                db.log_conversation(sender_id, "instagram", message_text, response_text, was_matched, template_id, **trace)
-                send_instagram_reply(sender_id, response_text)
-                return
-            if re.search(r"\b(?:no|nope|wrong|incorrect|गलत)\b", lowered):
-                facts["awaiting_instagram_contact_confirmation"] = False
-                facts["pending_instagram_contact"] = None
-                facts["awaiting_instagram_contact"] = True
-                response_text = _INSTAGRAM_CONTACT_REQUEST
-            else:
-                response_text = _INSTAGRAM_CONTACT_CONFIRM.format(number=candidate or "the number you sent")
-            db.log_conversation(sender_id, "instagram", message_text, response_text, True, "instagram_contact_confirmation", **trace)
-            send_instagram_reply(sender_id, response_text)
-            return
-
-        # A customer is allowed to decline a callback.  Clearing all pending
-        # state prevents every later sentence from being treated as a missing
-        # phone number, while making no claim that staff were notified.
-        if awaiting_contact and re.search(
-            r"\b(?:no thanks?|not interested|don't need|do not need|nahi chahiye|nahin chahiye)\b",
-            " ".join((message_text or "").lower().split()),
-        ):
-            facts["awaiting_instagram_contact"] = False
-            facts["awaiting_instagram_contact_confirmation"] = False
-            facts["pending_instagram_contact"] = None
-            facts["pending_instagram_escalation"] = None
-            response_text = "No problem at all. If you need anything later, just message us here."
-            db.log_conversation(sender_id, "instagram", message_text, response_text, True, "instagram_contact_declined", **trace)
-            send_instagram_reply(sender_id, response_text)
-            return
-
-        if awaiting_contact and not supplied_contact:
-            response_text = _INSTAGRAM_CONTACT_REQUEST
-            db.log_conversation(sender_id, "instagram", message_text, response_text, True, "instagram_contact_required", **trace)
-            send_instagram_reply(sender_id, response_text)
-            return
-
-        if awaiting_contact and supplied_contact:
-            facts["awaiting_instagram_contact"] = False
-            facts["awaiting_instagram_contact_confirmation"] = True
-            facts["pending_instagram_contact"] = supplied_contact
-            response_text = _INSTAGRAM_CONTACT_CONFIRM.format(number=supplied_contact)
-            db.log_conversation(sender_id, "instagram", message_text, response_text, True, "instagram_contact_confirmation", **trace)
-            send_instagram_reply(sender_id, response_text)
-            return
 
         response_text, was_matched, template_id, image_url = responder.match_and_respond(
             message_text, user_id=sender_id, channel="instagram",
             referral_source="ADS", referral_ad_id=trace["ad_id"], referral_ad_title=trace["ad_title"],
         )
 
-        # Assisted Resolution is an Instagram-only review draft. It runs only
-        # after the deterministic responder declines to resolve the message,
-        # never on WhatsApp, and never for an active order/contact flow.
-        if (
-            config.LLM_ASSISTED_RESOLUTION_ENABLED
-            and not was_matched
-            and not awaiting_contact
-            and not supplied_contact
-            and not facts.get("cart")
-            and not facts.get("order_draft", {}).get("flavour")
-        ):
-            create_suggestion(
-                user_id=sender_id,
-                channel="instagram",
-                customer_message=message_text,
-                deterministic_resolved=False,
-                active_protected_flow=False,
-                source_routed=False,
+        # Human-gated assisted resolution: unresolved Instagram messages only.
+        # The draft is durable and reviewable; it is never sent from this path.
+        protected_flow = bool(facts.get("cart") or facts.get("order_draft")) or template_id in ("order_draft_receipt", "order_next_steps")
+        if (config.LLM_ASSISTED_RESOLUTION_ENABLED or config.LLM_AUTO_RESOLVE_SIMULATION_ENABLED) and not was_matched and not protected_flow and not source_route:
+            assisted_suggestion = create_suggestion(
+                user_id=sender_id, channel="instagram", customer_message=message_text,
+                deterministic_resolved=False, active_protected_flow=protected_flow,
+                source_routed=bool(source_route), source_routing_id=trace.get("source_routing_id"),
             )
+            # Full deterministic eligibility runs in simulation, but this call
+            # only records an audit row.  It never sends an automatic reply;
+            # the normal human-gated assisted workflow below remains intact.
+            if assisted_suggestion and config.LLM_AUTO_RESOLVE_SIMULATION_ENABLED:
+                simulate_auto_resolve(assisted_suggestion, protected_order_flow=protected_flow, source_routed=bool(source_route))
 
-        needs_escalation = awaiting_contact or not was_matched or template_id == "order_next_steps"
-        if needs_escalation and not supplied_contact and not awaiting_contact:
-            facts["awaiting_instagram_contact"] = True
-            facts["awaiting_instagram_contact_confirmation"] = False
-            facts["pending_instagram_contact"] = None
-            facts["pending_instagram_escalation"] = {
-                "response_text": response_text,
-                "was_matched": was_matched,
-                "template_id": template_id,
-                "user_message": message_text,
-                "reason": "Order Confirmation & Intake Request" if was_matched else "Unmatched Instagram Query / Sensitive Request",
-            }
-            response_text = _INSTAGRAM_CONTACT_REQUEST
-            session_memory.add_turn(sender_id, "instagram", message_text, response_text)
-            db.log_conversation(sender_id, "instagram", message_text, response_text, True, "instagram_contact_required", **trace)
-            send_instagram_reply(sender_id, response_text)
-            return
-
+        # Channel policy: Instagram is the only AI chatbot channel. When it
+        # cannot answer — an unsupported question, or an order/event ask that
+        # genuinely needs a person — the customer continues on WhatsApp with
+        # a human, never with more bot. No phone number is collected here any
+        # more: the customer opens WhatsApp themselves via the link below, so
+        # nothing is typed, mistyped, or stored on Instagram along the way.
+        # An explicit human-contact request (matched by its own approved
+        # template) is also a handoff, not just an unmatched question: the
+        # client wants a clickable WhatsApp continuation here, not a phone
+        # number quoted as plain Instagram text.
+        needs_escalation = (
+            not was_matched
+            or (source_route or {}).get("escalation_policy") == "always_human"
+            or template_id in (
+                "explicit_escalation",
+                "order_draft_receipt",
+                "order_next_steps",
+                "GUARD_staff_names_manager_contact",
+            )
+        )
         if needs_escalation:
-            facts["awaiting_instagram_contact"] = False
-            facts["pending_instagram_escalation"] = None
-            escalator.handle_escalation(
-                user_id=sender_id,
-                channel="instagram",
-                user_message=message_text,
-                reason="Order Confirmation & Intake Request" if was_matched else "Unmatched Instagram Query / Sensitive Request",
-                context_data={
-                    "ad_id": ad_id,
-                    "sender_id": sender_id,
-                    "template_id": template_id,
-                    **({"customer_whatsapp_number": supplied_contact} if supplied_contact else {}),
-                },
+            reason = (
+                "Order Confirmation & Intake Request" if was_matched
+                else "Unmatched Instagram Query / Sensitive Request"
             )
+            # Created before the staff alert (not after) so the alert can name
+            # the CAM reference and the known-entities summary the customer
+            # never has to repeat, instead of a second, disconnected message.
+            # Only a message that is actually placing an order may carry the
+            # cart into the handoff. "Talk to human" is not one of those, and
+            # treating it as one is what attached a days-old Jolbhora order to
+            # a plain request to speak to somebody.
+            is_order_handoff = template_id in ("order_draft_receipt", "order_next_steps")
+            handoff = get_or_create_handoff(
+                user_id=sender_id, channel="instagram", reason=reason,
+                user_message=message_text, facts=facts,
+                include_order=is_order_handoff,
+            )
+            # A repeated "human"/"can someone help" against an already-active
+            # handoff reuses the reference (above) and must not re-alert
+            # staff a second time for the same open enquiry.
+            if handoff.get("newly_created", True):
+                escalator.handle_escalation(
+                    user_id=sender_id,
+                    channel="instagram",
+                    user_message=message_text,
+                    reason=reason,
+                    context_data={
+                        "ad_id": ad_id, "sender_id": sender_id, "template_id": template_id,
+                        "handoff_ref": handoff["handoff_ref"],
+                        "handoff_summary": staff_summary(handoff),
+                    },
+                )
+            order_summary = handoff.get("verified_order")
+            if template_id == "order_draft_receipt":
+                response_text = response_text.rstrip()
+            else:
+                response_text = customer_facing_notice()
+            link_message = customer_facing_link_message(handoff["handoff_ref"], order_summary)
+            mark_referred(handoff["handoff_ref"])
+            if is_order_handoff and order_summary:
+                # The order is now on its way to a human, prefilled in the
+                # link above. Instagram's copy has done its job; keeping it
+                # would make it luggage for every later enquiry.
+                retire_order_state(sender_id, "instagram")
+            template_id = "instagram_whatsapp_handoff"
+            image_url = None
 
-        db.log_conversation(sender_id, "instagram", message_text, response_text, was_matched, template_id, **trace)
+        trace["source_context_used"] = bool(facts.get("source_context_used"))
+        logged_response = response_text
+        if needs_escalation:
+            logged_response = f"{response_text}\n\n{link_message}"
+        conversation_id = db.log_conversation(
+            sender_id, "instagram", message_text, logged_response, was_matched,
+            template_id, **trace,
+        )
 
-        send_instagram_reply(sender_id, response_text, image_url=image_url)
+        send_instagram_reply(
+            sender_id, response_text, image_url=image_url,
+            inbound_message_id=conversation_id, response_type="reply",
+        )
+        if needs_escalation:
+            send_instagram_reply(
+                sender_id, link_message,
+                inbound_message_id=conversation_id, response_type="handoff",
+            )
     except Exception:
         # A background task that raises disappears silently, and the customer
         # is left with no reply and nothing in the logs explaining why.
@@ -535,8 +532,7 @@ _UNREADABLE_ATTACHMENT_REPLY = (
     "Thanks for sending that! I can't open photos or voice notes here — "
     "could you type your question instead?\n\n"
     "I can help with our Sondesh flavours & prices, this week's Bengali meals, "
-    "or delivery across Delhi NCR. If you'd rather speak to someone, our team "
-    "is on +91 87965 51990."
+    "or delivery across Delhi NCR. If you'd rather speak to someone, reply “human”."
 )
 
 
@@ -557,13 +553,162 @@ def _reply_to_unreadable_attachment(sender_id: str) -> None:
         facts["attachment_notice_sent"] = True
 
         session_memory.add_turn(sender_id, "instagram", "[attachment]", _UNREADABLE_ATTACHMENT_REPLY)
-        db.log_conversation(
+        conversation_id = db.log_conversation(
             sender_id, "instagram", "[attachment]", _UNREADABLE_ATTACHMENT_REPLY,
             True, "unreadable_attachment", message_source="attachment",
         )
-        send_instagram_reply(sender_id, _UNREADABLE_ATTACHMENT_REPLY)
+        send_instagram_reply(
+            sender_id, _UNREADABLE_ATTACHMENT_REPLY,
+            inbound_message_id=conversation_id, response_type="attachment_notice",
+        )
     except Exception:
         log.exception("Failed to answer an unreadable attachment from %s.", sender_id)
+
+
+def _apply_source_context(sender_id: str, route: Dict[str, Any], match_method: str) -> None:
+    """Writes a resolved route into the session for the next message to use.
+
+    Shared by the reel and the paired-post paths — both establish exactly
+    the same kind of context, just from different evidence.
+    """
+    facts = session_memory.get_facts(sender_id, "instagram")
+    facts["source_route"] = route
+    facts["source_match_method"] = match_method
+    facts["source_context_superseded"] = False
+    # Sharing a post is itself a change of subject: the customer has just put
+    # a specific thing in front of us, newer and more specific than whatever
+    # was last discussed. Without clearing that stale topic, source routing
+    # is skipped for the vague follow-up it exists to answer —
+    # `can_use_source` in responder.py treats any `last_topic` as the
+    # conversation already having a subject. In production this is what sent
+    # a "tell me more" straight after a shared reel into general matching
+    # instead of the reel's route.
+    #
+    # An open question the bot itself asked (awaiting_*) is deliberately left
+    # alone: that is a reply the customer still owes us, and the pack size or
+    # area they type next has to keep resolving. Cart, order_draft and any
+    # CAM handoff are untouched — a share changes conversational subject, not
+    # order state.
+    facts["last_topic"] = None
+    facts["source_priority_cursor"] = 0
+
+
+def _establish_shared_reel_context(sender_id: str, identity: Dict[str, str]) -> bool:
+    """
+    Remembers which configured reel a customer just shared, for their next
+    message to use. Returns whether a configured route was found.
+
+    A shared reel carries no question, so nothing is answered from it here —
+    it only establishes context. The customer sends "tell me more" a few
+    seconds later, and that message is the one that needs to know which post
+    it is about.
+
+    An unconfigured reel (a customer forwarding someone else's video, which
+    production traffic does contain) resolves to nothing and leaves the
+    session exactly as it was. No topic is guessed from the caption.
+    """
+    try:
+        route, match_method = route_for_inbound(
+            ad_id=None, media_id=None, shortcode=identity.get("shortcode"),
+        )
+        if not route:
+            log.info(
+                "Shared reel %s from %s is not configured for routing; no source context set.",
+                identity.get("shortcode"), sender_id,
+            )
+            return False
+        _apply_source_context(sender_id, route, match_method)
+        log.info(
+            "Shared reel %s from %s matched routing_id %s (%s) via %s.",
+            identity.get("shortcode"), sender_id, route.get("routing_id"),
+            route.get("routing_topic"), match_method,
+        )
+        return True
+    except Exception:
+        # Context is a nicety; the attachment reply below is not allowed to
+        # fail because of it.
+        log.exception("Could not establish shared-reel context for %s.", sender_id)
+        return False
+
+
+def _establish_shared_post_context(sender_id: str, post_media_id: str) -> bool:
+    """
+    Resolves a shared post's messaging-attachment id against a configured
+    route, either one already paired or — while an admin has deliberately
+    opened a pairing window — this exact share. Returns whether a route was
+    established.
+
+    A post's id has no deterministic permalink to fall back on (see
+    ``shared_post_media_id``'s docstring), so unlike a reel, an unpaired post
+    resolves to nothing: no shortcode, no caption match, no guess from
+    timing. Only an id that is either already bound to a route, or captured
+    during that route's own open pairing window, is trusted.
+    """
+    try:
+        route, match_method = route_for_inbound(
+            ad_id=None, media_id=None, post_media_id=post_media_id,
+        )
+        if route:
+            _apply_source_context(sender_id, route, match_method)
+            log.info(
+                "Shared post %s from %s matched routing_id %s (%s) via %s.",
+                post_media_id, sender_id, route.get("routing_id"),
+                route.get("routing_topic"), match_method,
+            )
+            return True
+
+        pairing = db.get_active_post_pairing()
+        if not pairing:
+            log.info(
+                "Shared post %s from %s is not configured and no pairing is open; no source context set.",
+                post_media_id, sender_id,
+            )
+            return False
+
+        bound = db.bind_post_pairing(pairing["id"], post_media_id)
+        if not bound:
+            # The window closed between the check above and this write —
+            # a race, not an error; the share is simply unpaired.
+            return False
+        route_row = db.get_instagram_source_route(pairing["routing_id"])
+        if not route_row:
+            return False
+        route = decode_route(route_row)
+        _apply_source_context(sender_id, route, "shared_post_media_id")
+        log.info(
+            "Paired shared post %s from %s to routing_id %s (%s) via an open admin pairing window.",
+            post_media_id, sender_id, route.get("routing_id"), route.get("routing_topic"),
+        )
+        return True
+    except Exception:
+        log.exception("Could not establish shared-post context for %s.", sender_id)
+        return False
+
+
+def _handle_shared_attachment(
+    sender_id: str,
+    reel_identity: Optional[Dict[str, str]],
+    post_media_id: Optional[str] = None,
+) -> None:
+    """
+    Establishes source context where there is any, then answers the
+    attachment.
+
+    A recognized post — already paired, or bound just now against an open
+    pairing window — skips the "I can't open photos" reply: the system did
+    understand what was shared, and sending that message would misstate what
+    just happened. A reel keeps its existing reply exactly as before; that
+    path is proven in production and this change does not touch it.
+    """
+    if reel_identity:
+        _establish_shared_reel_context(sender_id, reel_identity)
+        _reply_to_unreadable_attachment(sender_id)
+        return
+    if post_media_id:
+        recognized = _establish_shared_post_context(sender_id, post_media_id)
+        if recognized:
+            return
+    _reply_to_unreadable_attachment(sender_id)
 
 
 def _classify_unanswered_event(messaging_event: dict) -> Optional[str]:
@@ -622,6 +767,149 @@ def get_dropped_webhook_events(
     return {"count": len(_DROPPED_WEBHOOK_EVENTS), "events": list(reversed(_DROPPED_WEBHOOK_EVENTS))}
 
 
+# Sharing a reel into a DM arrives as an attachment with no message text, so
+# it never reaches the source-routing path. Whether Meta puts anything usable
+# (a permalink, a media id) inside that attachment is not documented by any
+# payload this repo has ever captured, and the code has only ever checked
+# `message.attachments` for truthiness — so nothing here assumes a field name.
+# This records the structure Meta actually sends, so the question can be
+# answered from evidence before any matcher is written.
+#
+# Structure, not content: values are kept only where they identify a shared
+# object (ids, types, URLs with the query string removed), everything else is
+# reported as its type. Deliberately in memory and bounded — a diagnostic
+# answering one question, not a second copy of customer data.
+_ATTACHMENT_DEBUG_EVENTS: List[Dict[str, Any]] = []
+_ATTACHMENT_DEBUG_LIMIT = 10
+_ATTACHMENT_DEBUG_MAX_DEPTH = 6
+_ATTACHMENT_DEBUG_MAX_STR = 300
+
+# Meta signs its CDN URLs with short-lived credentials in the query string
+# (and a shared link can carry click-tracking tokens), so a URL is recorded
+# as scheme://host/path only. A key that looks like a credential is never
+# recorded at all, whatever Meta decides to call it.
+_SECRET_KEY_HINTS = (
+    "token", "secret", "signature", "auth", "cookie", "password",
+    "credential", "session", "bearer", "apikey", "api_key",
+)
+
+
+def _sanitize_debug_url(value: str) -> str:
+    """scheme://host/path — the shape that identifies a shared object, with
+    signed query parameters dropped."""
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return "<unparseable-url>"
+    if not parsed.scheme or not parsed.hostname:
+        return "<not-a-url>"
+    cleaned = f"{parsed.scheme}://{parsed.hostname}{parsed.path}"
+    if parsed.query:
+        cleaned += "?<query-removed>"
+    return cleaned[:_ATTACHMENT_DEBUG_MAX_STR]
+
+
+def _sanitize_debug_value(key: str, value: Any, depth: int = 0) -> Any:
+    """
+    Reports what Meta sent without copying anything sensitive out of it.
+
+    Field names are never assumed — whatever keys arrive are the keys
+    reported. Only the values that could identify a shared post/reel survive
+    in readable form; everything else degrades to its type.
+    """
+    if any(hint in key.lower() for hint in _SECRET_KEY_HINTS):
+        return "<redacted-by-key-name>"
+    if depth >= _ATTACHMENT_DEBUG_MAX_DEPTH:
+        return "<max-depth>"
+
+    if isinstance(value, dict):
+        return {
+            str(k): _sanitize_debug_value(str(k), v, depth + 1)
+            for k, v in list(value.items())[:40]
+        }
+    if isinstance(value, list):
+        return [_sanitize_debug_value(key, item, depth + 1) for item in value[:10]]
+    if isinstance(value, bool) or value is None:
+        return value
+    if isinstance(value, (int, float)):
+        return value
+    if isinstance(value, str):
+        if value.startswith(("http://", "https://")):
+            return _sanitize_debug_url(value)
+        if len(value) > _ATTACHMENT_DEBUG_MAX_STR:
+            return f"<str len={len(value)}>"
+        return value
+    return f"<{type(value).__name__}>"
+
+
+def _record_attachment_debug_event(messaging_event: dict, sender_id: Optional[str]) -> None:
+    """
+    Captures the sanitized shape of one attachment-only Instagram message.
+
+    Changes nothing about how the message is answered — this only observes.
+    Never allowed to raise: a diagnostic that can break the webhook is worse
+    than the missing evidence it was added to collect.
+    """
+    try:
+        message = messaging_event.get("message") or {}
+        attachments = message.get("attachments")
+        attachment_list = attachments if isinstance(attachments, list) else []
+
+        _ATTACHMENT_DEBUG_EVENTS.append({
+            "at": datetime.utcnow().isoformat(timespec="seconds"),
+            "had_sender": bool(sender_id),
+            "event_keys": sorted(str(k) for k in messaging_event.keys()),
+            "message_keys": sorted(str(k) for k in message.keys()),
+            "attachment_count": len(attachment_list),
+            # Every key each attachment actually carries, so a field this
+            # code has never heard of still shows up.
+            "attachment_keys": [
+                sorted(str(k) for k in item.keys()) if isinstance(item, dict) else f"<{type(item).__name__}>"
+                for item in attachment_list
+            ],
+            "attachments": _sanitize_debug_value("attachments", attachment_list),
+            # A reply/share wrapper, if Meta sends one, lives beside the
+            # attachments rather than inside them.
+            "reply_to": _sanitize_debug_value("reply_to", message.get("reply_to")),
+            "referral": _sanitize_debug_value("referral", messaging_event.get("referral")),
+        })
+        del _ATTACHMENT_DEBUG_EVENTS[:-_ATTACHMENT_DEBUG_LIMIT]
+    except Exception:
+        log.exception("Attachment diagnostic capture failed; the message itself is unaffected.")
+
+
+@app.get("/admin/debug/instagram-attachments")
+def get_instagram_attachment_debug(
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """Sanitized structure of recent attachment-only Instagram messages."""
+    require_admin(x_admin_key, x_admin_pin)
+    return {
+        "count": len(_ATTACHMENT_DEBUG_EVENTS),
+        "limit": _ATTACHMENT_DEBUG_LIMIT,
+        "events": list(reversed(_ATTACHMENT_DEBUG_EVENTS)),
+    }
+
+
+@app.get("/admin/debug/instagram-media/{media_id}")
+def get_instagram_media_verification(
+    media_id: str,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """
+    Fetches one media id directly by Graph API and reports its real identity.
+
+    Diagnostic only: this is how an id captured off a real webhook event
+    (an attachment's ig_post_media_id, for instance) is checked against what
+    it actually is before any routing logic trusts it. It never writes
+    anything and is not part of any inbound matcher.
+    """
+    require_admin(x_admin_key, x_admin_pin)
+    return verify_media_by_id(media_id)
+
+
 def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks) -> dict:
     log.info("Instagram Webhook Raw Payload:\n%s", json.dumps(payload, indent=2))
 
@@ -644,24 +932,13 @@ def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks
                 results.append({"action": "ignored_no_sender"})
                 continue
 
-            if not message_text:
-                # A customer may send the WhatsApp number using Instagram's
-                # contact-card picker. Meta delivers that as an attachment
-                # with no message.text, so treat it as the contact response
-                # instead of replying that we cannot read photos or voice notes.
-                contact_card_number = _extract_contact_number_from_event(messaging_event)
-                if contact_card_number:
-                    if session_memory.get_facts(sender_id, "instagram").get("awaiting_instagram_contact"):
-                        message_text = contact_card_number
-                        log.info("Extracted WhatsApp contact card for Instagram sender %s.", sender_id)
-                    else:
-                        # The customer may have sent the number as text first;
-                        # Meta can then deliver the contact card as a second
-                        # event. It is already handled, so do not send the
-                        # misleading unreadable-attachment apology.
-                        _record_dropped_webhook_event("duplicate_contact_card", messaging_event, sender_id)
-                        results.append({"sender_id": sender_id, "action": "ignored_duplicate_contact_card"})
-                        continue
+            # A contact-card attachment used to be read as a WhatsApp number
+            # the customer was asked to share. Channel policy retired that
+            # flow — Instagram no longer asks for or collects a phone number,
+            # the customer opens WhatsApp themselves via the handoff link —
+            # so a contact card with no message text now falls through to the
+            # same "cannot read this attachment" handling as a photo or a
+            # voice note, just below.
 
             if not message_text:
                 # Only record the events that represent a customer going
@@ -672,6 +949,25 @@ def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks
                 # event that actually mattered.
                 reason = _classify_unanswered_event(messaging_event)
 
+                # Observation only, before either branch below: a reel shared
+                # into a DM lands here, and what Meta puts inside that
+                # attachment is the open question blocking shared-reel
+                # routing. Recording it changes nothing about the reply.
+                if reason == "attachment_only":
+                    _record_attachment_debug_event(messaging_event, sender_id)
+
+                # Parsed here because it is pure string work, but resolved and
+                # stored in the background task below — the webhook must keep
+                # returning 200 before Meta decides it timed out and redelivers.
+                shared_reel = (
+                    shared_reel_identity(messaging_event.get("message") or {})
+                    if reason == "attachment_only" else None
+                )
+                shared_post_id = (
+                    shared_post_media_id(messaging_event.get("message") or {})
+                    if reason == "attachment_only" and not shared_reel else None
+                )
+
                 # A photo, voice note or sticker is a real person saying
                 # something we cannot read. Silence is the worst available
                 # answer — they cannot tell whether anyone is there. Asking
@@ -679,8 +975,15 @@ def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks
                 # alive; it was found by the drop log within a minute of that
                 # log existing.
                 if reason == "attachment_only" and is_ad_qualified:
-                    background_tasks.add_task(_reply_to_unreadable_attachment, sender_id)
-                    results.append({"sender_id": sender_id, "action": "queued_attachment_reply"})
+                    background_tasks.add_task(
+                        _handle_shared_attachment, sender_id, shared_reel, shared_post_id,
+                    )
+                    results.append({
+                        "sender_id": sender_id,
+                        "action": "queued_attachment_reply",
+                        "shared_reel_shortcode": (shared_reel or {}).get("shortcode"),
+                        "shared_post_media_id": shared_post_id,
+                    })
                     continue
 
                 if reason:
@@ -735,7 +1038,124 @@ async def handle_instagram_webhook(request: Request, background_tasks: Backgroun
 
     return _dispatch_instagram_payload(payload, background_tasks)
 
-def send_instagram_reply(recipient_id: str, text: str, image_url=None) -> Dict[str, Any]:
+def _audit_recipient_id(recipient_id: str) -> str:
+    """Return a stable, non-reversible identifier for outbound audit rows."""
+    digest = hashlib.sha256(str(recipient_id).encode("utf-8")).hexdigest()[:20]
+    return f"sha256:{digest}"
+
+
+def _safe_outbound_exception(exc: Exception) -> str:
+    """Keep exception summaries useful without persisting credentials."""
+    return _safe_outbound_text(str(exc or ""))
+
+
+def _safe_outbound_text(value: str) -> str:
+    """Redact credential-shaped values from persisted diagnostic text."""
+    summary = str(value or "")
+    summary = re.sub(r"(?i)(bearer\s+)[^\s]+", r"\1[REDACTED]", summary)
+    summary = re.sub(r"(?i)(access_token|token|secret|password)=?[^\s,;]+", r"\1=[REDACTED]", summary)
+    return summary[:500]
+
+
+def _meta_error_fields(payload: Any) -> Tuple[Any, Any, Optional[str]]:
+    error = payload.get("error") if isinstance(payload, dict) else None
+    if not isinstance(error, dict):
+        return None, None, None
+    return (
+        error.get("code"),
+        error.get("error_subcode"),
+        _safe_outbound_text(str(error.get("message") or "")) or None,
+    )
+
+
+_INSTAGRAM_PREFERRED_CHUNK_SIZE = 950
+_INSTAGRAM_MAX_TEXT_CHARS = 1000
+
+
+def _split_instagram_text(
+    text: str,
+    preferred_chunk_size: int = _INSTAGRAM_PREFERRED_CHUNK_SIZE,
+) -> List[str]:
+    """Split text at natural boundaries while preserving it byte-for-byte."""
+    value = str(text or "")
+    preferred = max(1, min(int(preferred_chunk_size or _INSTAGRAM_PREFERRED_CHUNK_SIZE), _INSTAGRAM_MAX_TEXT_CHARS))
+    if len(value) <= preferred:
+        return [value] if value else []
+
+    chunks: List[str] = []
+    while value:
+        if len(value) <= preferred:
+            chunks.append(value)
+            break
+        # Keep the chunk close to the preferred size. A boundary in the
+        # latter half is preferable to a very short first message; if there
+        # is no such boundary, the final fallback still avoids breaking a
+        # word whenever possible.
+        cut = _instagram_natural_split(value, preferred)
+        chunks.append(value[:cut])
+        value = value[cut:]
+    return chunks
+
+
+def _instagram_natural_split(value: str, limit: int) -> int:
+    """Return a content-preserving split point at or before ``limit``."""
+    minimum = max(1, limit // 2)
+
+    def choose(candidate: int) -> Optional[int]:
+        if candidate <= 0 or candidate > limit:
+            return None
+        return candidate if candidate >= minimum else None
+
+    # Paragraph and line boundaries include their line break in the first
+    # chunk, so joining chunks reproduces the original text exactly.
+    for marker in ("\n\n", "\n"):
+        position = value.rfind(marker, 0, limit + 1)
+        candidate = choose(position + len(marker)) if position >= 0 else None
+        if candidate:
+            return candidate
+
+    # A sentence boundary is punctuation followed by whitespace (or the end
+    # of the complete value), never punctuation embedded in a number/table.
+    sentence_candidate = None
+    for index, character in enumerate(value[:limit]):
+        if character not in ".?!":
+            continue
+        if index + 1 >= len(value) or value[index + 1].isspace():
+            sentence_candidate = index + 1
+    candidate = choose(sentence_candidate or 0)
+    if candidate:
+        return candidate
+
+    whitespace_candidate = None
+    for index, character in enumerate(value[:limit]):
+        if character.isspace():
+            whitespace_candidate = index + 1
+    candidate = choose(whitespace_candidate or 0)
+    if candidate:
+        return candidate
+
+    # Prefer a smaller natural boundary to splitting through a word when the
+    # message has an unusually long opening block.
+    for marker in ("\n\n", "\n"):
+        position = value.rfind(marker, 0, limit + 1)
+        if position >= 0 and 0 < position + len(marker) <= limit:
+            return position + len(marker)
+    if sentence_candidate:
+        return sentence_candidate
+    if whitespace_candidate:
+        return whitespace_candidate
+    return min(limit, _INSTAGRAM_MAX_TEXT_CHARS)
+
+
+def send_instagram_reply(
+    recipient_id: str,
+    text: str,
+    image_url=None,
+    *,
+    inbound_message_id: Optional[int] = None,
+    response_type: str = "text",
+    retry_count: int = 0,
+) -> Dict[str, Any]:
     """Sends text plus zero or more image cards via Meta Graph API to Instagram user."""
     # Instagram has no caption field on attachments, so a captioned card is sent
     # as the image followed by its own text message — same card, detail, card,
@@ -799,46 +1219,189 @@ def send_instagram_reply(recipient_id: str, text: str, image_url=None) -> Dict[s
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json"
     }
+    parent_send_id = uuid.uuid4().hex
+    failed_chunk_number = None
 
     try:
         with httpx.Client(timeout=10.0) as client:
             last = None
 
-            def send_text(body):
+            def send_request(
+                body,
+                *,
+                kind: str,
+                chunk_number: Optional[int] = None,
+                total_chunks: Optional[int] = None,
+                character_count: Optional[int] = None,
+            ):
                 nonlocal last
-                last = client.post(url, headers=headers, json={"recipient": {"id": recipient_id}, "message": {"text": body}})
-                last.raise_for_status()
+                audit_id = None
+                try:
+                    audit_id = db.create_instagram_outbound_audit(
+                        inbound_message_id=inbound_message_id,
+                        recipient_id=_audit_recipient_id(recipient_id),
+                        response_type=kind or response_type,
+                        retry_count=retry_count,
+                        parent_send_id=parent_send_id,
+                        chunk_number=chunk_number,
+                        total_chunks=total_chunks,
+                        character_count=character_count,
+                    )
+                except Exception as audit_error:
+                    # Audit is observability only. A replaced/locked SQLite
+                    # file must never prevent the real Meta send.
+                    log.warning(
+                        "Could not create Instagram outbound audit row; "
+                        "continuing with Meta send: %s",
+                        _safe_outbound_exception(audit_error),
+                    )
+                started = time.perf_counter()
+                completed = False
+                resp = None
+                try:
+                    resp = client.post(url, headers=headers, json=body)
+                    last = resp
+                    payload = resp.json()
+                    code, subcode, message = _meta_error_fields(payload)
+                    status_code = int(getattr(resp, "status_code", 200))
+                    ok = 200 <= status_code < 300 and not (
+                        isinstance(payload, dict) and payload.get("error")
+                    )
+                    message_id = payload.get("message_id") or payload.get("id") if isinstance(payload, dict) else None
+                    payload_error = payload.get("error") if isinstance(payload, dict) else None
+                    trace_id = (
+                        getattr(resp, "headers", {}).get("x-fb-trace-id")
+                        or (payload_error or {}).get("fbtrace_id")
+                        or (payload.get("fbtrace_id") if isinstance(payload, dict) else None)
+                    )
+                    if audit_id is not None:
+                        try:
+                            db.complete_instagram_outbound_audit(
+                                audit_id,
+                                http_status=status_code, success=bool(ok),
+                                meta_message_id=message_id, meta_error_code=code,
+                                meta_error_subcode=subcode, meta_error_message=message,
+                                meta_trace_id=trace_id,
+                                duration_ms=round((time.perf_counter() - started) * 1000, 2),
+                            )
+                        except Exception as audit_error:
+                            log.warning(
+                                "Could not complete Instagram outbound audit row %s: %s",
+                                audit_id, _safe_outbound_exception(audit_error),
+                            )
+                    completed = True
+                    if not ok:
+                        log.error(
+                            "Instagram Meta API send failed: HTTP %s code=%s subcode=%s "
+                            "trace=%s message=%s",
+                            status_code, code, subcode, trace_id, message,
+                        )
+                    if hasattr(resp, "raise_for_status"):
+                        resp.raise_for_status()
+                    if isinstance(payload, dict) and payload.get("error"):
+                        raise RuntimeError(message or "Meta returned an error payload")
+                except Exception as exc:
+                    # If the HTTP call itself failed, the pending row still
+                    # records the exception and elapsed time for diagnosis.
+                    if not completed and audit_id is not None:
+                        try:
+                            db.complete_instagram_outbound_audit(
+                                audit_id,
+                                http_status=getattr(resp, "status_code", None) if resp is not None else None,
+                                success=False,
+                                meta_trace_id=getattr(resp, "headers", {}).get("x-fb-trace-id") if resp is not None else None,
+                                duration_ms=round((time.perf_counter() - started) * 1000, 2),
+                                exception_class=type(exc).__name__,
+                                exception_message=_safe_outbound_exception(exc),
+                            )
+                        except Exception as audit_error:
+                            log.warning(
+                                "Could not record Instagram outbound exception for audit row %s: %s",
+                                audit_id, _safe_outbound_exception(audit_error),
+                            )
+                    raise
+
+            text_groups = []
+            if text and not cards_first:
+                text_groups.append(_split_instagram_text(text))
+            for _img, caption in captioned:
+                if caption:
+                    text_groups.append(_split_instagram_text(caption))
+            if text and cards_first:
+                text_groups.append(_split_instagram_text(text))
+            total_text_chunks = sum(len(group) for group in text_groups)
+            text_group_index = 0
+            next_chunk_number = 0
+
+            def send_text_body(body: str):
+                nonlocal text_group_index, next_chunk_number, failed_chunk_number
+                # The groups are precomputed in the same order as the sends
+                # below, so every text chunk shares one parent sequence even
+                # when images are interleaved between caption groups.
+                chunks = text_groups[text_group_index]
+                text_group_index += 1
+                for chunk in chunks:
+                    next_chunk_number += 1
+                    try:
+                        send_request(
+                            {"recipient": {"id": recipient_id}, "message": {"text": chunk}},
+                            kind="text",
+                            chunk_number=next_chunk_number,
+                            total_chunks=total_text_chunks,
+                            character_count=len(chunk),
+                        )
+                    except Exception:
+                        failed_chunk_number = next_chunk_number
+                        raise
 
             if text and not cards_first:
-                send_text(text)
+                send_text_body(text)
 
             for img, caption in captioned:
                 if caption and caption_first:
-                    send_text(caption)
+                    send_text_body(caption)
                 # A rejected card must not cost the customer the whole reply.
                 # Meta refuses images for reasons outside our control — an
                 # unreachable host, an unsupported format, a size limit — and
                 # letting that raise meant the customer got silence instead of
                 # the answer we already had.
                 try:
-                    resp = client.post(url, headers=headers, json={
+                    send_request({
                         "recipient": {"id": recipient_id},
                         "message": {"attachment": {"type": "image", "payload": {"url": img, "is_reusable": True}}}
-                    })
-                    resp.raise_for_status()
-                    last = resp
+                    }, kind="image")
                 except Exception as img_error:
                     log.warning("Instagram rejected image card %s: %s", img, img_error)
                 if caption and not caption_first:
-                    send_text(caption)
+                    send_text_body(caption)
 
             # The closing question follows the cards it refers to.
             if text and cards_first:
-                send_text(text)
+                send_text_body(text)
 
+            try:
+                db.finalize_instagram_outbound_audit(
+                    parent_send_id, overall_success=True,
+                )
+            except Exception as audit_error:
+                log.warning(
+                    "Could not finalize Instagram outbound audit %s: %s",
+                    parent_send_id, _safe_outbound_exception(audit_error),
+                )
             delivery_monitor.record_success("instagram")
             return last.json() if last is not None else {"status": "no_content"}
     except Exception as e:
+        try:
+            db.finalize_instagram_outbound_audit(
+                parent_send_id,
+                overall_success=False,
+                overall_failure_chunk=failed_chunk_number,
+            )
+        except Exception as audit_error:
+            log.warning(
+                "Could not finalize failed Instagram outbound audit %s: %s",
+                parent_send_id, _safe_outbound_exception(audit_error),
+            )
         delivery_monitor.record_failure("instagram", str(e))
         if hasattr(e, "response") and getattr(e, "response", None) is not None:
             log.error("Instagram Meta API Error Body: %s", e.response.text)
@@ -1249,6 +1812,30 @@ _IG_TOKEN_TIMEOUT_SECONDS = 6.0
 _ig_token_state: Dict[str, Any] = {"checked_at": 0.0, "result": None}
 
 
+def _check_instagram_token(token: str, url: str, identity: str) -> Dict[str, Any]:
+    """Perform one real Meta token check; isolated for health-test mocking."""
+    try:
+        with httpx.Client(timeout=_IG_TOKEN_TIMEOUT_SECONDS) as client:
+            resp = client.get(url, params={"fields": "ice_breakers", "access_token": token})
+        if resp.status_code == 200:
+            return {"state": "valid", "identity": identity, "detail": "Meta accepted the token."}
+        error = (resp.json() or {}).get("error", {}) if resp.content else {}
+        code = error.get("code")
+        state = "invalid" if code == 190 or error.get("type") == "OAuthException" else "unknown"
+        return {
+            "state": state,
+            "identity": identity,
+            "detail": error.get("message") or f"HTTP {resp.status_code}",
+            "meta_code": code,
+        }
+    except Exception as e:
+        return {
+            "state": "unknown",
+            "identity": identity,
+            "detail": f"Could not reach Meta: {type(e).__name__}",
+        }
+
+
 def instagram_token_status(force: bool = False) -> Dict[str, Any]:
     """
     Whether Meta still accepts the Instagram token, cached for ten minutes.
@@ -1270,31 +1857,7 @@ def instagram_token_status(force: bool = False) -> Dict[str, Any]:
         return {**cached, "checked_seconds_ago": round(now - _ig_token_state["checked_at"], 1)}
 
     url, identity = _instagram_profile_url_and_identity()
-    try:
-        with httpx.Client(timeout=_IG_TOKEN_TIMEOUT_SECONDS) as client:
-            resp = client.get(url, params={"fields": "ice_breakers", "access_token": token})
-        if resp.status_code == 200:
-            result = {"state": "valid", "identity": identity, "detail": "Meta accepted the token."}
-        else:
-            error = (resp.json() or {}).get("error", {}) if resp.content else {}
-            code = error.get("code")
-            # 190 is the credential itself being rejected — expired, revoked,
-            # or invalidated by a password change. Other statuses may be a
-            # permission or a path problem, which is a different conversation.
-            state = "invalid" if code == 190 or error.get("type") == "OAuthException" else "unknown"
-            result = {
-                "state": state,
-                "identity": identity,
-                "detail": error.get("message") or f"HTTP {resp.status_code}",
-                "meta_code": code,
-            }
-    except Exception as e:
-        result = {
-            "state": "unknown",
-            "identity": identity,
-            "detail": f"Could not reach Meta: {type(e).__name__}",
-        }
-
+    result = _check_instagram_token(token, url, identity)
     _ig_token_state["result"] = result
     _ig_token_state["checked_at"] = now
     if result["state"] == "invalid":
@@ -1315,6 +1878,7 @@ def health_check():
     signature = _webhook_signature_status()
     storage = _storage_durability()
     instagram_token = instagram_token_status()
+    instagram_outbound = db.instagram_outbound_health()
 
     # Which phone actually receives escalation alerts. The environment
     # overrides the code default, and the environment is a dashboard nothing
@@ -1341,6 +1905,21 @@ def health_check():
         except Exception as e:
             router_shadow["error"] = f"{type(e).__name__}"
             log.warning("Could not read the router shadow pulse: %s", e)
+
+    # AI Resolution & Answers, Phase 3 slice 2. Same reasoning as
+    # router_shadow above: LLM_TRIAGE_ENABLED lives in the host dashboard,
+    # invisible to anything in this repo, so this is the only way to confirm
+    # a flip actually took without opening the admin dashboard.
+    llm_triage: Dict[str, Any] = {
+        "enabled": config.LLM_TRIAGE_ENABLED,
+        "model": config.LLM_TRIAGE_MODEL if config.LLM_TRIAGE_ENABLED else None,
+    }
+    if config.LLM_TRIAGE_ENABLED:
+        try:
+            llm_triage.update(db.triage_shadow_pulse())
+        except Exception as e:
+            llm_triage["error"] = f"{type(e).__name__}"
+            log.warning("Could not read the triage shadow pulse: %s", e)
 
     # A bot that cannot answer is down, whatever else is working. Live mode
     # without credentials is the same kind of failure one step later — it
@@ -1405,8 +1984,18 @@ def health_check():
             "webhook_signature": signature,
             "outbound_delivery": outbound,
             "instagram_token": instagram_token,
+            # Diagnostic only: no traffic is not an outage, so this block never
+            # participates in the overall healthy/degraded calculation.
+            "instagram_outbound": instagram_outbound,
             "escalation_alerts_to": alert_destination,
             "router_shadow": router_shadow,
+            "llm_triage": llm_triage,
+            "auto_resolve": {
+                "simulation_enabled": config.LLM_AUTO_RESOLVE_SIMULATION_ENABLED,
+                "actual_enabled": bool(config.LLM_AUTO_RESOLVE_ENABLED and db.get_auto_resolve_settings().get("kill_switch", True)),
+                "min_confidence": config.LLM_AUTO_RESOLVE_MIN_CONFIDENCE,
+                "readiness": db.auto_resolve_evaluation().get("readiness_status", "NOT READY"),
+            },
             "language_understanding": {
                 "structured_nlu_enabled": config.STRUCTURED_NLU_ENABLED,
                 "rollout_percent": config.STRUCTURED_NLU_ROLLOUT_PERCENT,
@@ -1426,95 +2015,6 @@ def health_check():
     )
 
 MAX_UPLOAD_SIZE = 10 * 1024 * 1024  # 10 MB limit for menu images
-
-
-@app.get("/admin/menu-manager/menus")
-def menu_manager_menus(x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
-    require_admin(x_admin_key, x_admin_pin)
-    return {"status": "success", "menus": menu_images.list_menus()}
-
-
-@app.get("/admin/menu-manager/menus/{menu_key}")
-def menu_manager_preview(menu_key: str, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
-    require_admin(x_admin_key, x_admin_pin)
-    try:
-        return {"status": "success", **menu_images.preview(menu_key)}
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Unknown menu")
-
-
-@app.get("/admin/menu-manager/menus/{menu_key}/preview")
-def menu_manager_preview_alias(menu_key: str, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
-    return menu_manager_preview(menu_key, x_admin_key, x_admin_pin)
-
-
-async def _save_menu_image_draft(menu_key: str, file: Optional[UploadFile], x_admin_key: Optional[str], x_admin_pin: Optional[str]):
-    require_admin(x_admin_key, x_admin_pin)
-    if file is None:
-        raise HTTPException(status_code=400, detail="No image file provided.")
-    data = await file.read()
-    if len(data) > MAX_UPLOAD_SIZE:
-        raise HTTPException(status_code=413, detail="File too large (maximum 10MB allowed).")
-    try:
-        return {"status": "success", "draft": menu_images.save_draft(menu_key, data, file.content_type or "", "admin")}
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Unknown menu")
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-
-
-@app.post("/admin/menu-manager/menus/{menu_key}/draft")
-async def menu_manager_save_draft(menu_key: str, file: Optional[UploadFile] = File(None), x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
-    return await _save_menu_image_draft(menu_key, file, x_admin_key, x_admin_pin)
-
-
-@app.put("/admin/menu-manager/menus/{menu_key}/draft")
-async def menu_manager_save_draft_put(menu_key: str, file: Optional[UploadFile] = File(None), x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None),):
-    return await _save_menu_image_draft(menu_key, file, x_admin_key, x_admin_pin)
-
-
-@app.post("/admin/menu-manager/menus/{menu_key}/replace")
-async def menu_manager_replace(menu_key: str, file: Optional[UploadFile] = File(None), x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
-    return await _save_menu_image_draft(menu_key, file, x_admin_key, x_admin_pin)
-
-
-@app.post("/admin/menu-manager/menus/{menu_key}/publish")
-def menu_manager_publish(menu_key: str, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
-    require_admin(x_admin_key, x_admin_pin)
-    try:
-        return {"status": "success", "menu": menu_images.publish(menu_key)}
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Unknown menu")
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-
-
-@app.get("/admin/menu-manager/menus/{menu_key}/history")
-def menu_manager_history(menu_key: str, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
-    require_admin(x_admin_key, x_admin_pin)
-    if menu_key not in menu_images.MENU_IMAGE_DEFINITIONS:
-        raise HTTPException(status_code=404, detail="Unknown menu")
-    return {"status": "success", "versions": menu_images.history(menu_key)}
-
-
-@app.post("/admin/menu-manager/menus/{menu_key}/archive")
-@app.delete("/admin/menu-manager/menus/{menu_key}")
-def menu_manager_archive(menu_key: str, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
-    require_admin(x_admin_key, x_admin_pin)
-    if menu_key not in menu_images.MENU_IMAGE_DEFINITIONS:
-        raise HTTPException(status_code=404, detail="Unknown menu")
-    return {"status": "success", "menu": menu_images.archive(menu_key)}
-
-
-@app.post("/admin/menu-manager/menus/{menu_key}/restore/{version_id}")
-def menu_manager_restore(menu_key: str, version_id: int, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
-    require_admin(x_admin_key, x_admin_pin)
-    if menu_key not in menu_images.MENU_IMAGE_DEFINITIONS:
-        raise HTTPException(status_code=404, detail="Unknown menu")
-    restored = menu_images.restore(menu_key, version_id)
-    if not restored:
-        raise HTTPException(status_code=404, detail="Version not found")
-    return {"status": "success", "menu": restored}
 
 @app.post("/admin/verify-pin")
 @limiter.limit("10/minute")
@@ -1608,6 +2108,193 @@ def remove_ad_route(
     if not db.delete_ad_product_route(ad_id):
         raise HTTPException(status_code=404, detail="Ad route not found.")
     return {"status": "success", "ad_id": ad_id}
+
+
+@app.post("/admin/instagram-routes/identify")
+async def identify_instagram_route(
+    request: Request,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """Normalize an operator-friendly post/reel URL without inventing metadata."""
+    require_admin(x_admin_key, x_admin_pin)
+    try:
+        body = await request.json()
+        identity = normalize_instagram_url(body.get("url"))
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    existing = next((
+        decode_route(row) for row in db.list_instagram_source_routes()
+        if row.get("canonical_url") == identity["canonical_url"]
+    ), None)
+    lookup = lookup_instagram_media(identity)
+    verified_media_id = lookup.get("verified_media_identifier") or (existing or {}).get("media_id")
+    return {
+        "status": "success",
+        **identity,
+        "verified_media_identifier": verified_media_id,
+        "thumbnail_url": lookup.get("thumbnail_url"),
+        "caption": lookup.get("caption"),
+        "metadata_status": (
+            lookup.get("metadata_status") if lookup.get("metadata_status") == "verified_graph_api"
+            else "saved_mapping" if existing and existing.get("media_id")
+            else lookup.get("metadata_status") or "not_retrievable_from_webhook"
+        ),
+    }
+
+
+@app.get("/admin/instagram-routes")
+def list_instagram_routes(
+    include_archived: bool = False,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    require_admin(x_admin_key, x_admin_pin)
+    if include_archived:
+        # The Archived tab: only archived rows, never mixed with active ones.
+        routes = [decode_route(row) for row in db.list_instagram_source_routes(include_archived=True) if row.get("archived_at")]
+    else:
+        routes = [decode_route(row) for row in db.list_instagram_source_routes()]
+    return {
+        "status": "success",
+        "routes": routes,
+        "legacy_ad_routes": db.list_ad_product_routes(),
+        "product_catalogue": product_catalogue(),
+        "knowledge_scopes": sorted(SOURCE_MAP),
+        "inbound_identifiers": ["ad_id", "story_media_id"],
+    }
+
+
+@app.post("/admin/instagram-routes")
+async def save_instagram_route(
+    request: Request,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    require_admin(x_admin_key, x_admin_pin)
+    try:
+        body = await request.json()
+        route = validate_route_payload(body)
+        routing_id = body.get("routing_id")
+        if routing_id is not None:
+            routing_id = int(routing_id)
+        saved = decode_route(db.save_instagram_source_route(route, routing_id))
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"status": "success", "route": saved}
+
+
+@app.patch("/admin/instagram-routes/{routing_id}/active")
+async def set_instagram_route_active(
+    routing_id: int,
+    request: Request,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    require_admin(x_admin_key, x_admin_pin)
+    body = await request.json()
+    if not isinstance(body.get("active"), bool):
+        raise HTTPException(status_code=400, detail="active must be true or false.")
+    if not db.set_instagram_source_route_active(routing_id, body["active"]):
+        raise HTTPException(status_code=404, detail="Routing record not found.")
+    return {"status": "success", "routing_id": routing_id, "active": body["active"]}
+
+
+@app.delete("/admin/instagram-routes/{routing_id}")
+def archive_instagram_route(
+    routing_id: int,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    require_admin(x_admin_key, x_admin_pin)
+    if not db.archive_instagram_source_route(routing_id):
+        raise HTTPException(status_code=404, detail="Routing record not found.")
+    return {"status": "success", "routing_id": routing_id, "archived": True}
+
+
+@app.post("/admin/instagram-routes/{routing_id}/restore")
+def restore_instagram_route(
+    routing_id: int,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """Un-archives a route in place. Same row, same id — nothing duplicated."""
+    require_admin(x_admin_key, x_admin_pin)
+    if not db.restore_instagram_source_route(routing_id):
+        raise HTTPException(status_code=404, detail="Archived routing record not found.")
+    return {"status": "success", "routing_id": routing_id, "restored": True}
+
+
+@app.delete("/admin/instagram-routes/{routing_id}/permanent")
+def delete_instagram_route(
+    routing_id: int,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """
+    Permanently deletes one routing configuration.
+
+    Deliberately a separate, explicit path from the archive DELETE above —
+    "Remove" and "Archive" are different actions with different consequences,
+    and giving them different endpoints instead of a body flag makes that
+    distinction obvious to anything calling this, not only to the admin UI.
+    Scope is narrow: this route and the pairing attempts that exist only to
+    serve it. Topics, menus, catalogue entries, knowledge, conversations and
+    handoffs are never touched by removing a route.
+    """
+    require_admin(x_admin_key, x_admin_pin)
+    if not db.delete_instagram_source_route(routing_id, removed_by=x_admin_key or "admin"):
+        raise HTTPException(status_code=404, detail="Routing record not found.")
+    return {"status": "success", "routing_id": routing_id, "removed": True}
+
+
+# --------------------------------------------------------------------------
+# Shared-post pairing. A shared post carries no shortcode/URL Meta will put
+# in a webhook, and its messaging-attachment id has not been shown to
+# correspond to anything Graph will verify — so a post route only gets a
+# trustworthy media_id through an admin deliberately pairing one: start a
+# short window, share the exact post into the business DM, and whatever id
+# arrives during that window binds to the route. Binding is a one-shot
+# write into instagram_source_routes.media_id; runtime matching then reuses
+# the existing exact media_id lookup, no separate code path required.
+# --------------------------------------------------------------------------
+
+@app.post("/admin/instagram-routes/{routing_id}/pairing/start")
+def start_instagram_post_pairing(
+    routing_id: int,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    require_admin(x_admin_key, x_admin_pin)
+    if not db.get_instagram_source_route(routing_id):
+        raise HTTPException(status_code=404, detail="Routing record not found.")
+    pairing = db.start_post_pairing(
+        routing_id, config.INSTAGRAM_POST_PAIRING_TTL_SECONDS, started_by=x_admin_key or "admin",
+    )
+    return {"status": "success", "pairing": pairing, "ttl_seconds": config.INSTAGRAM_POST_PAIRING_TTL_SECONDS}
+
+
+@app.get("/admin/instagram-routes/{routing_id}/pairing")
+def get_instagram_post_pairing_status(
+    routing_id: int,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    require_admin(x_admin_key, x_admin_pin)
+    pairing = db.get_post_pairing_for_route(routing_id)
+    return {"status": "success", "pairing": pairing}
+
+
+@app.post("/admin/instagram-routes/{routing_id}/pairing/cancel")
+def cancel_instagram_post_pairing(
+    routing_id: int,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    require_admin(x_admin_key, x_admin_pin)
+    cancelled = db.cancel_post_pairing(routing_id)
+    return {"status": "success", "cancelled": cancelled}
+
 
 @app.post("/admin/menu/upload-image")
 @limiter.limit("10/minute")
@@ -1877,6 +2564,187 @@ def get_router_shadow_report(
         report["note"] = "ROUTER_SHADOW_ENABLED is off, so nothing is being compared."
     return report
 
+@app.get("/admin/triage-shadow")
+def get_triage_shadow_report(
+    days: int = 7,
+    limit: int = 40,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """
+    AI Resolution & Answers, Phase 3 slice 2: how a triage model would have
+    categorized every message the deterministic/canonical path could not
+    answer, and what it would have needed to be grounded and confident
+    enough to auto-resolve. Nothing here has ever been sent to a customer or
+    changed a candidate/escalation/knowledge-gap row — it is a parallel
+    measurement, read for review only.
+    """
+    require_admin(x_admin_key, x_admin_pin)
+    report = db.triage_shadow_report(days=days, limit=limit)
+    report["shadow_enabled"] = config.LLM_TRIAGE_ENABLED
+    report["confidence_threshold"] = config.LLM_TRIAGE_CONFIDENCE_THRESHOLD
+    if not config.LLM_TRIAGE_ENABLED and not report["classified"]:
+        report["note"] = "LLM_TRIAGE_ENABLED is off, so nothing is being classified."
+    return report
+
+
+@app.get("/admin/assisted-resolutions")
+def get_assisted_resolutions(status: Optional[str] = None, category: Optional[str] = None, limit: int = 100, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    status = status.strip().upper() if status else None; category = category.strip().upper() if category else None
+    items = db.list_assisted_suggestions(status=status, category=category, limit=limit)
+    return {"status": "success", "count": len(items), "suggestions": items, "metrics": db.assisted_metrics(), "evaluation": db.assisted_evaluation()}
+
+
+@app.get("/admin/assisted-resolutions/metrics")
+def get_assisted_resolution_metrics(x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    return {"status": "success", "metrics": db.assisted_metrics(), "evaluation": db.assisted_evaluation()}
+
+
+@app.get("/admin/assisted-resolutions/evaluation")
+@app.get("/admin/assisted-resolutions/analytics")
+def get_assisted_resolution_evaluation(x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    return {"status": "success", "evaluation": db.assisted_evaluation(), "auto_resolve_enabled": bool(config.LLM_AUTO_RESOLVE_ENABLED), "auto_resolve_settings": db.get_auto_resolve_settings()}
+
+
+@app.get("/admin/auto-resolve/evaluation")
+def get_auto_resolve_evaluation(x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    """Authenticated, read-only simulation and readiness evidence."""
+    require_admin(x_admin_key, x_admin_pin)
+    return {"status": "success", "evaluation": db.auto_resolve_evaluation(), "settings": db.get_auto_resolve_settings(), "decisions": db.list_auto_resolve_decisions()}
+
+
+@app.get("/admin/auto-resolve/settings")
+def get_auto_resolve_settings(x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    settings = db.get_auto_resolve_settings()
+    settings["state_label"] = "AUTO RESOLVE: ON" if settings["actual_enabled"] else "AUTO RESOLVE: OFF"
+    return {"status": "success", "settings": settings}
+
+
+@app.post("/admin/auto-resolve/kill-switch")
+async def set_auto_resolve_kill_switch(request: Request, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    enabled = bool(body.get("enabled", False))
+    db.set_auto_resolve_setting("kill_switch", enabled)
+    settings = db.get_auto_resolve_settings()
+    return {"status": "success", "kill_switch": enabled, "settings": settings}
+
+
+@app.post("/admin/auto-resolve/category-controls")
+async def set_auto_resolve_category_controls(request: Request, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    controls = body.get("category_controls") if isinstance(body, dict) else None
+    category_settings = body.get("category_settings") if isinstance(body, dict) else None
+    if controls is not None:
+        if not isinstance(controls, dict):
+            raise HTTPException(status_code=400, detail="category_controls must be an object")
+        # Real category activation is intentionally blocked while the global
+        # env switch is false. Operators may still save a pilot plan for later.
+        normalized = {str(k).strip().upper(): bool(v) for k, v in controls.items() if str(k).strip()}
+        db.set_auto_resolve_setting("category_controls", normalized)
+    if category_settings is not None:
+        if not isinstance(category_settings, dict):
+            raise HTTPException(status_code=400, detail="category_settings must be an object")
+        db.set_auto_resolve_setting("category_settings", category_settings)
+    return {"status": "success", "settings": db.get_auto_resolve_settings(), "actual_send_enabled": bool(config.LLM_AUTO_RESOLVE_ENABLED)}
+
+
+def _assisted_reviewer(x_admin_key: Optional[str], x_admin_pin: Optional[str]) -> str:
+    return (x_admin_key or x_admin_pin or "admin")[:120]
+
+
+def _send_assisted_answer(suggestion: Dict[str, Any], answer: str) -> None:
+    if str(suggestion.get("channel")).lower() != "instagram":
+        raise HTTPException(status_code=400, detail="Assisted replies are Instagram-only.")
+    if not answer.strip():
+        raise HTTPException(status_code=400, detail="A final answer is required.")
+    send_instagram_reply(
+        str(suggestion["user_id"]), answer.strip(),
+        inbound_message_id=suggestion.get("conversation_id"),
+        response_type="assisted_answer",
+    )
+
+
+@app.post("/admin/assisted-resolutions/{suggestion_id}/approve")
+async def approve_assisted_resolution(suggestion_id: int, request: Request, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    suggestion = db.get_assisted_suggestion(suggestion_id)
+    if not suggestion or suggestion.get("status") != "PENDING_REVIEW": raise HTTPException(status_code=404, detail="Pending assisted suggestion not found.")
+    if suggestion.get("triage_category") in {"HUMAN_REQUIRED", "CONTACT_DETAIL", "TEACH_REQUIRED"}: raise HTTPException(status_code=400, detail="This suggestion requires human handling before resolution.")
+    try: body = await request.json()
+    except Exception: body = {}
+    final_answer = str(body.get("final_answer") or suggestion.get("suggested_answer") or "").strip()
+    _send_assisted_answer(suggestion, final_answer)
+    edited = final_answer != str(suggestion.get("original_suggested_answer") or "").strip(); status = "EDITED_AND_APPROVED" if edited else "APPROVED"
+    if not db.review_assisted_suggestion(suggestion_id, status=status, reviewed_by=_assisted_reviewer(x_admin_key, x_admin_pin), final_answer=final_answer, resolution_action=status): raise HTTPException(status_code=409, detail="Suggestion was already reviewed.")
+    if edited:
+        db.record_assisted_edit_metrics(suggestion_id, str(suggestion.get("original_suggested_answer") or ""), final_answer)
+    kid = str(suggestion.get("matched_knowledge_id") or "")
+    if kid.startswith("learned_knowledge#"):
+        try: db.increment_learned_knowledge_usage(int(kid.rsplit("#", 1)[1]))
+        except (TypeError, ValueError): pass
+    return {"status": status, "suggestion_id": suggestion_id, "final_answer": final_answer}
+
+
+@app.post("/admin/assisted-resolutions/{suggestion_id}/edit-resolve")
+async def edit_assisted_resolution(suggestion_id: int, request: Request, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    try: body = await request.json()
+    except Exception: body = {}
+    if not str(body.get("final_answer") or "").strip(): raise HTTPException(status_code=400, detail="final_answer is required for edit-and-resolve.")
+    return await approve_assisted_resolution(suggestion_id, request, x_admin_key, x_admin_pin)
+
+
+@app.post("/admin/assisted-resolutions/{suggestion_id}/reject")
+async def reject_assisted_resolution(suggestion_id: int, request: Request, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    try: body = await request.json()
+    except Exception: body = {}
+    reason_code = str(body.get("reason_code") or body.get("reason") or "Other").strip()[:80]
+    notes = str(body.get("notes") or "").strip()[:400]
+    rejection_reason = f"{reason_code}: {notes}" if notes else reason_code
+    if not db.review_assisted_suggestion(suggestion_id, status="REJECTED", reviewed_by=_assisted_reviewer(x_admin_key, x_admin_pin), resolution_action="REJECTED", rejection_reason=rejection_reason): raise HTTPException(status_code=404, detail="Pending assisted suggestion not found.")
+    return {"status": "REJECTED", "suggestion_id": suggestion_id}
+
+
+@app.post("/admin/assisted-resolutions/{suggestion_id}/send-to-human")
+def send_assisted_to_human(suggestion_id: int, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin); suggestion = db.get_assisted_suggestion(suggestion_id)
+    if not suggestion or suggestion.get("status") != "PENDING_REVIEW": raise HTTPException(status_code=404, detail="Pending assisted suggestion not found.")
+    escalator.handle_escalation(user_id=str(suggestion["user_id"]), channel="instagram", user_message=str(suggestion["customer_message"]), reason="Assisted Resolution sent to human", context_data={"suggestion_id": suggestion_id})
+    db.review_assisted_suggestion(suggestion_id, status="SENT_TO_HUMAN", reviewed_by=_assisted_reviewer(x_admin_key, x_admin_pin), resolution_action="SENT_TO_HUMAN")
+    return {"status": "SENT_TO_HUMAN", "suggestion_id": suggestion_id}
+
+
+@app.post("/admin/assisted-resolutions/{suggestion_id}/teach-and-resolve")
+async def teach_and_resolve_assisted(suggestion_id: int, request: Request, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin); suggestion = db.get_assisted_suggestion(suggestion_id)
+    if not suggestion or suggestion.get("status") != "PENDING_REVIEW": raise HTTPException(status_code=404, detail="Pending assisted suggestion not found.")
+    try: body = await request.json()
+    except Exception: body = {}
+    answer = str(body.get("verified_answer") or "").strip()
+    if not answer: raise HTTPException(status_code=400, detail="verified_answer is required.")
+    kid = db.add_learned_knowledge(str(body.get("topic") or suggestion["customer_message"][:80]), str(body.get("question_pattern") or suggestion["customer_message"]), answer, source="assisted_resolution")
+    _send_assisted_answer(suggestion, answer); db.review_assisted_suggestion(suggestion_id, status="RESOLVED", reviewed_by=_assisted_reviewer(x_admin_key, x_admin_pin), final_answer=answer, resolution_action="TEACH_AND_RESOLVE")
+    return {"status": "RESOLVED", "suggestion_id": suggestion_id, "learned_knowledge_id": kid}
+
+
+@app.post("/admin/assisted-resolutions/{suggestion_id}/dismiss")
+def dismiss_assisted_resolution(suggestion_id: int, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    if not db.review_assisted_suggestion(suggestion_id, status="REJECTED", reviewed_by=_assisted_reviewer(x_admin_key, x_admin_pin), resolution_action="DISMISSED", rejection_reason="Non-actionable"): raise HTTPException(status_code=404, detail="Pending assisted suggestion not found.")
+    return {"status": "DISMISSED", "suggestion_id": suggestion_id}
+
 # The four prompts Instagram shows before a customer types anything. Each one
 # was run through the matcher first: an opener the bot answers badly is worse
 # than no opener at all, because every customer sees it.
@@ -2096,6 +2964,26 @@ def get_conversations_list(
     total = db.get_conversations_count(channel=channel, user_id=user_id)
     return {"count": len(convs), "total": total, "conversations": convs}
 
+
+@app.get("/admin/instagram-outbound-audit")
+def get_instagram_outbound_audit(
+    limit: int = 50,
+    success: Optional[bool] = None,
+    inbound_message_id: Optional[int] = None,
+    since: Optional[str] = None,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """Authenticated, read-only Meta send diagnostics."""
+    require_admin(x_admin_key, x_admin_pin)
+    audits = db.get_instagram_outbound_audit(
+        limit=limit,
+        success=success,
+        inbound_message_id=inbound_message_id,
+        since=since,
+    )
+    return {"count": len(audits), "audits": audits}
+
 @app.get("/admin/sessions")
 def get_sessions_list(
     limit: int = 50,
@@ -2159,6 +3047,841 @@ def delete_learned_knowledge_entry(
     if not deleted:
         raise HTTPException(status_code=404, detail="Knowledge entry not found")
     return {"status": "deleted", "id": knowledge_id}
+
+SOURCE_LABELS = {
+    "system_template": "System Template",
+    "client_admin": "Created by Client",
+    "staff_resolution": "Teach & Resolve",
+    "staff_dashboard": "Staff Resolution",
+    "csv_import": "Imported",
+}
+
+
+def _source_label(source: Optional[str]) -> str:
+    """
+    Cryptic DB source strings never reach a client as the primary label.
+    Mapped by what actually writes each one, not by string similarity —
+    `staff_resolution` is the Teach & Resolve producer's literal source
+    value, `staff_dashboard` is the older manual-entry form's.
+    """
+    source = source or ""
+    if source in SOURCE_LABELS:
+        return SOURCE_LABELS[source]
+    if source.startswith("approved_candidate"):
+        return "AI Approved"
+    return source.replace("_", " ").title() if source else "Unknown"
+
+
+def _custom_qa_public(item: Dict[str, Any]) -> Dict[str, Any]:
+    """Shapes a learned_knowledge row for the Custom Q&A tab — no bare DB id up front."""
+    result = {
+        "id": item.get("id"),
+        "topic": item.get("topic"),
+        "primary_question": item.get("question_pattern"),
+        "aliases": item.get("aliases", []),
+        "approved_answer": item.get("verified_answer"),
+        "priority": item.get("priority") or "NORMAL",
+        "status": item.get("status") or "ACTIVE",
+        "source": item.get("source"),
+        "source_label": _source_label(item.get("source")),
+        "usage_count": item.get("usage_count") or 0,
+        "last_used_at": item.get("last_used_at"),
+        "created_at": item.get("created_at"),
+        "created_by": item.get("created_by"),
+        "updated_at": item.get("updated_at"),
+        "updated_by": item.get("updated_by"),
+    }
+    try:
+        result["auto_resolve_health"] = db.knowledge_health(int(item["id"]))
+    except (TypeError, ValueError):
+        result["auto_resolve_health"] = {"health": "Review Recommended"}
+    return result
+
+
+def _system_template_public(template: Dict[str, Any], override: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Shape protected JSON template logic as a Response Library card.
+
+    The template's triggers and escalation behavior stay read-only.  Only the
+    response copy may be overridden through the managed response store.
+    """
+    template_id = str(template.get("id") or "")
+    responses = template.get("responses") or []
+    answer = (override or {}).get("response") or template.get("response") or (responses[0] if responses else "")
+    trigger_list = [str(t).strip() for t in (template.get("triggers") or []) if str(t).strip()]
+    title = str(template.get("name") or template_id.replace("_", " ").title())
+    category = str(template.get("category") or "System")
+    status = str((override or {}).get("status") or "ACTIVE").upper()
+    return {
+        "library_id": f"system:{template_id}",
+        "kind": "system_template",
+        "template_id": template_id,
+        "title": title,
+        "topic": category,
+        "primary_question": trigger_list[0] if trigger_list else title,
+        "aliases": trigger_list[1:],
+        "triggers": trigger_list,
+        "approved_answer": answer,
+        "source": "system_template",
+        "source_label": "System Template",
+        "status": status,
+        "priority": "PROTECTED",
+        "editable": bool(answer) and not bool(template.get("escalate")),
+        "protected_runtime": True,
+        "created_at": None,
+        "updated_at": (override or {}).get("updated_at"),
+        "updated_by": (override or {}).get("updated_by"),
+        "usage_count": None,
+        "last_used_at": None,
+    }
+
+
+def _response_library_search_score(query: Optional[str], item: Dict[str, Any]) -> int:
+    """Rank library discovery fields without matching character substrings."""
+    needle = " ".join(str(query or "").casefold().split())
+    if not needle:
+        return 1
+    query_tokens = re.findall(r"[\w]+", needle, flags=re.UNICODE)
+    if not query_tokens:
+        return 0
+    # One- and two-character searches are intentionally strict: they may
+    # identify a trigger/title token, but never scan answer paragraphs or use
+    # fuzzy matching. This prevents `hi` from matching `this`/`which`.
+    short = len(needle.replace(" ", "")) <= 2
+    fields = {
+        "primary": [item.get("primary_question")],
+        "alias": list(item.get("aliases") or []),
+        "title": [item.get("title")],
+        "id_category": [item.get("template_id"), item.get("category"), item.get("topic")],
+        "answer": [item.get("approved_answer")],
+    }
+    def normalized(value: Any) -> str:
+        return " ".join(str(value or "").casefold().split())
+    def token_set(values: List[Any]) -> set:
+        return {token for value in values for token in re.findall(r"[\w]+", normalized(value), flags=re.UNICODE)}
+
+    # Primary question is the first trigger; additional triggers are aliases.
+    if any(normalized(value) == needle for value in fields["primary"]):
+        return 100
+    if any(normalized(value) == needle for value in fields["alias"]):
+        return 95
+    if any(normalized(value) == needle for value in fields["title"]):
+        return 90
+    if any(normalized(value) == needle for value in fields["id_category"]):
+        return 85
+    if set(query_tokens) & token_set(fields["primary"]):
+        return 80
+    if set(query_tokens) & token_set(fields["alias"]):
+        return 75
+    if set(query_tokens) & token_set(fields["title"]):
+        return 70
+    if set(query_tokens) & token_set(fields["id_category"]):
+        return 65
+    if not short and set(query_tokens) & token_set(fields["answer"]):
+        return 40
+    return 0
+
+
+def _response_library_system_items(status: str = "ALL", search: Optional[str] = None) -> List[Dict[str, Any]]:
+    overrides = db.list_response_template_overrides()
+    items = []
+    for template in (responder.qa_data or {}).get("templates", []):
+        item = _system_template_public(template, overrides.get(str(template.get("id"))))
+        if status and status.upper() != "ALL" and item["status"] != status.upper():
+            continue
+        score = _response_library_search_score(search, item)
+        if search and not score:
+            continue
+        item["relevance_score"] = score
+        items.append(item)
+    return sorted(items, key=lambda item: (-int(item.get("relevance_score") or 0), item.get("title") or ""))
+
+
+def _system_trigger_conflicts(primary_question: str, aliases: List[str]) -> List[Dict[str, Any]]:
+    """Find exact trigger collisions without copying system templates into DB."""
+    candidates = {str(value or "").strip().lower() for value in [primary_question, *(aliases or [])] if str(value or "").strip()}
+    conflicts = []
+    for template in (responder.qa_data or {}).get("templates", []):
+        override = db.get_response_template_override(str(template.get("id")))
+        if override and str(override.get("status") or "ACTIVE").upper() != "ACTIVE":
+            continue
+        triggers = {str(value or "").strip().lower() for value in (template.get("triggers") or [])}
+        if candidates & triggers:
+            conflicts.append(_system_template_public(template))
+    return conflicts
+
+
+@app.get("/admin/response-library")
+def list_response_library(
+    status: str = "ACTIVE",
+    source: Optional[str] = None,
+    category: Optional[str] = None,
+    search: Optional[str] = None,
+    limit: int = 500,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """Unified read-only view of protected templates plus managed Q&A rows."""
+    require_admin(x_admin_key, x_admin_pin)
+    limit = max(1, min(limit, 1000))
+    items: List[Dict[str, Any]] = []
+    if not source or source in {"system_template", "system"}:
+        items.extend(_response_library_system_items(status=status, search=search))
+    if not source or source not in {"system_template", "system"}:
+        learned_status = status if status else "ALL"
+        learned = db.list_custom_qa(status=learned_status, source=None if source in {"system_template", "system"} else source, topic=category, search=None, limit=limit)
+        for item in learned:
+            shaped = _custom_qa_public(item)
+            shaped.update({"library_id": f"custom:{item.get('id')}", "kind": "custom_qa", "title": item.get("topic") or item.get("question_pattern"), "category": item.get("topic")})
+            score = _response_library_search_score(search, shaped)
+            if not search or score:
+                shaped["relevance_score"] = score
+                items.append(shaped)
+    if category and (not source or source in {"system_template", "system"}):
+        items = [item for item in items if str(item.get("topic") or item.get("category") or "").lower() == category.lower()]
+    items.sort(key=lambda item: (-int(item.get("relevance_score") or 0), item.get("title") or item.get("topic") or ""))
+    return {"status": "success", "count": len(items[:limit]), "items": items[:limit]}
+
+
+@app.patch("/admin/response-library/system/{template_id}")
+async def edit_response_library_system_template(
+    template_id: str,
+    request: Request,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """Edit customer-facing copy only; protected trigger/runtime fields cannot be changed."""
+    require_admin(x_admin_key, x_admin_pin)
+    template = next((t for t in (responder.qa_data or {}).get("templates", []) if t.get("id") == template_id), None)
+    if not template:
+        raise HTTPException(status_code=404, detail="System template not found")
+    if template.get("escalate") or not (template.get("response") or template.get("responses")):
+        raise HTTPException(status_code=400, detail="This system template has no editable customer-facing response")
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    response = str(body.get("approved_answer") or body.get("response") or "").strip()
+    actor = body.get("updated_by") or "client_admin_dashboard"
+    if not response:
+        raise HTTPException(status_code=400, detail="response is required")
+    _validate_custom_qa_answer(response)
+    status = str(body.get("status") or "ACTIVE").upper()
+    default_response = template.get("response") or ((template.get("responses") or [""])[0])
+    if not db.save_response_template_override(template_id, response, actor, status=status, previous_response=default_response):
+        raise HTTPException(status_code=400, detail="Could not save response override")
+    return {"status": "success", "item": _system_template_public(template, db.get_response_template_override(template_id))}
+
+
+@app.get("/admin/response-library/system/{template_id}/versions")
+def get_response_library_system_versions(
+    template_id: str,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    require_admin(x_admin_key, x_admin_pin)
+    return {"status": "success", "versions": db.get_response_template_override_versions(template_id)}
+
+
+@app.post("/admin/response-library/system/{template_id}/preview")
+def preview_response_library_system_template(
+    template_id: str,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    require_admin(x_admin_key, x_admin_pin)
+    template = next((t for t in (responder.qa_data or {}).get("templates", []) if t.get("id") == template_id), None)
+    if not template:
+        raise HTTPException(status_code=404, detail="System template not found")
+    item = _system_template_public(template, db.get_response_template_override(template_id))
+    return {"preview_text": item["approved_answer"], "template_id": template_id, "note": "Preview only — nothing has been sent."}
+
+
+@app.post("/admin/response-library/system/{template_id}/restore/{version_id:int}")
+async def restore_response_library_system_version(
+    template_id: str,
+    version_id: int,
+    request: Request,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    require_admin(x_admin_key, x_admin_pin)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    actor = body.get("actor") or "client_admin_dashboard"
+    if not db.restore_response_template_override_version(template_id, version_id, actor):
+        raise HTTPException(status_code=404, detail="Version or system template not found")
+    return {"status": "restored", "template_id": template_id, "version_id": version_id}
+
+
+@app.post("/admin/response-library/test")
+async def test_response_library_match(
+    request: Request,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """Dry-run a real deterministic response without session/send/usage side effects."""
+    require_admin(x_admin_key, x_admin_pin)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    message = str(body.get("message") or "").strip()
+    if not message:
+        raise HTTPException(status_code=400, detail="message is required")
+    winner, matched_via, score = db._rank_learned_knowledge(message)
+    if winner:
+        item = _custom_qa_public(winner)
+        return {
+            "matched": True, "template_id": None, "source": item["source_label"],
+            "score": round(score, 3), "matched_via": matched_via,
+            "response": item["approved_answer"], "source_context_used": False,
+        }
+    normalized = " ".join(message.lower().split())
+    candidates = []
+    for template in (responder.qa_data or {}).get("templates", []):
+        triggers = [str(trigger).lower().strip() for trigger in (template.get("triggers") or [])]
+        matched_trigger = next((trigger for trigger in sorted(triggers, key=len, reverse=True) if trigger and trigger in normalized), None)
+        if matched_trigger:
+            item = _system_template_public(template, db.get_response_template_override(str(template.get("id"))))
+            candidates.append((len(matched_trigger), item, matched_trigger))
+    if not candidates:
+        return {"matched": False, "template_id": None, "source": None, "score": 0.0, "response": "", "source_context_used": False}
+    _length, item, matched_trigger = max(candidates, key=lambda candidate: candidate[0])
+    return {
+        "matched": True, "template_id": item["template_id"], "source": item["source_label"],
+        "score": 1.0, "matched_via": matched_trigger,
+        "response": item["approved_answer"], "source_context_used": False,
+    }
+
+
+@app.get("/admin/custom-qa")
+def list_custom_qa(
+    status: str = "ACTIVE",
+    source: Optional[str] = None,
+    priority: Optional[str] = None,
+    topic: Optional[str] = None,
+    search: Optional[str] = None,
+    limit: int = 500,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """The Custom Q&A tab's list — the same learned_knowledge rows AI Resolution & Answers' Approved Answers filter reads, with aliases attached."""
+    require_admin(x_admin_key, x_admin_pin)
+    items = db.list_custom_qa(status=status, source=source, priority=priority, topic=topic, search=None, limit=limit)
+    shaped_items = []
+    for item in items:
+        shaped = _custom_qa_public(item)
+        score = _response_library_search_score(search, {**shaped, "title": item.get("topic"), "category": item.get("topic")})
+        if not search or score:
+            shaped["relevance_score"] = score
+            shaped_items.append(shaped)
+    return {
+        "status": "success", "count": len(shaped_items), "items": shaped_items,
+        # Kept as a separate field for backwards compatibility: existing
+        # Custom Q&A consumers still receive only learned rows in `items`,
+        # while the tab can show the same protected system templates through
+        # the unified Response Library view without duplicating database rows.
+        "system_templates": (
+            _response_library_system_items(status=status, search=search)
+            if not source or source in {"system_template", "system"} else []
+        ),
+    }
+
+
+@app.get("/admin/custom-qa/{knowledge_id:int}")
+def get_custom_qa_detail(
+    knowledge_id: int,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    require_admin(x_admin_key, x_admin_pin)
+    item = db.get_custom_qa(knowledge_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Custom Q&A not found")
+    return _custom_qa_public(item)
+
+
+def _validate_custom_qa_answer(answer: str) -> None:
+    valid, error = validate_candidate_answer(answer)
+    if not valid:
+        raise HTTPException(status_code=400, detail=error)
+
+
+@app.post("/admin/custom-qa")
+async def create_custom_qa(
+    request: Request,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """
+    Creates a new Custom Q&A — a plain learned_knowledge row (source
+    defaults to client_admin) plus its aliases and a first version snapshot.
+    Exact duplicates always block; near-duplicates and business-commitment
+    content only warn, and only until force_save resubmits the same body.
+    """
+    require_admin(x_admin_key, x_admin_pin)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    topic = (body.get("topic") or "").strip()
+    primary_question = (body.get("primary_question") or "").strip()
+    answer = (body.get("approved_answer") or "").strip()
+    aliases = [a for a in (body.get("aliases") or []) if (a or "").strip()]
+    priority = (body.get("priority") or "NORMAL").upper()
+    status = (body.get("status") or "ACTIVE").upper()
+    created_by = body.get("created_by") or "client_admin_dashboard"
+    force_save = bool(body.get("force_save"))
+
+    if not topic or not primary_question or not answer:
+        raise HTTPException(status_code=400, detail="topic, primary_question, and approved_answer are required")
+    if priority not in {"NORMAL", "HIGH"}:
+        raise HTTPException(status_code=400, detail="priority must be NORMAL or HIGH")
+    if status not in {"ACTIVE", "DISABLED", "ARCHIVED"}:
+        raise HTTPException(status_code=400, detail="status must be ACTIVE, DISABLED, or ARCHIVED")
+
+    _validate_custom_qa_answer(answer)
+
+    dupes = db.find_learned_knowledge_duplicates(primary_question, aliases)
+    if dupes["exact"]:
+        raise HTTPException(status_code=409, detail={
+            "message": "An identical question or alias already exists. Edit the existing Q&A instead of creating a duplicate.",
+            "existing": [_custom_qa_public(i) for i in dupes["exact"]],
+        })
+    system_conflicts = _system_trigger_conflicts(primary_question, aliases)
+    if system_conflicts:
+        raise HTTPException(status_code=409, detail={
+            "message": "Another active response already matches this trigger. Edit the existing response instead of creating an ambiguous match.",
+            "existing": system_conflicts,
+        })
+
+    warnings = detect_business_commitment_warnings(answer)
+    if (dupes["similar"] or warnings) and not force_save:
+        return {
+            "status": "warning",
+            "similar": [_custom_qa_public(i) for i in dupes["similar"]],
+            "commitment_warnings": warnings,
+        }
+
+    knowledge_id = db.add_learned_knowledge(
+        topic, primary_question, answer, source="client_admin", confidence=1.0,
+        priority=priority, status=status, created_by=created_by, aliases=aliases,
+    )
+    return {"status": "success", "id": knowledge_id}
+
+
+@app.patch("/admin/custom-qa/{knowledge_id:int}")
+async def edit_custom_qa(
+    knowledge_id: int,
+    request: Request,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """Edits the same learned_knowledge record in place; the prior state is versioned first."""
+    require_admin(x_admin_key, x_admin_pin)
+    existing = db.get_custom_qa(knowledge_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Custom Q&A not found")
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    topic = (body.get("topic") or existing.get("topic") or "").strip()
+    primary_question = (body.get("primary_question") or existing.get("question_pattern") or "").strip()
+    answer = (body.get("approved_answer") or existing.get("verified_answer") or "").strip()
+    aliases = body.get("aliases")
+    if aliases is None:
+        aliases = [a["alias_text"] for a in existing.get("aliases", [])]
+    aliases = [a for a in aliases if (a or "").strip()]
+    priority = (body.get("priority") or existing.get("priority") or "NORMAL").upper()
+    status = (body.get("status") or existing.get("status") or "ACTIVE").upper()
+    updated_by = body.get("updated_by") or "client_admin_dashboard"
+    force_save = bool(body.get("force_save"))
+
+    if priority not in {"NORMAL", "HIGH"}:
+        raise HTTPException(status_code=400, detail="priority must be NORMAL or HIGH")
+    if status not in {"ACTIVE", "DISABLED", "ARCHIVED"}:
+        raise HTTPException(status_code=400, detail="status must be ACTIVE, DISABLED, or ARCHIVED")
+
+    _validate_custom_qa_answer(answer)
+
+    dupes = db.find_learned_knowledge_duplicates(primary_question, aliases, exclude_id=knowledge_id)
+    if dupes["exact"]:
+        raise HTTPException(status_code=409, detail={
+            "message": "An identical question or alias already exists on a different Q&A.",
+            "existing": [_custom_qa_public(i) for i in dupes["exact"]],
+        })
+    system_conflicts = _system_trigger_conflicts(primary_question, aliases)
+    if system_conflicts:
+        raise HTTPException(status_code=409, detail={
+            "message": "Another active response already matches this trigger. Edit the existing response instead of creating an ambiguous match.",
+            "existing": system_conflicts,
+        })
+
+    warnings = detect_business_commitment_warnings(answer)
+    if (dupes["similar"] or warnings) and not force_save:
+        return {
+            "status": "warning",
+            "similar": [_custom_qa_public(i) for i in dupes["similar"]],
+            "commitment_warnings": warnings,
+        }
+
+    db.update_custom_qa(knowledge_id, topic, primary_question, answer, aliases, priority, status, updated_by)
+    return {"status": "success", "id": knowledge_id}
+
+
+@app.post("/admin/custom-qa/{knowledge_id:int}/status")
+async def set_custom_qa_status(
+    knowledge_id: int,
+    request: Request,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """Disable / enable / archive / reactivate — status only, versioned like any other edit."""
+    require_admin(x_admin_key, x_admin_pin)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    status = str(body.get("status", "")).strip().upper()
+    actor = body.get("actor") or "client_admin_dashboard"
+    if not db.set_custom_qa_status(knowledge_id, status, actor):
+        raise HTTPException(status_code=400, detail="Could not update status (bad status value or Q&A not found)")
+    return {"status": status, "id": knowledge_id}
+
+
+@app.delete("/admin/custom-qa/{knowledge_id:int}")
+def delete_custom_qa(
+    knowledge_id: int,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """Permanent delete — only this Q&A and its own aliases/version history."""
+    require_admin(x_admin_key, x_admin_pin)
+    if not db.delete_learned_knowledge(knowledge_id):
+        raise HTTPException(status_code=404, detail="Custom Q&A not found")
+    return {"status": "deleted", "id": knowledge_id}
+
+
+@app.get("/admin/custom-qa/{knowledge_id:int}/versions")
+def get_custom_qa_versions(
+    knowledge_id: int,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    require_admin(x_admin_key, x_admin_pin)
+    return {"status": "success", "versions": db.get_learned_knowledge_versions(knowledge_id)}
+
+
+@app.post("/admin/custom-qa/{knowledge_id:int}/restore/{version_id:int}")
+async def restore_custom_qa_version(
+    knowledge_id: int,
+    version_id: int,
+    request: Request,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    require_admin(x_admin_key, x_admin_pin)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    actor = body.get("actor") or "client_admin_dashboard"
+    if not db.restore_learned_knowledge_version(knowledge_id, version_id, actor):
+        raise HTTPException(status_code=404, detail="Version or Q&A not found")
+    return {"status": "restored", "id": knowledge_id, "version_id": version_id}
+
+
+@app.delete("/admin/custom-qa/aliases/{alias_id}")
+def delete_custom_qa_alias(
+    alias_id: int,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """Removes one alias only — the owning Q&A is untouched."""
+    require_admin(x_admin_key, x_admin_pin)
+    if not db.remove_learned_knowledge_alias(alias_id):
+        raise HTTPException(status_code=404, detail="Alias not found")
+    return {"status": "deleted", "alias_id": alias_id}
+
+
+@app.post("/admin/custom-qa/test")
+async def test_custom_qa_match(
+    request: Request,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """
+    Dry run only: matches a sample message against live Custom Q&A the same
+    way a real customer message would, without sending anything, writing
+    conversation history, creating an escalation/candidate, incrementing
+    usage, or touching session state.
+    """
+    require_admin(x_admin_key, x_admin_pin)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    message = (body.get("message") or "").strip()
+    if not message:
+        raise HTTPException(status_code=400, detail="message is required")
+
+    winner, matched_via, score = db._rank_learned_knowledge(message)
+    focus_id = body.get("focus_id")
+
+    if not winner:
+        return {
+            "would_match": False, "matched": None, "matched_via": None, "score": 0.0,
+            "would_win": focus_id is None,
+        }
+
+    result = {
+        "would_match": True,
+        "matched": _custom_qa_public(winner),
+        "matched_via": matched_via,
+        "score": round(score, 3),
+        "ambiguous": 0.35 <= score < 0.55,
+    }
+    if focus_id is not None:
+        would_win = int(winner.get("id")) == int(focus_id)
+        result["would_win"] = would_win
+        if not would_win:
+            result["winning_qa"] = _custom_qa_public(winner)
+            result["reason"] = (
+                f"Another Q&A already matches this question with a {'higher or equal' if score >= 0.4 else 'comparable'} "
+                f"score via {matched_via.lower() if matched_via else 'a broader match'} — "
+                "edit that one, or make this question/alias more specific."
+            )
+    else:
+        result["would_win"] = True
+    return result
+
+
+@app.post("/admin/custom-qa/preview")
+async def preview_custom_qa_reply(
+    request: Request,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """
+    Shows the exact text a customer would receive — learned_knowledge
+    answers are sent verbatim on the live path (camellia/responder.py's
+    `_conversation_request`), so the preview is that same text with no
+    reformatting, and nothing is ever sent.
+    """
+    require_admin(x_admin_key, x_admin_pin)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    knowledge_id = body.get("id")
+    answer = body.get("approved_answer")
+    if answer is None and knowledge_id is not None:
+        item = db.get_custom_qa(int(knowledge_id))
+        if not item:
+            raise HTTPException(status_code=404, detail="Custom Q&A not found")
+        answer = item.get("verified_answer")
+    if answer is None:
+        raise HTTPException(status_code=400, detail="Provide either id or approved_answer")
+
+    return {"preview_text": answer, "note": "Preview only — nothing has been sent."}
+
+
+_CSV_COLUMNS = [
+    "id", "topic", "primary_question", "aliases", "approved_answer",
+    "priority", "status", "source", "usage_count", "last_used_at",
+    "created_at", "updated_at",
+]
+
+
+def _custom_qa_to_csv_row(item: Dict[str, Any]) -> Dict[str, Any]:
+    public = _custom_qa_public(item)
+    return {
+        "id": public["id"],
+        "topic": public["topic"],
+        "primary_question": public["primary_question"],
+        "aliases": json.dumps(public["aliases"]),
+        "approved_answer": public["approved_answer"],
+        "priority": public["priority"],
+        "status": public["status"],
+        "source": public["source"],
+        "usage_count": public["usage_count"],
+        "last_used_at": public["last_used_at"] or "",
+        "created_at": public["created_at"] or "",
+        "updated_at": public["updated_at"] or "",
+    }
+
+
+@app.get("/admin/custom-qa/export.csv")
+def export_custom_qa_csv(
+    status: str = "ALL",
+    source: Optional[str] = None,
+    priority: Optional[str] = None,
+    topic: Optional[str] = None,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """
+    Admin-only CSV export. Columns are stable and never include secrets —
+    they are drawn from the same public shaping (_custom_qa_public) the
+    JSON list endpoint uses, which never surfaces a raw credential field.
+    """
+    require_admin(x_admin_key, x_admin_pin)
+    items = db.list_custom_qa(status=status, source=source, priority=priority, topic=topic, limit=5000)
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=_CSV_COLUMNS)
+    writer.writeheader()
+    for item in items:
+        writer.writerow(_custom_qa_to_csv_row(item))
+    return PlainTextResponse(
+        content=buffer.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=custom_qa_export.csv"},
+    )
+
+
+@app.get("/admin/custom-qa/csv-template")
+def custom_qa_csv_template(
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    require_admin(x_admin_key, x_admin_pin)
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=["topic", "primary_question", "aliases", "approved_answer", "priority", "status"])
+    writer.writeheader()
+    writer.writerow({
+        "topic": "Delivery",
+        "primary_question": "Do you deliver outside Delhi NCR?",
+        "aliases": json.dumps(["deliver outside ncr", "ship outside delhi"]),
+        "approved_answer": "We currently deliver only within Delhi NCR.",
+        "priority": "NORMAL",
+        "status": "ACTIVE",
+    })
+    return PlainTextResponse(
+        content=buffer.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=custom_qa_template.csv"},
+    )
+
+
+def _parse_custom_qa_csv(raw_text: str) -> List[Dict[str, Any]]:
+    reader = csv.DictReader(io.StringIO(raw_text))
+    rows = []
+    for i, row in enumerate(reader, start=1):
+        rows.append({"row_number": i, **{k: (v or "").strip() for k, v in row.items()}})
+    return rows
+
+
+def _validate_import_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    topic = row.get("topic", "")
+    primary_question = row.get("primary_question", "")
+    answer = row.get("approved_answer", "")
+    priority = (row.get("priority") or "NORMAL").upper()
+    status = (row.get("status") or "ACTIVE").upper()
+    try:
+        aliases = json.loads(row.get("aliases") or "[]")
+        if isinstance(aliases, str):
+            aliases = [a.strip() for a in aliases.split("|") if a.strip()]
+    except Exception:
+        aliases = [a.strip() for a in (row.get("aliases") or "").split("|") if a.strip()]
+
+    errors = []
+    if not topic:
+        errors.append("topic is required")
+    if not primary_question:
+        errors.append("primary_question is required")
+    if priority not in {"NORMAL", "HIGH"}:
+        errors.append("priority must be NORMAL or HIGH")
+    if status not in {"ACTIVE", "DISABLED", "ARCHIVED"}:
+        errors.append("status must be ACTIVE, DISABLED, or ARCHIVED")
+
+    valid, answer_error = validate_candidate_answer(answer)
+    if not valid:
+        errors.append(answer_error)
+
+    if errors:
+        return {"row_number": row["row_number"], "row_status": "Invalid", "errors": errors, "data": row}
+
+    warnings = detect_business_commitment_warnings(answer)
+    dupes = db.find_learned_knowledge_duplicates(primary_question, aliases)
+    row_status = "Ready"
+    if dupes["exact"]:
+        row_status = "Duplicate"
+    elif dupes["similar"]:
+        row_status = "Possible Duplicate"
+    elif warnings:
+        row_status = "Validation Warning"
+
+    return {
+        "row_number": row["row_number"],
+        "row_status": row_status,
+        "errors": [],
+        "warnings": warnings,
+        "duplicates": [i.get("id") for i in dupes["exact"]] + [i.get("id") for i in dupes["similar"]],
+        "data": {"topic": topic, "primary_question": primary_question, "approved_answer": answer, "aliases": aliases, "priority": priority, "status": status},
+    }
+
+
+@app.post("/admin/custom-qa/import/dry-run")
+async def import_custom_qa_dry_run(
+    file: UploadFile = File(...),
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """Step 2 of the import flow: validates every row, writes nothing."""
+    require_admin(x_admin_key, x_admin_pin)
+    raw = (await file.read()).decode("utf-8-sig", errors="replace")
+    rows = _parse_custom_qa_csv(raw)
+    results = [_validate_import_row(row) for row in rows]
+    summary = {
+        "rows": len(results),
+        "valid": sum(1 for r in results if r["row_status"] == "Ready"),
+        "warnings": sum(1 for r in results if r["row_status"] == "Validation Warning"),
+        "duplicates": sum(1 for r in results if r["row_status"] == "Duplicate"),
+        "possible_duplicates": sum(1 for r in results if r["row_status"] == "Possible Duplicate"),
+        "errors": sum(1 for r in results if r["row_status"] == "Invalid"),
+    }
+    return {"status": "success", "summary": summary, "rows": results}
+
+
+@app.post("/admin/custom-qa/import/confirm")
+async def import_custom_qa_confirm(
+    file: UploadFile = File(...),
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """
+    Step 3: re-validates the same file (nothing was staged from the dry
+    run) and imports only rows that are Ready. Duplicate/Invalid rows are
+    skipped, never silently overwritten or partially published.
+    """
+    require_admin(x_admin_key, x_admin_pin)
+    raw = (await file.read()).decode("utf-8-sig", errors="replace")
+    rows = _parse_custom_qa_csv(raw)
+    results = [_validate_import_row(row) for row in rows]
+
+    imported_ids = []
+    skipped = []
+    for r in results:
+        if r["row_status"] != "Ready":
+            skipped.append({"row_number": r["row_number"], "reason": r["row_status"]})
+            continue
+        data = r["data"]
+        new_id = db.add_learned_knowledge(
+            data["topic"], data["primary_question"], data["approved_answer"],
+            source="csv_import", confidence=1.0, priority=data["priority"], status=data["status"],
+            created_by="csv_import", aliases=data["aliases"],
+        )
+        imported_ids.append(new_id)
+
+    return {"status": "success", "imported": len(imported_ids), "imported_ids": imported_ids, "skipped": skipped}
+
 
 @app.post("/admin/escalations/{escalation_id}/resolve")
 async def resolve_escalation(
@@ -2254,200 +3977,69 @@ async def update_templates(request: Request, x_admin_key: Optional[str] = Header
 
 @app.get("/admin/candidates")
 def get_candidate_templates(
+    status: str = "PENDING_APPROVAL",
     x_admin_key: Optional[str] = Header(None),
     x_admin_pin: Optional[str] = Header(None),
 ):
-    """Returns RAG/AI candidate answers awaiting human approval."""
+    """
+    Returns RAG/AI candidate answers by status. Default is the live approval
+    queue (PENDING_APPROVAL); APPROVED/REJECTED return the historical record
+    for the AI Resolution & Answers "Rejected / Archived" view — a decision
+    already made, not a new place decisions get made.
+    """
     require_admin(x_admin_key, x_admin_pin)
-    candidates = db.get_pending_candidates()
+    normalized = status.strip().upper()
+    if normalized == "PENDING_APPROVAL":
+        candidates = db.get_pending_candidates()
+    elif normalized in {"APPROVED", "REJECTED"}:
+        candidates = db.get_candidates_by_status(normalized)
+    else:
+        raise HTTPException(status_code=400, detail="status must be PENDING_APPROVAL, APPROVED, or REJECTED")
     return {"status": "success", "count": len(candidates), "candidates": candidates}
 
-
-@app.get("/admin/assisted-resolutions")
-def get_assisted_resolutions(
-    status: Optional[str] = None,
-    category: Optional[str] = None,
-    limit: int = 100,
+@app.post("/admin/db-backup")
+def create_db_backup(
     x_admin_key: Optional[str] = Header(None),
     x_admin_pin: Optional[str] = Header(None),
 ):
-    """Returns the human-review queue for LLM Assisted Resolution."""
+    """
+    Snapshots the live SQLite file next to itself before a schema migration
+    runs — every prior schema change in this project (routing tables, the
+    Topic/Menu catalogue, router/triage shadow) landed via additive
+    `_ensure_column` calls with no separate backup step, but a client asked
+    for one explicitly ahead of the Custom Q&A migration, so this exists to
+    make that step actually possible from here (nothing in this repo can
+    reach the Railway volume directly). Checkpoints WAL first so the copy is
+    consistent, not just a copy of the base file with pending writes still
+    sitting in a -wal sidecar.
+    """
     require_admin(x_admin_key, x_admin_pin)
-    if status:
-        status = status.strip().upper()
-    if category:
-        category = category.strip().upper()
-    return {
-        "status": "success",
-        "count": len(db.list_assisted_suggestions(status=status, category=category, limit=limit)),
-        "suggestions": db.list_assisted_suggestions(status=status, category=category, limit=limit),
-        "metrics": db.assisted_metrics(),
-    }
+    import shutil
+    import sqlite3
 
+    src_path = db.db_path
+    if not os.path.exists(src_path):
+        raise HTTPException(status_code=404, detail=f"No database file at {src_path}")
 
-@app.get("/admin/assisted-resolutions/metrics")
-def get_assisted_resolution_metrics(
-    x_admin_key: Optional[str] = Header(None),
-    x_admin_pin: Optional[str] = Header(None),
-):
-    require_admin(x_admin_key, x_admin_pin)
-    return {"status": "success", "metrics": db.assisted_metrics()}
-
-
-def _assisted_reviewer(x_admin_key: Optional[str], x_admin_pin: Optional[str]) -> str:
-    return (x_admin_key or x_admin_pin or "admin")[:120]
-
-
-def _send_assisted_answer(suggestion: Dict[str, Any], answer: str) -> None:
-    if suggestion.get("channel") != "instagram":
-        raise HTTPException(status_code=400, detail="Assisted replies are Instagram-only.")
-    if not answer.strip():
-        raise HTTPException(status_code=400, detail="A final answer is required.")
-    send_instagram_reply(str(suggestion["user_id"]), answer.strip())
-
-
-@app.post("/admin/assisted-resolutions/{suggestion_id}/approve")
-async def approve_assisted_resolution(
-    suggestion_id: int,
-    request: Request,
-    x_admin_key: Optional[str] = Header(None),
-    x_admin_pin: Optional[str] = Header(None),
-):
-    require_admin(x_admin_key, x_admin_pin)
-    suggestion = db.get_assisted_suggestion(suggestion_id)
-    if not suggestion or suggestion.get("status") != "PENDING_REVIEW":
-        raise HTTPException(status_code=404, detail="Pending assisted suggestion not found.")
-    if suggestion.get("triage_category") in {"HUMAN_REQUIRED", "CONTACT_DETAIL", "TEACH_REQUIRED"}:
-        raise HTTPException(status_code=400, detail="This suggestion requires the matching human action before it can be resolved.")
     try:
-        body = await request.json()
-    except Exception:
-        body = {}
-    final_answer = str(body.get("final_answer") or suggestion.get("suggested_answer") or "").strip()
-    _send_assisted_answer(suggestion, final_answer)
-    edited = final_answer != str(suggestion.get("original_suggested_answer") or "").strip()
-    status = "EDITED_AND_APPROVED" if edited else "APPROVED"
-    if not db.review_assisted_suggestion(
-        suggestion_id, status=status, reviewed_by=_assisted_reviewer(x_admin_key, x_admin_pin),
-        final_answer=final_answer, resolution_action="EDITED_AND_APPROVED" if edited else "APPROVED",
-    ):
-        raise HTTPException(status_code=409, detail="Suggestion was already reviewed.")
-    knowledge_id = str(suggestion.get("matched_knowledge_id") or "")
-    if knowledge_id.startswith("learned_knowledge#"):
-        try:
-            db.increment_learned_knowledge_usage(int(knowledge_id.rsplit("#", 1)[1]))
-        except (TypeError, ValueError):
-            pass
-    if suggestion.get("escalation_id"):
-        db.update_escalation_status(int(suggestion["escalation_id"]), "resolved")
-    return {"status": status, "suggestion_id": suggestion_id, "final_answer": final_answer}
+        with sqlite3.connect(src_path) as conn:
+            conn.execute("PRAGMA wal_checkpoint(FULL);")
+    except Exception as e:
+        log.warning("WAL checkpoint before backup failed (continuing anyway): %s", e)
 
-
-@app.post("/admin/assisted-resolutions/{suggestion_id}/edit-resolve")
-async def edit_assisted_resolution(
-    suggestion_id: int,
-    request: Request,
-    x_admin_key: Optional[str] = Header(None),
-    x_admin_pin: Optional[str] = Header(None),
-):
+    stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    backup_path = f"{src_path}.backup-{stamp}"
+    shutil.copy2(src_path, backup_path)
+    size_bytes = os.path.getsize(backup_path)
+    integrity_check = "unknown"
     try:
-        body = await request.json()
-    except Exception:
-        body = {}
-    if not str(body.get("final_answer") or "").strip():
-        raise HTTPException(status_code=400, detail="final_answer is required for edit-and-resolve.")
-    # Edit-and-resolve is the same authenticated send gate as approve.
-    return await approve_assisted_resolution(suggestion_id, request, x_admin_key, x_admin_pin)
-
-
-@app.post("/admin/assisted-resolutions/{suggestion_id}/reject")
-async def reject_assisted_resolution(
-    suggestion_id: int,
-    request: Request,
-    x_admin_key: Optional[str] = Header(None),
-    x_admin_pin: Optional[str] = Header(None),
-):
-    require_admin(x_admin_key, x_admin_pin)
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
-    reason = str(body.get("reason") or "Other").strip()[:500]
-    if not db.review_assisted_suggestion(
-        suggestion_id, status="REJECTED", reviewed_by=_assisted_reviewer(x_admin_key, x_admin_pin),
-        resolution_action="REJECTED", rejection_reason=reason,
-    ):
-        raise HTTPException(status_code=404, detail="Pending assisted suggestion not found.")
-    return {"status": "REJECTED", "suggestion_id": suggestion_id}
-
-
-@app.post("/admin/assisted-resolutions/{suggestion_id}/send-to-human")
-def send_assisted_to_human(
-    suggestion_id: int,
-    x_admin_key: Optional[str] = Header(None),
-    x_admin_pin: Optional[str] = Header(None),
-):
-    require_admin(x_admin_key, x_admin_pin)
-    suggestion = db.get_assisted_suggestion(suggestion_id)
-    if not suggestion or suggestion.get("status") != "PENDING_REVIEW":
-        raise HTTPException(status_code=404, detail="Pending assisted suggestion not found.")
-    escalator.handle_escalation(
-        user_id=str(suggestion["user_id"]), channel="instagram",
-        user_message=str(suggestion["customer_message"]),
-        reason="Assisted Resolution sent to human",
-        context_data={"suggestion_id": suggestion_id},
-    )
-    db.review_assisted_suggestion(
-        suggestion_id, status="SENT_TO_HUMAN", reviewed_by=_assisted_reviewer(x_admin_key, x_admin_pin),
-        resolution_action="SENT_TO_HUMAN",
-    )
-    return {"status": "SENT_TO_HUMAN", "suggestion_id": suggestion_id}
-
-
-@app.post("/admin/assisted-resolutions/{suggestion_id}/teach-and-resolve")
-async def teach_and_resolve_assisted(
-    suggestion_id: int,
-    request: Request,
-    x_admin_key: Optional[str] = Header(None),
-    x_admin_pin: Optional[str] = Header(None),
-):
-    require_admin(x_admin_key, x_admin_pin)
-    suggestion = db.get_assisted_suggestion(suggestion_id)
-    if not suggestion or suggestion.get("status") != "PENDING_REVIEW":
-        raise HTTPException(status_code=404, detail="Pending assisted suggestion not found.")
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
-    answer = str(body.get("verified_answer") or "").strip()
-    if not answer:
-        raise HTTPException(status_code=400, detail="verified_answer is required.")
-    topic = str(body.get("topic") or suggestion["customer_message"][:80]).strip()
-    pattern = str(body.get("question_pattern") or suggestion["customer_message"]).strip()
-    knowledge_id = db.add_learned_knowledge(topic, pattern, answer, source="assisted_resolution")
-    _send_assisted_answer(suggestion, answer)
-    db.review_assisted_suggestion(
-        suggestion_id, status="RESOLVED", reviewed_by=_assisted_reviewer(x_admin_key, x_admin_pin),
-        final_answer=answer, resolution_action="TEACH_AND_RESOLVE",
-    )
-    if suggestion.get("escalation_id"):
-        db.update_escalation_status(int(suggestion["escalation_id"]), "resolved")
-    return {"status": "RESOLVED", "suggestion_id": suggestion_id, "learned_knowledge_id": knowledge_id}
-
-
-@app.post("/admin/assisted-resolutions/{suggestion_id}/dismiss")
-def dismiss_assisted_resolution(
-    suggestion_id: int,
-    x_admin_key: Optional[str] = Header(None),
-    x_admin_pin: Optional[str] = Header(None),
-):
-    require_admin(x_admin_key, x_admin_pin)
-    if not db.review_assisted_suggestion(
-        suggestion_id, status="REJECTED", reviewed_by=_assisted_reviewer(x_admin_key, x_admin_pin),
-        resolution_action="DISMISSED", rejection_reason="Non-actionable",
-    ):
-        raise HTTPException(status_code=404, detail="Pending assisted suggestion not found.")
-    return {"status": "DISMISSED", "suggestion_id": suggestion_id}
+        with sqlite3.connect(backup_path) as verify_conn:
+            integrity_check = str(verify_conn.execute("PRAGMA integrity_check;").fetchone()[0])
+    except Exception as e:
+        log.warning("Database backup integrity check failed: %s", e)
+        integrity_check = f"error:{type(e).__name__}"
+    log.info("Database backed up to %s (%d bytes)", backup_path, size_bytes)
+    return {"status": "backed_up", "backup_path": backup_path, "size_bytes": size_bytes, "source_path": src_path, "integrity_check": integrity_check, "verified": integrity_check.lower() == "ok" and size_bytes > 0}
 
 @app.get("/admin/knowledge-gaps")
 def get_knowledge_gaps(
@@ -2504,10 +4096,14 @@ async def approve_candidate_template(
     if candidate.get("status") != "PENDING_APPROVAL":
         raise HTTPException(status_code=409, detail="Candidate template is no longer pending")
 
-    approved_by = body.get("approved_by", "admin")
-    if not db.approve_candidate_template(candidate_id, approved_by=approved_by):
-        raise HTTPException(status_code=409, detail="Candidate template could not be approved")
+    eligible, eligibility_error = candidate_eligibility(
+        candidate.get("user_message") or "", candidate.get("response") or ""
+    )
+    valid, validation_error = validate_candidate_answer(candidate.get("response") or "")
+    if not eligible or not valid:
+        raise HTTPException(status_code=422, detail=eligibility_error or validation_error)
 
+    approved_by = body.get("approved_by", "admin")
     knowledge_id = db.add_learned_knowledge(
         topic=candidate.get("name") or "Approved candidate",
         question_pattern=candidate.get("user_message") or candidate.get("name") or "",
@@ -2515,12 +4111,45 @@ async def approve_candidate_template(
         source=f"approved_candidate#{candidate_id}",
         confidence=max(float(candidate.get("confidence") or 0.0), 0.90),
     )
+    if not db.approve_candidate_template(candidate_id, approved_by=approved_by):
+        raise HTTPException(status_code=409, detail="Candidate template could not be approved")
     return {
         "status": "approved",
         "candidate_id": candidate_id,
         "learned_knowledge_id": knowledge_id,
         "message": "Candidate approved and added to the reviewed knowledge base.",
     }
+
+@app.patch("/admin/candidates/{candidate_id}")
+async def edit_candidate_template(
+    candidate_id: int,
+    request: Request,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """Edits the current answer while leaving it in the approval queue."""
+    require_admin(x_admin_key, x_admin_pin)
+    candidate = db.get_candidate_template(candidate_id)
+    if not candidate:
+        raise HTTPException(status_code=404, detail="Candidate template not found")
+    if candidate.get("status") != "PENDING_APPROVAL":
+        raise HTTPException(status_code=409, detail="Candidate template is no longer pending")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    response = str(body.get("response") or "")
+    valid, error = validate_candidate_answer(response)
+    if not valid:
+        raise HTTPException(status_code=422, detail=error)
+    eligible, error = candidate_eligibility(candidate.get("user_message") or "", response)
+    if not eligible:
+        raise HTTPException(status_code=422, detail=error)
+    if not db.edit_candidate_template(
+        candidate_id, response, edited_by=str(body.get("edited_by") or "admin")
+    ):
+        raise HTTPException(status_code=409, detail="Candidate template could not be edited")
+    return {"status": "pending", "candidate_id": candidate_id}
 
 @app.post("/admin/candidates/{candidate_id}/reject")
 def reject_candidate_template(
@@ -2605,6 +4234,384 @@ async def update_menu(request: Request, x_admin_key: Optional[str] = Header(None
     except Exception as e:
         log.error("Failed to update menu: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# --------------------------------------------------------------------------
+# Dynamic menu catalogue — the registry every menu (built-in or client-
+# created) is listed under. camellia/menu_catalogue.py owns validation and
+# id generation; the durable image/version machinery in menu_images.py
+# already works against any menu_id here, so creating a menu needs nothing
+# beyond a catalogue row plus one published image to become real everywhere
+# it is referenced (Menu Manager gallery, Topic default menu, Instagram
+# routing) — no second upload system, no restart.
+# --------------------------------------------------------------------------
+
+@app.get("/admin/menu-catalogue")
+def list_menu_catalogue_route(x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    return {"status": "success", "menus": menu_catalogue.list_menus(), "categories": menu_catalogue.CATEGORIES}
+
+
+@app.get("/admin/menu-manager/images")
+def list_menu_images_gallery(x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    """Every menu's current image card — built-in and client-created alike."""
+    require_admin(x_admin_key, x_admin_pin)
+    return {"status": "success", "menus": menu_images.list_menus()}
+
+
+@app.post("/admin/menu-catalogue")
+async def create_menu_catalogue_entry(
+    name: str = Form(...),
+    category: str = Form("Other"),
+    description: str = Form(...),
+    active: bool = Form(True),
+    file: UploadFile = File(...),
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """
+    Creates a new menu and immediately publishes its image — the single
+    "Create Menu" action the client sees corresponds to one catalogue row
+    plus one published image version, not a separate draft-then-publish
+    step, since a brand-new menu has nothing else to preview against yet.
+
+    No OCR, no fact extraction: the uploaded image is stored exactly as
+    uploaded. Only the name/category/description typed here are recorded as
+    customer-facing text; nothing about price, availability, ingredients or
+    allergens is inferred from the image or created by this endpoint.
+    """
+    require_admin(x_admin_key, x_admin_pin)
+    image_bytes = await file.read()
+    if len(image_bytes) > MAX_UPLOAD_SIZE:
+        raise HTTPException(status_code=413, detail="File too large (maximum 10MB allowed).")
+    try:
+        entry = menu_catalogue.create_menu(name, category, description, active=active)
+    except MenuCatalogueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    try:
+        menu_images.save_draft(entry["menu_id"], image_bytes, file.content_type or "", x_admin_key or "admin")
+        published = menu_images.publish(entry["menu_id"])
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"status": "success", "menu": entry, "image": published}
+
+
+@app.patch("/admin/menu-catalogue/{menu_id}")
+async def update_menu_catalogue_entry_route(
+    menu_id: str, request: Request,
+    x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None),
+):
+    require_admin(x_admin_key, x_admin_pin)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    try:
+        updated = menu_catalogue.update_menu(
+            menu_id, name=body.get("name"), category=body.get("category"),
+            description=body.get("description"), active=body.get("active"),
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"No menu '{menu_id}'")
+    except MenuCatalogueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"status": "success", "menu": updated}
+
+
+# --------------------------------------------------------------------------
+# Instagram Content Routing topics — a reusable Topic an operator picks once
+# instead of retyping the same routing_topic text on every route. Selecting
+# one on a route pre-fills that route's topic text, priority products and
+# knowledge scope; from then on the route itself, not the Topic, is what
+# matching and replies act on (see validate_route_payload's docstring).
+# --------------------------------------------------------------------------
+
+@app.get("/admin/instagram-topics")
+def list_instagram_topics_route(x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    return {"status": "success", "topics": [decode_topic(t) for t in db.list_instagram_topics()]}
+
+
+@app.post("/admin/instagram-topics")
+async def create_instagram_topic_route(
+    request: Request, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None),
+):
+    require_admin(x_admin_key, x_admin_pin)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    try:
+        topic = create_topic(
+            body.get("name", ""), body.get("description", ""),
+            default_menu_id=body.get("default_menu_id") or None,
+            priority_products=body.get("priority_products") or [],
+            knowledge_scope=body.get("knowledge_scope") or [],
+            active=bool(body.get("active", True)),
+            response_order=body.get("response_order") or "description_first",
+        )
+    except InstagramTopicError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"status": "success", "topic": decode_topic(topic)}
+
+
+@app.patch("/admin/instagram-topics/{topic_id}")
+async def update_instagram_topic_route(
+    topic_id: str, request: Request,
+    x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None),
+):
+    require_admin(x_admin_key, x_admin_pin)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    kwargs: Dict[str, Any] = {}
+    for field in ("name", "description", "active"):
+        if field in body:
+            kwargs[field] = body[field]
+    if "priority_products" in body:
+        kwargs["priority_products"] = body["priority_products"]
+    if "knowledge_scope" in body:
+        kwargs["knowledge_scope"] = body["knowledge_scope"]
+    if "response_order" in body:
+        kwargs["response_order"] = body["response_order"]
+    if "default_menu_id" in body:
+        if body["default_menu_id"]:
+            kwargs["default_menu_id"] = body["default_menu_id"]
+        else:
+            kwargs["clear_default_menu"] = True
+    try:
+        topic = update_topic(topic_id, **kwargs)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"No topic '{topic_id}'")
+    except InstagramTopicError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"status": "success", "topic": decode_topic(topic)}
+
+
+@app.get("/admin/instagram-routes/preview")
+def preview_instagram_route_response(
+    topic_id: str = "", product: str = "", menu_id: str = "", response_order: str = "",
+    x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None),
+):
+    """
+    Approximately what a customer would receive from a vague "Tell me more"
+    through this route — read-only, no session created, no conversation
+    logged. Composed from exactly the pieces a real reply would use: the
+    Topic's own admin-authored description, the linked menu's current image,
+    and the first priority product's approved template — never invented.
+
+    `product` and `menu_id` are the in-progress form's own current choices,
+    not yet saved — passing them previews the route being edited rather than
+    only the Topic's last-saved defaults, so unsaved changes show up too.
+    """
+    require_admin(x_admin_key, x_admin_pin)
+    topic = db.get_instagram_topic(topic_id) if topic_id else None
+    if topic_id and not topic:
+        raise HTTPException(status_code=404, detail=f"No topic '{topic_id}'")
+
+    topic_view = decode_topic(topic) if topic else {}
+    priority = topic_view.get("priority_products", []) if topic else []
+    chosen_product = product or (priority[0] if priority else None)
+    template_id = route_template_id(chosen_product) if chosen_product else None
+    template = responder._template_by_id(template_id) if template_id else None
+
+    resolved_menu_id = menu_id or (topic or {}).get("default_menu_id")
+    menu_entry = menu_catalogue.get_menu(resolved_menu_id) if resolved_menu_id else None
+    image_url = menu_images.current_url(resolved_menu_id) if resolved_menu_id else None
+    menu_response = (template or {}).get("response") or ""
+    chosen_order = response_order if response_order in RESPONSE_ORDERS else (topic_view.get("response_order") or "description_first")
+    ordered_response = compose_topic_response(
+        topic_view.get("name"), topic_view.get("description"), menu_response, chosen_order,
+    )
+
+    return {
+        "status": "success",
+        "topic_name": topic_view.get("name"),
+        "topic_description": topic_view.get("description"),
+        "linked_menu": menu_entry,
+        "linked_menu_image": image_url,
+        "matched_product": chosen_product,
+        "approved_response": ordered_response,
+        "menu_response": menu_response,
+        "response_order": chosen_order,
+    }
+
+
+# --------------------------------------------------------------------------
+# Menu Manager — every menu the chatbot actively serves, edited by the client
+# as a draft, previewed, and only made customer-facing by Save & Publish
+# (camellia/menu_manager.py owns validation/rendering/persistence; this is
+# just the admin-gated HTTP surface over it, same auth as every other
+# /admin/menu/* route).
+# --------------------------------------------------------------------------
+
+@app.get("/admin/menu-manager/menus")
+def list_manageable_menus(x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    menus = menu_manager.list_menus()
+    for menu in menus:
+        menu.update(menu_images.card(menu["menu_key"]))
+    return {"status": "success", "menus": menus}
+
+
+@app.get("/admin/menu-manager/menus/{menu_key}")
+def get_manageable_menu(menu_key: str, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    try:
+        return {"status": "success", **menu_manager.get_menu(menu_key), "image": menu_images.card(menu_key)}
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"No manageable menu '{menu_key}'")
+
+
+@app.put("/admin/menu-manager/menus/{menu_key}/draft")
+async def save_menu_draft(menu_key: str, request: Request, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    if not isinstance(body.get("items"), list):
+        raise HTTPException(status_code=400, detail="'items' must be a list")
+    admin_identity = x_admin_key or "admin"
+    try:
+        result = menu_manager.save_draft(menu_key, body["items"], updated_by=admin_identity)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"No manageable menu '{menu_key}'")
+    except menu_manager.MenuValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"status": "success", **result}
+
+
+@app.delete("/admin/menu-manager/menus/{menu_key}/draft")
+def discard_menu_draft(menu_key: str, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    try:
+        menu_manager.discard_draft(menu_key)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"No manageable menu '{menu_key}'")
+    return {"status": "success"}
+
+
+@app.get("/admin/menu-manager/menus/{menu_key}/preview")
+def preview_menu(menu_key: str, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    try:
+        return {"status": "success", **menu_manager.preview(menu_key)}
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"No manageable menu '{menu_key}'")
+
+
+@app.post("/admin/menu-manager/menus/{menu_key}/publish")
+async def publish_menu(menu_key: str, request: Request, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    admin_identity = x_admin_key or "admin"
+    raw_items = None
+    try:
+        body = await request.json()
+        if isinstance(body, dict) and isinstance(body.get("items"), list):
+            raw_items = body["items"]
+    except Exception:
+        raw_items = None  # No body / not JSON: publish the existing draft.
+    try:
+        result = menu_manager.publish(menu_key, raw_items=raw_items, changed_by=admin_identity)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"No manageable menu '{menu_key}'")
+    except menu_manager.MenuValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"status": "success", **result}
+
+
+@app.get("/admin/menu-manager/menus/{menu_key}/versions")
+def list_menu_versions(menu_key: str, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    try:
+        return {"status": "success", "versions": menu_manager.list_versions(menu_key)}
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"No manageable menu '{menu_key}'")
+
+
+@app.post("/admin/menu-manager/menus/{menu_key}/versions/{version_id}/restore")
+def restore_menu_version(menu_key: str, version_id: int, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    admin_identity = x_admin_key or "admin"
+    try:
+        result = menu_manager.restore_version(menu_key, version_id, changed_by=admin_identity)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"No manageable menu '{menu_key}' or version '{version_id}'")
+    except menu_manager.MenuValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"status": "success", **result}
+
+
+# Visual image workflow.  Structured item editing above remains available as
+# an advanced capability, while these routes keep image bytes in the durable
+# upload directory and SQLite holds metadata only.
+@app.post("/admin/menu-manager/menus/{menu_key}/image/draft")
+async def save_menu_image_draft(menu_key: str, file: Optional[UploadFile] = File(None), x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    if file is None:
+        raise HTTPException(status_code=400, detail="No image file provided.")
+    data = await file.read()
+    if len(data) > MAX_UPLOAD_SIZE:
+        raise HTTPException(status_code=413, detail="File too large (maximum 10MB allowed).")
+    try:
+        return {"status": "success", "draft": menu_images.save_draft(menu_key, data, file.content_type or "", x_admin_key or "admin")}
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"No manageable menu '{menu_key}'")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/admin/menu-manager/menus/{menu_key}/image/preview")
+def preview_menu_image(menu_key: str, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    try:
+        return {"status": "success", **menu_images.preview(menu_key)}
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"No manageable menu '{menu_key}'")
+
+
+@app.post("/admin/menu-manager/menus/{menu_key}/image/publish")
+def publish_menu_image(menu_key: str, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    try:
+        return {"status": "success", "image": menu_images.publish(menu_key)}
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"No manageable menu '{menu_key}'")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/admin/menu-manager/menus/{menu_key}/image/history")
+def menu_image_history(menu_key: str, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    try:
+        return {"status": "success", "versions": menu_images.history(menu_key)}
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"No manageable menu '{menu_key}'")
+
+
+@app.post("/admin/menu-manager/menus/{menu_key}/image/archive")
+def archive_menu_image(menu_key: str, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    try:
+        return {"status": "success", "image": menu_images.archive(menu_key)}
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"No manageable menu '{menu_key}'")
+
+
+@app.post("/admin/menu-manager/menus/{menu_key}/image/restore/{version_id}")
+def restore_menu_image(menu_key: str, version_id: int, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    try:
+        restored = menu_images.restore(menu_key, version_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"No manageable menu '{menu_key}'")
+    if not restored:
+        raise HTTPException(status_code=404, detail="Image version not found")
+    return {"status": "success", "image": restored}
+
 
 @app.post("/admin/parse-menu-card")
 async def parse_menu_card(request: Request, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
@@ -2959,30 +4966,28 @@ def get_admin_dashboard():
         .badge-veg { background: #D1FAE5; color: #065F46; }
         .badge-nonveg { background: #FEE2E2; color: #991B1B; }
 
-        /* Collection browser and builder */
-        .collection-layout { display: grid; grid-template-columns: minmax(280px, 0.8fr) minmax(360px, 1.2fr); gap: 20px; }
-        .collection-box { background: #FCFBF9; border: 1px solid var(--border); border-radius: 14px; padding: 16px; }
-        .collection-box h3 { color: var(--primary); font-size: 1.05rem; margin-bottom: 6px; }
-        .collection-select { width: 100%; padding: 10px 12px; border: 1px solid var(--border); border-radius: 9px; background: white; font: inherit; }
-        .collection-slot { padding: 12px 0; border-bottom: 1px solid var(--border); }
-        .collection-slot:last-child { border-bottom: 0; }
-        .collection-slot label { display: block; font-size: 0.8rem; font-weight: 700; margin-bottom: 5px; }
-        .collection-choice-detail { color: var(--text-muted); font-size: 0.78rem; line-height: 1.4; margin-top: 5px; }
-        .catalogue-section { margin-top: 18px; }
-        .catalogue-section h3 { color: var(--primary); font-size: 1.05rem; margin-bottom: 8px; }
-        .catalogue-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 10px; }
-        .catalogue-item { border: 1px solid var(--border); border-radius: 10px; padding: 11px; background: #fff; font-size: 0.82rem; line-height: 1.45; }
-        .catalogue-item b { display: block; color: var(--text-dark); margin-bottom: 3px; }
-        .menu-manager-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 16px; }
-        .menu-manager-card { border: 1px solid var(--border); border-radius: 14px; overflow: hidden; background: #fff; box-shadow: 0 2px 8px rgba(0,0,0,.04); }
-        .menu-manager-card h3 { margin: 0; padding: 14px 14px 5px; color: var(--primary); font-size: 1rem; }
-        .menu-manager-image { display: block; width: 100%; height: 220px; object-fit: contain; background: #f6f3ef; cursor: zoom-in; }
-        .menu-manager-meta { padding: 0 14px 10px; color: var(--text-muted); font-size: .8rem; }
-        .menu-manager-actions { display: flex; flex-wrap: wrap; gap: 7px; padding: 0 14px 14px; }
-        .menu-manager-actions button { font-size: .78rem; padding: 7px 9px; }
-        .menu-manager-history { padding: 10px 14px; border-top: 1px solid var(--border); background: #fcfbf9; }
-        .menu-manager-history img { width: 76px; height: 58px; object-fit: cover; vertical-align: middle; margin-right: 8px; border-radius: 5px; }
-        
+        /* Menu Manager */
+        .collection-select { width: 100%; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; background: #fff; color: var(--text-dark); }
+        .catalogue-item { border: 1px solid var(--border); background: #FCFBF9; color: var(--text-dark); padding: 8px 10px; border-radius: 9px; cursor: pointer; text-align: left; }
+        .catalogue-item:hover { border-color: var(--primary); background: #F5EEF0; }
+        .catalogue-item small { display: block; color: var(--text-muted); margin-top: 2px; }
+        .visual-menu-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; margin-bottom: 20px; }
+        .visual-menu-card { border: 1px solid var(--border); border-radius: 14px; overflow: hidden; background: #fff; }
+        .visual-menu-card h3 { margin: 0; padding: 14px 14px 6px; color: var(--primary); font-size: 1rem; }
+        .visual-menu-card img { width: 100%; height: 210px; object-fit: contain; background: #f6f3ef; display: block; }
+        .visual-menu-meta { padding: 8px 14px; color: var(--text-muted); font-size: .8rem; }
+        .visual-menu-actions { display: flex; flex-wrap: wrap; gap: 7px; padding: 0 14px 14px; }
+        .visual-menu-actions button { font-size: .78rem; padding: 7px 9px; }
+        .collection-layout { display: grid; grid-template-columns: minmax(220px, 1fr) 2fr; gap: 18px; align-items: start; }
+        .collection-box { border: 1px solid var(--border); border-radius: 14px; padding: 14px; background: #FCFBF9; }
+        .collection-box h3 { margin: 0 0 10px; color: var(--primary); font-size: 0.98rem; }
+        .collection-slot { border: 1px solid var(--border); border-radius: 10px; padding: 12px; margin-bottom: 10px; background: #fff; }
+        .collection-slot label { display: block; font-size: 0.78rem; font-weight: 600; margin-top: 8px; }
+        .collection-slot label:first-child { margin-top: 0; }
+        @media (max-width: 780px) {
+            .collection-layout { grid-template-columns: 1fr; }
+        }
+
         /* Analytics Table */
         table.data-table { width: 100%; border-collapse: collapse; margin-top: 16px; font-size: 0.86rem; }
         table.data-table th { background: #F5F1ED; text-align: left; padding: 10px 14px; font-weight: 600; border-bottom: 1.5px solid var(--border); }
@@ -3007,7 +5012,6 @@ def get_admin_dashboard():
             .tabs-nav { justify-content: flex-start; gap: 4px; padding: 4px; }
             .tab-btn { padding: 10px 8px; font-size: 0.8rem; gap: 4px; }
             .panel-card { padding: 20px 16px; }
-            .collection-layout { grid-template-columns: 1fr; }
         }
     </style>
 </head>
@@ -3069,20 +5073,31 @@ def get_admin_dashboard():
     <div class="main-container">
         <!-- Tab Navigation Bar -->
         <div class="tabs-nav">
-            <button class="tab-btn active" onclick="switchTab('tab-image', this)">🖼️ Menu Manager</button>
-            <button class="tab-btn" onclick="switchTab('tab-collections', this)">🎁 Collections</button>
-            <button class="tab-btn" onclick="switchTab('tab-stats', this)">💬 Customers</button>
-            <button class="tab-btn" onclick="switchTab('tab-candidates', this)">✅ Answers <span id="candidateBadge" style="display:none; background: var(--danger); color: #fff; border-radius: 10px; padding: 1px 7px; font-size: 0.72rem; margin-left: 4px;"></span></button>
+            <button class="tab-btn active" onclick="switchTab('tab-image', this)">🍱 Menu</button>
+            <button class="tab-btn" onclick="switchTab('tab-menu-manager', this)">📋 Menu Manager</button>
+            <button class="tab-btn" onclick="switchTab('tab-ai-resolution', this)">🤖 AI Resolution &amp; Answers <span id="aiResolutionBadge" style="display:none; background: var(--danger); color: #fff; border-radius: 10px; padding: 1px 7px; font-size: 0.72rem; margin-left: 4px;"></span></button>
+            <button class="tab-btn" onclick="switchTab('tab-custom-qa', this)">🗂️ Custom Q&amp;A</button>
         </div>
 
-        <div id="tab-menu-manager" class="panel-card" data-group="menu">
-            <div class="panel-header">
-                <h2>🖼️ Menu Manager</h2>
-                <p>Manage the actual menu images customers receive. Uploading an image never changes approved prices or business facts.</p>
+        <!-- Customers and Answers used to be their own top-level tabs. Every
+             action either one offered — view an escalation, Teach & Resolve,
+             view/edit/approve/reject a candidate draft, see approved
+             knowledge — is now inside AI Resolution & Answers below, reading
+             and writing the exact same candidate_templates/escalations/
+             learned_knowledge/knowledge_gaps tables through the exact same
+             endpoints. Nothing about those tables or endpoints changed; only
+             which screen a client reaches them from did. The two panels
+             stay in the DOM, unstyled into the normal flow, reachable only
+             from here — for regression comparison during this transition,
+             not for daily use. -->
+        <details style="margin: 10px 0 0; font-size: 0.82rem; color: var(--text-muted);">
+            <summary style="cursor:pointer; user-select:none;">⚙️ Advanced / Legacy Views (debugging only)</summary>
+            <div style="display:flex; gap:8px; margin-top:8px; flex-wrap:wrap;">
+                <button class="btn-secondary" type="button" onclick="switchTab('tab-stats', null)">Open Legacy Customers View</button>
+                <button class="btn-secondary" type="button" onclick="switchTab('tab-candidates', null)">Open Legacy Answers View</button>
             </div>
-            <div id="menuManagerResult" class="result-box"></div>
-            <div id="menuManagerGrid" class="menu-manager-grid"><p style="color: var(--text-muted);">Loading menu images…</p></div>
-        </div>
+            <p style="margin-top:6px;">These are the old per-workflow screens, kept only so a real discrepancy against AI Resolution &amp; Answers can be checked during this transition. Use the 🤖 AI Resolution &amp; Answers tab above for normal work.</p>
+        </details>
 
         <!-- MENU tab, panel 2 of 4: same job, for when there is no photo -->
         <div id="tab-image" class="panel-card" data-group="menu">
@@ -3121,30 +5136,75 @@ def get_admin_dashboard():
 
         <div id="tab-ad-routing" class="panel-card" data-group="menu" style="display: none;">
             <div class="panel-header">
-                <h2>📣 Ad Routing</h2>
-                <p>Choose what the chatbot shows first when somebody arrives from an Instagram ad. You only need the Ad ID from Meta.</p>
+                <h2>📣 Instagram Content Routing</h2>
+                <p>Connect an Instagram post or reel to a Topic.</p>
             </div>
-
             <div class="ad-routing-form">
                 <div>
-                    <label class="field-label" for="adRouteId">Instagram Ad ID</label>
-                    <input class="field-control" id="adRouteId" inputmode="text" autocomplete="off" placeholder="Paste the Ad ID">
+                    <label class="field-label" for="igRouteUrl">Instagram Link</label>
+                    <input class="field-control" id="igRouteUrl" autocomplete="off" placeholder="https://www.instagram.com/reel/DdAnO6MTok1/" onblur="identifyInstagramRoute()" onchange="identifyInstagramRoute()">
                 </div>
-                <div>
-                    <label class="field-label" for="adRouteProduct">Show this product first</label>
-                    <select class="field-control" id="adRouteProduct">
-                        <option value="sondesh">Sondesh</option>
-                        <option value="savoury">Savoury</option>
-                        <option value="bento">Bento</option>
-                    </select>
+            </div>
+            <div id="igRouteIdentity" aria-live="polite" style="font-size:0.82rem; margin:10px 0; color:var(--text-muted);"></div>
+            <div id="igPostConnectionStatus" style="display:none; font-size:0.82rem; margin:10px 0; padding:8px 10px; border-radius:8px;"></div>
+
+            <div style="margin-top:14px;">
+                <label class="field-label" for="igTopicPicker">Topic</label>
+                <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                    <select class="field-control" id="igTopicPicker" onchange="onIgTopicChange()" style="flex:1; min-width:220px;"><option value="">Select Topic</option></select>
+                    <button class="btn-secondary" type="button" onclick="openTopicModal()">+ Add Topic</button>
+                    <button class="btn-secondary" id="igEditTopicButton" type="button" onclick="openTopicEditor()" disabled>Edit Topic</button>
                 </div>
-                <button class="btn-primary" type="button" onclick="saveAdRoute()">Add ad</button>
             </div>
 
-            <div id="adRouteResult" class="result-box"></div>
-            <div id="adRouteList" class="ad-route-list">
-                <p style="color: var(--text-muted); font-size: 0.84rem;">Loading saved ads...</p>
+            <div id="igTopicPreview" style="display:none; margin-top:14px; background:#FCFBF9; border:1px solid var(--border); border-radius:10px; padding:14px; font-size:0.85rem;">
+                <div style="font-size:0.76rem; color:var(--text-muted); margin-bottom:6px;">Topic preview</div>
+                <h3 id="igTopicPreviewName" style="margin:0; font-size:1rem; color:var(--primary);"></h3>
+                <div style="margin-top:8px;"><b>Menu:</b> <span id="igTopicPreviewMenu">—</span></div>
+                <div style="margin-top:4px;"><b>Priority:</b> <span id="igTopicPreviewPriority">—</span></div>
+                <div style="margin-top:4px; white-space:pre-wrap;"><b>Description:</b> <span id="igTopicPreviewDescription">—</span></div>
+                <div style="margin-top:10px;"><b>Reply Order:</b> <span id="igTopicPreviewOrder">Description First</span></div>
+                <button class="btn-secondary" type="button" onclick="swapIgResponseOrder()" style="margin-top:8px;">⇅ Swap Order</button>
+                <button class="btn-secondary" type="button" onclick="previewInstagramRoute()" style="margin-top:10px;">Preview Reply</button>
+                <div id="igPreviewBox" style="display:none; margin-top:10px; background:#fff; border:1px solid var(--border); border-radius:8px; padding:10px; font-size:0.84rem;"></div>
             </div>
+
+            <details id="igCustomize" style="margin-top:12px;"><summary style="cursor:pointer;"><b>Customize</b></summary>
+                <div style="margin-top:10px;">
+                    <label class="field-label" for="igMenuPicker">Menu to Show</label>
+                    <div style="display:flex; gap:8px;">
+                        <select class="field-control" id="igMenuPicker"><option value="">Select Menu</option></select>
+                        <button class="btn-secondary" type="button" onclick="openMenuModal()">+ Add Menu</button>
+                    </div>
+                    <label class="field-label" for="igTopicDescription" style="margin-top:10px;">Topic Description</label>
+                    <textarea class="field-control" id="igTopicDescription" rows="2" placeholder="Select a Topic to see its description"></textarea>
+                    <label class="field-label" style="margin-top:10px;">Priority Products</label>
+                    <div style="display:flex; gap:8px;"><select class="field-control" id="igProductPicker"></select><button class="btn-secondary" type="button" onclick="addIgPriorityProduct()">+ Add Product</button></div>
+                    <div id="igPriorityProducts" class="ad-route-list" style="margin-top:8px;"></div>
+                </div>
+            </details>
+
+            <details id="igAdvancedSettings" style="margin-top:12px;"><summary style="cursor:pointer;"><b>Advanced Settings</b></summary>
+                <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:10px; margin-top:10px;">
+                    <input class="field-control" id="igMediaId" placeholder="Verified Media / Story ID">
+                    <input class="field-control" id="igAdId" placeholder="Meta Ad ID">
+                    <input class="field-control" id="igCampaignId" placeholder="Campaign ID (reference only)">
+                    <select class="field-control" id="igEscalationPolicy"><option value="human_if_unsupported">Human if unsupported</option><option value="canonical">Normal canonical rules</option><option value="always_human">Always offer human help</option></select>
+                    <select class="field-control" id="igKnowledgeScope" multiple title="Optional canonical knowledge scope"></select>
+                </div>
+                <p style="font-size:0.76rem;color:var(--text-muted);">Advanced settings are normally filled automatically. Only change these when instructed.</p>
+            </details>
+
+            <div class="action-bar">
+                <button class="btn-primary" id="igSaveButton" type="button" onclick="saveInstagramRoute()">Save Routing</button>
+                <button class="btn-secondary" type="button" onclick="resetInstagramRouteForm()">Cancel</button>
+            </div>
+            <div id="adRouteResult" class="result-box"></div>
+            <div style="display:flex; gap:8px; margin-top:16px; border-bottom:1px solid var(--border);">
+                <button class="tab-btn active" type="button" id="igRouteTabActiveBtn" onclick="switchIgRouteTab('active')" style="border-radius:8px 8px 0 0;">Active</button>
+                <button class="tab-btn" type="button" id="igRouteTabArchivedBtn" onclick="switchIgRouteTab('archived')" style="border-radius:8px 8px 0 0;">Archived</button>
+            </div>
+            <div id="adRouteList" class="ad-route-list"><p style="color:var(--text-muted);font-size:0.84rem;">Loading saved routes...</p></div>
         </div>
 
         <!-- MENU tab, panel 3 of 4: same job again, from a shared sheet -->
@@ -3245,34 +5305,46 @@ THIS WEEK'S BENGAL SPECIALS
             </div>
         </div>
 
-        <!-- COLLECTIONS tab: browse every available option and tailor a collection -->
-        <div id="tab-collections" class="panel-card" data-group="collections" style="display: none;">
+        <!-- MENU MANAGER tab: every menu the chatbot actively serves, edited
+             as a draft, previewed exactly as customers will see it, and only
+             made live by Save & Publish. camellia/menu_manager.py owns
+             validation/persistence/reload; this is its admin UI. -->
+        <div id="tab-menu-manager" class="panel-card" data-group="menu_manager" style="display: none;">
             <div class="panel-header">
-                <h2>🎁 Review and tailor a collection</h2>
-                <p>Start with either Sondesh collection, then replace any selection with another available option of the same kind. The complete menu catalogue is shown below for reference.</p>
+                <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px; flex-wrap:wrap;">
+                    <div>
+                        <h2>📋 Menu Manager</h2>
+                        <p>Edit any menu the chatbot uses. Changes are a draft until you press Save &amp; Publish — the bot keeps answering with the current live menu until then.</p>
+                    </div>
+                    <button class="btn-primary" type="button" onclick="openMenuModal()" style="white-space:nowrap;">+ Add New Menu</button>
+                </div>
             </div>
+
+            <div id="mmImageGrid" class="visual-menu-grid"><p style="color: var(--text-muted);">Loading menu images...</p></div>
 
             <div class="collection-layout">
                 <div class="collection-box">
-                    <h3>Build a new collection</h3>
-                    <p style="font-size: 0.82rem; color: var(--text-muted); margin-bottom: 12px;">Choose a starting collection. Every row can then be changed independently.</p>
-                    <label class="field-label" for="collectionBase">Start with</label>
-                    <select id="collectionBase" class="collection-select" onchange="startCollectionBuild(this.value)"></select>
-                    <div id="collectionBuilder"><p style="color: var(--text-muted); font-size: 0.84rem; margin-top: 12px;">Loading collection choices...</p></div>
-                    <div class="action-bar">
-                        <button class="btn-primary" type="button" onclick="copyCollectionSummary()">Copy collection summary</button>
-                    </div>
-                    <div id="collectionCopyResult" class="result-box"></div>
+                    <h3>Menus</h3>
+                    <div id="mmMenuList"><p style="color: var(--text-muted); font-size: 0.84rem;">Loading menus...</p></div>
                 </div>
 
                 <div class="collection-box">
-                    <h3>Your selected collection</h3>
-                    <div id="collectionSummary"><p style="color: var(--text-muted); font-size: 0.84rem;">Choose a starting collection to review it here.</p></div>
+                    <h3 id="mmEditorTitle">Select a menu to edit</h3>
+                    <div id="mmEditorItems"></div>
+                    <div class="action-bar" style="margin-top: 14px; flex-wrap: wrap; gap: 8px;">
+                        <button class="btn-secondary" type="button" onclick="mmAddItem()">+ Add item</button>
+                        <button class="btn-secondary" type="button" onclick="mmSaveDraft()">💾 Save draft</button>
+                        <button class="btn-secondary" type="button" onclick="mmPreview()">👁 Preview</button>
+                        <button class="btn-primary" type="button" onclick="mmPublish()">✅ Save &amp; Publish</button>
+                        <button class="btn-secondary" type="button" onclick="mmCancelDraft()">✕ Cancel draft</button>
+                    </div>
+                    <div id="mmMessage" class="result-box"></div>
+                    <div id="mmPreviewBox" style="display:none; margin-top: 14px;">
+                        <h3 style="color: var(--primary); font-size: 0.95rem;">Preview — exactly what customers/chatbot will see</h3>
+                        <pre id="mmPreviewText" style="white-space: pre-wrap; background: #FCFBF9; border: 1px solid var(--border); border-radius: 10px; padding: 12px; font-size: 0.82rem;"></pre>
+                    </div>
+                    <div id="mmVersions" style="margin-top: 18px;"></div>
                 </div>
-            </div>
-
-            <div id="allMenuCatalogue" style="margin-top: 22px;">
-                <p style="color: var(--text-muted); font-size: 0.84rem;">Loading all available menus...</p>
             </div>
         </div>
 
@@ -3315,38 +5387,6 @@ THIS WEEK'S BENGAL SPECIALS
                         <tr><td colspan="6" style="text-align: center; color: #888;">Loading escalations...</td></tr>
                     </tbody>
                 </table>
-            </div>
-
-            <div class="panel-card" id="assistedResolutionSection" data-group="answers" style="margin-top: 18px; border: 1px solid var(--border);">
-                <div class="panel-header">
-                    <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
-                        <div>
-                            <h2>🤝 AI Suggested — human review required</h2>
-                            <p>Instagram-only drafts grounded in approved knowledge. They are never sent automatically. WhatsApp is always HUMAN ONLY.</p>
-                        </div>
-                        <button class="btn-secondary" onclick="loadAssistedResolutions()">🔄 Refresh AI suggestions</button>
-                    </div>
-                    <div id="assistedResolutionMetrics" style="font-size:0.82rem;color:#666;margin-top:8px;">Loading review metrics...</div>
-                </div>
-                <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap;">
-                    <label for="assistedCategoryFilter" style="font-weight:600;">Category:</label>
-                    <select id="assistedCategoryFilter" onchange="loadAssistedResolutions()">
-                        <option value="">All</option>
-                        <option value="AUTO_RESOLVE">AUTO_RESOLVE (candidate only)</option>
-                        <option value="AI_SUGGESTED">AI_SUGGESTED</option>
-                        <option value="TEACH_REQUIRED">TEACH_REQUIRED</option>
-                        <option value="HUMAN_REQUIRED">HUMAN_REQUIRED</option>
-                        <option value="NON_ACTIONABLE">NON_ACTIONABLE</option>
-                        <option value="CONTACT_DETAIL">CONTACT_DETAIL</option>
-                        <option value="UNSUPPORTED">UNSUPPORTED</option>
-                    </select>
-                </div>
-                <div style="overflow-x:auto;">
-                    <table class="data-table">
-                        <thead><tr><th>Customer message</th><th>Suggested answer</th><th>Grounding</th><th>Matched Knowledge</th><th>Risk Flags</th><th>Action</th></tr></thead>
-                        <tbody id="assistedResolutionsTableBody"><tr><td colspan="6" style="text-align:center;color:#888;">Loading AI suggestions...</td></tr></tbody>
-                    </table>
-                </div>
             </div>
         </div>
 
@@ -3405,13 +5445,227 @@ THIS WEEK'S BENGAL SPECIALS
                         <tr>
                             <th>Customer Asked</th>
                             <th>Draft Answer — read it before approving</th>
-                            <th>Confidence</th>
+                            <th>AI Draft Confidence</th>
                             <th>Drafted By</th>
                             <th>Action</th>
                         </tr>
                     </thead>
                     <tbody id="candidatesTableBody">
                         <tr><td colspan="5" style="text-align: center; color: #888;">Loading suggested answers...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- AI RESOLUTION & ANSWERS: one queue combining what used to be two
+             screens (Customers waiting on a person, and Answers) plus the
+             knowledge-gaps queue that already existed as an API but had no
+             screen at all. It reads the same three tables through the same
+             endpoints those older screens already use — approving, rejecting,
+             editing, and resolving here call the exact same backend actions,
+             so nothing about how an answer reaches a customer changes. This
+             is a merged view, not a new workflow. -->
+        <div id="tab-ai-resolution" class="panel-card" data-group="ai_resolution" style="display: none;">
+            <div class="panel-header">
+                <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+                    <div>
+                        <h2>🤖 AI Resolution &amp; Answers</h2>
+                        <p>The one place for everything the bot could not answer on its own: drafts waiting on your approval, questions it has no knowledge of yet, and customers waiting on a person — plus the answers you've already approved. <b>Nothing here has been shown to a customer</b> except items already marked resolved/approved.</p>
+                    </div>
+                    <button class="btn-secondary" onclick="loadAiResolution()">🔄 Refresh</button>
+                </div>
+            </div>
+
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 14px; margin-bottom: 18px;">
+                <div style="background: #F8FAFC; border: 1px solid var(--border); padding: 16px; border-radius: 14px; text-align: center;">
+                    <span style="font-size: 0.75rem; color: #64748B; font-weight: 600;">TOTAL INQUIRIES</span>
+                    <h3 id="aiStatTotal" style="font-size: 1.7rem; margin-top: 4px;">0</h3>
+                </div>
+                <div style="background: #ECFDF5; border: 1px solid #A7F3D0; padding: 16px; border-radius: 14px; text-align: center;">
+                    <span style="font-size: 0.75rem; color: #065F46; font-weight: 600;">AUTO RESOLVED</span>
+                    <h3 id="aiStatAutoResolved" style="font-size: 1.7rem; color: var(--success); margin-top: 4px;">0</h3>
+                </div>
+                <div style="background: #FFF7ED; border: 1px solid #FED7AA; padding: 16px; border-radius: 14px; text-align: center;">
+                    <span style="font-size: 0.75rem; color: #9A3412; font-weight: 600;">NEEDS ATTENTION</span>
+                    <h3 id="aiStatNeedsAttention" style="font-size: 1.7rem; color: #9A3412; margin-top: 4px;">0</h3>
+                </div>
+                <div style="background: #FEF2F2; border: 1px solid #FECACA; padding: 16px; border-radius: 14px; text-align: center;">
+                    <span style="font-size: 0.75rem; color: #991B1B; font-weight: 600;">HUMAN REQUIRED</span>
+                    <h3 id="aiStatHuman" style="font-size: 1.7rem; color: var(--danger); margin-top: 4px;">0</h3>
+                </div>
+                <div id="aiStatAnalyzedCard" style="display:none; background: #EEF2FF; border: 1px solid #C7D2FE; padding: 16px; border-radius: 14px; text-align: center;">
+                    <span style="font-size: 0.75rem; color: #3730A3; font-weight: 600;">AI ANALYZED (shadow, not resolved)</span>
+                    <h3 id="aiStatAnalyzed" style="font-size: 1.7rem; color: #3730A3; margin-top: 4px;">0</h3>
+                </div>
+            </div>
+
+            <div style="margin-bottom:12px;">
+                <input type="text" id="aiResolutionSearch" class="field-control" placeholder="🔎 Search customer questions or answers…" style="max-width:420px;" oninput="renderAiResolution()">
+            </div>
+
+            <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:14px;">
+                <button class="tab-btn active" type="button" id="aiFilterBtn-needs_attention" onclick="setAiResolutionFilter('needs_attention')">Needs Attention</button>
+                <button class="tab-btn" type="button" id="aiFilterBtn-ai_suggested" onclick="setAiResolutionFilter('ai_suggested')">AI Suggested</button>
+                <button class="tab-btn" type="button" id="aiFilterBtn-human_required" onclick="setAiResolutionFilter('human_required')">Human Required</button>
+                <button class="tab-btn" type="button" id="aiFilterBtn-teach_required" onclick="setAiResolutionFilter('teach_required')">Knowledge Gaps</button>
+                <button class="tab-btn" type="button" id="aiFilterBtn-approved" onclick="setAiResolutionFilter('approved')">Approved Answers</button>
+                <button class="tab-btn" type="button" id="aiFilterBtn-rejected" onclick="setAiResolutionFilter('rejected')">Rejected / Archived</button>
+                <button class="tab-btn" type="button" onclick="document.getElementById('triage-shadow-section').scrollIntoView({behavior:'smooth'})">Triage Shadow ↓</button>
+            </div>
+
+            <div style="overflow-x: auto;">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>Status</th>
+                            <th>Customer Asked / Situation</th>
+                            <th>Draft Answer / Detail</th>
+                            <th>Confidence / Seen</th>
+                            <th>Action</th>
+                        </tr>
+                    </thead>
+                    <tbody id="aiResolutionTableBody">
+                        <tr><td colspan="5" style="text-align: center; color: #888;">Loading...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- Triage shadow mode: a model's opinion on every message above,
+                 run purely for measurement. It has never sent a reply, never
+                 auto-approved anything, and never touched the queue above —
+                 this is read-only so the quality of its calls can be judged
+                 against real traffic before any auto-resolve path is built. -->
+            <div id="triage-shadow-section" style="margin-top:28px; padding-top:20px; border-top:2px solid var(--border);">
+                <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 10px;">
+                    <div>
+                        <h3 style="margin:0;">🔬 Triage Shadow Mode <span style="font-weight:400; font-size:0.8rem; color:var(--text-muted);">(measurement only — nothing below has ever reached a customer)</span></h3>
+                        <p id="triageShadowStatusLine" style="font-size:0.82rem; color:var(--text-muted); margin-top:4px;">Checking status…</p>
+                    </div>
+                    <button class="btn-secondary" onclick="loadTriageShadow()">🔄 Refresh</button>
+                </div>
+
+                <div id="triageShadowSummary" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 16px;"></div>
+
+                <div style="overflow-x: auto;">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Message</th>
+                                <th>Triage Category</th>
+                                <th>Confidence</th>
+                                <th>Grounded</th>
+                                <th>Would Auto-Resolve?</th>
+                                <th>What Actually Happened</th>
+                                <th>Model's Reasoning</th>
+                            </tr>
+                        </thead>
+                        <tbody id="triageShadowTableBody">
+                            <tr><td colspan="7" style="text-align: center; color: #888;">Loading...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div id="assisted-evaluation-section" style="margin-top:28px;padding-top:20px;border-top:2px solid var(--border);">
+                <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
+                    <div><h3 style="margin:0;">📊 Assisted Resolution Performance</h3><p style="font-size:.82rem;color:var(--text-muted);margin-top:4px;">Read-only evaluation. Approval rate is not model accuracy; Auto Resolve remains informational only.</p></div>
+                    <button class="btn-secondary" onclick="loadAssistedEvaluation()">🔄 Refresh evaluation</button>
+                </div>
+                <div id="assistedPerformanceSummary" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:14px 0;"></div>
+                <div id="assistedReadiness" style="padding:12px;border:1px solid var(--border);border-radius:10px;margin-bottom:14px;"><b>Auto Resolve Readiness</b><span id="assistedReadinessBody">Loading…</span></div>
+                <div id="autoResolveControlState" style="padding:12px;border:1px solid #FDE68A;background:#FFFBEB;border-radius:10px;margin-bottom:14px;"><b>AUTO RESOLVE: OFF</b><span id="autoResolveControlDetail" style="margin-left:8px;color:var(--text-muted);">Simulation status loading…</span></div>
+                <div id="autoResolveMetrics" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:14px;"></div>
+                <div style="overflow-x:auto;margin-bottom:14px;"><table class="data-table"><thead><tr><th>Confidence Bucket</th><th>Reviewed</th><th>Approved As-Is</th><th>Edited</th><th>Rejected</th><th>Human Handoff</th></tr></thead><tbody id="assistedConfidenceTable"></tbody></table></div>
+                <div style="overflow-x:auto;margin-bottom:14px;"><table class="data-table"><thead><tr><th>Category</th><th>Total</th><th>Approved</th><th>Edited</th><th>Rejected</th><th>Human Final Action</th></tr></thead><tbody id="assistedCategoryTable"></tbody></table></div>
+                <div style="overflow-x:auto;margin-bottom:14px;"><table class="data-table"><thead><tr><th>Grounding</th><th>Reviewed</th><th>Approved</th><th>Edited</th><th>Rejected</th><th>Sent to Human</th></tr></thead><tbody id="assistedGroundingTable"></tbody></table></div>
+                <div style="overflow-x:auto;margin-bottom:14px;"><table class="data-table"><thead><tr><th>Risk Flag</th><th>Total</th><th>Approved</th><th>Edited</th><th>Rejected</th><th>Sent to Human</th></tr></thead><tbody id="assistedRiskTable"></tbody></table></div>
+                <h4>High Confidence Problems</h4><div id="assistedHighConfidenceProblems" style="font-size:.82rem;color:var(--text-muted);">None recorded.</div>
+                <h4>Shadow vs Assisted Comparison</h4><div id="assistedShadowComparison" style="font-size:.82rem;color:var(--text-muted);">No correlated records.</div>
+                <h4>Safety Metrics</h4><div id="assistedSafetyMetrics" style="font-size:.82rem;color:var(--text-muted);">Loading…</div>
+            </div>
+        </div>
+
+        <!-- CUSTOM Q&A: the client-managed reusable knowledge library. This
+             is not a second knowledge system -- every row here is a plain
+             learned_knowledge record, the exact same table Teach & Resolve
+             and candidate approval already write to, read through the exact
+             same matcher (camellia.database.search_learned_knowledge). AI
+             Resolution & Answers stays the operational/AI/human-review
+             workflow; this tab is where the client intentionally authors
+             and maintains reusable answers. -->
+        <div id="tab-custom-qa" class="panel-card" data-group="custom_qa" style="display: none;">
+            <div class="panel-header">
+                <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+                    <div>
+                        <h2>🗂️ Custom Q&amp;A / Response Library</h2>
+                        <p>Create and manage approved answers the chatbot can reuse when customers ask similar questions. Search, preview, test and safely edit customer-facing copy; protected runtime rules remain read-only.</p>
+                    </div>
+                    <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                        <button class="btn-primary" onclick="openCustomQaModal()">+ Add Q&amp;A</button>
+                        <button class="btn-secondary" onclick="openCustomQaImportModal()">Import CSV</button>
+                        <button class="btn-secondary" onclick="exportCustomQaCsv()">Export CSV</button>
+                    </div>
+                </div>
+            </div>
+
+            <div style="margin-bottom:12px;">
+                <input type="text" id="customQaSearch" class="field-control" placeholder="🔎 Search questions, triggers, answers, category or template ID…" style="max-width:560px;" oninput="renderCustomQaList(); renderSystemResponseLibrary()">
+            </div>
+            <div id="customQaAiSignals" style="padding:10px;border:1px solid var(--border);border-radius:10px;margin-bottom:12px;font-size:.82rem;">AI Review Signal: loading…</div>
+
+            <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:10px;">
+                <button class="tab-btn active" type="button" id="cqaStatusBtn-ACTIVE" onclick="setCustomQaStatusFilter('ACTIVE')">Active</button>
+                <button class="tab-btn" type="button" id="cqaStatusBtn-DISABLED" onclick="setCustomQaStatusFilter('DISABLED')">Disabled</button>
+                <button class="tab-btn" type="button" id="cqaStatusBtn-ARCHIVED" onclick="setCustomQaStatusFilter('ARCHIVED')">Archived</button>
+                <button class="tab-btn" type="button" id="cqaStatusBtn-ALL" onclick="setCustomQaStatusFilter('ALL')">All</button>
+            </div>
+            <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:14px;">
+                <select class="field-control" id="cqaSourceFilter" style="max-width:200px;" onchange="renderCustomQaList(); renderSystemResponseLibrary()">
+                    <option value="">All Sources</option>
+                    <option value="client_admin">Created by Client</option>
+                    <option value="staff_resolution">Teach &amp; Resolve</option>
+                    <option value="staff_dashboard">Staff Resolution</option>
+                    <option value="csv_import">Imported</option>
+                    <option value="system_template">System Template</option>
+                    <option value="approved_candidate">AI Approved</option>
+                </select>
+                <select class="field-control" id="cqaTopicFilter" style="max-width:200px;" onchange="renderCustomQaList(); renderSystemResponseLibrary()">
+                    <option value="">All Topics</option>
+                </select>
+                <select class="field-control" id="cqaPriorityFilter" style="max-width:160px;" onchange="renderCustomQaList()">
+                    <option value="">All Priorities</option>
+                    <option value="NORMAL">Normal</option>
+                    <option value="HIGH">High</option>
+                    <option value="PROTECTED">Protected System</option>
+                </select>
+                <button class="btn-secondary" onclick="loadCustomQa()">🔄 Refresh</button>
+            </div>
+
+            <div id="systemResponseLibrary" style="margin:0 0 18px; padding:14px; border:1px solid var(--border); border-radius:12px; background:#FCFBFA;">
+                <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; flex-wrap:wrap;">
+                    <h3 style="margin:0; color:var(--primary);">System Templates</h3>
+                    <span style="font-size:.78rem; color:var(--text-muted);">Triggers and protected runtime logic are read-only; response copy can be safely overridden.</span>
+                </div>
+                <div id="systemResponseLibraryCards" style="display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:10px; margin-top:10px;"></div>
+            </div>
+
+            <div style="overflow-x: auto;">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>Topic</th>
+                            <th>Question / Aliases</th>
+                            <th>Approved Answer</th>
+                            <th>Status</th>
+                            <th>Priority</th>
+                            <th>Source</th>
+                            <th>Usage</th>
+                            <th>Last Edited</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="customQaTableBody">
+                        <tr><td colspan="9" style="text-align: center; color: #888;">Loading...</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -3497,6 +5751,209 @@ THIS WEEK'S BENGAL SPECIALS
         </div>
     </div>
 
+    <div id="igRemoveModal" style="display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 9999; justify-content: center; align-items: center; padding: 20px;">
+        <div style="background: white; border-radius: 16px; width: 100%; max-width: 480px; padding: 24px; box-shadow: 0 10px 30px rgba(0,0,0,0.2);">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px;">
+                <h3 style="margin: 0; color: var(--danger);">Delete this Instagram routing connection?</h3>
+                <button onclick="closeIgRemoveModal()" style="background: none; border: none; font-size: 1.4rem; cursor: pointer;">&times;</button>
+            </div>
+            <div id="igRemoveModalDetails" style="background:#F7F5F3; border:1px solid var(--border); border-radius:10px; padding:12px; font-size:0.82rem; line-height:1.6; margin-bottom:12px;"></div>
+            <div style="background:#FEF2F2; border:1px solid #FCA5A5; border-radius:10px; padding:10px 12px; font-size:0.8rem; color:#991B1B; margin-bottom:16px;">
+                This only removes this Instagram routing connection. It will not delete the Instagram content, Topic, Menu, products, Custom Q&amp;A, or customer conversations.
+            </div>
+            <div style="display: flex; gap: 8px; justify-content: flex-end;">
+                <button class="btn-secondary" onclick="closeIgRemoveModal()">Cancel</button>
+                <button class="btn-danger" onclick="confirmIgRemove()">Delete Routing</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Custom Q&A: Add / Edit modal. One learned_knowledge record per
+         modal session -- editing always PATCHes the same id, never
+         creates a new one. -->
+    <div id="customQaModal" style="display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 9999; justify-content: center; align-items: center; padding: 20px; overflow-y: auto;">
+        <div style="background: white; border-radius: 16px; width: 100%; max-width: 640px; padding: 24px; box-shadow: 0 10px 30px rgba(0,0,0,0.2); max-height: 90vh; overflow-y: auto;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px;">
+                <h3 style="margin: 0; color: var(--primary);" id="customQaModalTitle">+ Add Q&amp;A</h3>
+                <button onclick="closeCustomQaModal()" style="background: none; border: none; font-size: 1.4rem; cursor: pointer;">&times;</button>
+            </div>
+            <input type="hidden" id="cqaEditingId">
+
+            <div style="margin-bottom:12px;">
+                <label class="field-label">Topic / Category</label>
+                <select class="field-control" id="cqaTopicSelect" onchange="onCqaTopicSelectChange()">
+                    <option>Pricing</option><option>Delivery</option><option>Corporate Gifting</option>
+                    <option>Meal Subscription</option><option>Sondesh</option><option>Events</option>
+                    <option>Careers</option><option>Other</option>
+                </select>
+                <input type="text" class="field-control" id="cqaTopicCustom" placeholder="Type a topic…" style="display:none; margin-top:6px;">
+            </div>
+
+            <div style="margin-bottom:12px;">
+                <label class="field-label">Primary Customer Question / Trigger *</label>
+                <input type="text" class="field-control" id="cqaPrimaryQuestion" placeholder="What is the price per meal?">
+            </div>
+
+            <div style="margin-bottom:12px;">
+                <label class="field-label">Alternative Questions / Aliases</label>
+                <div id="cqaAliasList"></div>
+                <div style="display:flex; gap:8px; margin-top:6px;">
+                    <input type="text" class="field-control" id="cqaAliasInput" placeholder="meal price">
+                    <button class="btn-secondary" type="button" onclick="addCqaAlias()">+ Add Alternative Question</button>
+                </div>
+            </div>
+
+            <div style="margin-bottom:12px;">
+                <label class="field-label">Approved Answer *</label>
+                <textarea class="field-control" id="cqaAnswer" rows="4" placeholder="The exact reply the bot should send."></textarea>
+            </div>
+
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:12px;">
+                <div>
+                    <label class="field-label">Priority</label>
+                    <select class="field-control" id="cqaPriority"><option value="NORMAL">Normal</option><option value="HIGH">High</option></select>
+                </div>
+                <div>
+                    <label class="field-label">Status</label>
+                    <select class="field-control" id="cqaStatus"><option value="ACTIVE">Active</option><option value="DISABLED">Disabled</option><option value="ARCHIVED">Archived</option></select>
+                </div>
+            </div>
+
+            <p style="font-size:0.78rem; color:var(--text-muted); margin-bottom:16px;">Source: <span id="cqaSourceLabel">Created by Client</span></p>
+
+            <div id="cqaWarningsBox" style="display:none; background:#FFF7ED; border:1px solid #FED7AA; border-radius:10px; padding:12px; margin-bottom:14px; font-size:0.84rem;"></div>
+
+            <div style="border-top:1px solid var(--border); padding-top:14px; margin-bottom:14px;">
+                <label class="field-label">Test Question <span style="font-weight:400; color:var(--text-muted);">(optional, before saving)</span></label>
+                <div style="display:flex; gap:8px;">
+                    <input type="text" class="field-control" id="cqaTestQuestion" placeholder="How much is one meal?">
+                    <button class="btn-secondary" type="button" onclick="runCqaTest()">Test</button>
+                    <button class="btn-secondary" type="button" onclick="runCqaPreview()">Preview</button>
+                </div>
+                <div id="cqaTestResult" style="margin-top:10px; font-size:0.84rem;"></div>
+            </div>
+
+            <div style="display: flex; gap: 8px; justify-content: flex-end;">
+                <button class="btn-secondary" onclick="closeCustomQaModal()">Cancel</button>
+                <button class="btn-primary" onclick="saveCustomQa()">Save Q&amp;A</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Custom Q&A: delete confirmation. Permanent -- distinct from Disable/Archive. -->
+    <div id="customQaDeleteModal" style="display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 9999; justify-content: center; align-items: center; padding: 20px;">
+        <div style="background: white; border-radius: 16px; width: 100%; max-width: 480px; padding: 24px; box-shadow: 0 10px 30px rgba(0,0,0,0.2);">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px;">
+                <h3 style="margin: 0; color: var(--danger);">Delete this Custom Q&amp;A permanently?</h3>
+                <button onclick="closeCustomQaDeleteModal()" style="background: none; border: none; font-size: 1.4rem; cursor: pointer;">&times;</button>
+            </div>
+            <div id="cqaDeleteDetails" style="background:#F7F5F3; border:1px solid var(--border); border-radius:10px; padding:12px; font-size:0.82rem; line-height:1.6; margin-bottom:12px;"></div>
+            <div style="background:#FEF2F2; border:1px solid #FCA5A5; border-radius:10px; padding:10px 12px; font-size:0.8rem; color:#991B1B; margin-bottom:16px;">
+                This permanently removes this Q&amp;A and it will no longer be available to the chatbot.
+            </div>
+            <div style="display: flex; gap: 8px; justify-content: flex-end;">
+                <button class="btn-secondary" onclick="closeCustomQaDeleteModal()">Cancel</button>
+                <button class="btn-danger" onclick="confirmCustomQaDelete()">Delete Permanently</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Custom Q&A: version history. Newest first; Restore snapshots the
+         current state before applying the historical one. -->
+    <div id="customQaHistoryModal" style="display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 9999; justify-content: center; align-items: center; padding: 20px;">
+        <div style="background: white; border-radius: 16px; width: 100%; max-width: 620px; padding: 24px; box-shadow: 0 10px 30px rgba(0,0,0,0.2); max-height: 85vh; overflow-y: auto;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px;">
+                <h3 style="margin: 0; color: var(--primary);">History</h3>
+                <button onclick="closeCustomQaHistoryModal()" style="background: none; border: none; font-size: 1.4rem; cursor: pointer;">&times;</button>
+            </div>
+            <div id="cqaHistoryBody"></div>
+        </div>
+    </div>
+
+    <!-- Custom Q&A: CSV import, three steps -- upload, dry-run report,
+         confirm. Nothing is saved until Confirm Import is pressed, and
+         confirm re-validates the same file rather than trusting client
+         state from the dry run. -->
+    <div id="customQaImportModal" style="display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 9999; justify-content: center; align-items: center; padding: 20px;">
+        <div style="background: white; border-radius: 16px; width: 100%; max-width: 680px; padding: 24px; box-shadow: 0 10px 30px rgba(0,0,0,0.2); max-height: 85vh; overflow-y: auto;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px;">
+                <h3 style="margin: 0; color: var(--primary);">Import CSV</h3>
+                <button onclick="closeCustomQaImportModal()" style="background: none; border: none; font-size: 1.4rem; cursor: pointer;">&times;</button>
+            </div>
+            <p style="font-size:0.82rem; color:var(--text-muted);">
+                <a href="#" onclick="downloadCustomQaTemplate(); return false;">Download CSV Template</a>
+            </p>
+            <input type="file" id="cqaImportFile" accept=".csv" class="field-control" style="margin-bottom:12px;">
+            <div style="display:flex; gap:8px; margin-bottom:14px;">
+                <button class="btn-secondary" onclick="runCustomQaImportDryRun()">Validate (Dry Run)</button>
+                <button class="btn-primary" id="cqaImportConfirmBtn" style="display:none;" onclick="confirmCustomQaImport()">Confirm Import</button>
+            </div>
+            <div id="cqaImportSummary" style="font-size:0.85rem; margin-bottom:10px;"></div>
+            <div style="overflow-x:auto;">
+                <table class="data-table">
+                    <thead><tr><th>Row</th><th>Question</th><th>Status</th><th>Notes</th></tr></thead>
+                    <tbody id="cqaImportRows"><tr><td colspan="4" style="text-align:center; color:#888;">Upload a CSV and click Validate.</td></tr></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <div id="topicModal" style="display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 9999; justify-content: center; align-items: center; padding: 20px;">
+        <div style="background: white; border-radius: 16px; width: 100%; max-width: 520px; padding: 24px; box-shadow: 0 10px 30px rgba(0,0,0,0.2); max-height: 90vh; overflow-y: auto;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px;">
+                <h3 style="margin: 0; color: var(--primary);" id="topicModalTitle">+ Add Topic</h3>
+                <button onclick="closeTopicModal()" style="background: none; border: none; font-size: 1.4rem; cursor: pointer;">&times;</button>
+            </div>
+            <input type="hidden" id="topicModalEditingId">
+            <label class="field-label">Topic Name *</label>
+            <input class="field-control" id="topicName" placeholder="e.g. Wedding / Event Sondesh" style="margin-bottom:10px;">
+            <label class="field-label">Description *</label>
+            <textarea class="field-control" id="topicDescription" rows="3" placeholder="Shown to customers who ask a vague question after sharing this content." style="margin-bottom:10px;"></textarea>
+            <label class="field-label">Default Menu *</label>
+            <select class="field-control" id="topicDefaultMenu" style="margin-bottom:10px;"><option value="">Select Menu</option></select>
+            <label class="field-label">Reply Order</label>
+            <select class="field-control" id="topicResponseOrder" style="margin-bottom:10px;"><option value="description_first">Description First</option><option value="menu_first">Menu First</option></select>
+            <label style="display:flex; align-items:center; gap:6px; font-size:0.85rem; margin-bottom:10px;"><input type="checkbox" id="topicActive" checked> Active</label>
+            <details><summary style="cursor:pointer; font-size:0.85rem; margin-bottom:8px;"><b>Advanced</b> — Priority Products, Knowledge Scope</summary>
+                <div style="margin-top:8px;">
+                    <label class="field-label">Priority Products</label>
+                    <div style="display:flex; gap:8px;"><select class="field-control" id="topicProductPicker"></select><button class="btn-secondary" type="button" onclick="addTopicPriorityProduct()">+ Add</button></div>
+                    <div id="topicPriorityProducts" class="ad-route-list" style="margin-top:8px;"></div>
+                    <label class="field-label" style="margin-top:10px;">Knowledge Scope</label>
+                    <select class="field-control" id="topicKnowledgeScope" multiple></select>
+                </div>
+            </details>
+            <div style="display: flex; gap: 8px; justify-content: flex-end; margin-top:16px;">
+                <button class="btn-secondary" onclick="closeTopicModal()">Cancel</button>
+                <button class="btn-primary" onclick="submitTopic()">Save Topic</button>
+            </div>
+            <div id="topicModalResult" class="result-box"></div>
+        </div>
+    </div>
+
+    <div id="menuModal" style="display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 9999; justify-content: center; align-items: center; padding: 20px;">
+        <div style="background: white; border-radius: 16px; width: 100%; max-width: 480px; padding: 24px; box-shadow: 0 10px 30px rgba(0,0,0,0.2); max-height: 90vh; overflow-y: auto;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px;">
+                <h3 style="margin: 0; color: var(--primary);">+ Add New Menu</h3>
+                <button onclick="closeMenuModal()" style="background: none; border: none; font-size: 1.4rem; cursor: pointer;">&times;</button>
+            </div>
+            <label class="field-label">Menu Name *</label>
+            <input class="field-control" id="menuName" placeholder="e.g. Meal Subscription" style="margin-bottom:10px;">
+            <label class="field-label">Menu Type / Category</label>
+            <select class="field-control" id="menuCategory" style="margin-bottom:10px;"></select>
+            <label class="field-label">Customer Description *</label>
+            <textarea class="field-control" id="menuDescription" rows="3" placeholder="e.g. Weekly Bengali home-style meal subscription with rotating menus." style="margin-bottom:10px;"></textarea>
+            <label class="field-label">Menu Image *</label>
+            <input type="file" id="menuImageFile" accept="image/jpeg,image/png,image/webp" style="margin-bottom:10px;">
+            <label style="display:flex; align-items:center; gap:6px; font-size:0.85rem; margin-bottom:10px;"><input type="checkbox" id="menuActive" checked> Active</label>
+            <div style="display: flex; gap: 8px; justify-content: flex-end;">
+                <button class="btn-secondary" onclick="closeMenuModal()">Cancel</button>
+                <button class="btn-primary" onclick="submitMenu()">Create Menu</button>
+            </div>
+            <div id="menuModalResult" class="result-box"></div>
+        </div>
+    </div>
+
     <script>
         // Remembering the PIN between page loads is a convenience, never part
         // of authentication — so no storage failure may stand between a valid
@@ -3560,12 +6017,10 @@ THIS WEEK'S BENGAL SPECIALS
             refreshReaderStatus();
             if (currentAdminKey) {
                 document.getElementById('authOverlay').style.display = 'none';
-                loadMenuManager();
                 loadActiveMenu();
                 loadAdRoutes();
                 loadAnalytics();
                 refreshCandidateBadge();
-                loadAssistedResolutions();
             } else {
                 document.getElementById('authOverlay').style.display = 'flex';
             }
@@ -3591,12 +6046,10 @@ THIS WEEK'S BENGAL SPECIALS
                     currentAdminKey = pin;
                     document.getElementById('authOverlay').style.display = 'none';
                     safeStorageSet('camellia_admin_pin', pin);
-                    loadMenuManager();
                     loadActiveMenu();
                     loadAdRoutes();
                     loadAnalytics();
                     refreshCandidateBadge();
-                    loadAssistedResolutions();
                 } else {
                     const card = document.getElementById('authCard');
                     card.classList.add('shake');
@@ -3640,15 +6093,18 @@ THIS WEEK'S BENGAL SPECIALS
             return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
         }
 
-        // The old panel-per-tab navigation overflowed a kitchen handset. Panels
-        // are grouped by task and a tab shows its whole group stacked. Each tab
+        // Eight tabs needed 1655px of nav on a 347px phone, so six of them were
+        // simply invisible to a kitchen working off a handset. Panels are now
+        // grouped three ways and a tab shows its whole group stacked. Each tab
         // is named after the panel it leads with, so the panels themselves did
         // not have to move.
         const TAB_GROUPS = {
             'tab-image': 'menu',
-            'tab-collections': 'collections',
+            'tab-menu-manager': 'menu_manager',
             'tab-stats': 'customers',
-            'tab-candidates': 'answers'
+            'tab-candidates': 'answers',
+            'tab-ai-resolution': 'ai_resolution',
+            'tab-custom-qa': 'custom_qa'
         };
 
         function showGroup(group) {
@@ -3667,264 +6123,636 @@ THIS WEEK'S BENGAL SPECIALS
             // Everything in the group is on screen at once, so everything in it
             // needs its data.
             if (group === 'menu') { loadActiveMenu(); loadAdRoutes(); }
-            if (group === 'menu') { loadMenuManager(); }
-            if (group === 'collections') { loadCollectionMenus(); }
+            if (group === 'menu_manager') { mmLoadMenuList(); }
             if (group === 'customers') { loadAnalytics(); loadConversations(); }
-            if (group === 'answers') { loadCandidates(); loadAssistedResolutions(); loadKnowledge(); }
+            if (group === 'answers') { loadCandidates(); loadKnowledge(); }
+            if (group === 'ai_resolution') { loadAiResolution(); loadTriageShadow(); }
+            if (group === 'custom_qa') { loadCustomQa(); loadAssistedEvaluation(); }
         }
 
-        function managerRequest(url, options) {
-            options = options || {};
-            options.headers = Object.assign({}, getAuthHeaders(), options.headers || {});
-            return fetch(url, options);
-        }
+        // MENU MANAGER tab: every menu is edited as a draft (server-side, in
+        // menu_drafts) and only becomes the chatbot's live answer when Save &
+        // Publish is pressed — camellia/menu_manager.py owns validation,
+        // rendering and the reload, this is only its HTTP-backed editor.
+        let mmMenus = [];
+        let mmCurrentKey = null;
+        let mmCurrentKind = null;
+        let mmItems = [];
 
-        async function loadMenuManager() {
-            const grid = document.getElementById('menuManagerGrid');
-            if (!grid) return;
+        async function mmLoadMenuList() {
+            const list = document.getElementById('mmMenuList');
+            if (!list || !currentAdminKey) return;
             try {
-                const response = await managerRequest('/admin/menu-manager/menus');
-                if (!response.ok) throw new Error('Could not load menu images');
-                const data = await response.json();
-                grid.innerHTML = (data.menus || []).map(menu => {
-                    const draft = menu.draft ? '<span style="color:#8a5a00;">Draft ready</span>' : '';
-                    const image = menu.image_url ? `<img class="menu-manager-image" src="${escapeHtml(menu.image_url)}" alt="${escapeHtml(menu.title)}" onclick="window.open('${escapeHtml(menu.image_url)}','_blank')">` : '<div class="menu-manager-image" style="display:grid;place-items:center;color:#888;">No published image</div>';
-                    return `<article class="menu-manager-card"><h3>${escapeHtml(menu.title)}</h3>${image}<div class="menu-manager-meta"><b>${escapeHtml(menu.status)}</b>${menu.published_at ? ` · Published ${escapeHtml(menu.published_at)}` : ''}${draft ? `<br>${draft}` : ''}</div><div class="menu-manager-actions"><button class="btn-primary" onclick="replaceMenuImage('${escapeHtml(menu.menu_key)}')">Replace Menu</button><button class="btn-secondary" onclick="showMenuHistory('${escapeHtml(menu.menu_key)}')">History</button><button class="btn-danger" onclick="archiveMenuImage('${escapeHtml(menu.menu_key)}')">Archive</button></div><div id="menu-history-${escapeHtml(menu.menu_key)}" class="menu-manager-history" style="display:none"></div></article>`;
-                }).join('');
-            } catch (error) { grid.innerHTML = `<p style="color:#a33">${escapeHtml(error.message)}</p>`; }
-        }
-
-        function replaceMenuImage(menuKey) {
-            const input = document.createElement('input'); input.type = 'file'; input.accept = 'image/jpeg,image/png,image/webp';
-            input.onchange = async () => {
-                const file = input.files && input.files[0]; if (!file) return;
-                const form = new FormData(); form.append('file', file);
-                const result = document.getElementById('menuManagerResult'); result.innerHTML = 'Uploading draft…';
-                const response = await managerRequest(`/admin/menu-manager/menus/${encodeURIComponent(menuKey)}/draft`, {method:'POST', body:form});
-                const data = await response.json();
-                if (!response.ok) { result.innerHTML = escapeHtml(data.detail || 'Upload failed'); return; }
-                const current = await managerRequest(`/admin/menu-manager/menus/${encodeURIComponent(menuKey)}`).then(r => r.json());
-                const draftUrl = data.draft.image_path;
-                result.innerHTML = `<div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-start"><div><b>Current Menu</b><br><img src="${escapeHtml(current.current || '')}" style="max-width:220px;max-height:260px"></div><div><b>New Menu</b><br><img src="${escapeHtml(draftUrl)}" style="max-width:220px;max-height:260px"></div></div><div class="action-bar"><button class="btn-secondary" onclick="loadMenuManager();document.getElementById('menuManagerResult').innerHTML=''">Cancel</button><button class="btn-secondary" onclick="previewMenuImage('${escapeHtml(menuKey)}')">Save Draft</button><button class="btn-primary" onclick="publishMenuImage('${escapeHtml(menuKey)}')">Publish New Menu</button></div>`;
-            }; input.click();
-        }
-
-        async function previewMenuImage(menuKey) { const data = await managerRequest(`/admin/menu-manager/menus/${encodeURIComponent(menuKey)}`).then(r=>r.json()); document.getElementById('menuManagerResult').innerHTML = data.draft ? `Draft saved for ${escapeHtml(menuKey)}. Publish when ready.` : 'No draft image.'; }
-        async function publishMenuImage(menuKey) { const response = await managerRequest(`/admin/menu-manager/menus/${encodeURIComponent(menuKey)}/publish`, {method:'POST'}); const data = await response.json(); document.getElementById('menuManagerResult').innerHTML = response.ok ? 'Published. Customers will receive the new image immediately.' : escapeHtml(data.detail || 'Publish failed'); loadMenuManager(); }
-        async function archiveMenuImage(menuKey) { if (!confirm('Are you sure you want to remove this menu from customer view?')) return; const response = await managerRequest(`/admin/menu-manager/menus/${encodeURIComponent(menuKey)}/archive`, {method:'POST'}); const data = await response.json(); document.getElementById('menuManagerResult').innerHTML = response.ok ? 'Menu archived. It remains available in History.' : escapeHtml(data.detail || 'Archive failed'); loadMenuManager(); }
-        async function showMenuHistory(menuKey) { const box = document.getElementById(`menu-history-${menuKey}`); if (!box) return; const data = await managerRequest(`/admin/menu-manager/menus/${encodeURIComponent(menuKey)}/history`).then(r=>r.json()); box.style.display = 'block'; box.innerHTML = (data.versions || []).length ? data.versions.map(v => `<div style="margin:7px 0"><img src="${escapeHtml(v.image_path)}"><span>Version ${v.version} — ${escapeHtml(v.status)}</span>${v.status !== 'current' ? ` <button class="btn-secondary" onclick="restoreMenuImage('${escapeHtml(menuKey)}',${v.id})">Restore</button>` : ''}</div>`).join('') : '<span>No image history yet.</span>'; }
-        async function restoreMenuImage(menuKey, versionId) { const response = await managerRequest(`/admin/menu-manager/menus/${encodeURIComponent(menuKey)}/restore/${versionId}`, {method:'POST'}); const data = await response.json(); document.getElementById('menuManagerResult').innerHTML = response.ok ? 'Previous menu restored.' : escapeHtml(data.detail || 'Restore failed'); loadMenuManager(); showMenuHistory(menuKey); }
-
-        let collectionCatalogue = null;
-        let collectionVariants = [];
-        let collectionSelections = [];
-
-        function priceLines(prices) {
-            return (prices || []).map(price => {
-                const size = price.pack_size || '';
-                const pieces = price.pieces ? `${price.pieces} pcs` : '';
-                const amount = price.price_inr != null ? `₹${price.price_inr}` : '';
-                return [size, pieces, amount].filter(Boolean).join(' · ');
-            }).join(', ');
-        }
-
-        function collectionOptionDetail(product, flavour) {
-            const prices = priceLines((flavour && flavour.prices) || product.prices);
-            return [prices, (flavour && flavour.note) || product.description || product.pricing_note || '']
-                .filter(Boolean).join(' — ');
-        }
-
-        function buildCollectionVariants(menu) {
-            const variants = [];
-            Object.entries(menu.collections || {}).forEach(([collectionKey, collection]) => {
-                (collection.products || []).forEach(product => {
-                    const type = String(product.item || 'Selection').toLowerCase();
-                    const flavours = product.flavours || [];
-                    if (flavours.length) {
-                        flavours.forEach(flavour => {
-                            const flavourName = typeof flavour === 'string' ? flavour : flavour.flavour;
-                            variants.push({
-                                collectionKey,
-                                collectionName: collection.collection_name || collectionKey,
-                                type,
-                                item: product.item || 'Selection',
-                                label: `${product.item}: ${flavourName}`,
-                                detail: collectionOptionDetail(product, typeof flavour === 'string' ? null : flavour)
-                            });
-                        });
-                    } else {
-                        variants.push({
-                            collectionKey,
-                            collectionName: collection.collection_name || collectionKey,
-                            type,
-                            item: product.item || 'Selection',
-                            label: product.item || 'Selection',
-                            detail: collectionOptionDetail(product, null)
-                        });
-                    }
-                });
-            });
-
-            const weeks = menu.weekly_menus || [];
-            const current = weeks.length ? weeks[weeks.length - 1] : {};
-            (current.norom_pak_sondesh || []).forEach(item => {
-                variants.push({
-                    collectionKey: 'weekly_norom_pak',
-                    collectionName: 'Weekly Norom Pak Sondesh',
-                    type: 'sondesh',
-                    item: 'Sondesh',
-                    label: `Sondesh: ${item.flavour || 'Weekly option'}`,
-                    detail: priceLines([item]) || item.pricing_note || item.status || ''
-                });
-            });
-            return variants;
-        }
-
-        function startCollectionBuild(collectionKey) {
-            if (!collectionCatalogue) return;
-            const collection = (collectionCatalogue.collections || {})[collectionKey];
-            if (!collection) return;
-
-            collectionSelections = (collection.products || []).map(product => {
-                const type = String(product.item || 'Selection').toLowerCase();
-                let selected = collectionVariants.findIndex(option =>
-                    option.collectionKey === collectionKey && option.type === type
-                );
-                if (selected < 0) selected = collectionVariants.findIndex(option => option.type === type);
-                return { type, item: product.item || 'Selection', selected };
-            }).filter(slot => slot.selected >= 0);
-            renderCollectionBuilder();
-        }
-
-        function renderCollectionBuilder() {
-            const builder = document.getElementById('collectionBuilder');
-            if (!builder) return;
-            if (!collectionSelections.length) {
-                builder.innerHTML = '<p style="color: var(--text-muted); font-size: 0.84rem; margin-top: 12px;">No selectable items are available in this collection.</p>';
-                renderCollectionSummary();
-                return;
-            }
-
-            builder.innerHTML = collectionSelections.map((slot, slotIndex) => {
-                const options = collectionVariants.map((option, optionIndex) => ({ option, optionIndex }))
-                    .filter(entry => entry.option.type === slot.type);
-                return `<div class="collection-slot">
-                    <label for="collectionSlot${slotIndex}">${escapeHtml(slot.item)}</label>
-                    <select id="collectionSlot${slotIndex}" class="collection-select" onchange="changeCollectionSelection(${slotIndex}, this.value)">
-                        ${options.map(entry => `<option value="${entry.optionIndex}" ${entry.optionIndex === slot.selected ? 'selected' : ''}>${escapeHtml(entry.option.collectionName)} — ${escapeHtml(entry.option.label)}</option>`).join('')}
-                    </select>
-                    <div class="collection-choice-detail">${escapeHtml((collectionVariants[slot.selected] || {}).detail || 'No price details listed')}</div>
-                </div>`;
-            }).join('');
-            renderCollectionSummary();
-        }
-
-        function changeCollectionSelection(slotIndex, variantIndex) {
-            const index = Number(variantIndex);
-            if (!collectionSelections[slotIndex] || !collectionVariants[index]) return;
-            collectionSelections[slotIndex].selected = index;
-            renderCollectionBuilder();
-        }
-
-        function collectionSummaryText() {
-            const base = document.getElementById('collectionBase');
-            const baseName = base && base.options[base.selectedIndex] ? base.options[base.selectedIndex].text : 'Custom collection';
-            const rows = collectionSelections.map((slot, index) => {
-                const choice = collectionVariants[slot.selected];
-                return `${index + 1}. ${choice.label} (${choice.collectionName})${choice.detail ? ` — ${choice.detail}` : ''}`;
-            });
-            return [`New collection — based on ${baseName}`, ...rows].join('\n');
-        }
-
-        function renderCollectionSummary() {
-            const summary = document.getElementById('collectionSummary');
-            if (!summary) return;
-            if (!collectionSelections.length) {
-                summary.innerHTML = '<p style="color: var(--text-muted); font-size: 0.84rem;">No selections yet.</p>';
-                return;
-            }
-            summary.innerHTML = collectionSelections.map((slot, index) => {
-                const choice = collectionVariants[slot.selected];
-                return `<div class="collection-slot"><b>${index + 1}. ${escapeHtml(choice.label)}</b><div class="collection-choice-detail">From ${escapeHtml(choice.collectionName)}${choice.detail ? ` · ${escapeHtml(choice.detail)}` : ''}</div></div>`;
-            }).join('');
-        }
-
-        async function copyCollectionSummary() {
-            const result = document.getElementById('collectionCopyResult');
-            if (!collectionSelections.length) return;
-            try {
-                await navigator.clipboard.writeText(collectionSummaryText());
-                result.className = 'result-box success';
-                result.innerText = 'Collection summary copied.';
-            } catch (e) {
-                result.className = 'result-box info';
-                result.innerText = collectionSummaryText();
-            }
-            result.style.display = 'block';
-        }
-
-        function catalogueCard(title, detail) {
-            return `<div class="catalogue-item"><b>${escapeHtml(title)}</b>${escapeHtml(detail || 'No additional details listed')}</div>`;
-        }
-
-        function renderAllMenuCatalogue(menu) {
-            const container = document.getElementById('allMenuCatalogue');
-            if (!container) return;
-            let html = '<h2 style="font-size: 1.2rem; color: var(--primary);">All available menus and items</h2>';
-
-            Object.values(menu.collections || {}).forEach(collection => {
-                let cards = '';
-                (collection.products || []).forEach(product => {
-                    const flavours = product.flavours || [];
-                    if (flavours.length) {
-                        flavours.forEach(flavour => {
-                            const name = typeof flavour === 'string' ? flavour : flavour.flavour;
-                            cards += catalogueCard(`${product.item}: ${name}`, collectionOptionDetail(product, typeof flavour === 'string' ? null : flavour));
-                        });
-                    } else {
-                        cards += catalogueCard(product.item, collectionOptionDetail(product, null));
-                    }
-                });
-                html += `<section class="catalogue-section"><h3>${escapeHtml(collection.collection_name || 'Sondesh collection')}</h3><div class="catalogue-list">${cards}</div></section>`;
-            });
-
-            const weeks = menu.weekly_menus || [];
-            if (weeks.length) {
-                const week = weeks[weeks.length - 1];
-                const weeklyGroups = [
-                    ['Vegetarian weekly menu', week.vegetarian || [], item => [item.item, [item.quantity, item.price_inr != null ? `₹${item.price_inr}` : '', item.description].filter(Boolean).join(' · ')]],
-                    ['Non-vegetarian weekly menu', week.non_vegetarian || [], item => [item.item, [item.quantity, item.price_inr != null ? `₹${item.price_inr}` : '', item.description].filter(Boolean).join(' · ')]],
-                    ['Bengali bento menu', week.bengali_bento || [], item => [item.name, [item.price_inr != null ? `₹${item.price_inr}` : '', (item.includes || []).join(', ')].filter(Boolean).join(' · ')]],
-                    ['Norom Pak Sondesh menu', week.norom_pak_sondesh || [], item => [item.flavour, priceLines([item]) || item.pricing_note || item.status || '']]
-                ];
-                weeklyGroups.forEach(([heading, items, describe]) => {
-                    if (!items.length) return;
-                    const cards = items.map(item => {
-                        const [title, detail] = describe(item);
-                        return catalogueCard(title, detail);
-                    }).join('');
-                    html += `<section class="catalogue-section"><h3>${escapeHtml(heading)}</h3><div class="catalogue-list">${cards}</div></section>`;
-                });
-            }
-            container.innerHTML = html;
-        }
-
-        async function loadCollectionMenus() {
-            try {
-                const resp = await fetch('/admin/menu/active', { headers: getAuthHeaders() });
-                if (!resp.ok) throw new Error('Could not load the menu catalogue.');
+                const resp = await fetch('/admin/menu-manager/menus', { headers: getAuthHeaders() });
                 const data = await resp.json();
-                collectionCatalogue = data.menu || {};
-                collectionVariants = buildCollectionVariants(collectionCatalogue);
-
-                const base = document.getElementById('collectionBase');
-                const collections = Object.entries(collectionCatalogue.collections || {});
-                base.innerHTML = collections.map(([key, collection]) => `<option value="${escapeHtml(key)}">${escapeHtml(collection.collection_name || key)}</option>`).join('');
-                renderAllMenuCatalogue(collectionCatalogue);
-                if (collections.length) startCollectionBuild(base.value || collections[0][0]);
+                if (!resp.ok) throw new Error(data.detail || 'Could not load menus.');
+                mmMenus = data.menus || [];
+                mmRenderImageGallery();
+                list.innerHTML = mmMenus.map(m => `
+                    <button class="catalogue-item" type="button" style="display:block; width:100%; text-align:left; margin-bottom:8px;" onclick="mmOpenMenu('${m.menu_key}')">
+                        <b>${escapeHtml(m.label)}</b>
+                        <small>${m.active_item_count}/${m.item_count} active item(s)${m.has_draft ? ' · <span style="color:var(--primary); font-weight:700;">unsaved draft</span>' : ''}</small>
+                    </button>`).join('');
+                if (mmCurrentKey) mmOpenMenu(mmCurrentKey);
             } catch (err) {
-                document.getElementById('collectionBuilder').innerHTML = `<p style="color: var(--danger); font-size: 0.84rem;">${escapeHtml(err.message || err)}</p>`;
-                document.getElementById('allMenuCatalogue').innerHTML = '<p style="color: var(--danger); font-size: 0.84rem;">The menu catalogue could not be loaded.</p>';
+                list.innerHTML = `<p style="color: var(--danger);">${escapeHtml(err.message || err)}</p>`;
+            }
+        }
+
+        // The image gallery is deliberately its own fetch, independent of
+        // mmMenus (the structured item/price editor list, which only ever
+        // covers the five built-in menus that have a MANAGEABLE_MENUS entry).
+        // A menu created purely through "+ Add New Menu" has no item list at
+        // all — just a name, category, description and image — so it would
+        // never appear here if this reused mmMenus. Fetching the dynamic
+        // catalogue directly means every menu, old or brand new, shows up.
+        async function mmRenderImageGallery() {
+            const grid = document.getElementById('mmImageGrid');
+            if (!grid || !currentAdminKey) return;
+            try {
+                const resp = await fetch('/admin/menu-manager/images', { headers: getAuthHeaders() });
+                const data = await resp.json();
+                if (!resp.ok) throw new Error(data.detail || 'Could not load menu images.');
+                const menus = data.menus || [];
+                grid.innerHTML = menus.map(m => {
+                    const image = m.image_url ? `<img src="${escapeHtml(m.image_url)}" alt="${escapeHtml(m.title)}">` : '<div style="height:210px;display:grid;place-items:center;background:#f6f3ef;color:#888">No image published</div>';
+                    const key = encodeURIComponent(m.menu_key);
+                    return `<article class="visual-menu-card"><h3>${escapeHtml(m.title)}${m.category ? ` <span style="font-weight:400;font-size:0.75rem;color:var(--text-muted);">· ${escapeHtml(m.category)}</span>` : ''}</h3>${image}<div class="visual-menu-meta"><b>${escapeHtml(m.status || 'Active')}</b>${m.published_at ? ` · ${escapeHtml(m.published_at)}` : ''}</div><div class="visual-menu-actions"><button class="btn-primary" onclick="mmReplaceImage('${key}')">Replace</button><button class="btn-secondary" onclick="mmPreviewImage('${key}')">Preview</button><button class="btn-secondary" onclick="mmHistoryImage('${key}')">History</button><button class="btn-danger" onclick="mmArchiveImage('${key}')">Archive</button></div><div id="mm-image-history-${key}" style="padding:0 14px 12px"></div></article>`;
+                }).join('');
+            } catch (err) {
+                grid.innerHTML = `<p style="color: var(--danger);">${escapeHtml(err.message || err)}</p>`;
+            }
+        }
+
+        function mmReplaceImage(key) { const input=document.createElement('input'); input.type='file'; input.accept='image/jpeg,image/png,image/webp'; input.onchange=async()=>{const file=input.files&&input.files[0];if(!file)return;const form=new FormData();form.append('file',file);const response=await fetch(`/admin/menu-manager/menus/${key}/image/draft`,{method:'POST',headers:getAuthHeaders(),body:form});const data=await response.json();const msg=document.getElementById('mmMessage');msg.style.display='block';msg.className=response.ok?'result-box info':'result-box error';msg.innerText=response.ok?'Draft image saved. Preview it, then publish when ready.':(data.detail||'Upload failed.');if(response.ok)mmLoadMenuList();};input.click(); }
+        async function mmPreviewImage(key){const response=await fetch(`/admin/menu-manager/menus/${key}/image/preview`,{headers:getAuthHeaders()});const data=await response.json();const msg=document.getElementById('mmMessage');msg.style.display='block';msg.className='result-box info';msg.innerHTML=response.ok?`<b>Current</b><br><img src="${escapeHtml(data.current||'')}" style="max-width:220px;max-height:260px"><br><b>New draft</b><br>${data.draft?`<img src="${escapeHtml(data.draft.image_path)}" style="max-width:220px;max-height:260px">`:'No draft saved.'}`:escapeHtml(data.detail||'Preview failed');}
+        async function mmPublishImage(key){const response=await fetch(`/admin/menu-manager/menus/${key}/image/publish`,{method:'POST',headers:getAuthHeaders()});const data=await response.json();const msg=document.getElementById('mmMessage');msg.style.display='block';msg.className=response.ok?'result-box success':'result-box error';msg.innerText=response.ok?'Published. Customers receive the new image immediately.':(data.detail||'Publish failed.');if(response.ok)mmLoadMenuList();}
+        async function mmArchiveImage(key){if(!confirm('Are you sure you want to remove this menu from customer view?'))return;const response=await fetch(`/admin/menu-manager/menus/${key}/image/archive`,{method:'POST',headers:getAuthHeaders()});const data=await response.json();const msg=document.getElementById('mmMessage');msg.style.display='block';msg.className='result-box info';msg.innerText=response.ok?'Menu archived; it remains in History.':(data.detail||'Archive failed.');if(response.ok)mmLoadMenuList();}
+        async function mmHistoryImage(key){const response=await fetch(`/admin/menu-manager/menus/${key}/image/history`,{headers:getAuthHeaders()});const data=await response.json();const box=document.getElementById(`mm-image-history-${key}`);box.innerHTML=(data.versions||[]).map(v=>`<div style="margin:7px 0"><img src="${escapeHtml(v.image_path)}" style="width:70px;height:50px;object-fit:cover;vertical-align:middle;border-radius:4px"><span style="font-size:.78rem">Version ${v.version} — ${escapeHtml(v.status)}</span>${v.status!=='current'?` <button class="btn-secondary" onclick="mmRestoreImage('${key}',${v.id})">Restore</button>`:''}</div>`).join('')||'<small>No image history yet.</small>';}
+        async function mmRestoreImage(key,versionId){const response=await fetch(`/admin/menu-manager/menus/${key}/image/restore/${versionId}`,{method:'POST',headers:getAuthHeaders()});const data=await response.json();const msg=document.getElementById('mmMessage');msg.style.display='block';msg.className=response.ok?'result-box success':'result-box error';msg.innerText=response.ok?'Previous menu restored.':(data.detail||'Restore failed.');if(response.ok)mmLoadMenuList();}
+
+        async function mmOpenMenu(menuKey) {
+            const msg = document.getElementById('mmMessage');
+            msg.style.display = 'none';
+            document.getElementById('mmPreviewBox').style.display = 'none';
+            try {
+                const resp = await fetch(`/admin/menu-manager/menus/${encodeURIComponent(menuKey)}`, { headers: getAuthHeaders() });
+                const data = await resp.json();
+                if (!resp.ok) throw new Error(data.detail || 'Could not load this menu.');
+                mmCurrentKey = menuKey;
+                mmCurrentKind = data.kind;
+                mmItems = data.draft || data.published || [];
+                document.getElementById('mmEditorTitle').innerText = data.label + (data.draft ? ' (editing draft)' : '');
+                mmRenderItems();
+                mmLoadVersions();
+            } catch (err) {
+                msg.style.display = 'block';
+                msg.className = 'result-box error';
+                msg.innerText = err.message || String(err);
+            }
+        }
+
+        function mmRenderItems() {
+            const container = document.getElementById('mmEditorItems');
+            if (!mmCurrentKey) { container.innerHTML = ''; return; }
+            if (mmCurrentKind === 'collection') {
+                container.innerHTML = mmItems.map((item, i) => `
+                    <div class="collection-slot">
+                        <label>Flavour / item name</label>
+                        <input type="text" class="collection-select" value="${escapeHtml(item.flavour || '')}" onchange="mmItems[${i}].flavour=this.value">
+                        <div style="display:flex; gap:8px; margin-top:6px; flex-wrap:wrap;">
+                            ${['250g','500g','1kg'].map(size => `
+                                <label style="font-size:0.76rem;">${size} price
+                                    <input type="number" style="width:90px;" value="${(item.prices && item.prices[size]) || ''}"
+                                        onchange="mmSetPrice(${i}, '${size}', this.value)">
+                                </label>`).join('')}
+                        </div>
+                        <label style="display:flex; align-items:center; gap:6px; margin-top:6px; font-size:0.8rem;">
+                            <input type="checkbox" ${item.active !== false ? 'checked' : ''} onchange="mmItems[${i}].active=this.checked">
+                            Active (unchecked items are kept here but hidden from customers)
+                        </label>
+                        <button class="btn-danger" type="button" style="margin-top:6px;" onclick="mmRemoveItem(${i})">Remove</button>
+                    </div>`).join('') || '<p style="color: var(--text-muted);">No items yet — use + Add item.</p>';
+            } else {
+                container.innerHTML = mmItems.map((item, i) => `
+                    <div class="collection-slot">
+                        <label>Dish name</label>
+                        <input type="text" class="collection-select" value="${escapeHtml(item.item || '')}" onchange="mmItems[${i}].item=this.value">
+                        <label style="margin-top:6px;">Price (₹)</label>
+                        <input type="number" class="collection-select" value="${item.price_inr || ''}" onchange="mmItems[${i}].price_inr=Number(this.value)">
+                        <label style="margin-top:6px;">Description</label>
+                        <input type="text" class="collection-select" value="${escapeHtml(item.description || '')}" onchange="mmItems[${i}].description=this.value">
+                        <label style="margin-top:6px;">Quantity / pack</label>
+                        <input type="text" class="collection-select" value="${escapeHtml(item.quantity || '')}" onchange="mmItems[${i}].quantity=this.value">
+                        <button class="btn-danger" type="button" style="margin-top:6px;" onclick="mmRemoveItem(${i})">Remove</button>
+                    </div>`).join('') || '<p style="color: var(--text-muted);">No items yet — use + Add item.</p>';
+            }
+        }
+
+        function mmSetPrice(index, size, value) {
+            const item = mmItems[index];
+            item.prices = item.prices || {};
+            const num = Number(value);
+            if (value === '' || Number.isNaN(num)) { delete item.prices[size]; }
+            else { item.prices[size] = num; }
+        }
+
+        function mmAddItem() {
+            if (!mmCurrentKey) return alert('Choose a menu first.');
+            mmItems.push(mmCurrentKind === 'collection'
+                ? { flavour: '', active: true, prices: {} }
+                : { item: '', price_inr: 0 });
+            mmRenderItems();
+        }
+
+        function mmRemoveItem(index) {
+            mmItems.splice(index, 1);
+            mmRenderItems();
+        }
+
+        function mmShowMessage(kind, text) {
+            const msg = document.getElementById('mmMessage');
+            msg.style.display = 'block';
+            msg.className = `result-box ${kind}`;
+            msg.innerText = text;
+        }
+
+        async function mmSaveDraft() {
+            if (!mmCurrentKey) return;
+            try {
+                const resp = await fetch(`/admin/menu-manager/menus/${encodeURIComponent(mmCurrentKey)}/draft`, {
+                    method: 'PUT', headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+                    body: JSON.stringify({ items: mmItems })
+                });
+                const data = await resp.json();
+                if (!resp.ok) throw new Error(data.detail || 'Could not save draft.');
+                mmShowMessage('success', 'Draft saved. The live chatbot menu is unchanged until you Save & Publish.');
+                mmLoadMenuList();
+            } catch (err) {
+                mmShowMessage('error', err.message || String(err));
+            }
+        }
+
+        async function mmPreview() {
+            if (!mmCurrentKey) return;
+            try {
+                await mmSaveDraft();
+                const resp = await fetch(`/admin/menu-manager/menus/${encodeURIComponent(mmCurrentKey)}/preview`, { headers: getAuthHeaders() });
+                const data = await resp.json();
+                if (!resp.ok) throw new Error(data.detail || 'Could not build preview.');
+                document.getElementById('mmPreviewBox').style.display = 'block';
+                document.getElementById('mmPreviewText').innerText = data.customer_facing_text;
+            } catch (err) {
+                mmShowMessage('error', err.message || String(err));
+            }
+        }
+
+        async function mmPublish() {
+            if (!mmCurrentKey) return;
+            if (!confirm('Publish this menu? Customers and the chatbot will see it immediately.')) return;
+            try {
+                const resp = await fetch(`/admin/menu-manager/menus/${encodeURIComponent(mmCurrentKey)}/publish`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+                    body: JSON.stringify({ items: mmItems })
+                });
+                const data = await resp.json();
+                if (!resp.ok) throw new Error(data.detail || 'Could not publish.');
+                mmShowMessage('success', `Published as version ${data.version_id}. The chatbot is using this menu now.`);
+                mmLoadMenuList();
+            } catch (err) {
+                mmShowMessage('error', err.message || String(err));
+            }
+        }
+
+        async function mmCancelDraft() {
+            if (!mmCurrentKey) return;
+            try {
+                await fetch(`/admin/menu-manager/menus/${encodeURIComponent(mmCurrentKey)}/draft`, {
+                    method: 'DELETE', headers: getAuthHeaders()
+                });
+                mmShowMessage('info', 'Draft discarded.');
+                mmOpenMenu(mmCurrentKey);
+                mmLoadMenuList();
+            } catch (err) {
+                mmShowMessage('error', err.message || String(err));
+            }
+        }
+
+        async function mmLoadVersions() {
+            const box = document.getElementById('mmVersions');
+            if (!mmCurrentKey) { box.innerHTML = ''; return; }
+            try {
+                const resp = await fetch(`/admin/menu-manager/menus/${encodeURIComponent(mmCurrentKey)}/versions`, { headers: getAuthHeaders() });
+                const data = await resp.json();
+                if (!resp.ok) throw new Error(data.detail || 'Could not load version history.');
+                const versions = data.versions || [];
+                if (!versions.length) { box.innerHTML = '<p style="color: var(--text-muted); font-size: 0.8rem;">No published versions yet.</p>'; return; }
+                box.innerHTML = '<h3 style="color: var(--primary); font-size: 0.95rem;">Version history</h3>' + versions.map(v => `
+                    <div class="collection-slot" style="display:flex; justify-content:space-between; align-items:center;">
+                        <span style="font-size:0.8rem;">#${v.id} · ${escapeHtml(v.action)} · ${escapeHtml(v.changed_at)} · ${escapeHtml(v.changed_by || 'admin')}</span>
+                        <button class="btn-secondary" type="button" onclick="mmRestoreVersion(${v.id})">Restore</button>
+                    </div>`).join('');
+            } catch (err) {
+                box.innerHTML = `<p style="color: var(--danger); font-size: 0.8rem;">${escapeHtml(err.message || err)}</p>`;
+            }
+        }
+
+        async function mmRestoreVersion(versionId) {
+            if (!mmCurrentKey) return;
+            if (!confirm(`Restore version #${versionId}? This publishes it immediately.`)) return;
+            try {
+                const resp = await fetch(`/admin/menu-manager/menus/${encodeURIComponent(mmCurrentKey)}/versions/${versionId}/restore`, {
+                    method: 'POST', headers: getAuthHeaders()
+                });
+                const data = await resp.json();
+                if (!resp.ok) throw new Error(data.detail || 'Could not restore this version.');
+                mmShowMessage('success', `Restored and published as version ${data.version_id}.`);
+                mmOpenMenu(mmCurrentKey);
+                mmLoadMenuList();
+            } catch (err) {
+                mmShowMessage('error', err.message || String(err));
+            }
+        }
+
+        let igProducts = [];
+        let igPriority = [];
+        let igEditingId = null;
+        let igTopics = [];
+        let igMenus = [];
+        let igResponseOrder = 'description_first';
+
+        // Topic and Menu dropdowns are populated purely from the backend —
+        // no hardcoded list — so a Topic or Menu created just now is
+        // immediately selectable everywhere it belongs, no restart needed.
+        async function loadTopicsAndMenus() {
+            try {
+                const [topicsResp, menusResp] = await Promise.all([
+                    fetch('/admin/instagram-topics', { headers: getAuthHeaders() }),
+                    fetch('/admin/menu-catalogue', { headers: getAuthHeaders() }),
+                ]);
+                const topicsData = await topicsResp.json();
+                const menusData = await menusResp.json();
+                igTopics = topicsData.topics || [];
+                igMenus = (menusData.menus || []).filter(m => m.active);
+                window.igMenuCategories = menusData.categories || [];
+
+                const topicOptions = '<option value="">Select Topic</option>' + igTopics.map(t =>
+                    `<option value="${escapeHtml(t.topic_id)}">${escapeHtml(t.name)}</option>`).join('');
+                document.getElementById('igTopicPicker').innerHTML = topicOptions;
+
+                const menuOptions = '<option value="">Select Menu</option>' + igMenus.map(m =>
+                    `<option value="${escapeHtml(m.menu_id)}">${escapeHtml(m.name)}</option>`).join('');
+                document.getElementById('igMenuPicker').innerHTML = menuOptions;
+                const topicDefaultMenuEl = document.getElementById('topicDefaultMenu');
+                if (topicDefaultMenuEl) topicDefaultMenuEl.innerHTML = menuOptions;
+            } catch (err) { /* dropdowns just stay empty; the rest of the tab still works */ }
+        }
+
+        function onIgTopicChange(preservePriority = false) {
+            const topicId = document.getElementById('igTopicPicker').value;
+            const topic = igTopics.find(t => t.topic_id === topicId);
+            igResponseOrder = topic && topic.response_order === 'menu_first' ? 'menu_first' : 'description_first';
+            const editTopicButton = document.getElementById('igEditTopicButton');
+            if (editTopicButton) editTopicButton.disabled = !topic;
+            document.getElementById('igTopicDescription').value = topic ? (topic.description || '') : '';
+            if (topic && topic.default_menu_id) {
+                document.getElementById('igMenuPicker').value = topic.default_menu_id;
+            }
+            // A new Topic owns the normal defaults. Edit mode passes true so
+            // an existing route override is preserved until the client changes
+            // it in Customize.
+            if (topic && !preservePriority) {
+                igPriority = [...topic.priority_products];
+                renderIgPriorityProducts();
+            }
+            renderIgTopicPreview();
+        }
+
+        function renderIgTopicPreview() {
+            const box = document.getElementById('igTopicPreview');
+            const topic = igTopics.find(t => t.topic_id === document.getElementById('igTopicPicker').value);
+            if (!box || !topic) { if (box) box.style.display = 'none'; return; }
+            const menuId = document.getElementById('igMenuPicker').value || topic.default_menu_id;
+            const menu = igMenus.find(item => item.menu_id === menuId);
+            const labels = igPriority.map(id => {
+                const product = igProducts.find(item => item.id === id);
+                return product ? product.label : id;
+            });
+            document.getElementById('igTopicPreviewName').innerText = topic.name || '';
+            document.getElementById('igTopicPreviewMenu').innerText = menu ? menu.name : 'No menu selected';
+            document.getElementById('igTopicPreviewPriority').innerText = labels.length ? labels.join(' → ') : 'Normal conversation routing';
+            document.getElementById('igTopicPreviewDescription').innerText = document.getElementById('igTopicDescription').value || '—';
+            document.getElementById('igTopicPreviewOrder').innerText = igResponseOrder === 'menu_first' ? 'Menu First' : 'Description First';
+            box.style.display = 'block';
+        }
+
+        function swapIgResponseOrder() {
+            if (!document.getElementById('igTopicPicker').value) return;
+            igResponseOrder = igResponseOrder === 'menu_first' ? 'description_first' : 'menu_first';
+            renderIgTopicPreview();
+            previewInstagramRoute();
+        }
+
+        function renderIgPriorityProducts() {
+            const box = document.getElementById('igPriorityProducts');
+            if (!box) return;
+            if (!igPriority.length) { box.innerHTML = '<small>No priority products. Normal conversation routing will apply.</small>'; renderIgTopicPreview(); return; }
+            box.innerHTML = igPriority.map((id, index) => {
+                const product = igProducts.find(item => item.id === id);
+                const label = product ? product.label : `${id} (currently unavailable)`;
+                return `<div class="ad-route-row"><span><b>${index + 1}.</b> ${escapeHtml(label)}</span><span>
+                    <button class="btn-secondary" type="button" onclick="moveIgPriority(${index},-1)" ${index === 0 ? 'disabled' : ''}>↑</button>
+                    <button class="btn-secondary" type="button" onclick="moveIgPriority(${index},1)" ${index === igPriority.length - 1 ? 'disabled' : ''}>↓</button>
+                    <button class="btn-danger" type="button" onclick="removeIgPriority(${index})">Remove</button></span></div>`;
+            }).join('');
+            renderIgTopicPreview();
+        }
+
+        function addIgPriorityProduct() {
+            const id = document.getElementById('igProductPicker').value;
+            if (!id || igPriority.includes(id)) return;
+            igPriority.push(id); renderIgPriorityProducts();
+        }
+        function moveIgPriority(index, change) { const target=index+change; if(target<0||target>=igPriority.length)return; [igPriority[index],igPriority[target]]=[igPriority[target],igPriority[index]]; renderIgPriorityProducts(); }
+        function removeIgPriority(index) { igPriority.splice(index,1); renderIgPriorityProducts(); }
+
+        function resetInstagramRouteForm() {
+            igEditingId = null; igPriority = [];
+            ['igRouteUrl','igMediaId','igAdId','igCampaignId'].forEach(id => { const el=document.getElementById(id); if(el)el.value=''; });
+            document.getElementById('igTopicPicker').value = '';
+            igResponseOrder = 'description_first';
+            document.getElementById('igMenuPicker').value = '';
+            document.getElementById('igTopicDescription').value = '';
+            document.getElementById('igEscalationPolicy').value='human_if_unsupported';
+            Array.from(document.getElementById('igKnowledgeScope').options).forEach(option => option.selected=false);
+            document.getElementById('igRouteIdentity').innerHTML='';
+            document.getElementById('igPreviewBox').style.display = 'none';
+            document.getElementById('igTopicPreview').style.display = 'none';
+            document.getElementById('igCustomize').open = false;
+            document.getElementById('igAdvancedSettings').open = false;
+            const saveButton = document.getElementById('igSaveButton');
+            if (saveButton) saveButton.innerText = 'Save Routing';
+            const status = document.getElementById('igPostConnectionStatus');
+            if (status) status.style.display = 'none';
+            renderIgPriorityProducts();
+        }
+
+        async function identifyInstagramRoute() {
+            const url=document.getElementById('igRouteUrl').value.trim();
+            const box=document.getElementById('igRouteIdentity');
+            if (!url) { box.innerHTML=''; return; }
+            const resp=await fetch('/admin/instagram-routes/identify',{method:'POST',headers:{...getAuthHeaders(),'Content-Type':'application/json'},body:JSON.stringify({url})});
+            const data=await resp.json().catch(()=>({}));
+            if(!resp.ok){box.innerHTML=`<span style="color:var(--danger);">Could not identify this link. Check the Instagram URL.</span>`;return;}
+            document.getElementById('igRouteUrl').value=data.canonical_url;
+            if(data.verified_media_identifier) document.getElementById('igMediaId').value=data.verified_media_identifier;
+            const detected = data.source_type === 'reel' ? 'Reel' : data.source_type === 'post' ? 'Instagram post' : 'Instagram content';
+            box.innerHTML=`<span style="color:#166534;">✓ ${detected} detected</span>`;
+        }
+
+        function editInstagramRoute(id) {
+            const route=(window.igRoutes||[]).find(item=>item.routing_id===id); if(!route)return;
+            igEditingId=id; igPriority=[...(route.priority_products||[])];
+            document.getElementById('igRouteUrl').value=route.canonical_url||'';
+            document.getElementById('igTopicPicker').value=route.topic_id||'';
+            document.getElementById('igMenuPicker').value=route.menu_id||'';
+            const topic = igTopics.find(t => t.topic_id === route.topic_id);
+            document.getElementById('igTopicDescription').value = topic ? (topic.description || '') : '';
+            document.getElementById('igMediaId').value=route.media_id||'';
+            document.getElementById('igAdId').value=route.ad_id||'';
+            document.getElementById('igCampaignId').value=route.campaign_id||'';
+            document.getElementById('igEscalationPolicy').value=route.escalation_policy||'human_if_unsupported';
+            Array.from(document.getElementById('igKnowledgeScope').options).forEach(option=>option.selected=(route.knowledge_scope||[]).includes(option.value));
+            renderIgPriorityProducts(); onIgTopicChange(true);
+            const saveButton = document.getElementById('igSaveButton');
+            if (saveButton) saveButton.innerText = 'Save Changes';
+            document.getElementById('igRouteUrl').scrollIntoView({behavior:'smooth'});
+        }
+
+        async function saveInstagramRoute() {
+            const result=document.getElementById('adRouteResult');
+            const payload={routing_id:igEditingId,url:document.getElementById('igRouteUrl').value.trim(),topic_id:document.getElementById('igTopicPicker').value,menu_id:document.getElementById('igMenuPicker').value,media_id:document.getElementById('igMediaId').value.trim(),ad_id:document.getElementById('igAdId').value.trim(),campaign_id:document.getElementById('igCampaignId').value.trim(),escalation_policy:document.getElementById('igEscalationPolicy').value,priority_products:igPriority,knowledge_scope:Array.from(document.getElementById('igKnowledgeScope').selectedOptions).map(o=>o.value),active:true};
+            const resp=await fetch('/admin/instagram-routes',{method:'POST',headers:{...getAuthHeaders(),'Content-Type':'application/json'},body:JSON.stringify(payload)});
+            const data=await resp.json().catch(()=>({})); result.style.display='block';
+            if(!resp.ok){result.className='result-box error';result.innerText=data.detail||'Could not save route.';return;}
+            const saved = data.route || {};
+            const topic = igTopics.find(item => item.topic_id === saved.topic_id) || {};
+            const menu = igMenus.find(item => item.menu_id === (saved.menu_id || payload.menu_id)) || {};
+            const content = saved.source_type === 'reel' ? 'Reel' : saved.source_type === 'post' ? 'Post' : 'Instagram content';
+            const label = saved.shortcode ? `${content} ${saved.shortcode}` : content;
+            resetInstagramRouteForm();
+            result.style.display='block'; result.className='result-box success';
+            result.innerHTML=`<b>✓ Instagram content connected successfully</b><br><small>Instagram content: ${escapeHtml(label)}<br>Topic: ${escapeHtml(topic.name || saved.routing_topic || '—')}<br>Menu: ${escapeHtml(menu.name || saved.menu_id || '—')}</small>`;
+            loadAdRoutes();
+        }
+
+        async function previewInstagramRoute() {
+            const box = document.getElementById('igPreviewBox');
+            const topicId = document.getElementById('igTopicPicker').value;
+            if (!topicId) { alert('Select a Topic first to preview its response.'); return; }
+            box.style.display = 'block';
+            box.innerHTML = 'Loading preview…';
+            const menuId = document.getElementById('igMenuPicker').value;
+            const product = igPriority[0] || '';
+            const params = new URLSearchParams({ topic_id: topicId, menu_id: menuId, product, response_order: igResponseOrder });
+            try {
+                const resp = await fetch(`/admin/instagram-routes/preview?${params}`, { headers: getAuthHeaders() });
+                const data = await resp.json();
+                if (!resp.ok) throw new Error(data.detail || 'Could not build preview.');
+                const imageHtml = data.linked_menu_image ? `<img src="${escapeHtml(data.linked_menu_image)}" style="max-width:220px;max-height:220px;border-radius:8px;margin-top:8px;display:block;">` : '';
+                box.innerHTML = `
+                    <div style="font-size:0.78rem;color:var(--text-muted);margin-bottom:6px;">Reply order: ${escapeHtml(data.response_order === 'menu_first' ? 'Menu First' : 'Description First')}</div>
+                    <div style="white-space:pre-wrap; font-family:inherit; font-size:0.85rem; background:#fff; border:1px solid var(--border); border-radius:8px; padding:8px;">${escapeHtml(data.approved_response || '(no approved product template matched yet — add Priority Products)')}</div>
+                    ${imageHtml}`;
+            } catch (err) {
+                box.innerHTML = `<span style="color:var(--danger);">${escapeHtml(err.message || err)}</span>`;
+            }
+        }
+
+        async function setInstagramRouteActive(id, active) {
+            await fetch(`/admin/instagram-routes/${id}/active`,{method:'PATCH',headers:{...getAuthHeaders(),'Content-Type':'application/json'},body:JSON.stringify({active})}); loadAdRoutes();
+        }
+
+        // + Add Topic modal. A Topic is a reusable label: create it once here,
+        // and it is immediately selectable on this and every future route —
+        // no hardcoded list, no restart.
+        let topicPriority = [];
+        function renderTopicPriorityProducts() {
+            const box = document.getElementById('topicPriorityProducts');
+            if (!box) return;
+            if (!topicPriority.length) { box.innerHTML = '<small>No priority products.</small>'; return; }
+            box.innerHTML = topicPriority.map((id, index) => {
+                const product = igProducts.find(item => item.id === id);
+                const label = product ? product.label : id;
+                return `<div class="ad-route-row"><span>${index + 1}. ${escapeHtml(label)}</span><button class="btn-danger" type="button" onclick="topicPriority.splice(${index},1);renderTopicPriorityProducts();">Remove</button></div>`;
+            }).join('');
+        }
+        function addTopicPriorityProduct() {
+            const id = document.getElementById('topicProductPicker').value;
+            if (!id || topicPriority.includes(id)) return;
+            topicPriority.push(id); renderTopicPriorityProducts();
+        }
+
+        function openTopicModal(editingId = '') {
+            const topic = editingId ? igTopics.find(item => item.topic_id === editingId) : null;
+            document.getElementById('topicModalTitle').innerText = topic ? 'Edit Topic' : '+ Add Topic';
+            document.getElementById('topicModalEditingId').value = topic ? topic.topic_id : '';
+            document.getElementById('topicName').value = '';
+            document.getElementById('topicDescription').value = '';
+            document.getElementById('topicDefaultMenu').value = '';
+            document.getElementById('topicResponseOrder').value = topic && topic.response_order === 'menu_first' ? 'menu_first' : 'description_first';
+            document.getElementById('topicActive').checked = true;
+            topicPriority = []; renderTopicPriorityProducts();
+            Array.from(document.getElementById('topicKnowledgeScope').options).forEach(o => o.selected = false);
+            document.getElementById('topicModalResult').style.display = 'none';
+            document.getElementById('topicModal').style.display = 'flex';
+            if (topic) {
+                document.getElementById('topicName').value = topic.name || '';
+                document.getElementById('topicDescription').value = topic.description || '';
+                document.getElementById('topicDefaultMenu').value = topic.default_menu_id || '';
+                document.getElementById('topicActive').checked = topic.active !== false;
+                topicPriority = [...(topic.priority_products || [])];
+                renderTopicPriorityProducts();
+                Array.from(document.getElementById('topicKnowledgeScope').options).forEach(o => o.selected = (topic.knowledge_scope || []).includes(o.value));
+            }
+        }
+        function openTopicEditor() {
+            const id = document.getElementById('igTopicPicker').value;
+            if (id) openTopicModal(id);
+        }
+        function closeTopicModal() { document.getElementById('topicModal').style.display = 'none'; }
+
+        async function submitTopic() {
+            const result = document.getElementById('topicModalResult');
+            const payload = {
+                name: document.getElementById('topicName').value.trim(),
+                description: document.getElementById('topicDescription').value.trim(),
+                default_menu_id: document.getElementById('topicDefaultMenu').value,
+                active: document.getElementById('topicActive').checked,
+                response_order: document.getElementById('topicResponseOrder').value || 'description_first',
+                priority_products: topicPriority,
+                knowledge_scope: Array.from(document.getElementById('topicKnowledgeScope').selectedOptions).map(o => o.value),
+            };
+            try {
+                const editingId = document.getElementById('topicModalEditingId').value;
+                const resp = await fetch(editingId ? `/admin/instagram-topics/${encodeURIComponent(editingId)}` : '/admin/instagram-topics', {
+                    method: editingId ? 'PATCH' : 'POST', headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload),
+                });
+                const data = await resp.json();
+                if (!resp.ok) throw new Error(data.detail || 'Could not save topic.');
+                closeTopicModal();
+                await loadTopicsAndMenus();
+                // The saved topic is selected immediately, and its defaults
+                // (including reply order) fill in like any normal selection.
+                document.getElementById('igTopicPicker').value = data.topic.topic_id;
+                onIgTopicChange();
+            } catch (err) {
+                result.style.display = 'block';
+                result.className = 'result-box error';
+                result.innerText = err.message || String(err);
+            }
+        }
+
+        // + Add New Menu modal. Shared by Instagram Content Routing and the
+        // Visual Menu Manager — a menu created from either place appears in
+        // both, plus the Topic form's Default Menu dropdown, immediately.
+        function openMenuModal() {
+            document.getElementById('menuName').value = '';
+            document.getElementById('menuDescription').value = '';
+            document.getElementById('menuImageFile').value = '';
+            document.getElementById('menuActive').checked = true;
+            const categories = window.igMenuCategories || ['Sondesh','Weekly Vegetarian','Weekly Non-Vegetarian','Bento / Meal','Subscription','Event','Other'];
+            document.getElementById('menuCategory').innerHTML = categories.map(c => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join('');
+            document.getElementById('menuModalResult').style.display = 'none';
+            document.getElementById('menuModal').style.display = 'flex';
+        }
+        function closeMenuModal() { document.getElementById('menuModal').style.display = 'none'; }
+
+        async function submitMenu() {
+            const result = document.getElementById('menuModalResult');
+            const name = document.getElementById('menuName').value.trim();
+            const description = document.getElementById('menuDescription').value.trim();
+            const file = document.getElementById('menuImageFile').files[0];
+            if (!name) { result.style.display='block'; result.className='result-box error'; result.innerText='Menu name is required.'; return; }
+            if (!description) { result.style.display='block'; result.className='result-box error'; result.innerText='Customer description is required.'; return; }
+            if (!file) { result.style.display='block'; result.className='result-box error'; result.innerText='A menu image is required.'; return; }
+            const form = new FormData();
+            form.append('name', name);
+            form.append('category', document.getElementById('menuCategory').value);
+            form.append('description', description);
+            form.append('active', document.getElementById('menuActive').checked);
+            form.append('file', file);
+            try {
+                const resp = await fetch('/admin/menu-catalogue', { method: 'POST', headers: getAuthHeaders(), body: form });
+                const data = await resp.json();
+                if (!resp.ok) throw new Error(data.detail || 'Could not create menu.');
+                closeMenuModal();
+                await loadTopicsAndMenus();
+                document.getElementById('igMenuPicker').value = data.menu.menu_id;
+                if (typeof mmLoadMenuList === 'function') mmLoadMenuList();
+            } catch (err) {
+                result.style.display = 'block';
+                result.className = 'result-box error';
+                result.innerText = err.message || String(err);
+            }
+        }
+        async function archiveInstagramRoute(id) { if(!confirm('Archive this Instagram route? It stops matching customer traffic but stays recoverable from the Archived tab.'))return; await fetch(`/admin/instagram-routes/${id}`,{method:'DELETE',headers:getAuthHeaders()}); loadAdRoutes(); }
+
+        async function restoreInstagramRoute(id) {
+            const resp = await fetch(`/admin/instagram-routes/${id}/restore`, { method: 'POST', headers: getAuthHeaders() });
+            if (!resp.ok) { alert('Could not restore this route. Please try again.'); return; }
+            loadAdRoutes();
+        }
+
+        // Instagram Content Routing: Active / Archived tabs. Archived rows get
+        // Restore/Remove only — no Edit/Disable/pairing until restored, so an
+        // archived route cannot be quietly edited without first bringing it back.
+        let igRouteTab = 'active';
+        function switchIgRouteTab(tab) {
+            igRouteTab = tab;
+            document.getElementById('igRouteTabActiveBtn').classList.toggle('active', tab === 'active');
+            document.getElementById('igRouteTabArchivedBtn').classList.toggle('active', tab === 'archived');
+            loadAdRoutes();
+        }
+
+        // Remove is permanent and destructive, so it always goes through this
+        // confirmation modal — never a one-click action, and never triggered
+        // from the same row position Edit/Disable/Archive already occupy.
+        let igRemoveTargetId = null;
+        function openIgRemoveModal(id) {
+            const route = (window.igRoutes || []).find(r => r.routing_id === id);
+            if (!route) return;
+            igRemoveTargetId = id;
+            const menu = igMenus.find(item => item.menu_id === route.menu_id);
+            const sourceType = route.source_type === 'reel' ? 'Reel' : route.source_type === 'post' ? 'Post' : 'Ad';
+            const status = route.archived_at ? 'Archived' : route.active ? 'Active' : 'Disabled';
+            document.getElementById('igRemoveModalDetails').innerHTML = `
+                <div><b>Topic:</b> ${escapeHtml(route.routing_topic || '—')}</div>
+                <div><b>Instagram content type:</b> ${sourceType}</div>
+                <div><b>Menu:</b> ${escapeHtml((menu || {}).name || route.menu_id || '—')}</div>
+                <div><b>Status:</b> ${status}</div>`;
+            document.getElementById('igRemoveModal').style.display = 'flex';
+        }
+        function closeIgRemoveModal() { document.getElementById('igRemoveModal').style.display = 'none'; igRemoveTargetId = null; }
+
+        async function confirmIgRemove() {
+            if (!igRemoveTargetId) return;
+            const id = igRemoveTargetId;
+            try {
+                const resp = await fetch(`/admin/instagram-routes/${id}/permanent`, { method: 'DELETE', headers: getAuthHeaders() });
+                if (!resp.ok) throw new Error();
+                closeIgRemoveModal();
+                const result = document.getElementById('adRouteResult');
+                result.style.display = 'block';
+                result.className = 'result-box success';
+                result.innerText = '✓ Instagram routing deleted';
+                loadAdRoutes();
+            } catch (err) {
+                const result = document.getElementById('adRouteResult');
+                result.style.display = 'block';
+                result.className = 'result-box error';
+                result.innerText = 'Could not remove this routing configuration. Please try again.';
             }
         }
 
@@ -3932,25 +6760,113 @@ THIS WEEK'S BENGAL SPECIALS
             const list = document.getElementById('adRouteList');
             if (!list || !currentAdminKey) return;
             try {
-                const resp = await fetch('/admin/ad-routes', { headers: getAuthHeaders() });
+                const query = igRouteTab === 'archived' ? '?include_archived=true' : '';
+                const resp = await fetch(`/admin/instagram-routes${query}`, { headers: getAuthHeaders() });
                 const data = await resp.json();
-                if (!resp.ok) throw new Error(data.detail || 'Could not load saved ads.');
+                if (!resp.ok) throw new Error(data.detail || 'Could not load saved routes.');
                 const routes = data.routes || [];
-                if (!routes.length) {
-                    list.innerHTML = '<p style="color: var(--text-muted); font-size: 0.84rem;">No ads added yet.</p>';
+                window.igRoutes=routes; igProducts=data.product_catalogue||[];
+                document.getElementById('igProductPicker').innerHTML='<option value="">Choose an approved product…</option>'+igProducts.map(item=>`<option value="${escapeHtml(item.id)}">${escapeHtml(item.label)}</option>`).join('');
+                document.getElementById('topicProductPicker') && (document.getElementById('topicProductPicker').innerHTML=document.getElementById('igProductPicker').innerHTML);
+                document.getElementById('igKnowledgeScope').innerHTML=(data.knowledge_scopes||[]).map(id=>`<option value="${escapeHtml(id)}">${escapeHtml(id)}</option>`).join('');
+                document.getElementById('topicKnowledgeScope') && (document.getElementById('topicKnowledgeScope').innerHTML=document.getElementById('igKnowledgeScope').innerHTML);
+                renderIgPriorityProducts();
+                if (!igTopics.length && !igMenus.length) await loadTopicsAndMenus();
+
+                if (igRouteTab === 'archived') {
+                    if (!routes.length) { list.innerHTML='<p style="color:var(--text-muted);font-size:0.84rem;">No archived routes.</p>'; return; }
+                    list.innerHTML = routes.map(route => `
+                        <div class="ad-route-row" style="display:block;">
+                            <div style="display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap; align-items:flex-start;">
+                                <span><b>${escapeHtml(route.routing_topic || 'Instagram content')}</b><br><small>${route.source_type === 'reel' ? 'Instagram Reel' : route.source_type === 'post' ? 'Instagram Post' : 'Instagram Ad'} · Archived</small></span>
+                                <span><button class="btn-secondary" type="button" onclick="restoreInstagramRoute(${route.routing_id})">Restore</button> <button class="btn-danger" type="button" onclick="openIgRemoveModal(${route.routing_id})">Delete</button></span>
+                            </div>
+                            <div style="margin-top:8px;"><b>Menu:</b> ${escapeHtml((igMenus.find(m => m.menu_id === route.menu_id) || {}).name || route.menu_id || '—')}</div>
+                            <div style="margin-top:4px;"><b>Priority:</b> ${escapeHtml((route.priority_products||[]).map(id => ((igProducts.find(p => p.id === id) || {}).label || id)).join(' → ') || 'Normal conversation routing')}</div>
+                        </div>`).join('');
                     return;
                 }
-                const labels = { sondesh: 'Sondesh', savoury: 'Savoury', bento: 'Bento' };
-                list.innerHTML = routes.map(route => `
-                    <div class="ad-route-row">
-                        <span class="ad-route-id">${escapeHtml(route.ad_id)}</span>
-                        <span class="product-chip">${labels[route.product] || escapeHtml(route.product)}</span>
-                        <button class="btn-danger" style="padding: 6px 10px; font-size: 0.76rem;" type="button"
-                            onclick="removeAdRoute('${escapeHtml(route.ad_id)}')">Remove</button>
-                    </div>`).join('');
+
+                if (!routes.length && !(data.legacy_ad_routes||[]).length) { list.innerHTML='<p style="color:var(--text-muted);font-size:0.84rem;">No Instagram routes added yet.</p>'; return; }
+                list.innerHTML = routes.map(route => {
+                    const menuName = (igMenus.find(m => m.menu_id === route.menu_id) || {}).name;
+                    const sourceLabel = route.source_type==='reel' ? 'Instagram Reel' : route.source_type==='post' ? 'Instagram Post' : 'Instagram Ad';
+                    const priorityLabels = (route.priority_products||[]).map(id => ((igProducts.find(p => p.id === id) || {}).label || id));
+                    // A post's connection is a client-friendly status, not a raw
+                    // Meta id — the id itself stays inside Advanced Settings
+                    // (the Media ID field, populated when you press Edit).
+                    const postStatus = route.source_type==='post'
+                        ? `<div id="igPairingStatus-${route.routing_id}" style="font-size:0.78rem;margin-top:4px;padding:4px 8px;border-radius:6px;display:inline-block;${route.media_id?'background:#ECFDF5;color:#065F46;':'background:#FEF3C7;color:#92400E;'}">${route.media_id?'✓ Post connected':'⚠ Post connection needs verification'}</div>`
+                        : '';
+                    const connectBtn = route.source_type==='post'
+                        ? ` <button class="btn-secondary" type="button" onclick="pairInstagramPost(${route.routing_id})">${route.media_id?'Reconnect Post':'Connect Post'}</button>`
+                        : '';
+                    const technical = `<details style="margin-top:8px;"><summary style="cursor:pointer; font-size:0.8rem;">View Details</summary><div style="margin-top:6px; font-size:0.78rem; color:var(--text-muted); line-height:1.6;">Shortcode: ${escapeHtml(route.shortcode||'—')}<br>Media ID: ${escapeHtml(route.media_id||'—')}<br>Ad ID: ${escapeHtml(route.ad_id||'—')}<br>Campaign ID: ${escapeHtml(route.campaign_id||'—')}<br>Knowledge scope: ${escapeHtml((route.knowledge_scope||[]).join(', ')||'—')}</div></details>`;
+                    return `<div class="ad-route-row" style="display:block;">
+                        <div style="display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap; align-items:flex-start;">
+                            <span><b>${escapeHtml(route.routing_topic || 'Instagram content')}</b><br><small>${sourceLabel}</small></span>
+                            <span><button class="btn-secondary" type="button" onclick="editInstagramRoute(${route.routing_id})">Edit</button> <button class="btn-secondary" type="button" onclick="setInstagramRouteActive(${route.routing_id},${!route.active})">${route.active?'Disable':'Enable'}</button> <button class="btn-danger" type="button" onclick="archiveInstagramRoute(${route.routing_id})">Archive</button> <button class="btn-danger" type="button" onclick="openIgRemoveModal(${route.routing_id})">Delete</button>${connectBtn}</span>
+                        </div>
+                        <div style="margin-top:8px;"><b>Menu:</b> ${escapeHtml(menuName || route.menu_id || '—')}</div>
+                        <div style="margin-top:4px;"><b>Priority:</b> ${escapeHtml(priorityLabels.join(' → ') || 'Normal conversation routing')}</div>
+                        <div style="margin-top:4px;"><b>Status:</b> ${route.active ? 'Active' : 'Disabled'}</div>
+                        ${postStatus}${technical}
+                    </div>`;
+                }).join('') + (data.legacy_ad_routes||[]).map(route=>`<div class="ad-route-row" style="display:block;"><b>Instagram Ad</b><br><small>Priority: ${escapeHtml(route.product || 'Normal conversation routing')}</small><details style="margin-top:8px;"><summary style="cursor:pointer; font-size:0.8rem;">View Details</summary><div style="margin-top:6px; font-size:0.78rem; color:var(--text-muted);">Ad ID: ${escapeHtml(route.ad_id || '—')}</div></details></div>`).join('');
             } catch (err) {
                 list.innerHTML = `<p style="color: var(--danger); font-size: 0.84rem;">${escapeHtml(err.message || err)}</p>`;
             }
+        }
+
+        // Shared-post pairing: a post carries no shortcode/URL in Meta's share
+        // webhook, so a verified media ID can only be established by an admin
+        // deliberately sharing the exact configured post while a short pairing
+        // window is open. Starting a window supersedes any other open one —
+        // only one route may be mid-pairing at a time.
+        let igPairingPollTimer = null;
+
+        async function pairInstagramPost(routingId) {
+            const box = document.getElementById(`igPairingStatus-${routingId}`);
+            if (!confirm('This starts a 10-minute pairing window and cancels any other route currently pairing.\n\nAfter starting, share the exact configured post into the business Instagram DM from an admin account. Continue?')) return;
+            try {
+                const resp = await fetch(`/admin/instagram-routes/${routingId}/pairing/start`, { method: 'POST', headers: getAuthHeaders() });
+                const data = await resp.json();
+                if (!resp.ok) throw new Error(data.detail || 'Could not start pairing.');
+                if (box) box.innerHTML = `⏳ Pairing window open (expires ${escapeHtml(data.pairing.expires_at)}). Share the exact post into the business DM now.`;
+                if (igPairingPollTimer) clearInterval(igPairingPollTimer);
+                igPairingPollTimer = setInterval(() => pollInstagramPairing(routingId), 4000);
+            } catch (err) {
+                if (box) box.innerHTML = `<span style="color:var(--danger);">${escapeHtml(err.message || err)}</span>`;
+            }
+        }
+
+        async function pollInstagramPairing(routingId) {
+            const box = document.getElementById(`igPairingStatus-${routingId}`);
+            if (!box) { clearInterval(igPairingPollTimer); return; }
+            try {
+                const resp = await fetch(`/admin/instagram-routes/${routingId}/pairing`, { headers: getAuthHeaders() });
+                const data = await resp.json();
+                const pairing = data.pairing;
+                if (!pairing) return;
+                if (pairing.status === 'bound') {
+                    clearInterval(igPairingPollTimer);
+                    box.innerHTML = `✅ Post connected`;
+                    loadAdRoutes();
+                } else if (pairing.status === 'pending') {
+                    box.innerHTML = `⏳ Waiting for the shared post (expires ${escapeHtml(pairing.expires_at)}). <button class="btn-secondary" type="button" onclick="cancelInstagramPairing(${routingId})">Cancel</button>`;
+                } else {
+                    clearInterval(igPairingPollTimer);
+                }
+            } catch (err) { /* transient; next poll retries */ }
+        }
+
+        async function cancelInstagramPairing(routingId) {
+            clearInterval(igPairingPollTimer);
+            const box = document.getElementById(`igPairingStatus-${routingId}`);
+            try {
+                await fetch(`/admin/instagram-routes/${routingId}/pairing/cancel`, { method: 'POST', headers: getAuthHeaders() });
+                if (box) box.innerText = 'Pairing cancelled.';
+            } catch (err) { /* best-effort */ }
         }
 
         async function saveAdRoute() {
@@ -4721,11 +7637,18 @@ Non-Veg:
                     rows += `
                     <tr>
                         <td style="max-width: 200px;"><b>${escapeHtml(c.user_message || '—')}</b></td>
-                        <td style="max-width: 340px; white-space: pre-wrap; font-size: 0.82rem;">${escapeHtml(c.response)}</td>
+                        <td style="max-width: 340px; font-size: 0.82rem;">
+                            <div id="candidateText-${c.id}" style="white-space:pre-wrap;">${escapeHtml(c.response)}</div>
+                            <textarea id="candidateEdit-${c.id}" style="display:none;width:100%;min-height:110px;">${escapeHtml(c.response)}</textarea>
+                            ${c.edited ? `<small>Edited by ${escapeHtml(c.edited_by || 'admin')} · ${escapeHtml(c.edited_at || '')}</small>` : ''}
+                        </td>
                         <td style="color: ${confColour}; font-weight: 600;">${confidence}%</td>
                         <td><span class="badge badge-veg">${escapeHtml(c.created_by || 'bot')}</span></td>
                         <td style="white-space: nowrap;">
                             <button class="btn-primary" style="padding: 4px 10px; font-size: 0.75rem;" onclick="approveCandidate(${c.id})">✅ Approve</button>
+                            <button class="btn-secondary" style="padding:4px 10px;font-size:0.75rem;" id="candidateEditButton-${c.id}" onclick="beginCandidateEdit(${c.id})">✏️ Edit</button>
+                            <button class="btn-primary" style="display:none;padding:4px 10px;font-size:0.75rem;" id="candidateSaveButton-${c.id}" onclick="saveCandidateEdit(${c.id})">Save draft</button>
+                            <button class="btn-secondary" style="display:none;padding:4px 10px;font-size:0.75rem;" id="candidateCancelButton-${c.id}" onclick="cancelCandidateEdit(${c.id})">Cancel</button>
                             <button class="btn-secondary" style="padding: 4px 10px; font-size: 0.75rem; color: var(--danger);" onclick="rejectCandidate(${c.id})">✕ Reject</button>
                         </td>
                     </tr>`;
@@ -4735,61 +7658,6 @@ Non-Veg:
                 tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: red;">Failed to load suggested answers.</td></tr>';
             }
         }
-
-        async function loadAssistedResolutions() {
-            const tbody = document.getElementById('assistedResolutionsTableBody');
-            if (!tbody) return;
-            tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:#888;">Loading AI suggestions...</td></tr>';
-            const category = (document.getElementById('assistedCategoryFilter') || {}).value || '';
-            try {
-                const query = category ? `&category=${encodeURIComponent(category)}` : '';
-                const resp = await fetch(`/admin/assisted-resolutions?status=PENDING_REVIEW${query}`, { headers: getAuthHeaders() });
-                if (!resp.ok) throw new Error('Could not load AI suggestions');
-                const data = await resp.json();
-                const metrics = data.metrics || {};
-                const metricsEl = document.getElementById('assistedResolutionMetrics');
-                if (metricsEl) metricsEl.textContent = `Reviewed: ${metrics.suggestions_reviewed || 0} · Approved: ${metrics.approved_as_is || 0} · Edited: ${metrics.edited_before_send || 0} · Rejected: ${metrics.rejected || 0} · Sent to human: ${metrics.sent_to_human || 0}`;
-                const items = data.suggestions || [];
-                if (!items.length) {
-                    tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:#888;">No pending AI suggestions.</td></tr>';
-                    return;
-                }
-                tbody.innerHTML = items.map(item => {
-                    const categoryLabel = escapeHtml(item.triage_category || 'UNSUPPORTED');
-                    const grounding = escapeHtml(item.grounding_status || 'Not Grounded');
-                    const source = escapeHtml(item.matched_knowledge_source || '—');
-                    const risks = escapeHtml((item.risk_flags || []).join(', ') || 'None');
-                    let actions = '';
-                    if (item.triage_category === 'HUMAN_REQUIRED' || item.triage_category === 'CONTACT_DETAIL') {
-                        actions += `<button class="btn-secondary" style="padding:4px 8px;font-size:.72rem" onclick="sendAssistedToHuman(${item.id})">Send to Human</button>`;
-                    } else if (item.triage_category === 'NON_ACTIONABLE') {
-                        actions += `<button class="btn-secondary" style="padding:4px 8px;font-size:.72rem" onclick="dismissAssisted(${item.id})">Dismiss</button>`;
-                    } else {
-                        actions += `<button class="btn-primary" style="padding:4px 8px;font-size:.72rem" onclick="approveAssisted(${item.id})">Approve &amp; Resolve</button> `;
-                        actions += `<button class="btn-secondary" style="padding:4px 8px;font-size:.72rem" onclick="editAssisted(${item.id})">Edit &amp; Resolve</button> `;
-                        actions += `<button class="btn-secondary" style="padding:4px 8px;font-size:.72rem" onclick="teachAssisted(${item.id})">Teach &amp; Resolve</button>`;
-                    }
-                    actions += ` <button class="btn-secondary" style="padding:4px 8px;font-size:.72rem;color:var(--danger)" onclick="rejectAssisted(${item.id})">Reject Suggestion</button>`;
-                    return `<tr><td style="max-width:190px;white-space:pre-wrap"><b>${escapeHtml(item.customer_message || '—')}</b><br><span class="badge badge-veg">${categoryLabel}</span></td><td style="max-width:260px;white-space:pre-wrap;font-size:.82rem">${escapeHtml(item.suggested_answer || '—')}<br><small>${escapeHtml(item.grounding_details || '')}</small></td><td>${grounding}</td><td>${source}</td><td>${risks}</td><td style="white-space:nowrap">${actions}</td></tr>`;
-                }).join('');
-            } catch (err) {
-                tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:red;">Failed to load AI suggestions.</td></tr>';
-            }
-        }
-
-        async function assistedAction(id, path, body) {
-            const options = { method: 'POST', headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' } };
-            if (body) options.body = JSON.stringify(body);
-            const resp = await fetch(`/admin/assisted-resolutions/${id}/${path}`, options);
-            if (!resp.ok) { const err = await resp.json().catch(() => ({})); throw new Error(err.detail || resp.status); }
-            await loadAssistedResolutions();
-        }
-        async function approveAssisted(id) { if (confirm('Approve and send this Instagram answer now?')) { try { await assistedAction(id, 'approve', {}); } catch (e) { alert(e); } } }
-        async function editAssisted(id) { const answer = prompt('Edit the final answer before sending:'); if (answer && answer.trim()) { try { await assistedAction(id, 'edit-resolve', { final_answer: answer.trim() }); } catch (e) { alert(e); } } }
-        async function rejectAssisted(id) { const reason = prompt('Why reject this suggestion?', 'Not approved'); if (reason !== null) { try { await assistedAction(id, 'reject', { reason }); } catch (e) { alert(e); } } }
-        async function sendAssistedToHuman(id) { if (confirm('Send this case to a human? No Instagram answer will be sent by AI.')) { try { await assistedAction(id, 'send-to-human', {}); } catch (e) { alert(e); } } }
-        async function teachAssisted(id) { const answer = prompt('Enter the verified answer to teach and send:'); if (answer && answer.trim()) { try { await assistedAction(id, 'teach-and-resolve', { verified_answer: answer.trim() }); } catch (e) { alert(e); } } }
-        async function dismissAssisted(id) { if (confirm('Dismiss this non-actionable message?')) { try { await assistedAction(id, 'dismiss', {}); } catch (e) { alert(e); } } }
 
         function updateCandidateBadge(count) {
             const badge = document.getElementById('candidateBadge');
@@ -4831,6 +7699,28 @@ Non-Veg:
             } catch (err) {
                 alert('Could not approve: ' + err);
             }
+        }
+
+        function beginCandidateEdit(id) {
+            document.getElementById(`candidateText-${id}`).style.display = 'none';
+            document.getElementById(`candidateEdit-${id}`).style.display = 'block';
+            document.getElementById(`candidateEditButton-${id}`).style.display = 'none';
+            document.getElementById(`candidateSaveButton-${id}`).style.display = 'inline-block';
+            document.getElementById(`candidateCancelButton-${id}`).style.display = 'inline-block';
+        }
+
+        function cancelCandidateEdit(id) { loadCandidates(); }
+
+        async function saveCandidateEdit(id) {
+            const response = document.getElementById(`candidateEdit-${id}`).value.trim();
+            if (!response) return alert('Draft answer cannot be empty.');
+            const resp = await fetch(`/admin/candidates/${id}`, {
+                method: 'PATCH', headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+                body: JSON.stringify({ response, edited_by: 'admin_dashboard' })
+            });
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok) return alert('Could not save draft: ' + (data.detail || resp.status));
+            loadCandidates();
         }
 
         async function rejectCandidate(id) {
@@ -4895,6 +7785,7 @@ Non-Veg:
                 });
                 if (resp.ok) {
                     loadKnowledge();
+                    refreshAiResolutionIfVisible();
                 } else {
                     alert('Failed to delete knowledge item.');
                 }
@@ -4931,6 +7822,7 @@ Non-Veg:
                     alert('Escalation resolved and taught to bot successfully!');
                     closeResolveModal();
                     loadAnalytics();
+                    refreshAiResolutionIfVisible();
                 } else {
                     alert('Failed: ' + (data.detail || 'Could not resolve escalation.'));
                 }
@@ -4951,10 +7843,955 @@ Non-Veg:
                     alert('Escalation marked as resolved.');
                     closeResolveModal();
                     loadAnalytics();
+                    refreshAiResolutionIfVisible();
                 }
             } catch (e) {
                 alert('Error resolving escalation.');
             }
+        }
+
+        // AI RESOLUTION & ANSWERS: a merged read of the existing queues
+        // (candidate_templates pending/approved/rejected, escalations,
+        // knowledge_gaps, learned_knowledge) through their existing
+        // endpoints. It introduces no new table and no new customer-facing
+        // behaviour — approve/reject/edit/resolve/delete here call the
+        // identical endpoints the old Answers and Customers tabs used.
+        let aiResolutionFilter = 'needs_attention';
+        let aiResolutionItems = [];          // candidates(pending) + escalations(pending) + gaps(open)
+        let aiResolutionApproved = [];       // learned_knowledge
+        let aiResolutionRejected = [];       // candidates(status=REJECTED)
+
+        function refreshAiResolutionIfVisible() {
+            const panel = document.getElementById('tab-ai-resolution');
+            if (panel && panel.style.display !== 'none') loadAiResolution();
+        }
+
+        function setAiResolutionFilter(filter) {
+            aiResolutionFilter = filter;
+            ['needs_attention', 'ai_suggested', 'teach_required', 'human_required', 'approved', 'rejected'].forEach(f => {
+                const btn = document.getElementById(`aiFilterBtn-${f}`);
+                if (btn) btn.classList.toggle('active', f === filter);
+            });
+            renderAiResolution();
+        }
+
+        async function loadAiResolution() {
+            const tbody = document.getElementById('aiResolutionTableBody');
+            tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: #888;">Loading...</td></tr>';
+            try {
+                const [candResp, escResp, gapResp, approvedResp, rejectedResp, analyticsResp, assistedResp] = await Promise.all([
+                    fetch('/admin/candidates', { headers: getAuthHeaders() }),
+                    fetch('/admin/escalations?status=pending&limit=100', { headers: getAuthHeaders() }),
+                    fetch('/admin/knowledge-gaps?status=OPEN&limit=100', { headers: getAuthHeaders() }),
+                    fetch('/admin/learned-knowledge?limit=100', { headers: getAuthHeaders() }),
+                    fetch('/admin/candidates?status=REJECTED', { headers: getAuthHeaders() }),
+                    fetch('/admin/analytics', { headers: getAuthHeaders() }),
+                    fetch('/admin/assisted-resolutions?status=PENDING_REVIEW', { headers: getAuthHeaders() }),
+                ]);
+                const candData = candResp.ok ? await candResp.json() : { candidates: [] };
+                const escData = escResp.ok ? await escResp.json() : { escalations: [] };
+                const gapData = gapResp.ok ? await gapResp.json() : { knowledge_gaps: [] };
+                const approvedData = approvedResp.ok ? await approvedResp.json() : { learned_knowledge: [] };
+                const rejectedData = rejectedResp.ok ? await rejectedResp.json() : { candidates: [] };
+                const analytics = analyticsResp.ok ? await analyticsResp.json() : {};
+                const assistedData = assistedResp.ok ? await assistedResp.json() : { suggestions: [] };
+
+                const candidates = candData.candidates || [];
+                const escalations = escData.escalations || [];
+                const gaps = gapData.knowledge_gaps || [];
+                aiResolutionApproved = approvedData.learned_knowledge || [];
+                aiResolutionRejected = rejectedData.candidates || [];
+
+                aiResolutionItems = [
+                    ...(assistedData.suggestions || []).map(s => ({ kind: 'assisted', category: (s.triage_category || 'UNSUPPORTED').toLowerCase(), data: s })),
+                    ...candidates.map(c => ({ kind: 'candidate', category: 'ai_suggested', data: c })),
+                    ...escalations.map(e => ({ kind: 'escalation', category: 'human_required', data: e })),
+                    ...gaps.map(g => ({ kind: 'gap', category: 'teach_required', data: g })),
+                ];
+
+                const needsAttention = candidates.length + escalations.length + gaps.length;
+                document.getElementById('aiStatTotal').innerText = analytics.total_conversations || 0;
+                document.getElementById('aiStatAutoResolved').innerText = analytics.matched_conversations || 0;
+                document.getElementById('aiStatNeedsAttention').innerText = needsAttention;
+                document.getElementById('aiStatHuman').innerText = escalations.length;
+                updateAiResolutionBadge(needsAttention);
+
+                renderAiResolution();
+                loadAssistedEvaluation();
+            } catch (err) {
+                tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: red;">Failed to load AI Resolution &amp; Answers.</td></tr>';
+            }
+        }
+
+        function updateAiResolutionBadge(count) {
+            const badge = document.getElementById('aiResolutionBadge');
+            if (!badge) return;
+            if (count > 0) {
+                badge.textContent = count;
+                badge.style.display = 'inline-block';
+            } else {
+                badge.style.display = 'none';
+            }
+        }
+
+        const AI_CATEGORY_LABEL = {
+            ai_suggested: '✨ AI Suggested',
+            teach_required: '📘 Knowledge Gap',
+            human_required: '🙋 Pending Human',
+            approved: '✅ Approved',
+            rejected: '🗄️ Rejected',
+        };
+
+        function renderAiResolution() {
+            const tbody = document.getElementById('aiResolutionTableBody');
+            const query = (document.getElementById('aiResolutionSearch').value || '').trim().toLowerCase();
+
+            let items;
+            if (aiResolutionFilter === 'approved') {
+                items = aiResolutionApproved.map(k => ({ kind: 'approved', category: 'approved', data: k }));
+            } else if (aiResolutionFilter === 'rejected') {
+                items = aiResolutionRejected.map(c => ({ kind: 'rejected', category: 'rejected', data: c }));
+            } else if (aiResolutionFilter === 'needs_attention') {
+                items = aiResolutionItems;
+            } else {
+                items = aiResolutionItems.filter(i => i.category === aiResolutionFilter);
+            }
+
+            if (query) {
+                items = items.filter(i => aiResolutionSearchText(i).includes(query));
+            }
+
+            if (!items.length) {
+                tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: #888;">Nothing here right now.</td></tr>';
+                return;
+            }
+
+            tbody.innerHTML = items.map(item => renderAiResolutionRow(item)).join('');
+        }
+
+        function aiResolutionSearchText(item) {
+            const d = item.data;
+            return [
+                d.user_message, d.response, d.verified_answer, d.question_pattern,
+                d.topic, d.example_message, d.reason,
+            ].filter(Boolean).join(' ').toLowerCase();
+        }
+
+        function renderAiResolutionRow(item) {
+            const label = AI_CATEGORY_LABEL[item.category];
+            if (item.kind === 'assisted') {
+                const s = item.data;
+                const category = (s.triage_category || 'UNSUPPORTED').toLowerCase();
+                const risk = (s.risk_flags || []).join(', ') || 'None';
+                let actions = '';
+                if (category === 'human_required' || category === 'contact_detail' || category === 'unsupported') actions += `<button class="btn-secondary" style="padding:4px 8px;font-size:.72rem" onclick="sendAssistedToHuman(${s.id})">Send to Human</button>`;
+                else if (category === 'non_actionable') actions += `<button class="btn-secondary" style="padding:4px 8px;font-size:.72rem" onclick="dismissAssisted(${s.id})">Dismiss</button>`;
+                else if (category === 'teach_required') actions += `<button class="btn-secondary" style="padding:4px 8px;font-size:.72rem" onclick="teachAssisted(${s.id})">Teach &amp; Resolve</button> <button class="btn-secondary" style="padding:4px 8px;font-size:.72rem" onclick="sendAssistedToHuman(${s.id})">Send to Human</button>`;
+                else actions += `<button class="btn-primary" style="padding:4px 8px;font-size:.72rem" onclick="approveAssisted(${s.id})">Approve &amp; Resolve</button> <button class="btn-secondary" style="padding:4px 8px;font-size:.72rem" onclick="editAssisted(${s.id})">Edit &amp; Resolve</button> <button class="btn-secondary" style="padding:4px 8px;font-size:.72rem" onclick="teachAssisted(${s.id})">Teach &amp; Resolve</button>`;
+                actions += ` <button class="btn-secondary" style="padding:4px 8px;font-size:.72rem;color:var(--danger)" onclick="rejectAssisted(${s.id})">Reject Suggestion</button>`;
+                return `<tr><td><span class="badge badge-veg">${escapeHtml(label || category)}</span><br><small>Category: ${escapeHtml(s.triage_category || 'UNSUPPORTED')}<br>Detected Intent: ${escapeHtml(s.detected_intent || '—')}</small></td><td style="max-width:220px;white-space:pre-wrap">${escapeHtml(s.customer_message || '—')}<br><small>Created Time: ${escapeHtml(s.created_at || '—')}</small></td><td style="max-width:300px;white-space:pre-wrap"><b>Suggested Reply:</b> ${escapeHtml(s.suggested_answer || '—')}<br><small>Grounding Status: ${escapeHtml(s.grounding_status || 'Not Grounded')}<br>Matched Knowledge: ${escapeHtml(s.matched_knowledge_source || '—')}<br>Risk Flags: ${escapeHtml(risk)}<br>Source: ${escapeHtml(s.model || '—')}<br>${escapeHtml(s.grounding_details || '')}</small></td><td>Confidence: ${Math.round((s.confidence || 0) * 100)}%</td><td style="white-space:nowrap">${actions}</td></tr>`;
+            }
+            if (item.kind === 'candidate') {
+                const c = item.data;
+                const confidence = Math.round((c.confidence || 0) * 100);
+                const confColour = confidence >= 85 ? 'var(--success, #2e7d32)' : (confidence >= 60 ? '#b26a00' : 'var(--danger)');
+                return `
+                <tr>
+                    <td><span class="badge badge-veg">${label}</span></td>
+                    <td style="max-width: 220px;">${escapeHtml(c.user_message || '—')}</td>
+                    <td style="max-width: 340px; font-size: 0.82rem;">
+                        <div id="ai-candidateText-${c.id}" style="white-space:pre-wrap;">${escapeHtml(c.response)}</div>
+                        <textarea id="ai-candidateEdit-${c.id}" style="display:none;width:100%;min-height:110px;">${escapeHtml(c.response)}</textarea>
+                        ${c.edited ? `<small style="color:var(--text-muted);">Edited by ${escapeHtml(c.edited_by || 'admin')} · ${escapeHtml(c.edited_at || '')}</small>` : ''}
+                    </td>
+                    <td style="color: ${confColour}; font-weight: 600;">${confidence}%</td>
+                    <td style="white-space: nowrap;">
+                        <button class="btn-primary" style="padding: 4px 10px; font-size: 0.75rem;" onclick="aiApproveCandidate(${c.id})">✅ Approve</button>
+                        <button class="btn-secondary" style="padding:4px 10px;font-size:0.75rem;" id="ai-candidateEditButton-${c.id}" onclick="aiBeginCandidateEdit(${c.id})">✏️ Edit</button>
+                        <button class="btn-primary" style="display:none;padding:4px 10px;font-size:0.75rem;" id="ai-candidateSaveButton-${c.id}" onclick="aiSaveCandidateEdit(${c.id})">Save draft</button>
+                        <button class="btn-secondary" style="display:none;padding:4px 10px;font-size:0.75rem;" id="ai-candidateCancelButton-${c.id}" onclick="aiCancelCandidateEdit(${c.id})">Cancel</button>
+                        <button class="btn-secondary" style="padding: 4px 10px; font-size: 0.75rem; color: var(--danger);" onclick="aiRejectCandidate(${c.id})">✕ Reject</button>
+                    </td>
+                </tr>`;
+            }
+            if (item.kind === 'escalation') {
+                const e = item.data;
+                return `
+                <tr>
+                    <td><span class="badge badge-nonveg">${label}</span></td>
+                    <td style="max-width: 220px;"><b>${escapeHtml(e.channel)}</b> · <code>${escapeHtml(e.user_id)}</code><br>${escapeHtml(e.user_message)}</td>
+                    <td style="font-size: 0.82rem;">${escapeHtml(e.reason || '')}</td>
+                    <td>—</td>
+                    <td style="white-space: nowrap;">
+                        <button class="btn-secondary" style="padding: 4px 10px; font-size: 0.78rem;" onclick="openResolveModal(${e.id}, '${escapeHtml(e.user_message)}')">✨ Teach &amp; Resolve</button>
+                    </td>
+                </tr>`;
+            }
+            if (item.kind === 'gap') {
+                const g = item.data;
+                const intents = (g.intents || []).join(', ');
+                return `
+                <tr>
+                    <td><span class="badge badge-nonveg">${label}</span></td>
+                    <td style="max-width: 220px;">${escapeHtml(g.example_message || '—')}</td>
+                    <td style="font-size: 0.82rem;">${escapeHtml(intents || g.reason || '')}</td>
+                    <td>seen ${g.occurrences || 1}x</td>
+                    <td style="white-space: nowrap;">
+                        <button class="btn-secondary" style="padding: 4px 10px; font-size: 0.75rem;" onclick="aiSetGapStatus(${g.id}, 'DISMISSED')">Dismiss</button>
+                    </td>
+                </tr>`;
+            }
+            if (item.kind === 'approved') {
+                const k = item.data;
+                return `
+                <tr>
+                    <td><span class="badge badge-veg">${label}</span></td>
+                    <td style="max-width: 220px;"><b>${escapeHtml(k.topic || '')}</b><br><code style="font-size:0.78rem;">${escapeHtml(k.question_pattern || '')}</code></td>
+                    <td style="max-width: 340px; font-size: 0.82rem; white-space:pre-wrap;">${escapeHtml(k.verified_answer || '')}</td>
+                    <td><span class="badge badge-veg">${escapeHtml(k.source || 'staff')}</span></td>
+                    <td style="white-space: nowrap;">
+                        <button class="btn-secondary" style="padding: 4px 8px; font-size: 0.75rem;" onclick="openInCustomQa(${k.id})">Open in Custom Q&amp;A</button>
+                        <button class="btn-secondary" style="padding: 4px 8px; font-size: 0.75rem; color: var(--danger);" onclick="deleteKnowledge(${k.id})">🗑️ Delete</button>
+                    </td>
+                </tr>`;
+            }
+            // rejected candidate — a decision already made, kept for the record only
+            const r = item.data;
+            const rConfidence = Math.round((r.confidence || 0) * 100);
+            return `
+            <tr style="opacity:0.75;">
+                <td><span class="badge badge-nonveg">${label}</span></td>
+                <td style="max-width: 220px;">${escapeHtml(r.user_message || '—')}</td>
+                <td style="max-width: 340px; font-size: 0.82rem; white-space:pre-wrap;">${escapeHtml(r.response || '')}</td>
+                <td>${rConfidence}%</td>
+                <td style="font-size:0.78rem; color:var(--text-muted);">No longer editable</td>
+            </tr>`;
+        }
+
+        async function assistedAction(id, path, body) {
+            const options = { method:'POST', headers:{...getAuthHeaders(), 'Content-Type':'application/json'} };
+            if (body) options.body = JSON.stringify(body);
+            const resp = await fetch(`/admin/assisted-resolutions/${id}/${path}`, options);
+            if (!resp.ok) { const err = await resp.json().catch(() => ({})); throw new Error(err.detail || resp.status); }
+            await loadAiResolution();
+        }
+
+        async function loadAssistedEvaluation() {
+            try {
+                const resp = await fetch('/admin/assisted-resolutions/evaluation', { headers: getAuthHeaders() });
+                if (!resp.ok) throw new Error('evaluation unavailable');
+                const data = await resp.json();
+                const ev = data.evaluation || {}, p = ev.performance || {}, readiness = ev.readiness || {}, safety = ev.safety || {}, ar = ev.auto_resolve || {};
+                const card = (label, value) => `<div style="padding:10px;border:1px solid var(--border);border-radius:10px;text-align:center"><small>${escapeHtml(label)}</small><h3 style="margin:4px 0">${escapeHtml(value)}</h3></div>`;
+                document.getElementById('assistedPerformanceSummary').innerHTML = [
+                    card('Suggestions Generated', p.suggestions_generated || 0), card('Reviewed', p.reviewed || 0), card('Approved As-Is', p.approved_as_is || 0), card('Edited & Approved', p.edited_and_approved || 0), card('Rejected', p.rejected || 0), card('Sent to Human', p.sent_to_human || 0), card('Teach & Resolve', p.teach_and_resolve || 0), card('Non-Actionable Dismissed', p.non_actionable_dismissed || 0),
+                ].join('');
+                const readinessText = readiness.reviewed_grounded_suggestions ? `${readiness.reviewed_grounded_suggestions.value} / ${readiness.reviewed_grounded_suggestions.target} grounded human-reviewed suggestions · unsafe facts ${readiness.unsafe_factual_suggestions || 0} · high-confidence problems ${readiness.high_confidence_rejected || 0} · price/discount/delivery errors ${readiness.price_discount_delivery_errors || 0} · Auto Resolve: ${data.auto_resolve_enabled ? 'ENABLED (unexpected)' : 'OFF'}` : 'No data yet.';
+                document.getElementById('assistedReadinessBody').innerHTML = ` <span style="font-weight:400;margin-left:8px">${escapeHtml(readinessText)}</span>`;
+                const settings = data.auto_resolve_settings || {};
+                const state = document.getElementById('autoResolveControlState');
+                if (state) {
+                    state.innerHTML = `<b>${escapeHtml(settings.state_label || (settings.actual_enabled ? 'AUTO RESOLVE: ON' : 'AUTO RESOLVE: OFF'))}</b><span id="autoResolveControlDetail" style="margin-left:8px;color:var(--text-muted)">Simulation ${settings.simulation_enabled ? 'ON' : 'OFF'} · Readiness ${escapeHtml(readiness.readiness_status || ar.readiness_status || 'NOT READY')} · ${ar.simulated_eligible_cases || 0} simulated eligible · ${ar.simulation_false_positives || 0} false positives</span>`;
+                }
+                const metricTarget = document.getElementById('autoResolveMetrics');
+                if (metricTarget) {
+                    const metric = (label, value) => `<div style="padding:10px;border:1px solid var(--border);border-radius:10px;text-align:center"><small>${escapeHtml(label)}</small><h3 style="margin:4px 0">${escapeHtml(value)}</h3></div>`;
+                    metricTarget.innerHTML = [metric('Simulated Eligible', ar.simulated_eligible_cases || 0), metric('False Positives', ar.simulation_false_positives || 0), metric('Grounded Reviewed', ar.reviewed_grounded_cases || 0), metric('Risk Violations', ar.risk_violations || 0), metric('Source Overrides', ar.source_routing_overrides || 0), metric('WhatsApp AI', ar.whatsapp_ai_activity || 0), metric('Order/CAM Interference', ar.order_cam_interference || 0)].join('');
+                }
+                const rows = (obj, labels) => labels.map(label => { const x = obj[label] || {}; return `<tr><td>${escapeHtml(label)}</td><td>${x.reviewed ?? x.total ?? 0}</td><td>${x.approved_as_is || x.approved || 0}</td><td>${x.edited || 0}</td><td>${x.rejected || 0}</td><td>${x.human_handoff || x.sent_to_human || 0}</td></tr>`; }).join('');
+                document.getElementById('assistedConfidenceTable').innerHTML = rows(ev.confidence_buckets || {}, Object.keys(ev.confidence_buckets || {}));
+                document.getElementById('assistedCategoryTable').innerHTML = rows(ev.category_breakdown || {}, Object.keys(ev.category_breakdown || {}));
+                document.getElementById('assistedGroundingTable').innerHTML = rows(ev.grounding_breakdown || {}, Object.keys(ev.grounding_breakdown || {}));
+                document.getElementById('assistedRiskTable').innerHTML = rows(ev.risk_breakdown || {}, Object.keys(ev.risk_breakdown || {}));
+                const problems = ev.high_confidence_problems || [];
+                document.getElementById('assistedHighConfidenceProblems').innerHTML = problems.length ? problems.map(x => `<div style="padding:6px;border-bottom:1px solid var(--border)"><b>${escapeHtml(x.confidence)}</b> · ${escapeHtml(x.triage_category)} · ${escapeHtml(x.status)} · ${escapeHtml(x.customer_message)}<br><small>Grounding: ${escapeHtml(x.grounding_status)} · Knowledge: ${escapeHtml(x.matched_knowledge_source || '—')} · Reason: ${escapeHtml(x.rejection_reason || x.edit_severity || '—')}</small></div>`).join('') : 'None recorded.';
+                const comparisons = ev.shadow_vs_assisted || [];
+                document.getElementById('assistedShadowComparison').innerHTML = comparisons.length ? comparisons.map(x => `<div>${escapeHtml(x.shadow_prediction)} → ${escapeHtml(x.assisted_prediction)} → ${escapeHtml(x.human_final_decision || 'Pending')}</div>`).join('') : 'No correlated records.';
+                document.getElementById('assistedSafetyMetrics').innerHTML = `Source Routing Overrides by AI: <b>${safety.source_routing_overrides || 0}</b> · WhatsApp Assisted AI Activity: <b>${safety.whatsapp_assisted_activity || 0}</b> · Protected order flow: <b>${safety.protected_order_flow || 0}</b> · CAM interference: <b>${safety.cam_interference || 0}</b>`;
+                const signal = document.getElementById('customQaAiSignals');
+                if (signal) signal.innerHTML = 'AI Review Signal: ' + ((ev.knowledge_signals || []).length ? (ev.knowledge_signals || []).map(k => `${escapeHtml(k.topic || k.knowledge_id)} — Used in ${k.total || 0} assisted suggestions; Approved ${k.approved_as_is || 0}; Edited ${k.edited || 0}; Rejected ${k.rejected || 0}${k.knowledge_review_recommended ? ' · <b>Knowledge Review Recommended</b>' : ''}`).join('<br>') : 'No Custom Q&A usage yet.');
+            } catch (err) {
+                const target = document.getElementById('assistedSafetyMetrics'); if (target) target.textContent = 'Evaluation unavailable.';
+            }
+        }
+        async function approveAssisted(id) { if (confirm('Approve and send this Instagram answer now?')) { try { await assistedAction(id,'approve',{}); } catch(e) { alert(e); } } }
+        async function editAssisted(id) { const answer = prompt('Edit the final answer before sending:'); if (answer && answer.trim()) { try { await assistedAction(id,'edit-resolve',{final_answer:answer.trim()}); } catch(e) { alert(e); } } }
+        async function rejectAssisted(id) { const reason = prompt('Why reject this suggestion?','Not approved'); if (reason !== null) { try { await assistedAction(id,'reject',{reason}); } catch(e) { alert(e); } } }
+        async function sendAssistedToHuman(id) { if (confirm('Send this case to a human? No AI answer will be sent.')) { try { await assistedAction(id,'send-to-human',{}); } catch(e) { alert(e); } } }
+        async function teachAssisted(id) { const answer = prompt('Enter the verified answer to teach and send:'); if (answer && answer.trim()) { try { await assistedAction(id,'teach-and-resolve',{verified_answer:answer.trim()}); } catch(e) { alert(e); } } }
+        async function dismissAssisted(id) { if (confirm('Dismiss this non-actionable message?')) { try { await assistedAction(id,'dismiss',{}); } catch(e) { alert(e); } } }
+
+        async function aiApproveCandidate(id) {
+            if (!confirm('Approve this answer?\n\nIt will be added to the bot\'s verified knowledge and sent to customers who ask this from now on.')) return;
+            try {
+                const resp = await fetch(`/admin/candidates/${id}/approve`, {
+                    method: 'POST',
+                    headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ approved_by: 'admin_dashboard' })
+                });
+                if (resp.ok) { loadAiResolution(); refreshCandidateBadge(); }
+                else { const err = await resp.json().catch(() => ({})); alert('Could not approve: ' + (err.detail || resp.status)); }
+            } catch (err) { alert('Could not approve: ' + err); }
+        }
+
+        function aiBeginCandidateEdit(id) {
+            document.getElementById(`ai-candidateText-${id}`).style.display = 'none';
+            document.getElementById(`ai-candidateEdit-${id}`).style.display = 'block';
+            document.getElementById(`ai-candidateEditButton-${id}`).style.display = 'none';
+            document.getElementById(`ai-candidateSaveButton-${id}`).style.display = 'inline-block';
+            document.getElementById(`ai-candidateCancelButton-${id}`).style.display = 'inline-block';
+        }
+
+        function aiCancelCandidateEdit(id) { renderAiResolution(); }
+
+        async function aiSaveCandidateEdit(id) {
+            const response = document.getElementById(`ai-candidateEdit-${id}`).value.trim();
+            if (!response) return alert('Draft answer cannot be empty.');
+            const resp = await fetch(`/admin/candidates/${id}`, {
+                method: 'PATCH', headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+                body: JSON.stringify({ response, edited_by: 'admin_dashboard' })
+            });
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok) return alert('Could not save draft: ' + (data.detail || resp.status));
+            loadAiResolution();
+        }
+
+        async function aiRejectCandidate(id) {
+            if (!confirm('Reject this draft? It will not be shown to customers and will be removed from this list.')) return;
+            try {
+                const resp = await fetch(`/admin/candidates/${id}/reject`, { method: 'POST', headers: getAuthHeaders() });
+                if (resp.ok) { loadAiResolution(); refreshCandidateBadge(); }
+                else { const err = await resp.json().catch(() => ({})); alert('Could not reject: ' + (err.detail || resp.status)); }
+            } catch (err) { alert('Could not reject: ' + err); }
+        }
+
+        async function aiSetGapStatus(gapId, status) {
+            try {
+                const resp = await fetch(`/admin/knowledge-gaps/${gapId}/status`, {
+                    method: 'POST',
+                    headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ status })
+                });
+                if (resp.ok) loadAiResolution();
+                else { const err = await resp.json().catch(() => ({})); alert('Could not update: ' + (err.detail || resp.status)); }
+            } catch (err) { alert('Could not update: ' + err); }
+        }
+
+        // Triage shadow mode: read-only. There is deliberately no approve,
+        // reject, or resolve action anywhere below — a shadow row was never
+        // acted on by anything, and this view must not become the first
+        // thing that does.
+        const TRIAGE_CATEGORY_LABEL = {
+            AUTO_RESOLVE: '🟢 Auto-Resolve',
+            AI_SUGGESTED: '✨ AI Suggested',
+            TEACH_REQUIRED: '📘 Teach Required',
+            HUMAN_REQUIRED: '🙋 Human Required',
+            NON_ACTIONABLE: '💬 Non-Actionable',
+            CONTACT_DETAIL: '📇 Contact Detail',
+            UNSUPPORTED: '🚫 Unsupported',
+        };
+
+        async function loadTriageShadow() {
+            const statusLine = document.getElementById('triageShadowStatusLine');
+            const summary = document.getElementById('triageShadowSummary');
+            const tbody = document.getElementById('triageShadowTableBody');
+            try {
+                const resp = await fetch('/admin/triage-shadow?days=7&limit=40', { headers: getAuthHeaders() });
+                if (!resp.ok) {
+                    statusLine.innerText = 'Could not load triage shadow report.';
+                    tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: red;">Failed to load.</td></tr>';
+                    return;
+                }
+                const data = await resp.json();
+
+                statusLine.innerText = data.shadow_enabled
+                    ? `On — ${data.classified} message(s) classified in the last ${data.days} day(s). Confidence threshold for a future auto-resolve: ${Math.round(data.confidence_threshold * 100)}%.`
+                    : (data.note || 'LLM_TRIAGE_ENABLED is off.');
+
+                // Shown in the top summary only while shadow mode is on, and
+                // deliberately never folded into AUTO RESOLVED — a shadow
+                // category is a prediction nobody has acted on, not a
+                // resolution.
+                const analyzedCard = document.getElementById('aiStatAnalyzedCard');
+                if (analyzedCard) {
+                    analyzedCard.style.display = data.shadow_enabled ? 'block' : 'none';
+                    document.getElementById('aiStatAnalyzed').innerText = data.classified || 0;
+                }
+
+                summary.innerHTML = (data.by_category || []).map(c => `
+                    <div style="background:#F8FAFC; border:1px solid var(--border); padding:12px; border-radius:12px; text-align:center;">
+                        <span style="font-size:0.72rem; color:#64748B; font-weight:600;">${escapeHtml(TRIAGE_CATEGORY_LABEL[c.category] || c.category)}</span>
+                        <h3 style="font-size:1.4rem; margin-top:4px;">${c.count}</h3>
+                        ${c.avg_confidence !== null ? `<small style="color:var(--text-muted);">avg ${Math.round(c.avg_confidence * 100)}%</small>` : ''}
+                    </div>`).join('') || '<p style="color: var(--text-muted); grid-column: 1/-1;">Nothing classified yet in this window.</p>';
+
+                const rows = data.recent || [];
+                if (!rows.length) {
+                    tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: #888;">Nothing classified yet in this window.</td></tr>';
+                    return;
+                }
+                tbody.innerHTML = rows.map(r => {
+                    const label = r.ok ? (TRIAGE_CATEGORY_LABEL[r.category] || r.category) : `⚠️ ${escapeHtml(r.detail || 'failed')}`;
+                    const wouldAuto = r.would_auto_resolve ? '✅ Yes' : '—';
+                    const grounded = r.ok ? (r.grounded ? '✅ Grounded' : '—') : '—';
+                    const actual = r.was_matched ? `Matched: ${escapeHtml(r.template_id || '')}` : `Fell through${r.template_id ? ` (${escapeHtml(r.template_id)})` : ''}`;
+                    return `
+                    <tr>
+                        <td style="max-width: 220px;">${escapeHtml(r.user_message || '')}</td>
+                        <td><span class="badge badge-veg">${label}</span></td>
+                        <td>${r.ok && r.confidence !== null ? Math.round(r.confidence * 100) + '%' : '—'}</td>
+                        <td>${grounded}</td>
+                        <td>${wouldAuto}</td>
+                        <td style="font-size:0.8rem;">${actual}</td>
+                        <td style="max-width: 260px; font-size:0.78rem; color:var(--text-muted);">${escapeHtml(r.reasoning || '')}</td>
+                    </tr>`;
+                }).join('');
+            } catch (err) {
+                statusLine.innerText = 'Could not load triage shadow report.';
+                tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: red;">Failed to load.</td></tr>';
+            }
+        }
+
+        // CUSTOM Q&A: the client-managed reusable knowledge library. Every
+        // read/write here goes through /admin/custom-qa, which is backed by
+        // the exact same learned_knowledge table (and matcher) Teach &
+        // Resolve and candidate approval already use -- there is no second
+        // knowledge store or second editor.
+        let customQaItems = [];
+        let systemResponseItems = [];
+        let customQaStatusFilter = 'ACTIVE';
+        let cqaAliasesDraft = [];
+
+        // Linked from AI Resolution & Answers' Approved Answers filter --
+        // one editor for learned_knowledge, not two. Switches tabs and opens
+        // the same Edit modal Custom Q&A's own Edit button uses.
+        async function openInCustomQa(id) {
+            document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+            showGroup('custom_qa');
+            await loadCustomQa();
+            const item = customQaItems.find(i => i.id === id);
+            if (item) openCustomQaModal(item);
+            else alert('Could not find this Q&A in Custom Q&A (it may be Disabled/Archived — check those filters).');
+        }
+
+        async function loadCustomQa() {
+            const tbody = document.getElementById('customQaTableBody');
+            tbody.innerHTML = '<tr><td colspan="9" style="text-align: center; color: #888;">Loading...</td></tr>';
+            try {
+                const sourceFilter = document.getElementById('cqaSourceFilter').value;
+                const customSource = sourceFilter === 'system_template' ? '' : sourceFilter;
+                const [resp, systemResp] = await Promise.all([
+                    fetch(`/admin/custom-qa?status=${encodeURIComponent(customQaStatusFilter)}${customSource ? `&source=${encodeURIComponent(customSource)}` : ''}&limit=500`, { headers: getAuthHeaders() }),
+                    fetch(`/admin/response-library?status=${encodeURIComponent(customQaStatusFilter)}${sourceFilter ? `&source=${encodeURIComponent(sourceFilter)}` : ''}&limit=500`, { headers: getAuthHeaders() }),
+                ]);
+                if (!resp.ok || !systemResp.ok) throw new Error('failed');
+                const data = await resp.json();
+                const systemData = await systemResp.json();
+                customQaItems = data.items || [];
+                systemResponseItems = (systemData.items || []).filter(i => i.kind === 'system_template');
+
+                const topicSelect = document.getElementById('cqaTopicFilter');
+                const currentTopic = topicSelect.value;
+                const topics = [...new Set(customQaItems.concat(systemResponseItems).map(i => i.topic || i.category).filter(Boolean))].sort();
+                topicSelect.innerHTML = '<option value="">All Topics</option>' + topics.map(t => `<option value="${escapeHtml(t)}">${escapeHtml(t)}</option>`).join('');
+                topicSelect.value = topics.includes(currentTopic) ? currentTopic : '';
+
+                renderCustomQaList();
+                renderSystemResponseLibrary();
+            } catch (err) {
+                tbody.innerHTML = '<tr><td colspan="9" style="text-align: center; color: red;">Failed to load Custom Q&amp;A.</td></tr>';
+            }
+        }
+
+        function setCustomQaStatusFilter(status) {
+            customQaStatusFilter = status;
+            ['ACTIVE', 'DISABLED', 'ARCHIVED', 'ALL'].forEach(s => {
+                const btn = document.getElementById(`cqaStatusBtn-${s}`);
+                if (btn) btn.classList.toggle('active', s === status);
+            });
+            loadCustomQa();
+        }
+
+        function responseLibrarySearchScore(query, item) {
+            const needle = (query || '').toLowerCase().trim().replace(/\s+/g, ' ');
+            if (!needle) return 1;
+            const tokens = needle.match(/[\w]+/g) || [];
+            if (!tokens.length) return 0;
+            const norm = value => String(value || '').toLowerCase().trim().replace(/\s+/g, ' ');
+            const tokenSet = values => new Set(values.flatMap(value => (norm(value).match(/[\w]+/g) || [])));
+            const primary = [item.primary_question];
+            const aliases = item.aliases || [];
+            const title = [item.title];
+            const category = [item.category, item.topic, item.template_id];
+            const answer = [item.approved_answer];
+            if (primary.some(v => norm(v) === needle)) return 100;
+            if (aliases.some(v => norm(v) === needle)) return 95;
+            if (title.some(v => norm(v) === needle)) return 90;
+            if (category.some(v => norm(v) === needle)) return 85;
+            const q = new Set(tokens);
+            if ([...q].some(v => tokenSet(primary).has(v))) return 80;
+            if ([...q].some(v => tokenSet(aliases).has(v))) return 75;
+            if ([...q].some(v => tokenSet(title).has(v))) return 70;
+            if ([...q].some(v => tokenSet(category).has(v))) return 65;
+            if (needle.replace(/\s/g, '').length > 2 && [...q].some(v => tokenSet(answer).has(v))) return 40;
+            return 0;
+        }
+
+        function renderCustomQaList() {
+            const tbody = document.getElementById('customQaTableBody');
+            const query = (document.getElementById('customQaSearch').value || '').trim().toLowerCase();
+            const source = document.getElementById('cqaSourceFilter').value;
+            const topic = document.getElementById('cqaTopicFilter').value;
+            const priority = document.getElementById('cqaPriorityFilter').value;
+
+            let items = customQaItems;
+            if (source === 'system_template') items = [];
+            else if (source) items = items.filter(i => i.source === source);
+            if (topic) items = items.filter(i => i.topic === topic);
+            if (priority) items = items.filter(i => i.priority === priority);
+            if (query) items = items.map(i => ({ item: i, score: responseLibrarySearchScore(query, { ...i, title: i.topic, category: i.topic }) }))
+                .filter(entry => entry.score > 0)
+                .sort((a, b) => b.score - a.score)
+                .map(entry => entry.item);
+
+            if (!items.length) {
+                tbody.innerHTML = '<tr><td colspan="9" style="text-align: center; color: #888;">Nothing here yet.</td></tr>';
+                return;
+            }
+
+            tbody.innerHTML = items.map(renderCustomQaRow).join('');
+        }
+
+        function renderSystemResponseLibrary() {
+            const box = document.getElementById('systemResponseLibraryCards');
+            if (!box) return;
+            const query = (document.getElementById('customQaSearch').value || '').trim().toLowerCase();
+            const source = document.getElementById('cqaSourceFilter').value;
+            const topic = document.getElementById('cqaTopicFilter').value;
+            const priority = document.getElementById('cqaPriorityFilter').value;
+            if (source && source !== 'system_template') { box.innerHTML = ''; return; }
+            const items = systemResponseItems.map(item => ({ item, score: responseLibrarySearchScore(query, item) })).filter(entry => {
+                const item = entry.item;
+                if (priority && priority !== 'PROTECTED') return false;
+                if (topic && String(item.topic || item.category || '') !== topic) return false;
+                return !query || entry.score > 0;
+            }).sort((a, b) => b.score - a.score).map(entry => entry.item);
+            if (!items.length) { box.innerHTML = '<div style="font-size:.82rem;color:var(--text-muted);">No matching system templates.</div>'; return; }
+            box.innerHTML = items.map(renderSystemResponseCard).join('');
+        }
+
+        function renderSystemResponseCard(item) {
+            const status = item.status || 'ACTIVE';
+            const aliases = (item.aliases || []).slice(0, 5).map(escapeHtml).join(', ') || '—';
+            const editButton = item.editable ? `<button class="btn-secondary" style="padding:4px 8px;font-size:.72rem;" onclick="openSystemResponseEditor('${escapeHtml(item.template_id)}')">Edit</button>` : '';
+            return `<div style="border:1px solid var(--border);border-radius:10px;padding:12px;background:#fff;">
+                <div style="display:flex;justify-content:space-between;gap:8px;align-items:center;"><b>${escapeHtml(item.title || item.template_id)}</b><span class="badge badge-veg">${escapeHtml(status)}</span></div>
+                <div style="font-size:.78rem;color:var(--text-muted);margin:5px 0;">${escapeHtml(item.primary_question || '')} · ${escapeHtml(item.template_id || '')}</div>
+                <div style="font-size:.76rem;color:var(--text-muted);">Aliases: ${aliases}</div>
+                <div style="white-space:pre-wrap;font-size:.82rem;margin:8px 0;">${escapeHtml(item.approved_answer || '')}</div>
+                <div style="display:flex;gap:6px;flex-wrap:wrap;">
+                    ${editButton}
+                    <button class="btn-secondary" style="padding:4px 8px;font-size:.72rem;" onclick="previewSystemResponse('${escapeHtml(item.template_id)}')">Preview</button>
+                    <button class="btn-secondary" style="padding:4px 8px;font-size:.72rem;" onclick="testSystemResponse('${escapeHtml(item.template_id)}')">Test</button>
+                    <button class="btn-secondary" style="padding:4px 8px;font-size:.72rem;" onclick="historySystemResponse('${escapeHtml(item.template_id)}')">History</button>
+                </div>
+            </div>`;
+        }
+
+        async function openSystemResponseEditor(templateId) {
+            const item = systemResponseItems.find(i => i.template_id === templateId);
+            if (!item || !item.editable) return;
+            const response = window.prompt('Editable Response Text (protected triggers and runtime logic cannot be changed):', item.approved_answer || '');
+            if (response === null || !response.trim() || response.trim() === (item.approved_answer || '').trim()) return;
+            try {
+                const resp = await fetch(`/admin/response-library/system/${encodeURIComponent(templateId)}`, {
+                    method: 'PATCH', headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ response: response.trim(), updated_by: 'client_admin_dashboard' }),
+                });
+                const data = await resp.json().catch(() => ({}));
+                if (!resp.ok) { alert(data.detail || 'Could not save response.'); return; }
+                await loadCustomQa();
+                alert('Response saved and active for the next matching customer message.');
+            } catch (e) { alert('Could not save response.'); }
+        }
+
+        async function previewSystemResponse(templateId) {
+            try {
+                const resp = await fetch(`/admin/response-library/system/${encodeURIComponent(templateId)}/preview`, { method: 'POST', headers: getAuthHeaders() });
+                const data = await resp.json();
+                alert(`${data.preview_text || ''}\n\n(${data.note || 'Preview only — nothing has been sent.'})`);
+            } catch (e) { alert('Preview failed.'); }
+        }
+
+        async function testSystemResponse(templateId) {
+            const message = window.prompt('Message to test (dry-run only):', 'hi');
+            if (!message) return;
+            try {
+                const resp = await fetch('/admin/response-library/test', {
+                    method: 'POST', headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ message, focus_template_id: templateId }),
+                });
+                const data = await resp.json();
+                alert(`Detected template: ${data.template_id || 'none'}\nSource: ${data.source || 'none'}\nScore: ${Math.round((data.score || 0) * 100)}%\n\n${data.response || 'No approved response matched.'}`);
+            } catch (e) { alert('Test failed.'); }
+        }
+
+        async function historySystemResponse(templateId) {
+            try {
+                const resp = await fetch(`/admin/response-library/system/${encodeURIComponent(templateId)}/versions`, { headers: getAuthHeaders() });
+                const data = await resp.json();
+                const versions = data.versions || [];
+                if (!versions.length) { alert('No edits yet — this system response is using its approved default copy.'); return; }
+                const choice = window.prompt('Version IDs (newest first):\n' + versions.map(v => `${v.version_id}: ${v.changed_at} — ${v.response}`).join('\n\n') + '\n\nEnter a version ID to restore, or Cancel:');
+                if (!choice) return;
+                const restore = await fetch(`/admin/response-library/system/${encodeURIComponent(templateId)}/restore/${encodeURIComponent(choice)}`, {
+                    method: 'POST', headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ actor: 'client_admin_dashboard' }),
+                });
+                if (!restore.ok) { alert('Could not restore that version.'); return; }
+                await loadCustomQa();
+                alert('Previous response restored.');
+            } catch (e) { alert('History failed.'); }
+        }
+
+        function timeAgo(iso) {
+            if (!iso) return 'Never';
+            const then = new Date(iso.includes('T') || iso.includes(' ') ? iso + (iso.endsWith('Z') ? '' : 'Z') : iso);
+            const diffMs = Date.now() - then.getTime();
+            if (isNaN(diffMs)) return iso;
+            const mins = Math.round(diffMs / 60000);
+            if (mins < 1) return 'Just now';
+            if (mins < 60) return `${mins} min ago`;
+            const hrs = Math.round(mins / 60);
+            if (hrs < 24) return `${hrs} hour${hrs === 1 ? '' : 's'} ago`;
+            const days = Math.round(hrs / 24);
+            return `${days} day${days === 1 ? '' : 's'} ago`;
+        }
+
+        function renderCustomQaRow(item) {
+            const aliasCount = (item.aliases || []).length;
+            const priorityBadge = item.priority === 'HIGH' ? '<span class="badge badge-nonveg">High</span>' : '<span class="badge badge-veg">Normal</span>';
+            const statusBadge = { ACTIVE: '<span class="badge badge-veg">Active</span>', DISABLED: '<span class="badge badge-nonveg">Disabled</span>', ARCHIVED: '<span class="badge">Archived</span>' }[item.status] || item.status;
+            const lifecycleAction = item.status === 'ARCHIVED'
+                ? `<button class="btn-secondary" style="padding:4px 8px;font-size:0.72rem;" onclick="cqaSetStatus(${item.id},'ACTIVE')">Restore</button>`
+                : `<button class="btn-secondary" style="padding:4px 8px;font-size:0.72rem;" onclick="cqaSetStatus(${item.id},'${item.status === 'ACTIVE' ? 'DISABLED' : 'ACTIVE'}')">${item.status === 'ACTIVE' ? 'Disable' : 'Enable'}</button>
+                   <button class="btn-secondary" style="padding:4px 8px;font-size:0.72rem;" onclick="cqaSetStatus(${item.id},'ARCHIVED')">Archive</button>`;
+            return `
+            <tr>
+                <td style="max-width:140px;">${escapeHtml(item.topic || '')}</td>
+                <td style="max-width:220px;">
+                    <b>${escapeHtml(item.primary_question || '')}</b>
+                    ${aliasCount ? `<br><small style="color:var(--text-muted);">+${aliasCount} alternative question${aliasCount === 1 ? '' : 's'}</small>` : ''}
+                </td>
+                <td style="max-width:280px; font-size:0.82rem; white-space:pre-wrap;">${escapeHtml((item.approved_answer || '').slice(0, 220))}${(item.approved_answer || '').length > 220 ? '…' : ''}</td>
+                <td>${statusBadge}</td>
+                <td>${priorityBadge}</td>
+                <td><span class="badge badge-veg">${escapeHtml(item.source_label || item.source || '')}</span></td>
+                <td style="font-size:0.78rem;">Used ${item.usage_count || 0} time${item.usage_count === 1 ? '' : 's'}<br>Last used: ${item.last_used_at ? timeAgo(item.last_used_at) : 'Never'}</td>
+                <td style="font-size:0.76rem; color:var(--text-muted);">${item.updated_at ? timeAgo(item.updated_at) : ''}${item.updated_by ? `<br>by ${escapeHtml(item.updated_by)}` : ''}</td>
+                <td style="white-space:nowrap;">
+                    <button class="btn-secondary" style="padding:4px 8px;font-size:0.72rem;" onclick="cqaQuickTest(${item.id})">Test</button>
+                    <button class="btn-secondary" style="padding:4px 8px;font-size:0.72rem;" onclick="cqaQuickPreview(${item.id})">Preview</button>
+                    <button class="btn-secondary" style="padding:4px 8px;font-size:0.72rem;" onclick="cqaOpenEdit(${item.id})">Edit</button>
+                    ${lifecycleAction}
+                    <button class="btn-secondary" style="padding:4px 8px;font-size:0.72rem;" onclick="cqaOpenHistory(${item.id})">History</button>
+                    <button class="btn-secondary" style="padding:4px 8px;font-size:0.72rem;color:var(--danger);" onclick="cqaOpenDeleteConfirm(${item.id})">Delete</button>
+                </td>
+            </tr>`;
+        }
+
+        async function cqaSetStatus(id, status) {
+            try {
+                const resp = await fetch(`/admin/custom-qa/${id}/status`, {
+                    method: 'POST', headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ status, actor: 'client_admin_dashboard' }),
+                });
+                if (resp.ok) { loadCustomQa(); refreshAiResolutionIfVisible(); }
+                else alert('Could not update status.');
+            } catch (e) { alert('Could not update status.'); }
+        }
+
+        async function cqaQuickTest(id) {
+            const message = window.prompt('Sample customer question to test against this Q&A:');
+            if (!message) return;
+            try {
+                const resp = await fetch('/admin/custom-qa/test', {
+                    method: 'POST', headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ message, focus_id: id }),
+                });
+                const data = await resp.json();
+                if (!data.would_match) { alert('Would Match: NO — nothing in Custom Q&A matches that question.'); return; }
+                let text = `Would Match: YES\nMatched Q&A: ${data.matched.topic} — ${data.matched.primary_question}\nMatched Via: ${data.matched_via}\nScore: ${Math.round(data.score * 100)}%\nWould This Q&A Win: ${data.would_win ? 'YES' : 'NO'}`;
+                if (!data.would_win) text += `\nWinning Q&A: ${data.winning_qa.topic} — ${data.winning_qa.primary_question}\nReason: ${data.reason}`;
+                if (data.ambiguous) text += '\n\n⚠ Two answers are close in score — consider making the question more specific.';
+                alert(text);
+            } catch (e) { alert('Test failed.'); }
+        }
+
+        async function cqaQuickPreview(id) {
+            try {
+                const resp = await fetch('/admin/custom-qa/preview', {
+                    method: 'POST', headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ id }),
+                });
+                const data = await resp.json();
+                alert(`${data.preview_text}\n\n(${data.note})`);
+            } catch (e) { alert('Preview failed.'); }
+        }
+
+        function cqaOpenDeleteConfirm(id) {
+            const item = customQaItems.find(i => i.id === id);
+            if (!item) return;
+            document.getElementById('cqaDeleteDetails').innerHTML = `
+                <div><b>Topic:</b> ${escapeHtml(item.topic || '')}</div>
+                <div><b>Question:</b> ${escapeHtml(item.primary_question || '')}</div>
+                <div><b>Source:</b> ${escapeHtml(item.source_label || '')}</div>
+                <div><b>Usage Count:</b> ${item.usage_count || 0}</div>`;
+            document.getElementById('customQaDeleteModal').dataset.id = id;
+            document.getElementById('customQaDeleteModal').style.display = 'flex';
+        }
+        function closeCustomQaDeleteModal() { document.getElementById('customQaDeleteModal').style.display = 'none'; }
+        async function confirmCustomQaDelete() {
+            const id = document.getElementById('customQaDeleteModal').dataset.id;
+            try {
+                const resp = await fetch(`/admin/custom-qa/${id}`, { method: 'DELETE', headers: getAuthHeaders() });
+                if (resp.ok) { closeCustomQaDeleteModal(); loadCustomQa(); refreshAiResolutionIfVisible(); }
+                else alert('Could not delete.');
+            } catch (e) { alert('Could not delete.'); }
+        }
+
+        async function cqaOpenHistory(id) {
+            const body = document.getElementById('cqaHistoryBody');
+            body.innerHTML = 'Loading…';
+            document.getElementById('customQaHistoryModal').style.display = 'flex';
+            document.getElementById('customQaHistoryModal').dataset.id = id;
+            try {
+                const resp = await fetch(`/admin/custom-qa/${id}/versions`, { headers: getAuthHeaders() });
+                const data = await resp.json();
+                const versions = data.versions || [];
+                if (!versions.length) { body.innerHTML = '<p style="color:var(--text-muted);">No edits yet — this Q&A has not been changed since it was created.</p>'; return; }
+                body.innerHTML = versions.map(v => `
+                    <div style="border:1px solid var(--border); border-radius:10px; padding:12px; margin-bottom:10px;">
+                        <div style="display:flex; justify-content:space-between; align-items:center;">
+                            <b>Version ${v.version_number}</b>
+                            <button class="btn-secondary" style="padding:4px 10px;font-size:0.75rem;" onclick="cqaRestoreVersion(${id},${v.version_id})">Restore</button>
+                        </div>
+                        <div style="font-size:0.8rem; color:var(--text-muted); margin:4px 0;">${escapeHtml(v.changed_by || 'unknown')} · ${escapeHtml(v.changed_at || '')} · ${escapeHtml(v.change_reason || '')}</div>
+                        <div style="font-size:0.82rem;"><b>Topic:</b> ${escapeHtml(v.topic || '')}</div>
+                        <div style="font-size:0.82rem;"><b>Question:</b> ${escapeHtml(v.primary_question || '')}</div>
+                        <div style="font-size:0.82rem; white-space:pre-wrap;"><b>Answer:</b> ${escapeHtml(v.answer || '')}</div>
+                        <div style="font-size:0.78rem; color:var(--text-muted);"><b>Priority:</b> ${escapeHtml(v.priority || '')} · <b>Aliases:</b> ${(v.aliases_snapshot || []).map(escapeHtml).join(', ') || '—'}</div>
+                    </div>`).join('');
+            } catch (e) { body.innerHTML = '<p style="color:red;">Could not load history.</p>'; }
+        }
+        function closeCustomQaHistoryModal() { document.getElementById('customQaHistoryModal').style.display = 'none'; }
+        async function cqaRestoreVersion(id, versionId) {
+            if (!confirm('Restore this version?')) return;
+            try {
+                const resp = await fetch(`/admin/custom-qa/${id}/restore/${versionId}`, {
+                    method: 'POST', headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ actor: 'client_admin_dashboard' }),
+                });
+                if (resp.ok) { closeCustomQaHistoryModal(); loadCustomQa(); }
+                else alert('Could not restore this version.');
+            } catch (e) { alert('Could not restore this version.'); }
+        }
+
+        // -- Add / Edit modal ---------------------------------------------
+
+        const CQA_TOPIC_PRESETS = ['Pricing', 'Delivery', 'Corporate Gifting', 'Meal Subscription', 'Sondesh', 'Events', 'Careers'];
+
+        function onCqaTopicSelectChange() {
+            const select = document.getElementById('cqaTopicSelect');
+            document.getElementById('cqaTopicCustom').style.display = select.value === 'Other' ? 'block' : 'none';
+        }
+
+        function renderCqaAliasList() {
+            const list = document.getElementById('cqaAliasList');
+            list.innerHTML = cqaAliasesDraft.map((a, idx) => `
+                <div style="display:flex; gap:6px; align-items:center; margin-bottom:4px;">
+                    <span style="flex:1; background:#F8FAFC; border:1px solid var(--border); border-radius:6px; padding:6px 10px; font-size:0.82rem;">${escapeHtml(a)}</span>
+                    <button class="btn-secondary" type="button" style="padding:2px 8px; font-size:0.75rem;" onclick="removeCqaAlias(${idx})">✕</button>
+                </div>`).join('');
+        }
+        function addCqaAlias() {
+            const input = document.getElementById('cqaAliasInput');
+            const value = input.value.trim();
+            if (!value) return;
+            cqaAliasesDraft.push(value);
+            input.value = '';
+            renderCqaAliasList();
+        }
+        function removeCqaAlias(idx) { cqaAliasesDraft.splice(idx, 1); renderCqaAliasList(); }
+
+        function openCustomQaModal(item) {
+            document.getElementById('cqaEditingId').value = item ? item.id : '';
+            document.getElementById('customQaModalTitle').innerText = item ? 'Edit Q&A' : '+ Add Q&A';
+            const topicSelect = document.getElementById('cqaTopicSelect');
+            const topic = item ? item.topic : '';
+            if (topic && CQA_TOPIC_PRESETS.includes(topic)) {
+                topicSelect.value = topic;
+                document.getElementById('cqaTopicCustom').style.display = 'none';
+                document.getElementById('cqaTopicCustom').value = '';
+            } else {
+                topicSelect.value = 'Other';
+                document.getElementById('cqaTopicCustom').style.display = 'block';
+                document.getElementById('cqaTopicCustom').value = topic || '';
+            }
+            document.getElementById('cqaPrimaryQuestion').value = item ? item.primary_question : '';
+            document.getElementById('cqaAnswer').value = item ? item.approved_answer : '';
+            document.getElementById('cqaPriority').value = item ? item.priority : 'NORMAL';
+            document.getElementById('cqaStatus').value = item ? item.status : 'ACTIVE';
+            document.getElementById('cqaSourceLabel').innerText = item ? (item.source_label || item.source || '') : 'Created by Client';
+            cqaAliasesDraft = item ? [...(item.aliases || [])] : [];
+            renderCqaAliasList();
+            document.getElementById('cqaTestQuestion').value = '';
+            document.getElementById('cqaTestResult').innerHTML = '';
+            document.getElementById('cqaWarningsBox').style.display = 'none';
+            document.getElementById('cqaWarningsBox').innerHTML = '';
+            document.getElementById('customQaModal').style.display = 'flex';
+        }
+        function closeCustomQaModal() { document.getElementById('customQaModal').style.display = 'none'; }
+
+        function cqaOpenEdit(id) {
+            const item = customQaItems.find(i => i.id === id);
+            if (item) openCustomQaModal(item);
+        }
+
+        function currentCqaTopic() {
+            const select = document.getElementById('cqaTopicSelect');
+            return select.value === 'Other' ? document.getElementById('cqaTopicCustom').value.trim() : select.value;
+        }
+
+        async function runCqaTest() {
+            const message = document.getElementById('cqaTestQuestion').value.trim();
+            const resultBox = document.getElementById('cqaTestResult');
+            if (!message) { resultBox.innerHTML = 'Enter a sample question first.'; return; }
+            const editingId = document.getElementById('cqaEditingId').value;
+            try {
+                const resp = await fetch('/admin/custom-qa/test', {
+                    method: 'POST', headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ message, focus_id: editingId || null }),
+                });
+                const data = await resp.json();
+                if (!data.would_match) { resultBox.innerHTML = '<b>Would Match:</b> NO'; return; }
+                let html = `<b>Would Match:</b> YES<br><b>Matched Q&A:</b> ${escapeHtml(data.matched.topic)} — ${escapeHtml(data.matched.primary_question)}<br><b>Matched Via:</b> ${escapeHtml(data.matched_via)}<br><b>Score:</b> ${Math.round(data.score * 100)}%<br><b>Would This Q&A Win:</b> ${data.would_win ? 'YES' : 'NO'}`;
+                if (!data.would_win) html += `<br><b>Winning Q&A:</b> ${escapeHtml(data.winning_qa.topic)} — ${escapeHtml(data.winning_qa.primary_question)}<br><b>Reason:</b> ${escapeHtml(data.reason)}`;
+                if (data.ambiguous) html += '<br>⚠ Two answers are close in score.';
+                resultBox.innerHTML = html;
+            } catch (e) { resultBox.innerHTML = 'Test failed.'; }
+        }
+
+        function runCqaPreview() {
+            const answer = document.getElementById('cqaAnswer').value;
+            document.getElementById('cqaTestResult').innerHTML = `<div style="white-space:pre-wrap; background:#F8FAFC; border:1px solid var(--border); border-radius:8px; padding:10px;">${escapeHtml(answer)}</div><small style="color:var(--text-muted);">Preview only — nothing has been sent.</small>`;
+        }
+
+        async function saveCustomQa(forceSave) {
+            const id = document.getElementById('cqaEditingId').value;
+            const payload = {
+                topic: currentCqaTopic(),
+                primary_question: document.getElementById('cqaPrimaryQuestion').value.trim(),
+                approved_answer: document.getElementById('cqaAnswer').value.trim(),
+                aliases: cqaAliasesDraft,
+                priority: document.getElementById('cqaPriority').value,
+                status: document.getElementById('cqaStatus').value,
+                force_save: !!forceSave,
+            };
+            if (!payload.topic || !payload.primary_question || !payload.approved_answer) {
+                alert('Topic, Primary Question, and Approved Answer are required.');
+                return;
+            }
+            try {
+                const resp = await fetch(id ? `/admin/custom-qa/${id}` : '/admin/custom-qa', {
+                    method: id ? 'PATCH' : 'POST',
+                    headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload),
+                });
+                const data = await resp.json().catch(() => ({}));
+                if (resp.status === 409) {
+                    const existing = (data.detail && data.detail.existing) || [];
+                    alert('An identical question or alias already exists:\n' + existing.map(e => `${e.topic} — ${e.primary_question}`).join('\n') + '\n\nEdit the existing Q&A instead.');
+                    return;
+                }
+                if (!resp.ok) { alert('Could not save: ' + (data.detail || resp.status)); return; }
+                if (data.status === 'warning') {
+                    let msg = '';
+                    if (data.similar && data.similar.length) {
+                        msg += 'Similar Q&A already exists:\n' + data.similar.map(s => `${s.topic} — ${s.primary_question}\n${(s.approved_answer || '').slice(0, 120)}`).join('\n\n') + '\n\n';
+                    }
+                    if (data.commitment_warnings && data.commitment_warnings.length) {
+                        msg += '⚠ This answer appears to contain: ' + data.commitment_warnings.join(', ') + '. Please confirm this information is current and approved.\n\n';
+                    }
+                    msg += 'Save anyway?';
+                    if (confirm(msg)) { saveCustomQa(true); }
+                    return;
+                }
+                closeCustomQaModal();
+                loadCustomQa();
+                refreshAiResolutionIfVisible();
+            } catch (e) { alert('Could not save Q&A.'); }
+        }
+
+        // -- CSV export / import -------------------------------------------
+
+        async function downloadBlobFrom(url, filename) {
+            const resp = await fetch(url, { headers: getAuthHeaders() });
+            if (!resp.ok) { alert('Download failed.'); return; }
+            const blob = await resp.blob();
+            const objectUrl = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = objectUrl; a.download = filename;
+            document.body.appendChild(a); a.click(); a.remove();
+            URL.revokeObjectURL(objectUrl);
+        }
+        function exportCustomQaCsv() { downloadBlobFrom('/admin/custom-qa/export.csv?status=ALL', 'custom_qa_export.csv'); }
+        function downloadCustomQaTemplate() { downloadBlobFrom('/admin/custom-qa/csv-template', 'custom_qa_template.csv'); }
+
+        function openCustomQaImportModal() {
+            document.getElementById('cqaImportFile').value = '';
+            document.getElementById('cqaImportSummary').innerHTML = '';
+            document.getElementById('cqaImportRows').innerHTML = '<tr><td colspan="4" style="text-align:center; color:#888;">Upload a CSV and click Validate.</td></tr>';
+            document.getElementById('cqaImportConfirmBtn').style.display = 'none';
+            document.getElementById('customQaImportModal').style.display = 'flex';
+        }
+        function closeCustomQaImportModal() { document.getElementById('customQaImportModal').style.display = 'none'; }
+
+        async function runCustomQaImportDryRun() {
+            const fileInput = document.getElementById('cqaImportFile');
+            if (!fileInput.files.length) { alert('Choose a CSV file first.'); return; }
+            const form = new FormData();
+            form.append('file', fileInput.files[0]);
+            try {
+                const resp = await fetch('/admin/custom-qa/import/dry-run', { method: 'POST', headers: getAuthHeaders(), body: form });
+                const data = await resp.json();
+                if (!resp.ok) { alert('Validation failed.'); return; }
+                const s = data.summary;
+                document.getElementById('cqaImportSummary').innerHTML = `Rows: ${s.rows} · Valid: ${s.valid} · Warnings: ${s.warnings} · Duplicates: ${s.duplicates} · Possible Duplicates: ${s.possible_duplicates} · Errors: ${s.errors}`;
+                document.getElementById('cqaImportRows').innerHTML = data.rows.map(r => `
+                    <tr>
+                        <td>${r.row_number}</td>
+                        <td style="max-width:220px;">${escapeHtml((r.data && r.data.primary_question) || '')}</td>
+                        <td><span class="badge ${r.row_status === 'Ready' ? 'badge-veg' : 'badge-nonveg'}">${r.row_status}</span></td>
+                        <td style="font-size:0.78rem;">${escapeHtml((r.errors || []).concat(r.warnings || []).join('; '))}</td>
+                    </tr>`).join('');
+                document.getElementById('cqaImportConfirmBtn').style.display = s.valid > 0 ? 'inline-block' : 'none';
+            } catch (e) { alert('Validation failed.'); }
+        }
+
+        async function confirmCustomQaImport() {
+            const fileInput = document.getElementById('cqaImportFile');
+            if (!fileInput.files.length) { alert('Choose a CSV file first.'); return; }
+            const form = new FormData();
+            form.append('file', fileInput.files[0]);
+            try {
+                const resp = await fetch('/admin/custom-qa/import/confirm', { method: 'POST', headers: getAuthHeaders(), body: form });
+                const data = await resp.json();
+                if (!resp.ok) { alert('Import failed.'); return; }
+                alert(`Imported ${data.imported} row(s). Skipped ${data.skipped.length} row(s).`);
+                closeCustomQaImportModal();
+                loadCustomQa();
+            } catch (e) { alert('Import failed.'); }
         }
     </script>
 </body>
@@ -5124,7 +8961,7 @@ def get_web_chat():
                 <select id="channelSelect" class="channel-select" onchange="resetSession()">
                     <option value="instagram_ad">Instagram DM (Ad-Originated) ✅ Auto-Reply Enabled</option>
                     <option value="instagram_organic">Instagram DM (Organic) 🛑 Auto-Reply Blocked</option>
-                    <option value="whatsapp">WhatsApp Business ✅ Auto-Reply Enabled</option>
+                    <option value="whatsapp">WhatsApp Business 🛑 Human-Only in Production (engine preview only)</option>
                 </select>
             </div>
             

@@ -497,8 +497,8 @@ class OrderCalculator:
                 f"• *Courier (Porter):* Actuals at dispatch (from Sushant Arcade, Gurgaon)\n"
                 f"─────────────────────────────\n"
                 f"💰 *Total Estimated Item Price:* ₹{itm['total_price']:,}\n\n"
-                f"📞 *Next Steps:* Our team (+91 87965 51990) "
-                f"will verify your delivery address & share the official invoice via WhatsApp!"
+                f"➡️ *Next Step:* Tap Continue on WhatsApp to send this order draft "
+                f"to our team. They’ll personally confirm your delivery details and final invoice."
             )
             return {
                 "collection": itm["collection"],
@@ -540,8 +540,8 @@ class OrderCalculator:
                 f"• *Courier (Porter):* Actuals at dispatch (from Sushant Arcade, Gurgaon)\n"
                 f"─────────────────────────────\n"
                 f"💰 *Total Estimated Item Price:* ₹{grand_total:,}\n\n"
-                f"📞 *Next Steps:* Our team (+91 87965 51990) "
-                f"will verify your delivery address & share the official invoice via WhatsApp!"
+                f"➡️ *Next Step:* Tap Continue on WhatsApp to send this order draft "
+                f"to our team. They’ll personally confirm your delivery details and final invoice."
             )
             return {
                 "items": combined_items,

@@ -48,7 +48,8 @@ def test_expired_menu_does_not_gain_fresh_dishes_through_compound_route():
 def test_complaint_wins_over_menu_and_delivery():
     reply, matched, tid, _ = responder._conversation_request("wrong order delivered and show veg menu", "holdout", "whatsapp")
     assert not matched and tid == "explicit_escalation"
-    assert "sorry" in reply.lower()
+    assert "assist you personally on whatsapp" in reply.lower()
+    assert "menu" not in reply.lower()
 
 
 def test_ad_gate_still_precedes_conversation_improvements():

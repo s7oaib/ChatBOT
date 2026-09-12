@@ -1,5 +1,5 @@
 {
-  "seed_version": 17,
+  "seed_version": 18,
   "matching_rules": {
     "guard_precedence": "GUARD_ templates (id starting with GUARD_) have absolute precedence over any answer template. When matched, they escalate immediately with response: null to prevent unverified brand statements.",
     "how_it_works": "Each template has 'triggers' (keywords/phrases). If a customer message contains ANY trigger from a template's list, that template fires. If multiple templates match, the one with the MOST matched keywords wins. If nothing matches confidently, escalate to human — never guess.",
@@ -18,16 +18,16 @@
         "good evening"
       ],
       "responses": [
-        "Hi! 👋 Welcome to Camellia Artisanal — Bengal-rooted, artisanal food. What can we help you discover today?",
-        "Hello from Camellia Artisanal! Are you in the mood for Sondesh, a Bengali meal, or a little menu browsing?",
-        "Hey there from Camellia Artisanal! Our chhana is fresh, our flavours are thoughtful, and our menu is ready when you are. 😊",
-        "Namaste from Camellia Artisanal! Shall we explore artisanal Sondesh or this week's Bengali bento menu?",
-        "Hi! You’ve reached Camellia Artisanal — where Bengal meets small-batch craft. What are you curious about?",
-        "Hello! A warm Camellia Artisanal welcome to you. Would you like prices, flavours, or this week's menu?",
-        "Hey from Camellia Artisanal! Freshly made Bengali goodness is on the other side of your next question — what shall we look at?",
-        "Hi there from Camellia Artisanal! Sondesh, savoury meals, delivery details — point me toward what you’re craving.",
-        "Hello hello from Camellia Artisanal! 😊 Are we talking mishti today, or should I show you the weekly Bengali menu?",
-        "Hey from Camellia Artisanal! What would make your day sweeter — a flavour guide or the menu?"
+        "Hi there! 👋 Welcome to Camellia Artisanal. How can I help you today?",
+        "Hello! 👋 Welcome to Camellia Artisanal. How can I help you today?",
+        "Hey! 👋 Welcome to Camellia Artisanal. What can I help you with today?",
+        "Good morning! 👋 Welcome to Camellia Artisanal. How can I help you today?",
+        "Good afternoon! 👋 Welcome to Camellia Artisanal. How can I help you today?",
+        "Good evening! 👋 Welcome to Camellia Artisanal. How can I help you today?",
+        "Hi there! 👋 Welcome to Camellia Artisanal. Ask us about Sondesh or Kanchagolla.",
+        "Hello! 👋 Welcome to Camellia Artisanal. Ask us about our weekly menu or prices.",
+        "Hey there! 👋 Welcome to Camellia Artisanal. Ask us about gifting or ordering.",
+        "Hi! 👋 Welcome to Camellia Artisanal. What would you like to know?"
       ],
       "escalate": false,
       "router_hint": "A bare hello with no question attached to it."
@@ -257,7 +257,7 @@
         "place the order",
         "here is my address"
       ],
-      "response": "Wonderful — thank you!\n\nOur team (+91 87965 51990) has been notified of your order request and recent chat history. We will connect with you shortly on WhatsApp/Call to verify your address, share your official invoice, and confirm delivery timing!\n\nFeel free to ask any questions in the meantime. 🙏",
+      "response": "Our team can assist you personally on WhatsApp. Please continue your enquiry using the link below.",
       "escalate": true,
       "source_ref": "client Q&A script > QUESTION",
       "router_hint": "The customer is ready to place an order and needs to know what to share."
@@ -1019,8 +1019,8 @@
         "whatsapp number",
         "facebook page"
       ],
-      "response": "You can reach us on WhatsApp at +91 8796551990, or find us on Instagram & Facebook @camellia.artisanal",
-      "escalate": false,
+      "response": "Our team can assist you personally on WhatsApp. Please continue your enquiry using the link below.",
+      "escalate": true,
       "source_ref": "menu.json > contact"
     },
     {
@@ -1035,7 +1035,7 @@
         "how can i place an order",
         "i want to place an order"
       ],
-      "response": "Great! To place an order, please share:\n1. Item & Flavour (e.g. Nolen Gur Sondesh)\n2. Collection (Aamar Mishti / Signature)\n3. Pack Size (250g, 500g, or 1kg)\n4. Delivery Address & Phone Number\n\nOnce shared, our team (+91 87965 51990) will verify your details with you on WhatsApp/Call and share your invoice for payment before dispatch!",
+      "response": "Great! To prepare an order draft, please share:\n1. Item & flavour\n2. Collection\n3. Pack size\n4. Quantity\n\nOnce the draft is complete, you can continue it with our team on WhatsApp.",
       "escalate": false
     },
     {
@@ -1185,7 +1185,8 @@
         "order update",
         "check my order"
       ],
-      "response": "Thank you for checking in!\n\nIf you have already transferred the payment or placed your order, our team is verifying your dispatch on Porter/courier.\n\nWe will immediately share the live delivery tracking link or dispatch confirmation with you right here on WhatsApp! Feel free to ping us directly on +91 87965 51990 if it is urgent. 🙏",
+      "response": "Our team can assist you personally on WhatsApp. Please continue your enquiry using the link below.",
+      "escalate": true,
       "escalate": false,
       "source_ref": "customer support & order dispatch"
     },
@@ -1219,7 +1220,7 @@
         "where is your kitchen",
         "where is the kitchen"
       ],
-      "response": "Address: E144, ground floor, Sushant Arcade, Sushant Lok 1, Gurgaon — easily accessible from Gate No. 4. Kitchen hours: 10:00 AM – 7:30 PM daily. Please call the kitchen number (+91 8796551990) for directions if needed.",
+      "response": "Address: E144, ground floor, Sushant Arcade, Sushant Lok 1, Gurgaon — easily accessible from Gate No. 4. Kitchen hours: 10:00 AM – 7:30 PM daily.",
       "escalate": false,
       "source_ref": "client confirmation (Somdeb Ji) > kitchen address & pickup hours"
     },
@@ -1355,7 +1356,7 @@
         "speak to your team",
         "talk to your team"
       ],
-      "response": "Our Manager of Kitchens, Mr. Guru Dayal Singh (+91 87965 51990), will be your single point of contact for this order and will be happy to assist you with any queries.\n\nYou can also reach the kitchen at camellia.artisanal.gurgaon@gmail.com.",
+      "response": "Our Manager of Kitchens, Mr. Guru Dayal Singh, is the point of contact for kitchen enquiries. You can reach the kitchen at camellia.artisanal.gurgaon@gmail.com.",
       "escalate": false,
       "source_ref": "client confirmation (Somdeb Ji) > kitchen manager (email camellia.artisanal.gurgaon@gmail.com confirmed Phase E-continued)"
     },
@@ -1533,7 +1534,7 @@
         "pre-order ala carte meals",
         "pre order ala carte"
       ],
-      "response": "To place an order, kindly let me know the following here or call / WhatsApp our kitchen at 8796551990.\n\n1. Your choice of items & the quantity\n2. Delivery address, so that I can tell you Porter charges\n3. Phone number of the person who will receive the package\n4. Which slot — example: Friday / Saturday / Sunday, lunch or dinner, or any day next week\n5. In case the delivery address is a standalone house, kindly share a Google location pin.",
+      "response": "To prepare an order draft, please share your choice of items, quantity, and preferred day or meal slot. Once the draft is complete, you can continue it with our team on WhatsApp.",
       "escalate": false,
       "source_ref": "client confirmation 2026-09-08 (Somdeb Ji)"
     },
@@ -1655,7 +1656,7 @@
         "how soon can you deliver the meal",
         "meal delivery"
       ],
-      "response": "Hi! Thank you for getting in touch.\n\nWe request you to always pre order. So that way the delivery time can be at your convenience subject to our kitchen timings. If you are unable to pre order, once your order is confirmed, we usually dispatch it from our kitchen in Sushant Lok, Gurgaon within 45 minutes.\n\nDelivery time after that depends on the Porter rider's travel time, which varies based on traffic and the time of day.\n\nOur kitchen is open 10:00 AM – 7:30 PM every day. You may also DM to pre order or call/WhatsApp +918796551990.",
+      "response": "Hi! Thank you for getting in touch.\n\nWe request you to always pre order. So that way the delivery time can be at your convenience subject to our kitchen timings. If you are unable to pre order, once your order is confirmed, we usually dispatch it from our kitchen in Sushant Lok, Gurgaon within 45 minutes.\n\nDelivery time after that depends on the Porter rider's travel time, which varies based on traffic and the time of day.\n\nOur kitchen is open 10:00 AM – 7:30 PM every day. You may also DM to pre order.",
       "escalate": false,
       "source_ref": "client confirmation 2026-09-08 (Somdeb Ji)"
     },
@@ -1676,7 +1677,7 @@
         "relocating to kolkata",
         "moving kitchen"
       ],
-      "response": "Over the past two months, we have personally run our Gurgaon kitchen to ensure every aspect of the operation met the standards we had envisioned.\n\nToday, we have a professional team in place, led by our Kitchen Manager, Guru Dayal Singh (+91 87965 51990 | camellia.artisanal.gurgaon@gmail.com). Our women kitchen team has been with us for the past four years and has been extensively trained by us. Together, they now run the kitchen through well-established systems, processes, quality checks and balances.\n\nOver the last few weeks, we have deliberately reduced our physical presence in the kitchen and have been monitoring operations remotely. The transition has gone exactly as planned, and the kitchen is now operating independently while consistently maintaining our standards.\n\nThis gives us the confidence to move to Kolkata, knowing that nothing changes for our guests in Delhi NCR. The same kitchen, the same team, the same recipes, the same ingredients, and the same goal of trying to be at uncompromising standards will continue — exactly as they do today.",
+      "response": "Over the past two months, we have personally run our Gurgaon kitchen to ensure every aspect of the operation met the standards we had envisioned.\n\nToday, we have a professional team in place, led by our Kitchen Manager, Guru Dayal Singh (camellia.artisanal.gurgaon@gmail.com). Our women kitchen team has been with us for the past four years and has been extensively trained by us. Together, they now run the kitchen through well-established systems, processes, quality checks and balances.\n\nOver the last few weeks, we have deliberately reduced our physical presence in the kitchen and have been monitoring operations remotely. The transition has gone exactly as planned, and the kitchen is now operating independently while consistently maintaining our standards.\n\nThis gives us the confidence to move to Kolkata, knowing that nothing changes for our guests in Delhi NCR. The same kitchen, the same team, the same recipes, the same ingredients, and the same goal of trying to be at uncompromising standards will continue — exactly as they do today.",
       "escalate": false,
       "source_ref": "client confirmation 2026-09-08 (Somdeb Ji)"
     }
@@ -1746,7 +1747,7 @@
       "failed transactions or UPI deduction issues",
       "anything not matching any template above with sufficient confidence"
     ],
-    "fallback_response": "Thank you for getting in touch! I've notified our team (+91 87965 51990) regarding your request and they'll connect with you directly on WhatsApp/call shortly.\n\nIn the meantime, feel free to ask me about:\n• Our fresh Sondesh, Kanchagolla & Jolbhora (Aamar Mishti & Signature Collections)\n• 🍱 This week's fresh Bengali Lunch & Dinner Bento menu\n• 🚚 Delivery details across Delhi NCR\n\nOr reply 'menu' to see our complete price list!"
+    "fallback_response": "Our team can assist you personally on WhatsApp. Please continue your enquiry using the link below."
   },
   "open_questions_for_client": [
     "Payment methods accepted — needed before we can auto-answer 'how do I pay'",

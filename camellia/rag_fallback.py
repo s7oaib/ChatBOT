@@ -285,9 +285,7 @@ class RAGFallbackEngine:
         Retrieves relevant context chunks strictly from approved source documents,
         calculates similarity/confidence scores, checks for conflicting sources,
         and (when ``persist_candidate`` is true) creates a candidate template
-        with status 'PENDING_APPROVAL'. Assisted Resolution uses the same
-        approved lookup with persistence disabled so it does not duplicate the
-        existing candidate queue.
+        with status 'PENDING_APPROVAL'.
         """
         result = RAGResult()
         if not user_message or not user_message.strip():
@@ -419,9 +417,10 @@ class RAGFallbackEngine:
                     confidence=result.confidence_score,
                     created_by="rag_fallback"
                 )
-                result.candidate_id = candidate_id
-                result.approval_status = "PENDING_APPROVAL"
-                log.info("RAG Candidate Template #%d created for '%s' (status: PENDING_APPROVAL, confidence: %.2f)", candidate_id, user_message, result.confidence_score)
+                if candidate_id is not None:
+                    result.candidate_id = candidate_id
+                    result.approval_status = "PENDING_APPROVAL"
+                    log.info("RAG Candidate Template #%d created for '%s' (status: PENDING_APPROVAL, confidence: %.2f)", candidate_id, user_message, result.confidence_score)
             except Exception as e:
                 log.error("Failed to save RAG candidate template: %s", e)
 

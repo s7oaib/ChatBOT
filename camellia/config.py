@@ -171,6 +171,42 @@ class Config:
     except ValueError:
         STRUCTURED_NLU_ROLLOUT_PERCENT: int = 100
 
+    # AI Resolution & Answers, Phase 3 slice 2: a triage model categorizes
+    # every message the deterministic/canonical path could not answer into one
+    # of seven review buckets, purely for the admin dashboard. Same rollout
+    # shape as ROUTER_SHADOW_ENABLED above — it changes no reply and sends
+    # nothing; it only ever writes to triage_shadow, which nothing in the
+    # reply path reads. Off by default: it costs a Groq call per unmatched
+    # message.
+    LLM_TRIAGE_ENABLED: bool = os.getenv("LLM_TRIAGE_ENABLED", "false").lower() in ("true", "1", "t", "yes")
+    # Human-gated assisted-resolution drafts. This queue never sends an AI
+    # answer by itself; automatic resolution remains explicitly disabled.
+    LLM_ASSISTED_RESOLUTION_ENABLED: bool = os.getenv("LLM_ASSISTED_RESOLUTION_ENABLED", "false").lower() in ("true", "1", "t", "yes")
+    LLM_AUTO_RESOLVE_ENABLED: bool = os.getenv("LLM_AUTO_RESOLVE_ENABLED", "false").lower() in ("true", "1", "t", "yes")
+    # Phase 4: evaluate every deterministic eligibility gate in shadow mode,
+    # but never send a customer reply. Actual sending remains independently
+    # disabled by LLM_AUTO_RESOLVE_ENABLED and the category controls below.
+    LLM_AUTO_RESOLVE_SIMULATION_ENABLED: bool = os.getenv("LLM_AUTO_RESOLVE_SIMULATION_ENABLED", "true").lower() in ("true", "1", "t", "yes")
+    try:
+        LLM_AUTO_RESOLVE_MIN_CONFIDENCE: float = max(0.0, min(1.0, float(os.getenv("LLM_AUTO_RESOLVE_MIN_CONFIDENCE", "0.95"))))
+    except ValueError:
+        LLM_AUTO_RESOLVE_MIN_CONFIDENCE: float = 0.95
+    # Comma-separated category names are deliberately empty by default: a
+    # future pilot must opt a single safe category in explicitly.
+    LLM_AUTO_RESOLVE_ALLOWED_CATEGORIES: str = os.getenv("LLM_AUTO_RESOLVE_ALLOWED_CATEGORIES", "")
+    # Its own model for the same reason the router has one: a different job,
+    # a different rate-limit bucket, and freedom to change one without
+    # touching the other.
+    LLM_TRIAGE_MODEL: str = os.getenv("LLM_TRIAGE_MODEL", "") or "groq/compound-mini"
+    # How confident a grounded AUTO_RESOLVE call would need to be before any
+    # future phase let it auto-send. Recorded on every shadow row now
+    # (`would_auto_resolve`) so that threshold can be picked from real
+    # traffic instead of guessed — nothing reads this to act yet.
+    try:
+        LLM_TRIAGE_CONFIDENCE_THRESHOLD: float = float(os.getenv("LLM_TRIAGE_CONFIDENCE_THRESHOLD", "0.85"))
+    except ValueError:
+        LLM_TRIAGE_CONFIDENCE_THRESHOLD: float = 0.85
+
     # Active conversation state survives restarts and is shared by workers via
     # the existing SQLite volume. The short TTL limits stale conversational state.
     SESSION_PERSISTENCE_ENABLED: bool = os.getenv("SESSION_PERSISTENCE_ENABLED", "true").lower() in ("true", "1", "t", "yes")
@@ -196,19 +232,58 @@ class Config:
     # Instagram Config — uses its own Page token (may differ from WhatsApp token)
     INSTAGRAM_PAGE_ID: str = os.getenv("INSTAGRAM_PAGE_ID", "")
     INSTAGRAM_ACCESS_TOKEN: str = os.getenv("INSTAGRAM_ACCESS_TOKEN", "") or os.getenv("WHATSAPP_ACCESS_TOKEN", "")
-    
+
+    # --- Channel policy: Instagram is the only AI chatbot channel -----------
+    # The client does not want customers talking to an AI on WhatsApp at all.
+    # WHATSAPP_CHATBOT_ENABLED defaults false and is the one flag that would
+    # restore the old auto-reply behaviour; camellia/whatsapp_adapter.py only
+    # consults it as an explicit, logged escape hatch for a future policy
+    # change — the code path that calls the understanding/RAG/template stack
+    # for WhatsApp does not run by default, and nothing else in this file
+    # turns it on implicitly.
+    INSTAGRAM_CHATBOT_ENABLED: bool = os.getenv("INSTAGRAM_CHATBOT_ENABLED", "true").lower() in ("true", "1", "t", "yes")
+    WHATSAPP_CHATBOT_ENABLED: bool = os.getenv("WHATSAPP_CHATBOT_ENABLED", "false").lower() in ("true", "1", "t", "yes")
+    # A single flipped boolean (a copy-pasted .env, a typo'd override) must not
+    # be enough to put the AI back on WhatsApp. Restoring the old behaviour
+    # requires this second, differently-named flag as well — whatsapp_adapter
+    # treats WHATSAPP_CHATBOT_ENABLED alone as a misconfiguration and fails
+    # safe to human-only, logging an error instead of guessing intent.
+    WHATSAPP_CHATBOT_ENABLE_CONFIRM: bool = os.getenv("WHATSAPP_CHATBOT_ENABLE_CONFIRM", "false").lower() in ("true", "1", "t", "yes")
+    WHATSAPP_HUMAN_HANDOFF_ENABLED: bool = os.getenv("WHATSAPP_HUMAN_HANDOFF_ENABLED", "true").lower() in ("true", "1", "t", "yes")
+    # The client's own WhatsApp Business number that customers are sent to,
+    # digits only with country code (e.g. "9198XXXXXXXX") — NOT the Meta Cloud
+    # API sender number above, which never faces the customer directly here.
+    # Left blank until the client provides it; see the manual-configuration
+    # report for what happens while it is unset.
+    WHATSAPP_BUSINESS_NUMBER: str = os.getenv("WHATSAPP_BUSINESS_NUMBER", "")
+    # How long an Instagram -> WhatsApp handoff reference stays valid/active
+    # for deduplication before a repeated "human please" creates a new one.
+    CROSS_CHANNEL_HANDOFF_EXPIRY_HOURS: int = int(os.getenv("CROSS_CHANNEL_HANDOFF_EXPIRY_HOURS", "72"))
+    # How long an admin-started shared-post pairing session stays open before
+    # it auto-expires. A shared post carries no shortcode/URL in the webhook
+    # (only a messaging-attachment id Graph cannot verify against a route),
+    # so pairing is the deliberate, admin-initiated alternative: short window,
+    # on purpose, so a stray share long after the admin meant to pair cannot
+    # bind to the wrong route.
+    INSTAGRAM_POST_PAIRING_TTL_SECONDS: int = int(os.getenv("INSTAGRAM_POST_PAIRING_TTL_SECONDS", "600"))
+    # Placeholder copy — the manual-configuration report flags this as
+    # pending client sign-off; do not treat it as approved client wording.
+    INSTAGRAM_HANDOFF_MESSAGE: str = os.getenv(
+        "INSTAGRAM_HANDOFF_MESSAGE",
+        "Our team can assist you personally on WhatsApp. "
+        "Please continue your enquiry using the link below.",
+    )
+
     # Human Escalation Contact
-    # Where the bot sends its escalation alerts. Distinct from the number
-    # customers are told to call, which stays +91 87965 51990 across the
-    # templates, the menu and the order summaries — this one is internal.
+    # Where the bot sends its internal escalation alerts. It is never printed
+    # in the customer reply; customers use the configured wa.me continuation.
     HUMAN_ESCALATION_PHONE: str = os.getenv("HUMAN_ESCALATION_PHONE", "+919902181650")
     HUMAN_ESCALATION_EMAIL: str = os.getenv("HUMAN_ESCALATION_EMAIL", "")
 
     # Slow-reply notice.
     # When the bot itself becomes slow to answer, the customer is sitting there
     # watching nothing happen. Rather than let them guess, we say so once per
-    # conversation and hand them the manager's direct line — they can switch to
-    # a human or carry on with the bot, whichever they prefer.
+    # conversation without exposing a direct number or promising a callback.
     SLOW_REPLY_NOTICE_ENABLED: bool = os.getenv("SLOW_REPLY_NOTICE_ENABLED", "true").lower() in ("true", "1", "t", "yes")
     # A reply slower than this (milliseconds) counts as slow. Parsed defensively:
     # a blank or malformed value must not take the whole bot down at import time.
@@ -216,19 +291,12 @@ class Config:
         SLOW_REPLY_THRESHOLD_MS: float = float(os.getenv("SLOW_REPLY_THRESHOLD_MS", "").strip() or 3000)
     except ValueError:
         SLOW_REPLY_THRESHOLD_MS: float = 3000.0
-    # The notice promises a limited period, so it must be able to expire —
-    # otherwise the bot keeps claiming "for a week" indefinitely. ISO date
-    # (YYYY-MM-DD); once past, the notice stops being sent. Empty = no expiry.
+    # Optional ISO date (YYYY-MM-DD); once past, the notice stops being sent.
     SLOW_REPLY_NOTICE_UNTIL: str = os.getenv("SLOW_REPLY_NOTICE_UNTIL", "")
     # `or` rather than a getenv default: an empty SLOW_REPLY_NOTICE_TEXT= line in
     # .env would otherwise blank the notice instead of falling back to the copy.
     SLOW_REPLY_NOTICE_TEXT: str = os.getenv("SLOW_REPLY_NOTICE_TEXT", "").strip() or (
-        "Hi thanks so much for connecting. I will slow in replying to the Instagram "
-        "messages for a week, due to unavoidable circumstances. Request you to connect "
-        "directly with Our Manager of Kitchens, Mr. Guru Dayal Singh (8796551990), on a "
-        "call or WhatsApp . He will help you in the selection & purchase process & also "
-        "and share your invoice. He will be your single point of contact for this order "
-        "and will be happy to assist you with any queries."
+        "Hi thanks so much for connecting. Replies to Instagram messages may be slower than usual."
     )
 
     @property

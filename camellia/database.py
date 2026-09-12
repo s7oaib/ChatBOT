@@ -2,10 +2,18 @@ import os
 import re
 import sqlite3
 import json
+from difflib import SequenceMatcher
 from datetime import datetime, timedelta
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 from camellia.config import config
 from camellia.text_rules import strip_flower_emoji
+from camellia.candidate_safety import (
+    candidate_eligibility,
+    detect_business_commitment_warnings,
+    knowledge_key,
+    normalize_question,
+    validate_candidate_answer,
+)
 
 class Database:
     def __init__(self, db_path: str = None):
@@ -13,6 +21,61 @@ class Database:
         parent = os.path.dirname(os.path.abspath(self.db_path))
         os.makedirs(parent, exist_ok=True)
         self.init_db()
+
+    @classmethod
+    def _ensure_instagram_outbound_audit_schema(cls, conn: sqlite3.Connection) -> None:
+        """Ensure only the additive outbound-audit schema on this connection.
+
+        The long-lived application Database can outlive a test or recovery
+        workflow that swaps the SQLite file underneath it. Keeping this small
+        helper idempotent lets audit reads/writes heal that file without
+        rerunning the full application schema migration on every send.
+        """
+        cursor = conn.cursor()
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS instagram_outbound_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            inbound_message_id INTEGER,
+            recipient_id TEXT,
+            response_type TEXT NOT NULL DEFAULT 'text',
+            parent_send_id TEXT,
+            chunk_number INTEGER,
+            total_chunks INTEGER,
+            character_count INTEGER,
+            send_attempted INTEGER NOT NULL DEFAULT 0,
+            http_status INTEGER,
+            success INTEGER,
+            overall_success INTEGER,
+            overall_failure_chunk INTEGER,
+            meta_message_id TEXT,
+            meta_error_code TEXT,
+            meta_error_subcode TEXT,
+            meta_error_message TEXT,
+            meta_trace_id TEXT,
+            duration_ms REAL,
+            retry_count INTEGER NOT NULL DEFAULT 0,
+            exception_class TEXT,
+            exception_message TEXT
+        )
+        """)
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ig_outbound_audit_created "
+            "ON instagram_outbound_audit(created_at DESC)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ig_outbound_audit_inbound "
+            "ON instagram_outbound_audit(inbound_message_id)"
+        )
+        for column, declaration in (
+            ("parent_send_id", "TEXT"),
+            ("chunk_number", "INTEGER"),
+            ("total_chunks", "INTEGER"),
+            ("character_count", "INTEGER"),
+            ("overall_success", "INTEGER"),
+            ("overall_failure_chunk", "INTEGER"),
+        ):
+            cls._ensure_column(cursor, "instagram_outbound_audit", column, declaration)
 
     def get_connection(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=10.0)
@@ -82,6 +145,37 @@ class Database:
             );
             """)
 
+            # AI Resolution & Answers, Phase 3 slice 2: the triage model's
+            # silent category for every message the deterministic/canonical
+            # path could not answer. Same shape as router_shadow above — a
+            # measurement table nothing in the reply path reads, kept
+            # separate from candidate_templates/escalations/knowledge_gaps
+            # because a row here was never acted on, only observed.
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS triage_shadow (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                channel TEXT,
+                user_id TEXT,
+                user_message TEXT NOT NULL,
+                category TEXT,
+                confidence REAL,
+                reasoning TEXT,
+                ok INTEGER DEFAULT 0,
+                detail TEXT,
+                matched_knowledge_id INTEGER,
+                matched_knowledge_source TEXT,
+                matched_knowledge_preview TEXT,
+                grounded INTEGER DEFAULT 0,
+                grounding_reason TEXT,
+                would_auto_resolve INTEGER DEFAULT 0,
+                was_matched INTEGER DEFAULT 0,
+                template_id TEXT,
+                latency_ms REAL,
+                model TEXT,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+
             # Columns added after this table shipped. CREATE TABLE IF NOT
             # EXISTS does nothing to a table that already exists, and the
             # production database lives on a Railway volume full of real rows,
@@ -106,7 +200,10 @@ class Database:
             );
             """)
 
-            # Self-Healing Learned Knowledge base
+            # Self-Healing Learned Knowledge base. This is the single live,
+            # bot-servable answer store — Teach & Resolve, candidate approval,
+            # staff/client manual entry and CSV import (Custom Q&A) all write
+            # here; nothing forks a second knowledge table for any of them.
             cursor.execute("""
             CREATE TABLE IF NOT EXISTS learned_knowledge (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -119,6 +216,83 @@ class Database:
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
             """)
+
+            # Custom Q&A, additive columns on the existing table (existing
+            # rows migrate to status=ACTIVE / priority=NORMAL / usage_count=0
+            # / last_used_at=NULL via the column defaults below — nothing
+            # about topic/question_pattern/verified_answer/source/confidence
+            # on an existing row is touched).
+            self._ensure_column(cursor, "learned_knowledge", "status", "TEXT DEFAULT 'ACTIVE'")
+            self._ensure_column(cursor, "learned_knowledge", "priority", "TEXT DEFAULT 'NORMAL'")
+            self._ensure_column(cursor, "learned_knowledge", "usage_count", "INTEGER DEFAULT 0")
+            self._ensure_column(cursor, "learned_knowledge", "last_used_at", "TIMESTAMP")
+            self._ensure_column(cursor, "learned_knowledge", "created_by", "TEXT")
+            self._ensure_column(cursor, "learned_knowledge", "updated_by", "TEXT")
+            self._ensure_column(cursor, "learned_knowledge", "normalized_question", "TEXT")
+
+            # One Q&A owns zero or more alternative phrasings of the same
+            # question — a real ownership relation, not delimiter-stuffing
+            # question_pattern. A row with only question_pattern (every row
+            # written before this table existed) remains fully valid with no
+            # aliases at all.
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS learned_knowledge_aliases (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                learned_knowledge_id INTEGER NOT NULL,
+                alias_text TEXT NOT NULL,
+                normalized_alias TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                created_by TEXT
+            );
+            """)
+
+            # Every edit (and lifecycle change) snapshots the prior state here
+            # before applying the new one, so History can show what a Q&A
+            # used to say and Restore can bring it back under the same id.
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS learned_knowledge_versions (
+                version_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                learned_knowledge_id INTEGER NOT NULL,
+                version_number INTEGER NOT NULL,
+                topic TEXT,
+                primary_question TEXT,
+                answer TEXT,
+                priority TEXT,
+                status TEXT,
+                aliases_snapshot TEXT,
+                changed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                changed_by TEXT,
+                change_reason TEXT
+            );
+            """)
+
+            # Customer-editable copy for system templates.  This is an
+            # override layer, not a duplicate template/knowledge store: the
+            # protected qa_templates.json record remains authoritative for
+            # triggers and runtime logic, while this table stores only the
+            # approved response text an operator has intentionally changed.
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS response_template_overrides (
+                template_id TEXT PRIMARY KEY,
+                response TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'ACTIVE',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_by TEXT
+            );
+            """)
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS response_template_override_versions (
+                version_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                template_id TEXT NOT NULL,
+                response TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'ACTIVE',
+                changed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                changed_by TEXT,
+                change_reason TEXT
+            );
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_response_override_versions_template ON response_template_override_versions(template_id, version_id DESC)")
 
             # Candidate templates table for human approval workflow
             cursor.execute("""
@@ -134,6 +308,87 @@ class Database:
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 approved_at TIMESTAMP,
                 approved_by TEXT
+            );
+            """)
+
+            # One durable row per Instagram Meta send attempt. The recipient
+            # is a one-way hash; this table stores no credentials or content.
+            self._ensure_instagram_outbound_audit_schema(conn)
+
+            # Human-reviewed assisted-resolution drafts. Separate from the
+            # legacy candidate queue so every review action is auditable.
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS assisted_resolution_suggestions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                escalation_id INTEGER,
+                conversation_id INTEGER,
+                user_id TEXT NOT NULL,
+                channel TEXT NOT NULL,
+                customer_message TEXT NOT NULL,
+                triage_category TEXT NOT NULL,
+                detected_intent TEXT,
+                confidence REAL DEFAULT 0.0,
+                matched_knowledge_id TEXT,
+                matched_knowledge_source TEXT,
+                grounding_status TEXT NOT NULL DEFAULT 'Not Grounded',
+                grounding_details TEXT,
+                suggested_answer TEXT,
+                original_suggested_answer TEXT,
+                status TEXT NOT NULL DEFAULT 'PENDING_REVIEW',
+                risk_flags TEXT NOT NULL DEFAULT '[]',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                reviewed_at TIMESTAMP,
+                reviewed_by TEXT,
+                final_answer TEXT,
+                resolution_action TEXT,
+                rejection_reason TEXT,
+                model TEXT,
+                source_routing_id TEXT
+            );
+            """)
+            # Slice 4 evaluation fields are additive so existing review rows
+            # remain intact across the production migration.
+            self._ensure_column(cursor, "assisted_resolution_suggestions", "edit_score", "REAL")
+            self._ensure_column(cursor, "assisted_resolution_suggestions", "edit_severity", "TEXT")
+            self._ensure_column(cursor, "assisted_resolution_suggestions", "shadow_category", "TEXT")
+            self._ensure_column(cursor, "assisted_resolution_suggestions", "shadow_confidence", "REAL")
+            self._ensure_column(cursor, "assisted_resolution_suggestions", "protected_order_flow", "INTEGER DEFAULT 0")
+            self._ensure_column(cursor, "assisted_resolution_suggestions", "source_route_present", "INTEGER DEFAULT 0")
+            self._ensure_column(cursor, "assisted_resolution_suggestions", "cam_interference", "INTEGER DEFAULT 0")
+
+            # Phase 4: durable Auto Resolve simulation/audit decisions.  These
+            # rows are evidence only while the production send flag is off.
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS auto_resolve_decisions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                assisted_suggestion_id INTEGER,
+                conversation_id INTEGER,
+                user_id TEXT,
+                channel TEXT NOT NULL,
+                customer_message TEXT NOT NULL,
+                matched_knowledge_id TEXT,
+                category TEXT,
+                confidence REAL,
+                grounding_status TEXT,
+                risk_flags TEXT NOT NULL DEFAULT '[]',
+                eligibility TEXT NOT NULL,
+                eligibility_reasons TEXT NOT NULL DEFAULT '[]',
+                simulated INTEGER DEFAULT 1,
+                would_auto_resolve INTEGER DEFAULT 0,
+                actually_sent INTEGER DEFAULT 0,
+                response_text TEXT,
+                final_human_outcome TEXT,
+                idempotency_key TEXT UNIQUE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+            self._ensure_column(cursor, "auto_resolve_decisions", "assisted_suggestion_id", "INTEGER")
+
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS auto_resolve_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
             """)
 
@@ -191,6 +446,30 @@ class Database:
                     "ALTER TABLE message_route_audit ADD COLUMN route_source TEXT"
                 )
 
+            # Instagram -> WhatsApp handoff references. handoff_ref is the
+            # opaque customer-facing token ("CAM-48371"); nothing else in this
+            # row is ever shown to a customer. One active (non-expired,
+            # non-resolved) row per (source_channel, source_user_id) is the
+            # dedup key — a repeated "human please" reuses it instead of
+            # minting a new reference.
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS cross_channel_handoffs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                handoff_ref TEXT NOT NULL UNIQUE,
+                source_channel TEXT NOT NULL,
+                source_user_id TEXT NOT NULL,
+                reason TEXT,
+                summary TEXT,
+                known_entities TEXT,
+                unresolved_topic TEXT,
+                status TEXT NOT NULL DEFAULT 'CREATED',
+                escalation_id INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                expires_at TIMESTAMP
+            );
+            """)
+
             # Canonical missing-information queue. Unlike candidate_templates,
             # this records what fact/action is absent rather than teaching one
             # more spelling of the customer's question.
@@ -231,41 +510,173 @@ class Database:
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
             """)
-            self._ensure_column(cursor, "learned_knowledge", "usage_count", "INTEGER DEFAULT 0")
+            for column, declaration in (
+                ("original_draft", "TEXT"),
+                ("edited", "INTEGER DEFAULT 0"),
+                ("edited_by", "TEXT"),
+                ("edited_at", "TIMESTAMP"),
+                ("candidate_kind", "TEXT DEFAULT 'knowledge'"),
+                ("normalized_question", "TEXT"),
+                ("knowledge_key", "TEXT"),
+            ):
+                self._ensure_column(cursor, "candidate_templates", column, declaration)
 
-            # Human-reviewed LLM drafts. This queue is deliberately separate
-            # from candidate_templates so assisted decisions retain the full
-            # audit trail without changing the existing RAG approval flow.
             cursor.execute("""
-            CREATE TABLE IF NOT EXISTS assisted_resolution_suggestions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                escalation_id INTEGER,
-                conversation_id INTEGER,
-                user_id TEXT NOT NULL,
-                channel TEXT NOT NULL,
-                customer_message TEXT NOT NULL,
-                triage_category TEXT NOT NULL,
-                detected_intent TEXT,
-                confidence REAL DEFAULT 0.0,
-                matched_knowledge_id TEXT,
-                matched_knowledge_source TEXT,
-                grounding_status TEXT NOT NULL DEFAULT 'Not Grounded',
-                grounding_details TEXT,
-                suggested_answer TEXT,
-                original_suggested_answer TEXT,
-                status TEXT NOT NULL DEFAULT 'PENDING_REVIEW',
-                risk_flags TEXT NOT NULL DEFAULT '[]',
+            CREATE TABLE IF NOT EXISTS instagram_source_routes (
+                routing_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_type TEXT NOT NULL,
+                canonical_url TEXT UNIQUE,
+                shortcode TEXT,
+                media_id TEXT,
+                ad_id TEXT,
+                campaign_id TEXT,
+                routing_topic TEXT NOT NULL DEFAULT '',
+                knowledge_scope TEXT NOT NULL DEFAULT '[]',
+                escalation_policy TEXT NOT NULL DEFAULT 'human_if_unsupported',
+                priority_products TEXT NOT NULL DEFAULT '[]',
+                active INTEGER NOT NULL DEFAULT 1,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                reviewed_at TIMESTAMP,
-                reviewed_by TEXT,
-                final_answer TEXT,
-                resolution_action TEXT,
-                rejection_reason TEXT,
-                model TEXT,
-                source_routing_id TEXT
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                archived_at TIMESTAMP
+            );
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_instagram_routes_ad ON instagram_source_routes(ad_id, active)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_instagram_routes_media ON instagram_source_routes(media_id, active)")
+            # A reel shared into a DM is matched by its normalized shortcode.
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_instagram_routes_shortcode ON instagram_source_routes(shortcode, active)")
+
+            # A shared post carries no shortcode/URL Meta will put in a
+            # webhook, and its messaging-attachment id has not been shown to
+            # correspond to any id the Graph API will confirm — so a post
+            # route can only get a verified media_id through an admin
+            # deliberately pairing one. One row per pairing attempt; the
+            # deliberately short lifetime and one-active-at-a-time rule are
+            # enforced by the application, not this table.
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS instagram_post_pairings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                routing_id INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                expires_at TIMESTAMP NOT NULL,
+                started_by TEXT,
+                bound_media_id TEXT,
+                bound_at TIMESTAMP
+            );
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_post_pairings_status ON instagram_post_pairings(status, expires_at)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_post_pairings_routing ON instagram_post_pairings(routing_id, id DESC)")
+
+            # A permanent-delete audit trail. Kept even after the route row
+            # itself is gone, and deliberately small — no customer data, just
+            # enough to answer "what was this route and who removed it."
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS instagram_route_removals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                routing_id INTEGER NOT NULL,
+                canonical_url TEXT,
+                source_type TEXT,
+                shortcode TEXT,
+                routing_topic TEXT,
+                removed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                removed_by TEXT
             );
             """)
 
+            for column, declaration in (
+                ("source_routing_id", "INTEGER"),
+                ("source_match_method", "TEXT"),
+                ("source_type", "TEXT"),
+                ("shortcode", "TEXT"),
+                ("media_id", "TEXT"),
+                ("routing_topic", "TEXT"),
+                ("source_context_used", "INTEGER DEFAULT 0"),
+            ):
+                self._ensure_column(cursor, "conversations", column, declaration)
+
+            # Dynamic menu catalogue: the registry of every menu the Visual
+            # Menu Manager and Instagram routing know about — the durable
+            # image/version machinery in menu_image_versions already works
+            # against any menu_key string, so a new menu needs nothing more
+            # than a row here to become real everywhere it is referenced.
+            # `is_builtin` marks the five menus that predate this catalogue
+            # (their image history already exists under these exact keys);
+            # it is informational only and gates nothing.
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS menu_catalogue (
+                menu_id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                category TEXT NOT NULL DEFAULT 'Other',
+                description TEXT NOT NULL DEFAULT '',
+                active INTEGER NOT NULL DEFAULT 1,
+                is_builtin INTEGER NOT NULL DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+
+            # Instagram Content Routing topics: a reusable label an operator
+            # picks once and every future route reuses, instead of retyping
+            # the same topic as free text on each route. `priority_products`
+            # and `knowledge_scope` here are the *defaults* a route is
+            # pre-filled with at creation time, not a live reference read at
+            # matching time — the route's own columns remain what the
+            # matcher and responder actually act on, so nothing about
+            # existing routing behavior changes shape.
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS instagram_topics (
+                topic_id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                default_menu_id TEXT,
+                priority_products TEXT NOT NULL DEFAULT '[]',
+                knowledge_scope TEXT NOT NULL DEFAULT '[]',
+                response_order TEXT NOT NULL DEFAULT 'description_first',
+                active INTEGER NOT NULL DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+            self._ensure_column(cursor, "instagram_topics", "response_order", "TEXT NOT NULL DEFAULT 'description_first'")
+            cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_topics_normalized_name ON instagram_topics(name COLLATE NOCASE)")
+
+            self._ensure_column(cursor, "instagram_source_routes", "topic_id", "TEXT")
+            # The menu shown for this route. Defaults from the selected
+            # Topic's default_menu_id at save time (see validate_route_payload)
+            # but is its own column so a route can override it independently —
+            # "the client may override it if needed" without changing the Topic.
+            self._ensure_column(cursor, "instagram_source_routes", "menu_id", "TEXT")
+
+            # Menu Manager: one row per unpublished edit in progress. A menu_key
+            # ("collections.aamar_mishti", "weekly.vegetarian", ...) has at most
+            # one draft — a second save overwrites it rather than accumulating.
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS menu_drafts (
+                menu_key TEXT PRIMARY KEY,
+                draft_json TEXT NOT NULL,
+                updated_by TEXT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+
+            # Menu Manager: one row per publish/restore, holding the full
+            # resulting item list for that menu_key — the lightweight version
+            # history the client can review or roll back to.
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS menu_versions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                menu_key TEXT NOT NULL,
+                snapshot_json TEXT NOT NULL,
+                action TEXT NOT NULL DEFAULT 'publish',
+                changed_by TEXT,
+                changed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_menu_versions_key ON menu_versions(menu_key, id DESC);")
+
+            # Visual Menu Manager: durable image versions per menu_key. Image
+            # bytes live on the same durable volume as menu.json; this table
+            # holds only the metadata needed to make one version current.
             cursor.execute("""
             CREATE TABLE IF NOT EXISTS menu_image_versions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -286,23 +697,163 @@ class Database:
             cursor.execute("INSERT OR IGNORE INTO analytics (key, value) VALUES ('matched_responses', 0);")
             cursor.execute("INSERT OR IGNORE INTO analytics (key, value) VALUES ('escalations_count', 0);")
 
+            # The five menus that predate the dynamic menu catalogue. Seeded
+            # here — not from a separate startup call — so every Database
+            # instance (production, or an isolated one built fresh in a
+            # test) has them without remembering to ask; INSERT OR IGNORE
+            # means an operator's later edits to a built-in's description
+            # are never overwritten by this running again.
+            for menu_id, name, category, description in (
+                ("aamar_mishti", "Aamar Mishti Collection", "Sondesh",
+                 "Everyday Bengali Sondesh collection, made with local dairy milk."),
+                ("signature", "Signature Collection", "Sondesh",
+                 "Sondesh for special occasions and gifting, made with A2 cow milk."),
+                ("weekly_vegetarian", "Weekly Vegetarian", "Weekly Vegetarian",
+                 "This week's fresh vegetarian Bengali dishes."),
+                ("weekly_non_vegetarian", "Weekly Non-Vegetarian", "Weekly Non-Vegetarian",
+                 "This week's fresh non-vegetarian Bengali dishes."),
+                ("bento", "Bento / Meal Menu", "Bento / Meal", "Ready-to-eat Bengali meal boxes."),
+            ):
+                cursor.execute(
+                    "INSERT OR IGNORE INTO menu_catalogue (menu_id, name, category, description, active, is_builtin) "
+                    "VALUES (?, ?, ?, ?, 1, 1)",
+                    (menu_id, name, category, description),
+                )
+
             self._create_indexes(cursor)
 
             conn.commit()
 
-    def get_menu_image_current(self, menu_key: str) -> Optional[Dict[str, Any]]:
+    def set_ad_product_route(self, ad_id: str, product: str) -> Dict[str, Any]:
+        """Creates or updates the product shown first for one Meta ad ID."""
+        now = datetime.utcnow().isoformat()
         with self.get_connection() as conn:
-            row = conn.execute("SELECT * FROM menu_image_versions WHERE menu_key = ? AND status = 'current' ORDER BY version DESC LIMIT 1", (menu_key,)).fetchone()
+            conn.execute(
+                """
+                INSERT INTO ad_product_routes (ad_id, product, created_at, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(ad_id) DO UPDATE SET
+                    product = excluded.product,
+                    updated_at = excluded.updated_at
+                """,
+                (ad_id, product, now, now),
+            )
+            conn.commit()
+        return {"ad_id": ad_id, "product": product, "updated_at": now}
+
+    def get_ad_product_route(self, ad_id: str) -> Optional[str]:
+        """Returns an admin-managed product route for one ad, if configured."""
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT product FROM ad_product_routes WHERE ad_id = ?", (ad_id,)
+            ).fetchone()
+        return str(row["product"]) if row else None
+
+    def list_ad_product_routes(self) -> List[Dict[str, Any]]:
+        """Lists ad routes in most-recently-updated order for the portal."""
+        with self.get_connection() as conn:
+            rows = conn.execute(
+                "SELECT ad_id, product, created_at, updated_at "
+                "FROM ad_product_routes ORDER BY updated_at DESC, ad_id"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def delete_ad_product_route(self, ad_id: str) -> bool:
+        """Deletes one mapping without affecting conversations from that ad."""
+        with self.get_connection() as conn:
+            cursor = conn.execute("DELETE FROM ad_product_routes WHERE ad_id = ?", (ad_id,))
+            conn.commit()
+        return cursor.rowcount > 0
+
+    # --- Menu Manager: drafts and version history -------------------------
+
+    def save_menu_draft(self, menu_key: str, draft_json: str, updated_by: Optional[str] = None) -> None:
+        with self.get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO menu_drafts (menu_key, draft_json, updated_by, updated_at)
+                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(menu_key) DO UPDATE SET
+                    draft_json = excluded.draft_json,
+                    updated_by = excluded.updated_by,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (menu_key, draft_json, updated_by),
+            )
+            conn.commit()
+
+    def get_menu_draft(self, menu_key: str) -> Optional[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM menu_drafts WHERE menu_key = ?", (menu_key,)
+            ).fetchone()
             return dict(row) if row else None
+
+    def clear_menu_draft(self, menu_key: str) -> None:
+        with self.get_connection() as conn:
+            conn.execute("DELETE FROM menu_drafts WHERE menu_key = ?", (menu_key,))
+            conn.commit()
+
+    def record_menu_version(
+        self, menu_key: str, snapshot_json: str, action: str = "publish",
+        changed_by: Optional[str] = None,
+    ) -> int:
+        with self.get_connection() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO menu_versions (menu_key, snapshot_json, action, changed_by)
+                VALUES (?, ?, ?, ?)
+                """,
+                (menu_key, snapshot_json, action, changed_by),
+            )
+            conn.commit()
+            return cursor.lastrowid
+
+    def get_menu_versions(self, menu_key: str, limit: int = 20) -> List[Dict[str, Any]]:
+        """Newest first — the version a client wants to inspect or restore is
+        almost always a recent one."""
+        with self.get_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM menu_versions WHERE menu_key = ? ORDER BY id DESC LIMIT ?",
+                (menu_key, limit),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def get_menu_version(self, version_id: int) -> Optional[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM menu_versions WHERE id = ?", (version_id,)
+            ).fetchone()
+            return dict(row) if row else None
+
+    # --- Visual Menu Manager: durable menu image versions ------------------
+
+    def get_menu_image_current(self, menu_key: str) -> Optional[Dict[str, Any]]:
+        # Every responder reply checks this, so a table that has not been
+        # created yet (a connection racing process startup, or a test
+        # database recreated without re-running init_db) must read as "no
+        # managed image" rather than take the whole reply down.
+        try:
+            with self.get_connection() as conn:
+                row = conn.execute("SELECT * FROM menu_image_versions WHERE menu_key = ? AND status = 'current' ORDER BY version DESC LIMIT 1", (menu_key,)).fetchone()
+                return dict(row) if row else None
+        except sqlite3.OperationalError:
+            return None
 
     def get_menu_image_draft(self, menu_key: str) -> Optional[Dict[str, Any]]:
-        with self.get_connection() as conn:
-            row = conn.execute("SELECT * FROM menu_image_versions WHERE menu_key = ? AND status = 'draft' ORDER BY id DESC LIMIT 1", (menu_key,)).fetchone()
-            return dict(row) if row else None
+        try:
+            with self.get_connection() as conn:
+                row = conn.execute("SELECT * FROM menu_image_versions WHERE menu_key = ? AND status = 'draft' ORDER BY id DESC LIMIT 1", (menu_key,)).fetchone()
+                return dict(row) if row else None
+        except sqlite3.OperationalError:
+            return None
 
     def has_menu_image_archive(self, menu_key: str) -> bool:
-        with self.get_connection() as conn:
-            return conn.execute("SELECT 1 FROM menu_image_versions WHERE menu_key = ? AND status = 'archived' LIMIT 1", (menu_key,)).fetchone() is not None
+        try:
+            with self.get_connection() as conn:
+                return conn.execute("SELECT 1 FROM menu_image_versions WHERE menu_key = ? AND status = 'archived' LIMIT 1", (menu_key,)).fetchone() is not None
+        except sqlite3.OperationalError:
+            return False
 
     def save_menu_image_draft(self, menu_key: str, image_path: str, uploaded_by: str) -> Dict[str, Any]:
         now = datetime.utcnow().isoformat()
@@ -357,46 +908,397 @@ class Database:
             conn.commit()
             return dict(conn.execute("SELECT * FROM menu_image_versions WHERE id = ?", (version_id,)).fetchone())
 
-    def set_ad_product_route(self, ad_id: str, product: str) -> Dict[str, Any]:
-        """Creates or updates the product shown first for one Meta ad ID."""
+    def save_instagram_source_route(self, route: Dict[str, Any], routing_id: Optional[int] = None) -> Dict[str, Any]:
+        """Create/update one source route, deduplicating URL and identifiers."""
         now = datetime.utcnow().isoformat()
+        values = (
+            route["source_type"], route.get("canonical_url"), route.get("shortcode"),
+            route.get("media_id"), route.get("ad_id"), route.get("campaign_id"),
+            route.get("routing_topic", ""), json.dumps(route.get("knowledge_scope", [])),
+            route.get("escalation_policy", "human_if_unsupported"),
+            json.dumps(route.get("priority_products", [])), int(bool(route.get("active", True))),
+            route.get("topic_id"), route.get("menu_id"), now,
+        )
         with self.get_connection() as conn:
-            conn.execute(
-                """
-                INSERT INTO ad_product_routes (ad_id, product, created_at, updated_at)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(ad_id) DO UPDATE SET
-                    product = excluded.product,
-                    updated_at = excluded.updated_at
-                """,
-                (ad_id, product, now, now),
-            )
+            if routing_id is None:
+                for field in ("canonical_url", "ad_id", "media_id"):
+                    if not route.get(field):
+                        continue
+                    existing = conn.execute(
+                        f"SELECT routing_id FROM instagram_source_routes WHERE {field} = ? AND archived_at IS NULL",
+                        (route[field],),
+                    ).fetchone()
+                    if existing:
+                        routing_id = int(existing["routing_id"])
+                        break
+            if routing_id is None:
+                cursor = conn.execute(
+                    """INSERT INTO instagram_source_routes
+                    (source_type, canonical_url, shortcode, media_id, ad_id, campaign_id,
+                     routing_topic, knowledge_scope, escalation_policy, priority_products,
+                     active, topic_id, menu_id, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    values[:-1] + (now, now),
+                )
+                routing_id = int(cursor.lastrowid)
+            else:
+                cursor = conn.execute(
+                    """UPDATE instagram_source_routes SET source_type=?, canonical_url=?, shortcode=?,
+                    media_id=?, ad_id=?, campaign_id=?, routing_topic=?, knowledge_scope=?,
+                    escalation_policy=?, priority_products=?, active=?, topic_id=?, menu_id=?, updated_at=?, archived_at=NULL
+                    WHERE routing_id=?""",
+                    values + (routing_id,),
+                )
+                if cursor.rowcount == 0:
+                    raise ValueError("Routing record not found.")
             conn.commit()
-        return {"ad_id": ad_id, "product": product, "updated_at": now}
-
-    def get_ad_product_route(self, ad_id: str) -> Optional[str]:
-        """Returns an admin-managed product route for one ad, if configured."""
-        with self.get_connection() as conn:
             row = conn.execute(
-                "SELECT product FROM ad_product_routes WHERE ad_id = ?", (ad_id,)
+                "SELECT * FROM instagram_source_routes WHERE routing_id = ?", (routing_id,)
             ).fetchone()
-        return str(row["product"]) if row else None
+        return dict(row)
 
-    def list_ad_product_routes(self) -> List[Dict[str, Any]]:
-        """Lists ad routes in most-recently-updated order for the portal."""
+    def list_instagram_source_routes(self, include_archived: bool = False) -> List[Dict[str, Any]]:
+        where = "" if include_archived else "WHERE archived_at IS NULL"
         with self.get_connection() as conn:
             rows = conn.execute(
-                "SELECT ad_id, product, created_at, updated_at "
-                "FROM ad_product_routes ORDER BY updated_at DESC, ad_id"
+                f"SELECT * FROM instagram_source_routes {where} ORDER BY updated_at DESC, routing_id DESC"
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def delete_ad_product_route(self, ad_id: str) -> bool:
-        """Deletes one mapping without affecting conversations from that ad."""
+    def get_instagram_source_route(self, routing_id: int) -> Optional[Dict[str, Any]]:
         with self.get_connection() as conn:
-            cursor = conn.execute("DELETE FROM ad_product_routes WHERE ad_id = ?", (ad_id,))
+            row = conn.execute(
+                "SELECT * FROM instagram_source_routes WHERE routing_id = ?", (routing_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def find_instagram_source_route(self, field: str, value: str) -> Optional[Dict[str, Any]]:
+        # The column name is interpolated, so the allowlist is the thing
+        # keeping this query safe. Widening it is adding a name to the list,
+        # never relaxing the check.
+        if field not in ("ad_id", "media_id", "shortcode"):
+            raise ValueError("Unsupported route identifier.")
+        with self.get_connection() as conn:
+            row = conn.execute(
+                f"SELECT * FROM instagram_source_routes WHERE {field} = ? AND active = 1 "
+                "AND archived_at IS NULL ORDER BY updated_at DESC LIMIT 1",
+                (value,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def set_instagram_source_route_active(self, routing_id: int, active: bool) -> bool:
+        with self.get_connection() as conn:
+            cursor = conn.execute(
+                "UPDATE instagram_source_routes SET active=?, updated_at=? WHERE routing_id=? AND archived_at IS NULL",
+                (int(active), datetime.utcnow().isoformat(), routing_id),
+            )
             conn.commit()
         return cursor.rowcount > 0
+
+    def set_instagram_source_route_topic(self, routing_id: int, topic_id: str) -> bool:
+        """Backfills topic_id only — deliberately narrower than
+        save_instagram_source_route, which unconditionally clears archived_at
+        on update. Used by the startup migration, which must never un-archive
+        a route just because it is backfilling one field."""
+        with self.get_connection() as conn:
+            cursor = conn.execute(
+                "UPDATE instagram_source_routes SET topic_id=? WHERE routing_id=?",
+                (topic_id, routing_id),
+            )
+            conn.commit()
+        return cursor.rowcount > 0
+
+    def archive_instagram_source_route(self, routing_id: int) -> bool:
+        # `active` is left exactly as it was — `archived_at IS NULL` is
+        # already what gates matching, so forcing active=0 here would only
+        # destroy the one piece of information restore needs: whether this
+        # route should resume matching immediately or come back disabled.
+        now = datetime.utcnow().isoformat()
+        with self.get_connection() as conn:
+            cursor = conn.execute(
+                "UPDATE instagram_source_routes SET archived_at=?, updated_at=? WHERE routing_id=?",
+                (now, now, routing_id),
+            )
+            conn.commit()
+        return cursor.rowcount > 0
+
+    def restore_instagram_source_route(self, routing_id: int) -> bool:
+        """Un-archives a route in place — same row, same id, nothing duplicated.
+
+        Deliberately does not touch `active`: an operator who archived a
+        route they had disabled should get back a disabled route, not one
+        that starts matching customer traffic again on its own.
+        """
+        now = datetime.utcnow().isoformat()
+        with self.get_connection() as conn:
+            cursor = conn.execute(
+                "UPDATE instagram_source_routes SET archived_at=NULL, updated_at=? "
+                "WHERE routing_id=? AND archived_at IS NOT NULL",
+                (now, routing_id),
+            )
+            conn.commit()
+        return cursor.rowcount > 0
+
+    def delete_instagram_source_route(self, routing_id: int, removed_by: Optional[str] = None) -> bool:
+        """Permanently deletes one routing configuration.
+
+        Scope is deliberately narrow: the route row itself, and the
+        pairing-attempt rows that exist only to serve that route (they carry
+        no meaning once the route they were pairing is gone). Nothing about
+        Topics, Menus, product/knowledge catalogues, conversations, or CAM
+        handoffs is touched — none of those are owned by a route, and a
+        route referencing one of them is not a reason to remove it.
+
+        A row is written to instagram_route_removals before the delete, so
+        what this route was and who removed it survives the delete itself.
+        """
+        with self.get_connection() as conn:
+            route = conn.execute(
+                "SELECT * FROM instagram_source_routes WHERE routing_id = ?", (routing_id,)
+            ).fetchone()
+            if not route:
+                return False
+            conn.execute(
+                """
+                INSERT INTO instagram_route_removals
+                    (routing_id, canonical_url, source_type, shortcode, routing_topic, removed_by)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (routing_id, route["canonical_url"], route["source_type"],
+                 route["shortcode"], route["routing_topic"], removed_by),
+            )
+            conn.execute("DELETE FROM instagram_post_pairings WHERE routing_id = ?", (routing_id,))
+            conn.execute("DELETE FROM instagram_source_routes WHERE routing_id = ?", (routing_id,))
+            conn.commit()
+        return True
+
+    # --- Shared-post pairing: admin-verified media_id binding --------------
+
+    def start_post_pairing(self, routing_id: int, ttl_seconds: int, started_by: Optional[str]) -> Dict[str, Any]:
+        """Opens a pairing window for one route, superseding any other open one.
+
+        Only one route may be mid-pairing at a time — otherwise the next
+        shared post received during the window would be ambiguous about which
+        route it was meant to bind. Starting a new pairing is how an admin
+        cancels a forgotten one, so this does not refuse; it supersedes.
+        """
+        now = datetime.utcnow()
+        # SQLite's own CURRENT_TIMESTAMP renders as "YYYY-MM-DD HH:MM:SS" —
+        # matched here rather than using isoformat()'s "T"-separated,
+        # microsecond-bearing string, which would sort before every
+        # CURRENT_TIMESTAMP value in a plain string comparison and make
+        # get_active_post_pairing()'s expiry check never actually expire
+        # anything.
+        expires_at = (now + timedelta(seconds=ttl_seconds)).strftime("%Y-%m-%d %H:%M:%S")
+        with self.get_connection() as conn:
+            conn.execute(
+                "UPDATE instagram_post_pairings SET status='cancelled' WHERE status='pending'"
+            )
+            cursor = conn.execute(
+                """
+                INSERT INTO instagram_post_pairings (routing_id, status, started_at, expires_at, started_by)
+                VALUES (?, 'pending', ?, ?, ?)
+                """,
+                (routing_id, now.isoformat(), expires_at, started_by),
+            )
+            conn.commit()
+            row = conn.execute(
+                "SELECT * FROM instagram_post_pairings WHERE id = ?", (cursor.lastrowid,)
+            ).fetchone()
+        return dict(row)
+
+    def get_active_post_pairing(self) -> Optional[Dict[str, Any]]:
+        """The one pairing currently waiting for a shared post, if its window has not closed."""
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM instagram_post_pairings WHERE status = 'pending' "
+                "AND expires_at > CURRENT_TIMESTAMP ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        return dict(row) if row else None
+
+    def get_post_pairing_for_route(self, routing_id: int) -> Optional[Dict[str, Any]]:
+        """Newest pairing attempt for this route, of any status — for the admin status view."""
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM instagram_post_pairings WHERE routing_id = ? ORDER BY id DESC LIMIT 1",
+                (routing_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def cancel_post_pairing(self, routing_id: int) -> bool:
+        with self.get_connection() as conn:
+            cursor = conn.execute(
+                "UPDATE instagram_post_pairings SET status='cancelled' "
+                "WHERE routing_id = ? AND status = 'pending'",
+                (routing_id,),
+            )
+            conn.commit()
+        return cursor.rowcount > 0
+
+    def bind_post_pairing(self, pairing_id: int, media_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Commits one shared post's media id to the route it was paired against.
+
+        Writes both sides atomically-enough for SQLite's single-writer model:
+        the pairing row records what was bound and when (for the admin to see
+        it happened and to what), and the route itself gets the verified
+        media_id, which is what the existing exact-match lookup already
+        matches ad-id/story replies against — a paired post needs no matcher
+        of its own once this is set.
+        """
+        now = datetime.utcnow().isoformat()
+        with self.get_connection() as conn:
+            pairing = conn.execute(
+                "SELECT * FROM instagram_post_pairings WHERE id = ? AND status = 'pending' "
+                "AND expires_at > CURRENT_TIMESTAMP",
+                (pairing_id,),
+            ).fetchone()
+            if not pairing:
+                return None
+            conn.execute(
+                "UPDATE instagram_post_pairings SET status='bound', bound_media_id=?, bound_at=? WHERE id=?",
+                (media_id, now, pairing_id),
+            )
+            conn.execute(
+                "UPDATE instagram_source_routes SET media_id=?, updated_at=? WHERE routing_id=?",
+                (media_id, now, pairing["routing_id"]),
+            )
+            conn.commit()
+            row = conn.execute("SELECT * FROM instagram_post_pairings WHERE id=?", (pairing_id,)).fetchone()
+        return dict(row)
+
+    # --- Dynamic menu catalogue ---------------------------------------------
+
+    def list_menu_catalogue(self, include_inactive: bool = True) -> List[Dict[str, Any]]:
+        where = "" if include_inactive else "WHERE active = 1"
+        with self.get_connection() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM menu_catalogue {where} ORDER BY is_builtin DESC, name COLLATE NOCASE"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_menu_catalogue_entry(self, menu_id: str) -> Optional[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            row = conn.execute("SELECT * FROM menu_catalogue WHERE menu_id = ?", (menu_id,)).fetchone()
+        return dict(row) if row else None
+
+    def find_menu_catalogue_entry_by_name(self, name: str) -> Optional[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM menu_catalogue WHERE name = ? COLLATE NOCASE", (name.strip(),)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def create_menu_catalogue_entry(
+        self, menu_id: str, name: str, category: str, description: str,
+        active: bool = True, is_builtin: bool = False,
+    ) -> Dict[str, Any]:
+        with self.get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO menu_catalogue (menu_id, name, category, description, active, is_builtin)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (menu_id, name, category, description, int(active), int(is_builtin)),
+            )
+            conn.commit()
+            row = conn.execute("SELECT * FROM menu_catalogue WHERE menu_id = ?", (menu_id,)).fetchone()
+        return dict(row)
+
+    def update_menu_catalogue_entry(
+        self, menu_id: str, *, name: Optional[str] = None, category: Optional[str] = None,
+        description: Optional[str] = None, active: Optional[bool] = None,
+    ) -> Optional[Dict[str, Any]]:
+        fields, values = [], []
+        for column, value in (("name", name), ("category", category), ("description", description)):
+            if value is not None:
+                fields.append(f"{column} = ?")
+                values.append(value)
+        if active is not None:
+            fields.append("active = ?")
+            values.append(int(active))
+        if not fields:
+            return self.get_menu_catalogue_entry(menu_id)
+        fields.append("updated_at = ?")
+        values.append(datetime.utcnow().isoformat())
+        values.append(menu_id)
+        with self.get_connection() as conn:
+            cursor = conn.execute(f"UPDATE menu_catalogue SET {', '.join(fields)} WHERE menu_id = ?", values)
+            conn.commit()
+        return self.get_menu_catalogue_entry(menu_id) if cursor.rowcount else None
+
+    # --- Instagram Content Routing topics -----------------------------------
+
+    def list_instagram_topics(self, include_inactive: bool = True) -> List[Dict[str, Any]]:
+        where = "" if include_inactive else "WHERE active = 1"
+        with self.get_connection() as conn:
+            rows = conn.execute(f"SELECT * FROM instagram_topics {where} ORDER BY name COLLATE NOCASE").fetchall()
+        return [dict(row) for row in rows]
+
+    def get_instagram_topic(self, topic_id: str) -> Optional[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            row = conn.execute("SELECT * FROM instagram_topics WHERE topic_id = ?", (topic_id,)).fetchone()
+        return dict(row) if row else None
+
+    def find_instagram_topic_by_name(self, name: str) -> Optional[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM instagram_topics WHERE name = ? COLLATE NOCASE", (name.strip(),)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def create_instagram_topic(
+        self, topic_id: str, name: str, description: str, default_menu_id: Optional[str],
+        priority_products: List[str], knowledge_scope: List[str], active: bool = True,
+        response_order: str = "description_first",
+    ) -> Dict[str, Any]:
+        with self.get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO instagram_topics
+                    (topic_id, name, description, default_menu_id, priority_products, knowledge_scope, response_order, active)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (topic_id, name, description, default_menu_id,
+                 json.dumps(priority_products), json.dumps(knowledge_scope), response_order, int(active)),
+            )
+            conn.commit()
+            row = conn.execute("SELECT * FROM instagram_topics WHERE topic_id = ?", (topic_id,)).fetchone()
+        return dict(row)
+
+    def update_instagram_topic(
+        self, topic_id: str, *, name: Optional[str] = None, description: Optional[str] = None,
+        default_menu_id: Optional[str] = None, priority_products: Optional[List[str]] = None,
+        knowledge_scope: Optional[List[str]] = None, active: Optional[bool] = None,
+        response_order: Optional[str] = None,
+        clear_default_menu: bool = False,
+    ) -> Optional[Dict[str, Any]]:
+        fields, values = [], []
+        if name is not None:
+            fields.append("name = ?"); values.append(name)
+        if description is not None:
+            fields.append("description = ?"); values.append(description)
+        if clear_default_menu:
+            fields.append("default_menu_id = NULL")
+        elif default_menu_id is not None:
+            fields.append("default_menu_id = ?"); values.append(default_menu_id)
+        if priority_products is not None:
+            fields.append("priority_products = ?"); values.append(json.dumps(priority_products))
+        if knowledge_scope is not None:
+            fields.append("knowledge_scope = ?"); values.append(json.dumps(knowledge_scope))
+        if response_order is not None:
+            fields.append("response_order = ?"); values.append(response_order)
+        if active is not None:
+            fields.append("active = ?"); values.append(int(active))
+        if not fields:
+            return self.get_instagram_topic(topic_id)
+        fields.append("updated_at = ?")
+        values.append(datetime.utcnow().isoformat())
+        values.append(topic_id)
+        with self.get_connection() as conn:
+            cursor = conn.execute(f"UPDATE instagram_topics SET {', '.join(fields)} WHERE topic_id = ?", values)
+            conn.commit()
+        return self.get_instagram_topic(topic_id) if cursor.rowcount else None
 
     @staticmethod
     def _create_indexes(cursor) -> None:
@@ -422,6 +1324,12 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_conversations_timestamp ON conversations(timestamp);",
             # /health reads this table on every poll, so it must not scan it.
             "CREATE INDEX IF NOT EXISTS idx_router_shadow_timestamp ON router_shadow(timestamp);",
+            "CREATE INDEX IF NOT EXISTS idx_triage_shadow_timestamp ON triage_shadow(timestamp);",
+            "CREATE INDEX IF NOT EXISTS idx_triage_shadow_category ON triage_shadow(category);",
+            "CREATE INDEX IF NOT EXISTS idx_lk_aliases_lkid ON learned_knowledge_aliases(learned_knowledge_id);",
+            "CREATE INDEX IF NOT EXISTS idx_lk_aliases_normalized ON learned_knowledge_aliases(normalized_alias);",
+            "CREATE INDEX IF NOT EXISTS idx_lk_versions_lkid ON learned_knowledge_versions(learned_knowledge_id, version_number DESC);",
+            "CREATE INDEX IF NOT EXISTS idx_learned_knowledge_status ON learned_knowledge(status);",
             # get_escalations() filters on status, ordered by id DESC.
             "CREATE INDEX IF NOT EXISTS idx_escalations_status_id ON escalations(status, id DESC);",
             "CREATE INDEX IF NOT EXISTS idx_escalations_user ON escalations(user_id);",
@@ -439,6 +1347,8 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_knowledge_gaps_status_updated ON knowledge_gaps(status, updated_at DESC);",
             "CREATE INDEX IF NOT EXISTS idx_active_sessions_updated ON active_conversation_sessions(updated_at);",
             "CREATE INDEX IF NOT EXISTS idx_message_route_time ON message_route_audit(timestamp DESC);",
+            "CREATE INDEX IF NOT EXISTS idx_handoffs_ref ON cross_channel_handoffs(handoff_ref);",
+            "CREATE INDEX IF NOT EXISTS idx_handoffs_active ON cross_channel_handoffs(source_channel, source_user_id, status);",
         )
         for statement in statements:
             cursor.execute(statement)
@@ -571,6 +1481,120 @@ class Database:
                 "disagreements": disagreements,
             }
 
+    def record_triage_shadow(
+        self,
+        channel: str,
+        user_id: str,
+        user_message: str,
+        category: Optional[str],
+        confidence: Optional[float],
+        reasoning: Optional[str],
+        ok: bool,
+        detail: str,
+        matched_knowledge_id: Optional[int],
+        matched_knowledge_source: Optional[str],
+        matched_knowledge_preview: Optional[str],
+        grounded: bool,
+        grounding_reason: Optional[str],
+        would_auto_resolve: bool,
+        was_matched: bool,
+        template_id: Optional[str],
+        latency_ms: float,
+        model: Optional[str] = None,
+    ) -> None:
+        """Stores one silent triage classification. Never read by any reply path."""
+        with self.get_connection() as conn:
+            conn.execute("""
+            INSERT INTO triage_shadow (
+                channel, user_id, user_message, category, confidence, reasoning,
+                ok, detail, matched_knowledge_id, matched_knowledge_source,
+                matched_knowledge_preview, grounded, grounding_reason,
+                would_auto_resolve, was_matched, template_id, latency_ms, model
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                channel, user_id, user_message, category, confidence, reasoning,
+                1 if ok else 0, detail, matched_knowledge_id, matched_knowledge_source,
+                matched_knowledge_preview, 1 if grounded else 0, grounding_reason,
+                1 if would_auto_resolve else 0, 1 if was_matched else 0, template_id,
+                round(latency_ms, 1), model,
+            ))
+            conn.commit()
+
+    def triage_shadow_pulse(self, hours: int = 24) -> Dict[str, Any]:
+        """Just enough to tell whether shadow triage is actually running, for /health."""
+        with self.get_connection() as conn:
+            cutoff = (datetime.utcnow() - timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
+            row = conn.execute("""
+                SELECT COUNT(*) AS n, MAX(timestamp) AS last_at,
+                       SUM(would_auto_resolve) AS would_auto_resolve
+                FROM triage_shadow WHERE timestamp >= ?
+            """, (cutoff,)).fetchone()
+            classified = row["n"] or 0
+            return {
+                "classified_recently": classified,
+                "would_auto_resolve_recently": row["would_auto_resolve"] or 0,
+                "last_classification_at": row["last_at"],
+                "window_hours": hours,
+            }
+
+    def triage_shadow_report(self, days: int = 7, limit: int = 40) -> Dict[str, Any]:
+        """
+        How the triage model would have categorized the messages the bot
+        could not answer on its own, for admin review before any auto-resolve
+        path exists. Recent rows are the point — an admin has to be able to
+        read the model's reasoning against the real message, not just a count.
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cutoff = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+
+            totals = cursor.execute("""
+                SELECT COUNT(*) AS n, SUM(ok) AS ok, SUM(would_auto_resolve) AS would_auto_resolve,
+                       SUM(grounded) AS grounded, AVG(latency_ms) AS avg_latency
+                FROM triage_shadow WHERE timestamp >= ?
+            """, (cutoff,)).fetchone()
+            classified = totals["n"] or 0
+
+            by_category = [
+                {
+                    "category": row["category"] or "unclassified",
+                    "count": row["n"],
+                    "avg_confidence": round(row["avg_confidence"], 3) if row["avg_confidence"] is not None else None,
+                }
+                for row in cursor.execute("""
+                    SELECT category, COUNT(*) AS n, AVG(confidence) AS avg_confidence
+                    FROM triage_shadow WHERE timestamp >= ? AND ok = 1
+                    GROUP BY category ORDER BY n DESC
+                """, (cutoff,))
+            ]
+
+            by_detail = [
+                {"detail": row["detail"], "count": row["n"]}
+                for row in cursor.execute("""
+                    SELECT detail, COUNT(*) AS n FROM triage_shadow
+                    WHERE timestamp >= ? AND ok = 0 GROUP BY detail ORDER BY n DESC
+                """, (cutoff,))
+            ]
+
+            recent = [
+                dict(row) for row in cursor.execute("""
+                    SELECT * FROM triage_shadow WHERE timestamp >= ?
+                    ORDER BY id DESC LIMIT ?
+                """, (cutoff, limit))
+            ]
+
+            return {
+                "days": days,
+                "classified": classified,
+                "ok": totals["ok"] or 0,
+                "grounded": totals["grounded"] or 0,
+                "would_auto_resolve": totals["would_auto_resolve"] or 0,
+                "avg_latency_ms": round(totals["avg_latency"], 1) if totals["avg_latency"] else None,
+                "by_category": by_category,
+                "failures": by_detail,
+                "recent": recent,
+            }
+
     def entry_point_breakdown(self, channel: str = "instagram", days: int = 30) -> Dict[str, Any]:
         """
         How customers on a channel are composing their messages, and which
@@ -675,6 +1699,13 @@ class Database:
         message_source: Optional[str] = None,
         ad_id: Optional[str] = None,
         ad_title: Optional[str] = None,
+        source_routing_id: Optional[int] = None,
+        source_match_method: Optional[str] = None,
+        source_type: Optional[str] = None,
+        shortcode: Optional[str] = None,
+        media_id: Optional[str] = None,
+        routing_topic: Optional[str] = None,
+        source_context_used: bool = False,
     ):
         """Log message exchange and increment analytics counters."""
         with self.get_connection() as conn:
@@ -682,13 +1713,16 @@ class Database:
             cursor.execute("""
             INSERT INTO conversations (
                 user_id, channel, user_message, bot_response, was_matched, template_id,
-                message_source, ad_id, ad_title
+                message_source, ad_id, ad_title, source_routing_id, source_match_method,
+                source_type, shortcode, media_id, routing_topic, source_context_used
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 user_id, channel, user_message, bot_response, 1 if was_matched else 0, template_id,
-                message_source, ad_id, ad_title,
+                message_source, ad_id, ad_title, source_routing_id, source_match_method,
+                source_type, shortcode, media_id, routing_topic, int(bool(source_context_used)),
             ))
+            conversation_id = int(cursor.lastrowid)
             
             cursor.execute("UPDATE analytics SET value = value + 1 WHERE key = 'total_messages';")
             if was_matched:
@@ -697,6 +1731,172 @@ class Database:
                 cursor.execute("UPDATE analytics SET value = value + 1 WHERE key = 'escalations_count';")
                 
             conn.commit()
+            return conversation_id
+
+    # --- Instagram outbound delivery audit -------------------------------
+
+    def create_instagram_outbound_audit(
+        self,
+        *,
+        inbound_message_id: Optional[int],
+        recipient_id: str,
+        response_type: str,
+        retry_count: int = 0,
+        parent_send_id: Optional[str] = None,
+        chunk_number: Optional[int] = None,
+        total_chunks: Optional[int] = None,
+        character_count: Optional[int] = None,
+    ) -> int:
+        """Create the pending row immediately before a Meta API call."""
+        with self.get_connection() as conn:
+            self._ensure_instagram_outbound_audit_schema(conn)
+            cursor = conn.execute(
+                """
+                INSERT INTO instagram_outbound_audit (
+                    inbound_message_id, recipient_id, response_type,
+                    parent_send_id, chunk_number, total_chunks, character_count,
+                    send_attempted, retry_count
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)
+                """,
+                (
+                    inbound_message_id,
+                    recipient_id,
+                    response_type or "text",
+                    parent_send_id,
+                    chunk_number,
+                    total_chunks,
+                    character_count,
+                    max(0, int(retry_count or 0)),
+                ),
+            )
+            conn.commit()
+            return int(cursor.lastrowid)
+
+    def complete_instagram_outbound_audit(
+        self,
+        audit_id: int,
+        *,
+        http_status: Optional[int] = None,
+        success: bool = False,
+        meta_message_id: Optional[str] = None,
+        meta_error_code: Optional[Any] = None,
+        meta_error_subcode: Optional[Any] = None,
+        meta_error_message: Optional[str] = None,
+        meta_trace_id: Optional[str] = None,
+        duration_ms: Optional[float] = None,
+        exception_class: Optional[str] = None,
+        exception_message: Optional[str] = None,
+        overall_success: Optional[bool] = None,
+        overall_failure_chunk: Optional[int] = None,
+    ) -> None:
+        """Fill the pending row with the exact Meta result or safe exception."""
+        with self.get_connection() as conn:
+            self._ensure_instagram_outbound_audit_schema(conn)
+            conn.execute(
+                """
+                UPDATE instagram_outbound_audit
+                SET http_status = ?, success = ?, meta_message_id = ?,
+                    meta_error_code = ?, meta_error_subcode = ?,
+                    meta_error_message = ?, meta_trace_id = ?, duration_ms = ?,
+                    exception_class = ?, exception_message = ?,
+                    overall_success = ?, overall_failure_chunk = ?
+                WHERE id = ?
+                """,
+                (
+                    http_status,
+                    int(bool(success)),
+                    str(meta_message_id) if meta_message_id is not None else None,
+                    str(meta_error_code) if meta_error_code is not None else None,
+                    str(meta_error_subcode) if meta_error_subcode is not None else None,
+                    meta_error_message,
+                    meta_trace_id,
+                    duration_ms,
+                    exception_class,
+                    exception_message,
+                    int(bool(overall_success)) if overall_success is not None else None,
+                    overall_failure_chunk,
+                    audit_id,
+                ),
+            )
+            conn.commit()
+
+    def finalize_instagram_outbound_audit(
+        self,
+        parent_send_id: str,
+        *,
+        overall_success: bool,
+        overall_failure_chunk: Optional[int] = None,
+    ) -> None:
+        """Mark every attempt in one logical send with its aggregate outcome."""
+        with self.get_connection() as conn:
+            self._ensure_instagram_outbound_audit_schema(conn)
+            conn.execute(
+                """
+                UPDATE instagram_outbound_audit
+                SET overall_success = ?, overall_failure_chunk = ?
+                WHERE parent_send_id = ?
+                """,
+                (int(bool(overall_success)), overall_failure_chunk, parent_send_id),
+            )
+            conn.commit()
+
+    def get_instagram_outbound_audit(
+        self,
+        *,
+        limit: int = 50,
+        success: Optional[bool] = None,
+        inbound_message_id: Optional[int] = None,
+        since: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Read recent Instagram send attempts with optional diagnostics filters."""
+        clauses = ["1=1"]
+        params: List[Any] = []
+        if success is not None:
+            clauses.append("success = ?")
+            params.append(int(bool(success)))
+        if inbound_message_id is not None:
+            clauses.append("inbound_message_id = ?")
+            params.append(int(inbound_message_id))
+        if since:
+            clauses.append("created_at >= ?")
+            params.append(str(since))
+        params.append(max(1, min(int(limit or 50), 200)))
+        with self.get_connection() as conn:
+            self._ensure_instagram_outbound_audit_schema(conn)
+            rows = conn.execute(
+                "SELECT * FROM instagram_outbound_audit "
+                f"WHERE {' AND '.join(clauses)} ORDER BY id DESC LIMIT ?",
+                tuple(params),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def instagram_outbound_health(self) -> Dict[str, Any]:
+        """Summarize send activity without making traffic absence unhealthy."""
+        with self.get_connection() as conn:
+            self._ensure_instagram_outbound_audit_schema(conn)
+            last_attempted = conn.execute(
+                "SELECT created_at FROM instagram_outbound_audit "
+                "WHERE send_attempted = 1 ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            last_success = conn.execute(
+                "SELECT created_at FROM instagram_outbound_audit "
+                "WHERE send_attempted = 1 AND success = 1 ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            last_failure = conn.execute(
+                "SELECT created_at FROM instagram_outbound_audit "
+                "WHERE send_attempted = 1 AND success = 0 ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            failures_24h = conn.execute(
+                "SELECT COUNT(*) AS count FROM instagram_outbound_audit "
+                "WHERE send_attempted = 1 AND success = 0 "
+                "AND created_at >= datetime('now', '-24 hours')"
+            ).fetchone()["count"]
+        return {
+            "last_attempted": last_attempted["created_at"] if last_attempted else None,
+            "last_success": last_success["created_at"] if last_success else None,
+            "last_failure": last_failure["created_at"] if last_failure else None,
+            "failures_last_24h": int(failures_24h or 0),
+        }
 
     def record_escalation(self, user_id: str, channel: str, user_message: str, reason: str, context_data: Optional[Dict[str, Any]] = None) -> int:
         """Record escalation for human review."""
@@ -719,6 +1919,91 @@ class Database:
             else:
                 cursor.execute("SELECT * FROM escalations ORDER BY id DESC LIMIT ?", (limit,))
             rows = cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    # --- Instagram -> WhatsApp cross-channel handoffs -----------------------
+
+    def create_handoff(
+        self,
+        *,
+        handoff_ref: str,
+        source_channel: str,
+        source_user_id: str,
+        reason: Optional[str],
+        summary: Optional[str],
+        known_entities: Optional[Dict[str, Any]],
+        unresolved_topic: Optional[str],
+        escalation_id: Optional[int],
+        expires_at: Optional[str],
+    ) -> Dict[str, Any]:
+        """Records a new opaque handoff reference. Never overwrites one."""
+        with self.get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO cross_channel_handoffs (
+                    handoff_ref, source_channel, source_user_id, reason, summary,
+                    known_entities, unresolved_topic, status, escalation_id, expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'CREATED', ?, ?)
+                """,
+                (
+                    handoff_ref, source_channel, source_user_id, reason, summary,
+                    json.dumps(known_entities or {}, ensure_ascii=False), unresolved_topic,
+                    escalation_id, expires_at,
+                ),
+            )
+            conn.commit()
+        return self.get_handoff_by_ref(handoff_ref)
+
+    def get_handoff_by_ref(self, handoff_ref: str) -> Optional[Dict[str, Any]]:
+        """Looks up a handoff by its customer-facing reference."""
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM cross_channel_handoffs WHERE handoff_ref = ?", (handoff_ref,)
+            ).fetchone()
+            return dict(row) if row else None
+
+    def get_active_handoff(
+        self, source_channel: str, source_user_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """The one non-expired, non-resolved handoff for this customer, if any.
+
+        This is the dedup check: a customer repeating "human please" reuses
+        this row instead of minting a second reference for the same enquiry.
+        """
+        with self.get_connection() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM cross_channel_handoffs
+                WHERE source_channel = ? AND source_user_id = ?
+                  AND status NOT IN ('RESOLVED', 'EXPIRED')
+                  AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
+                ORDER BY id DESC LIMIT 1
+                """,
+                (source_channel, source_user_id),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def update_handoff_status(self, handoff_ref: str, status: str) -> None:
+        with self.get_connection() as conn:
+            conn.execute(
+                "UPDATE cross_channel_handoffs SET status = ?, updated_at = CURRENT_TIMESTAMP "
+                "WHERE handoff_ref = ?",
+                (status, handoff_ref),
+            )
+            conn.commit()
+
+    def get_handoffs(self, limit: int = 50, status: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Staff-facing listing, newest first."""
+        with self.get_connection() as conn:
+            if status:
+                rows = conn.execute(
+                    "SELECT * FROM cross_channel_handoffs WHERE status = ? ORDER BY id DESC LIMIT ?",
+                    (status, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM cross_channel_handoffs ORDER BY id DESC LIMIT ?", (limit,)
+                ).fetchall()
             return [dict(row) for row in rows]
 
     def get_conversations(self, limit: int = 50, offset: int = 0, channel: Optional[str] = None, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -799,86 +2084,586 @@ class Database:
             conn.commit()
             return cursor.rowcount > 0
 
+    _LEARNED_STOP_WORDS = {"is", "are", "do", "you", "the", "a", "an", "and", "in", "of", "to", "for", "your", "what", "how", "can", "have"}
+
     def add_learned_knowledge(
         self,
         topic: str,
         question_pattern: str,
         verified_answer: str,
         source: str = "staff_resolution",
-        confidence: float = 1.0
-    ) -> int:
-        """Adds or updates a verified knowledge item in the self-healing knowledge base."""
+        confidence: float = 1.0,
+        priority: str = "NORMAL",
+        status: str = "ACTIVE",
+        created_by: Optional[str] = None,
+        aliases: Optional[List[str]] = None,
+    ) -> Optional[int]:
+        """
+        Adds a verified knowledge item to the self-healing knowledge base.
+
+        This is the single write path shared by Teach & Resolve, candidate
+        approval, manual staff/client entry (Custom Q&A) and CSV import —
+        every one of them ends up as a plain learned_knowledge row here, not
+        in a second knowledge table. `priority`/`status`/`created_by`/
+        `aliases` are new, optional, and default to the values every
+        pre-existing row already migrated to, so every caller written before
+        Custom Q&A existed keeps working unchanged.
+        """
+        topic = (topic or "").strip()
+        question_pattern = (question_pattern or "").strip().lower()
+        verified_answer = (verified_answer or "").strip()
         with self.get_connection() as conn:
             cursor = conn.cursor()
             now = datetime.utcnow().isoformat()
             cursor.execute("""
-            INSERT INTO learned_knowledge (topic, question_pattern, verified_answer, source, confidence, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (topic.strip(), question_pattern.strip().lower(), verified_answer.strip(), source, confidence, now, now))
+            INSERT INTO learned_knowledge (
+                topic, question_pattern, verified_answer, source, confidence,
+                priority, status, created_by, updated_by, normalized_question,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                topic, question_pattern, verified_answer, source, confidence,
+                (priority or "NORMAL").upper(), (status or "ACTIVE").upper(), created_by, created_by,
+                normalize_question(question_pattern), now, now,
+            ))
+            new_id = cursor.lastrowid
+            for alias in (aliases or []):
+                alias = (alias or "").strip()
+                if not alias:
+                    continue
+                cursor.execute("""
+                INSERT INTO learned_knowledge_aliases (learned_knowledge_id, alias_text, normalized_alias, created_at, created_by)
+                VALUES (?, ?, ?, ?, ?)
+                """, (new_id, alias, normalize_question(alias), now, created_by))
             conn.commit()
-            return cursor.lastrowid
+            return new_id
 
     def get_learned_knowledge(self, limit: int = 100) -> List[Dict[str, Any]]:
-        """Retrieves active learned knowledge entries ordered by most recently updated."""
+        """Retrieves learned knowledge entries ordered by most recently created, any status."""
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM learned_knowledge ORDER BY id DESC LIMIT ?", (limit,))
             rows = cursor.fetchall()
             return [dict(row) for row in rows]
 
-    def search_learned_knowledge(self, query_text: str) -> Optional[Dict[str, Any]]:
+    def get_learned_knowledge_aliases(self, learned_knowledge_id: int) -> List[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM learned_knowledge_aliases WHERE learned_knowledge_id = ? ORDER BY id ASC",
+                (learned_knowledge_id,),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def _active_learned_knowledge_with_aliases(self, limit: int = 150) -> List[Dict[str, Any]]:
+        """Only rows eligible for live matching, each carrying its own aliases."""
+        with self.get_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM learned_knowledge WHERE status = 'ACTIVE' ORDER BY id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+            items = [dict(row) for row in rows]
+            if not items:
+                return items
+            ids = [item["id"] for item in items]
+            placeholders = ",".join("?" * len(ids))
+            alias_rows = conn.execute(
+                f"SELECT learned_knowledge_id, alias_text FROM learned_knowledge_aliases WHERE learned_knowledge_id IN ({placeholders})",
+                ids,
+            ).fetchall()
+            aliases_by_id: Dict[int, List[str]] = {}
+            for row in alias_rows:
+                aliases_by_id.setdefault(row["learned_knowledge_id"], []).append(row["alias_text"])
+            for item in items:
+                item["aliases"] = aliases_by_id.get(item["id"], [])
+            return items
+
+    @staticmethod
+    def _priority_rank(item: Dict[str, Any]) -> int:
+        return 1 if str(item.get("priority") or "NORMAL").upper() == "HIGH" else 0
+
+    def _rank_learned_knowledge(self, query_text: str) -> Tuple[Optional[Dict[str, Any]], Optional[str], float]:
         """
-        Searches learned knowledge base for relevant facts matching the query.
-        Returns the highest-scoring matching item if relevance threshold is met.
+        Shared ranking behind search_learned_knowledge and the Custom Q&A
+        Test dry-run.
+
+        A single-token primary question or alias ("sondesh", "kanchagolla")
+        is too generic to ever match on its own — a specificity floor of two
+        meaningful tokens keeps a broad Custom Q&A entry from shadowing a
+        deterministic/canonical answer for the same word. Above that floor,
+        every candidate is scored by how much of ITS OWN text is satisfied
+        by the query (a literal substring containment is a full 1.0; a
+        token-overlap match scores the covered fraction), so a specific,
+        fully-covered phrase always outranks a short generic one that merely
+        happens to appear as a substring too. Priority is only a tie-breaker
+        between candidates already equal on (score, specificity).
+        """
+        q_clean = (query_text or "").lower().strip()
+        q_tokens = set(re.findall(r'\w+', q_clean))
+        if not q_tokens:
+            return None, None, 0.0
+        filtered_q = q_tokens - self._LEARNED_STOP_WORDS
+
+        items = self._active_learned_knowledge_with_aliases(limit=150)
+        # (score, specificity, priority_rank, updated_at, item, matched_via)
+        candidates: List[Tuple[float, int, int, str, Dict[str, Any], str]] = []
+
+        for item in items:
+            topic = (item.get("topic") or "").lower()
+            pattern = (item.get("question_pattern") or "").lower()
+            aliases = item.get("aliases") or []
+
+            texts = [("Primary Question", pattern)] + [("Alias", (a or "").lower()) for a in aliases]
+            best_for_item: Optional[Tuple[float, int, str]] = None
+
+            for via, text in texts:
+                if not text:
+                    continue
+                text_tokens = set(re.findall(r'\w+', text))
+                filtered_text = text_tokens - self._LEARNED_STOP_WORDS
+                specificity = len(filtered_text)
+                if specificity < 2:
+                    continue
+
+                if text in q_clean or q_clean in text:
+                    score = 1.0
+                else:
+                    overlap = filtered_text & filtered_q
+                    if len(overlap) < 2:
+                        continue
+                    score = len(overlap) / specificity
+
+                if score < 0.4:
+                    continue
+                if best_for_item is None or (score, specificity) > (best_for_item[0], best_for_item[1]):
+                    best_for_item = (score, specificity, via)
+
+            if best_for_item is None and topic:
+                topic_tokens = set(re.findall(r'\w+', topic)) - self._LEARNED_STOP_WORDS
+                if len(topic_tokens) >= 2 and topic in q_clean:
+                    best_for_item = (1.0, len(topic_tokens), "Other")
+
+            if best_for_item:
+                score, specificity, via = best_for_item
+                candidates.append((score, specificity, self._priority_rank(item), item.get("updated_at") or "", item, via))
+
+        if not candidates:
+            return None, None, 0.0
+
+        candidates.sort(key=lambda c: (c[0], c[1], c[2], c[3]))
+        score, _specificity, _prio, _updated, winner, via = candidates[-1]
+        return winner, via, score
+
+    def search_learned_knowledge(self, query_text: str, count_usage: bool = True) -> Optional[Dict[str, Any]]:
+        """
+        Searches learned knowledge base (primary questions and aliases,
+        ACTIVE only) for the best match to the query. `count_usage=False` is
+        for anything that must never move usage_count/last_used_at — the
+        Custom Q&A Test dry-run and triage shadow mode; every real serving
+        call site (responder, rag_fallback, ai_responder) keeps the default.
         """
         if not query_text:
             return None
+        winner, _via, _score = self._rank_learned_knowledge(query_text)
+        if winner and count_usage:
+            self.record_learned_knowledge_usage(winner["id"])
+        return winner
 
-        q_clean = query_text.lower().strip()
-        q_tokens = set(re.findall(r'\w+', q_clean))
-        if not q_tokens:
-            return None
-
-        items = self.get_learned_knowledge(limit=150)
-        best_match = None
-        best_score = 0.0
-
-        for item in items:
-            topic = item.get("topic", "").lower()
-            pattern = item.get("question_pattern", "").lower()
-            
-            # Direct phrase/substring match
-            if pattern in q_clean or q_clean in pattern:
-                return item
-            if topic in q_clean:
-                return item
-
-            # Token overlap scoring
-            pattern_tokens = set(re.findall(r'\w+', pattern)) | set(re.findall(r'\w+', topic))
-            # Remove generic stop words
-            stop_words = {"is", "are", "do", "you", "the", "a", "an", "and", "in", "of", "to", "for", "your", "what", "how", "can", "have"}
-            filtered_patterns = pattern_tokens - stop_words
-            filtered_q = q_tokens - stop_words
-
-            if filtered_patterns and filtered_q:
-                overlap = filtered_patterns.intersection(filtered_q)
-                score = len(overlap) / max(len(filtered_patterns), 1)
-                if len(overlap) >= 2 or (len(overlap) == 1 and len(filtered_patterns) == 1):
-                    if score > best_score:
-                        best_score = score
-                        best_match = item
-
-        if best_match and best_score >= 0.4:
-            return best_match
-        return None
+    def record_learned_knowledge_usage(self, knowledge_id: int) -> None:
+        with self.get_connection() as conn:
+            conn.execute(
+                "UPDATE learned_knowledge SET usage_count = COALESCE(usage_count, 0) + 1, last_used_at = ? WHERE id = ?",
+                (datetime.utcnow().isoformat(), knowledge_id),
+            )
+            conn.commit()
 
     def delete_learned_knowledge(self, knowledge_id: int) -> bool:
-        """Deletes a learned knowledge entry by id."""
+        """
+        Permanently deletes one learned knowledge entry and only its own
+        aliases/version history — never conversations, escalations,
+        candidate_templates, Instagram Topics, menus, handoffs, or any other
+        learned_knowledge row.
+        """
         with self.get_connection() as conn:
             cursor = conn.cursor()
+            cursor.execute("DELETE FROM learned_knowledge_aliases WHERE learned_knowledge_id = ?", (knowledge_id,))
+            cursor.execute("DELETE FROM learned_knowledge_versions WHERE learned_knowledge_id = ?", (knowledge_id,))
             cursor.execute("DELETE FROM learned_knowledge WHERE id = ?", (knowledge_id,))
+            affected = cursor.rowcount
+            conn.commit()
+            return affected > 0
+
+    # -- Response Library: safe overrides for protected system templates --
+
+    def get_response_template_override(self, template_id: str) -> Optional[Dict[str, Any]]:
+        """Return the active editable copy for one protected template, if any."""
+        if not template_id:
+            return None
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM response_template_overrides WHERE template_id = ?",
+                (template_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def list_response_template_overrides(self) -> Dict[str, Dict[str, Any]]:
+        with self.get_connection() as conn:
+            rows = conn.execute("SELECT * FROM response_template_overrides").fetchall()
+            return {str(row["template_id"]): dict(row) for row in rows}
+
+    def save_response_template_override(
+        self, template_id: str, response: str, updated_by: Optional[str] = None,
+        status: str = "ACTIVE", change_reason: str = "edited", previous_response: Optional[str] = None,
+    ) -> bool:
+        """Upsert only customer-facing copy while preserving template logic."""
+        template_id = (template_id or "").strip()
+        response = (response or "").strip()
+        status = (status or "ACTIVE").upper()
+        if not template_id or not response or status not in {"ACTIVE", "DISABLED", "ARCHIVED"}:
+            return False
+        with self.get_connection() as conn:
+            current = conn.execute(
+                "SELECT * FROM response_template_overrides WHERE template_id = ?",
+                (template_id,),
+            ).fetchone()
+            now = datetime.utcnow().isoformat()
+            if current:
+                current = dict(current)
+                conn.execute(
+                    "INSERT INTO response_template_override_versions "
+                    "(template_id, response, status, changed_at, changed_by, change_reason) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (template_id, current["response"], current.get("status") or "ACTIVE", now, updated_by, change_reason),
+                )
+                conn.execute(
+                    "UPDATE response_template_overrides SET response = ?, status = ?, updated_at = ?, updated_by = ? WHERE template_id = ?",
+                    (response, status, now, updated_by, template_id),
+                )
+            else:
+                if previous_response:
+                    conn.execute(
+                        "INSERT INTO response_template_override_versions "
+                        "(template_id, response, status, changed_at, changed_by, change_reason) VALUES (?, ?, ?, ?, ?, ?)",
+                        (template_id, previous_response, "ACTIVE", now, updated_by, "initial_override_default"),
+                    )
+                conn.execute(
+                    "INSERT INTO response_template_overrides (template_id, response, status, created_at, updated_at, updated_by) VALUES (?, ?, ?, ?, ?, ?)",
+                    (template_id, response, status, now, now, updated_by),
+                )
+            conn.commit()
+            return True
+
+    def get_response_template_override_versions(self, template_id: str) -> List[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM response_template_override_versions WHERE template_id = ? ORDER BY version_id DESC",
+                (template_id,),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def restore_response_template_override_version(self, template_id: str, version_id: int, actor: Optional[str] = None) -> bool:
+        with self.get_connection() as conn:
+            version = conn.execute(
+                "SELECT * FROM response_template_override_versions WHERE template_id = ? AND version_id = ?",
+                (template_id, version_id),
+            ).fetchone()
+            current = conn.execute(
+                "SELECT * FROM response_template_overrides WHERE template_id = ?",
+                (template_id,),
+            ).fetchone()
+            if not version or not current:
+                return False
+            now = datetime.utcnow().isoformat()
+            current = dict(current)
+            conn.execute(
+                "INSERT INTO response_template_override_versions "
+                "(template_id, response, status, changed_at, changed_by, change_reason) VALUES (?, ?, ?, ?, ?, ?)",
+                (template_id, current["response"], current.get("status") or "ACTIVE", now, actor, f"restored_from_version_{version_id}"),
+            )
+            conn.execute(
+                "UPDATE response_template_overrides SET response = ?, status = ?, updated_at = ?, updated_by = ? WHERE template_id = ?",
+                (version["response"], version["status"], now, actor, template_id),
+            )
+            conn.commit()
+            return True
+
+    # -- Custom Q&A: full editor on top of the same learned_knowledge store --
+
+    def list_custom_qa(
+        self,
+        status: Optional[str] = None,
+        source: Optional[str] = None,
+        priority: Optional[str] = None,
+        topic: Optional[str] = None,
+        search: Optional[str] = None,
+        limit: int = 500,
+    ) -> List[Dict[str, Any]]:
+        """The Custom Q&A tab's list, with each row's alias count attached."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            clauses, params = [], []
+            if status and status.upper() != "ALL":
+                clauses.append("status = ?")
+                params.append(status.upper())
+            if source:
+                clauses.append("source = ?")
+                params.append(source)
+            if priority:
+                clauses.append("priority = ?")
+                params.append(priority.upper())
+            if topic:
+                clauses.append("topic = ?")
+                params.append(topic)
+            where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+            cursor.execute(f"SELECT * FROM learned_knowledge {where} ORDER BY id DESC LIMIT ?", (*params, limit))
+            items = [dict(row) for row in cursor.fetchall()]
+
+            if not items:
+                return items
+            ids = [item["id"] for item in items]
+            placeholders = ",".join("?" * len(ids))
+            alias_rows = cursor.execute(
+                f"SELECT learned_knowledge_id, alias_text FROM learned_knowledge_aliases WHERE learned_knowledge_id IN ({placeholders})",
+                ids,
+            ).fetchall()
+            aliases_by_id: Dict[int, List[str]] = {}
+            for row in alias_rows:
+                aliases_by_id.setdefault(row["learned_knowledge_id"], []).append(row["alias_text"])
+            for item in items:
+                item["aliases"] = aliases_by_id.get(item["id"], [])
+
+            if search:
+                needle = search.strip().lower()
+                if needle:
+                    def matches(it):
+                        haystacks = [it.get("topic"), it.get("question_pattern"), it.get("verified_answer")] + it.get("aliases", [])
+                        return any(needle in (h or "").lower() for h in haystacks)
+                    items = [it for it in items if matches(it)]
+            return items
+
+    def get_custom_qa(self, knowledge_id: int) -> Optional[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            row = conn.execute("SELECT * FROM learned_knowledge WHERE id = ?", (knowledge_id,)).fetchone()
+            if not row:
+                return None
+            item = dict(row)
+            item["aliases"] = self.get_learned_knowledge_aliases(knowledge_id)
+            return item
+
+    def _snapshot_version(self, conn, knowledge_id: int, current: Dict[str, Any], changed_by: Optional[str], reason: str) -> None:
+        row = conn.execute(
+            "SELECT COALESCE(MAX(version_number), 0) AS n FROM learned_knowledge_versions WHERE learned_knowledge_id = ?",
+            (knowledge_id,),
+        ).fetchone()
+        next_version = (row["n"] or 0) + 1
+        aliases = [a["alias_text"] for a in self.get_learned_knowledge_aliases(knowledge_id)]
+        conn.execute("""
+        INSERT INTO learned_knowledge_versions (
+            learned_knowledge_id, version_number, topic, primary_question, answer,
+            priority, status, aliases_snapshot, changed_at, changed_by, change_reason
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            knowledge_id, next_version, current.get("topic"), current.get("question_pattern"),
+            current.get("verified_answer"), current.get("priority"), current.get("status"),
+            json.dumps(aliases), datetime.utcnow().isoformat(), changed_by, reason,
+        ))
+
+    def update_custom_qa(
+        self,
+        knowledge_id: int,
+        topic: str,
+        primary_question: str,
+        answer: str,
+        aliases: List[str],
+        priority: str,
+        status: str,
+        updated_by: Optional[str],
+        change_reason: str = "edited",
+    ) -> bool:
+        """
+        Edits the SAME learned_knowledge record — never a new one. The prior
+        state (including its alias set) is snapshotted to
+        learned_knowledge_versions before anything is overwritten.
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            current = cursor.execute("SELECT * FROM learned_knowledge WHERE id = ?", (knowledge_id,)).fetchone()
+            if not current:
+                return False
+            self._snapshot_version(conn, knowledge_id, dict(current), updated_by, change_reason)
+
+            now = datetime.utcnow().isoformat()
+            cursor.execute("""
+            UPDATE learned_knowledge
+            SET topic = ?, question_pattern = ?, verified_answer = ?, priority = ?, status = ?,
+                normalized_question = ?, updated_by = ?, updated_at = ?
+            WHERE id = ?
+            """, (
+                (topic or "").strip(), (primary_question or "").strip().lower(), (answer or "").strip(),
+                (priority or "NORMAL").upper(), (status or "ACTIVE").upper(),
+                normalize_question(primary_question), updated_by, now, knowledge_id,
+            ))
+            cursor.execute("DELETE FROM learned_knowledge_aliases WHERE learned_knowledge_id = ?", (knowledge_id,))
+            for alias in (aliases or []):
+                alias = (alias or "").strip()
+                if not alias:
+                    continue
+                cursor.execute("""
+                INSERT INTO learned_knowledge_aliases (learned_knowledge_id, alias_text, normalized_alias, created_at, created_by)
+                VALUES (?, ?, ?, ?, ?)
+                """, (knowledge_id, alias, normalize_question(alias), now, updated_by))
+            conn.commit()
+            return True
+
+    def set_custom_qa_status(self, knowledge_id: int, status: str, actor: Optional[str], reason: Optional[str] = None) -> bool:
+        """Disable/enable/archive/reactivate — a lifecycle change, snapshotted like any other edit."""
+        status = (status or "").upper()
+        if status not in {"ACTIVE", "DISABLED", "ARCHIVED"}:
+            return False
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            current = cursor.execute("SELECT * FROM learned_knowledge WHERE id = ?", (knowledge_id,)).fetchone()
+            if not current:
+                return False
+            self._snapshot_version(conn, knowledge_id, dict(current), actor, reason or f"status_changed_to_{status.lower()}")
+            cursor.execute(
+                "UPDATE learned_knowledge SET status = ?, updated_by = ?, updated_at = ? WHERE id = ?",
+                (status, actor, datetime.utcnow().isoformat(), knowledge_id),
+            )
             conn.commit()
             return cursor.rowcount > 0
+
+    def get_learned_knowledge_versions(self, knowledge_id: int) -> List[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM learned_knowledge_versions WHERE learned_knowledge_id = ? ORDER BY version_number DESC",
+                (knowledge_id,),
+            ).fetchall()
+            result = []
+            for row in rows:
+                item = dict(row)
+                try:
+                    item["aliases_snapshot"] = json.loads(item.get("aliases_snapshot") or "[]")
+                except Exception:
+                    item["aliases_snapshot"] = []
+                result.append(item)
+            return result
+
+    def restore_learned_knowledge_version(self, knowledge_id: int, version_id: int, actor: Optional[str]) -> bool:
+        """
+        Restores a historical version's content onto the live row, under the
+        exact same id — the current state is preserved as a new version
+        first, so restoring is itself just another reviewable edit.
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            version = cursor.execute(
+                "SELECT * FROM learned_knowledge_versions WHERE version_id = ? AND learned_knowledge_id = ?",
+                (version_id, knowledge_id),
+            ).fetchone()
+            current = cursor.execute("SELECT * FROM learned_knowledge WHERE id = ?", (knowledge_id,)).fetchone()
+            if not version or not current:
+                return False
+            self._snapshot_version(conn, knowledge_id, dict(current), actor, f"restored_from_version_{version['version_number']}")
+
+            now = datetime.utcnow().isoformat()
+            cursor.execute("""
+            UPDATE learned_knowledge
+            SET topic = ?, question_pattern = ?, verified_answer = ?, priority = ?, status = ?,
+                normalized_question = ?, updated_by = ?, updated_at = ?
+            WHERE id = ?
+            """, (
+                version["topic"], version["primary_question"], version["answer"],
+                version["priority"], version["status"], normalize_question(version["primary_question"] or ""),
+                actor, now, knowledge_id,
+            ))
+            try:
+                restored_aliases = json.loads(version["aliases_snapshot"] or "[]")
+            except Exception:
+                restored_aliases = []
+            cursor.execute("DELETE FROM learned_knowledge_aliases WHERE learned_knowledge_id = ?", (knowledge_id,))
+            for alias in restored_aliases:
+                alias = (alias or "").strip()
+                if not alias:
+                    continue
+                cursor.execute("""
+                INSERT INTO learned_knowledge_aliases (learned_knowledge_id, alias_text, normalized_alias, created_at, created_by)
+                VALUES (?, ?, ?, ?, ?)
+                """, (knowledge_id, alias, normalize_question(alias), now, actor))
+            conn.commit()
+            return True
+
+    def add_learned_knowledge_alias(self, knowledge_id: int, alias_text: str, created_by: Optional[str] = None) -> Optional[int]:
+        alias_text = (alias_text or "").strip()
+        if not alias_text:
+            return None
+        with self.get_connection() as conn:
+            cursor = conn.execute("""
+            INSERT INTO learned_knowledge_aliases (learned_knowledge_id, alias_text, normalized_alias, created_at, created_by)
+            VALUES (?, ?, ?, ?, ?)
+            """, (knowledge_id, alias_text, normalize_question(alias_text), datetime.utcnow().isoformat(), created_by))
+            conn.commit()
+            return cursor.lastrowid
+
+    def remove_learned_knowledge_alias(self, alias_id: int) -> bool:
+        """Removes one alias only — the owning Q&A and its other aliases are untouched."""
+        with self.get_connection() as conn:
+            cursor = conn.execute("DELETE FROM learned_knowledge_aliases WHERE id = ?", (alias_id,))
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def find_learned_knowledge_duplicates(
+        self, primary_question: str, aliases: Optional[List[str]] = None, exclude_id: Optional[int] = None,
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """
+        Deterministic duplicate detection for Custom Q&A create/edit: an
+        exact match on normalized primary/alias text blocks the save, a
+        conservative token-overlap match only warns. No LLM decides two
+        pieces of business knowledge are equivalent.
+        """
+        candidates = [primary_question] + list(aliases or [])
+        normalized_candidates = {normalize_question(c) for c in candidates if (c or "").strip()}
+        if not normalized_candidates:
+            return {"exact": [], "similar": []}
+
+        with self.get_connection() as conn:
+            rows = conn.execute("SELECT * FROM learned_knowledge WHERE status != 'ARCHIVED'").fetchall()
+            items = [dict(row) for row in rows if exclude_id is None or row["id"] != exclude_id]
+            alias_rows = conn.execute("SELECT * FROM learned_knowledge_aliases").fetchall()
+            aliases_by_id: Dict[int, List[str]] = {}
+            for row in alias_rows:
+                aliases_by_id.setdefault(row["learned_knowledge_id"], []).append(row["alias_text"])
+
+        exact, similar = [], []
+        seen_ids = set()
+        for item in items:
+            item_aliases = aliases_by_id.get(item["id"], [])
+            item_normalized = {normalize_question(item.get("question_pattern") or "")} | {normalize_question(a) for a in item_aliases}
+            item_normalized.discard("")
+            if item_normalized & normalized_candidates:
+                exact.append({**item, "aliases": item_aliases})
+                seen_ids.add(item["id"])
+
+        candidate_tokens = set()
+        for c in normalized_candidates:
+            candidate_tokens |= set(c.split())
+        candidate_tokens -= self._LEARNED_STOP_WORDS
+
+        for item in items:
+            if item["id"] in seen_ids or not candidate_tokens:
+                continue
+            item_aliases = aliases_by_id.get(item["id"], [])
+            item_text_tokens = set(normalize_question(item.get("question_pattern") or "").split())
+            for a in item_aliases:
+                item_text_tokens |= set(normalize_question(a).split())
+            item_text_tokens -= self._LEARNED_STOP_WORDS
+            if not item_text_tokens:
+                continue
+            overlap = candidate_tokens & item_text_tokens
+            score = len(overlap) / max(len(candidate_tokens | item_text_tokens), 1)
+            if score >= 0.5:
+                similar.append({**item, "aliases": item_aliases})
+
+        return {"exact": exact, "similar": similar}
 
     def get_analytics(self) -> Dict[str, Any]:
         """Get summary analytics."""
@@ -971,13 +2756,44 @@ class Database:
         the client owns — so it must never carry a flower in the first place.
         """
         response = strip_flower_emoji(response or "")
+        eligible, _ = candidate_eligibility(user_message or "", response)
+        valid, _ = validate_candidate_answer(response)
+        if not eligible or not valid:
+            return None
+        normalized = normalize_question(user_message or name)
+        stable_key = knowledge_key(name, user_message or name)
         sources_str = json.dumps(source_refs or [])
         with self.get_connection() as conn:
             cursor = conn.cursor()
+            duplicate_rows = cursor.execute("""
+                SELECT id, normalized_question FROM candidate_templates
+                WHERE status = 'PENDING_APPROVAL'
+                  AND (knowledge_key = ? OR normalized_question = ?)
+                ORDER BY id ASC
+            """, (stable_key, normalized)).fetchall()
+            if not duplicate_rows:
+                duplicate_rows = cursor.execute("""
+                    SELECT id, normalized_question FROM candidate_templates
+                    WHERE status = 'PENDING_APPROVAL' AND candidate_kind = 'knowledge'
+                    ORDER BY id ASC
+                """).fetchall()
+            incoming_words = set(normalized.split())
+            for duplicate in duplicate_rows:
+                existing_words = set((duplicate["normalized_question"] or "").split())
+                union = incoming_words | existing_words
+                similarity = len(incoming_words & existing_words) / len(union) if union else 1.0
+                if duplicate["normalized_question"] == normalized or similarity >= 0.88:
+                    return int(duplicate["id"])
             cursor.execute("""
-            INSERT INTO candidate_templates (name, status, user_message, response, source_refs, confidence, created_by, created_at)
-            VALUES (?, 'PENDING_APPROVAL', ?, ?, ?, ?, ?, ?)
-            """, (name, user_message, response, sources_str, confidence, created_by, datetime.utcnow().isoformat()))
+            INSERT INTO candidate_templates (
+                name, status, user_message, response, original_draft, source_refs,
+                confidence, created_by, created_at, candidate_kind,
+                normalized_question, knowledge_key
+            ) VALUES (?, 'PENDING_APPROVAL', ?, ?, ?, ?, ?, ?, ?, 'knowledge', ?, ?)
+            """, (
+                name, user_message, response, response, sources_str, confidence,
+                created_by, datetime.utcnow().isoformat(), normalized, stable_key,
+            ))
             candidate_id = cursor.lastrowid
             conn.commit()
             return candidate_id
@@ -1146,6 +2962,23 @@ class Database:
             conn.commit()
         return cursor.rowcount > 0
 
+    def _hydrate_candidate_row(self, item: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Shared shaping for a candidate_templates row before it reaches the
+        dashboard: strip flowers left over from before the save-time strip
+        existed, fall back original_draft to the current response for a row
+        that was never edited, decode source_refs, and normalize `edited`
+        to a real bool for the JS layer.
+        """
+        item["response"] = strip_flower_emoji(item.get("response") or "")
+        item["original_draft"] = item.get("original_draft") or item["response"]
+        item["edited"] = bool(item.get("edited"))
+        try:
+            item["source_refs"] = json.loads(item.get("source_refs") or "[]")
+        except Exception:
+            item["source_refs"] = []
+        return item
+
     def get_pending_candidates(self) -> List[Dict[str, Any]]:
         """Retrieves all candidate templates awaiting human approval."""
         with self.get_connection() as conn:
@@ -1154,16 +2987,29 @@ class Database:
             rows = cursor.fetchall()
             result = []
             for row in rows:
-                item = dict(row)
-                # Rows written before the save-time strip existed still carry
-                # flowers, so clean them on the way to the dashboard too.
-                item["response"] = strip_flower_emoji(item.get("response") or "")
-                try:
-                    item["source_refs"] = json.loads(item.get("source_refs") or "[]")
-                except Exception:
-                    item["source_refs"] = []
+                item = self._hydrate_candidate_row(dict(row))
+                eligible, _ = candidate_eligibility(item.get("user_message") or "", item["response"])
+                valid, _ = validate_candidate_answer(item["response"])
+                if not eligible or not valid:
+                    continue
                 result.append(item)
             return result
+
+    def get_candidates_by_status(self, status: str, limit: int = 100) -> List[Dict[str, Any]]:
+        """
+        Historical candidate rows for review — an approved or rejected
+        decision already made. Unlike get_pending_candidates, this does not
+        re-run the eligibility/validity gate: that gate decides what belongs
+        in the live approval queue, not whether a past decision is worth
+        showing in the dashboard's AI Resolution & Answers view.
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM candidate_templates WHERE status = ? ORDER BY id DESC LIMIT ?",
+                (status, limit),
+            )
+            return [self._hydrate_candidate_row(dict(row)) for row in cursor.fetchall()]
 
     def get_candidate_template(self, candidate_id: int) -> Optional[Dict[str, Any]]:
         """Returns one candidate template for the approval workflow."""
@@ -1174,11 +3020,32 @@ class Database:
             if not row:
                 return None
             item = dict(row)
+            item["original_draft"] = item.get("original_draft") or item.get("response") or ""
+            item["edited"] = bool(item.get("edited"))
             try:
                 item["source_refs"] = json.loads(item.get("source_refs") or "[]")
             except Exception:
                 item["source_refs"] = []
             return item
+
+    def edit_candidate_template(
+        self, candidate_id: int, response: str, edited_by: str = "admin"
+    ) -> bool:
+        """Updates the current draft without changing its pending status."""
+        answer = strip_flower_emoji(response or "").strip()
+        valid, _ = validate_candidate_answer(answer)
+        if not valid:
+            return False
+        now = datetime.utcnow().isoformat()
+        with self.get_connection() as conn:
+            cursor = conn.execute("""
+                UPDATE candidate_templates
+                SET original_draft = COALESCE(original_draft, response),
+                    response = ?, edited = 1, edited_by = ?, edited_at = ?
+                WHERE id = ? AND status = 'PENDING_APPROVAL'
+            """, (answer, edited_by, now, candidate_id))
+            conn.commit()
+        return cursor.rowcount > 0
 
     def approve_candidate_template(self, candidate_id: int, approved_by: str = "admin") -> bool:
         """Marks a candidate template as APPROVED and returns candidate details."""
@@ -1203,110 +3070,275 @@ class Database:
             conn.commit()
             return affected > 0
 
-    # --- LLM Assisted Resolution ------------------------------------------
-
+    # --- Human-gated assisted resolution ---------------------------------
     def create_assisted_suggestion(self, **fields: Any) -> int:
-        """Create one pending suggestion, deduplicating the same open issue."""
         with self.get_connection() as conn:
-            existing = conn.execute(
-                """SELECT id FROM assisted_resolution_suggestions
-                   WHERE user_id = ? AND channel = ? AND customer_message = ?
-                     AND status = 'PENDING_REVIEW'
-                   ORDER BY id DESC LIMIT 1""",
-                (str(fields.get("user_id")), str(fields.get("channel")), fields.get("customer_message", "")),
-            ).fetchone()
+            existing = conn.execute("SELECT id FROM assisted_resolution_suggestions WHERE user_id=? AND channel=? AND customer_message=? AND status='PENDING_REVIEW' ORDER BY id DESC LIMIT 1", (str(fields.get("user_id")), str(fields.get("channel")), fields.get("customer_message", ""))).fetchone()
             if existing:
                 return int(existing["id"])
-            columns = [
-                "escalation_id", "conversation_id", "user_id", "channel", "customer_message",
-                "triage_category", "detected_intent", "confidence", "matched_knowledge_id",
-                "matched_knowledge_source", "grounding_status", "grounding_details",
-                "suggested_answer", "original_suggested_answer", "status", "risk_flags",
-                "reviewed_at", "reviewed_by", "final_answer", "resolution_action",
-                "rejection_reason", "model", "source_routing_id",
-            ]
-            values = [fields.get(column) for column in columns]
-            values[5] = fields.get("triage_category") or "UNSUPPORTED"
-            values[7] = float(fields.get("confidence") or 0.0)
-            values[10] = fields.get("grounding_status") or "Not Grounded"
-            values[14] = fields.get("status") or "PENDING_REVIEW"
-            values[15] = json.dumps(fields.get("risk_flags") or [], ensure_ascii=False)
-            cursor = conn.execute(
-                f"INSERT INTO assisted_resolution_suggestions ({', '.join(columns)}) VALUES ({', '.join('?' for _ in columns)})",
-                values,
-            )
-            conn.commit()
-            return int(cursor.lastrowid)
+            columns = ["escalation_id", "conversation_id", "user_id", "channel", "customer_message", "triage_category", "detected_intent", "confidence", "matched_knowledge_id", "matched_knowledge_source", "grounding_status", "grounding_details", "suggested_answer", "original_suggested_answer", "status", "risk_flags", "model", "source_routing_id", "shadow_category", "shadow_confidence", "protected_order_flow", "source_route_present", "cam_interference"]
+            values = [fields.get(c) for c in columns]
+            values[5] = fields.get("triage_category") or "UNSUPPORTED"; values[7] = float(fields.get("confidence") or 0.0); values[10] = fields.get("grounding_status") or "Not Grounded"; values[14] = fields.get("status") or "PENDING_REVIEW"; values[15] = json.dumps(fields.get("risk_flags") or [], ensure_ascii=False); values[20] = int(bool(fields.get("protected_order_flow"))); values[21] = int(bool(fields.get("source_route_present"))); values[22] = int(bool(fields.get("cam_interference")))
+            cur = conn.execute(f"INSERT INTO assisted_resolution_suggestions ({', '.join(columns)}) VALUES ({', '.join('?' for _ in columns)})", values); conn.commit(); return int(cur.lastrowid)
+
+    def latest_triage_shadow_for(self, user_id: str, channel: str, user_message: str) -> Optional[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            row = conn.execute("SELECT category, confidence, reasoning FROM triage_shadow WHERE user_id=? AND channel=? AND user_message=? ORDER BY id DESC LIMIT 1", (str(user_id), str(channel), user_message)).fetchone()
+        return dict(row) if row else None
 
     @staticmethod
     def _decode_assisted(row: sqlite3.Row) -> Dict[str, Any]:
         item = dict(row)
-        try:
-            item["risk_flags"] = json.loads(item.get("risk_flags") or "[]")
-        except (TypeError, json.JSONDecodeError):
-            item["risk_flags"] = []
+        try: item["risk_flags"] = json.loads(item.get("risk_flags") or "[]")
+        except (TypeError, json.JSONDecodeError): item["risk_flags"] = []
         return item
 
     def get_assisted_suggestion(self, suggestion_id: int) -> Optional[Dict[str, Any]]:
-        with self.get_connection() as conn:
-            row = conn.execute(
-                "SELECT * FROM assisted_resolution_suggestions WHERE id = ?", (suggestion_id,)
-            ).fetchone()
+        with self.get_connection() as conn: row = conn.execute("SELECT * FROM assisted_resolution_suggestions WHERE id=?", (suggestion_id,)).fetchone()
         return self._decode_assisted(row) if row else None
 
     def list_assisted_suggestions(self, status: Optional[str] = None, category: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
-        query = "SELECT * FROM assisted_resolution_suggestions WHERE 1=1"
-        params: List[Any] = []
-        if status:
-            query += " AND status = ?"
-            params.append(status)
-        if category:
-            query += " AND triage_category = ?"
-            params.append(category)
-        query += " ORDER BY created_at DESC, id DESC LIMIT ?"
-        params.append(max(1, min(int(limit), 200)))
-        with self.get_connection() as conn:
-            rows = conn.execute(query, tuple(params)).fetchall()
+        query = "SELECT * FROM assisted_resolution_suggestions WHERE 1=1"; params: List[Any] = []
+        if status: query += " AND status=?"; params.append(status)
+        if category: query += " AND triage_category=?"; params.append(category)
+        query += " ORDER BY created_at DESC, id DESC LIMIT ?"; params.append(max(1, min(int(limit), 200)))
+        with self.get_connection() as conn: rows = conn.execute(query, tuple(params)).fetchall()
         return [self._decode_assisted(row) for row in rows]
 
-    def review_assisted_suggestion(self, suggestion_id: int, *, status: str, reviewed_by: str,
-                                   final_answer: Optional[str] = None, resolution_action: Optional[str] = None,
-                                   rejection_reason: Optional[str] = None) -> bool:
-        now = datetime.utcnow().isoformat()
+    def review_assisted_suggestion(self, suggestion_id: int, *, status: str, reviewed_by: str, final_answer: Optional[str] = None, resolution_action: Optional[str] = None, rejection_reason: Optional[str] = None) -> bool:
+        original = self.get_assisted_suggestion(suggestion_id) or {}
+        edit_score = None
+        edit_severity = None
+        if status == "EDITED_AND_APPROVED":
+            before = str(original.get("original_suggested_answer") or "")
+            after = str(final_answer or "")
+            similarity = SequenceMatcher(None, before, after) if before or after else 1.0
+            edit_score = round(1.0 - (similarity.ratio() if hasattr(similarity, "ratio") else similarity), 4)
+            edit_severity = "Minor Edit" if edit_score <= 0.10 else ("Moderate Edit" if edit_score <= 0.30 else "Major Edit")
         with self.get_connection() as conn:
-            cursor = conn.execute(
-                """UPDATE assisted_resolution_suggestions
-                   SET status = ?, reviewed_at = ?, reviewed_by = ?, final_answer = ?,
-                       resolution_action = ?, rejection_reason = ?
-                   WHERE id = ? AND status = 'PENDING_REVIEW'""",
-                (status, now, reviewed_by, final_answer, resolution_action, rejection_reason, suggestion_id),
-            )
+            cur = conn.execute("UPDATE assisted_resolution_suggestions SET status=?, reviewed_at=?, reviewed_by=?, final_answer=?, resolution_action=?, rejection_reason=?, edit_score=COALESCE(?, edit_score), edit_severity=COALESCE(?, edit_severity) WHERE id=? AND status='PENDING_REVIEW'", (status, datetime.utcnow().isoformat(), reviewed_by, final_answer, resolution_action, rejection_reason, edit_score, edit_severity, suggestion_id))
+            if cur.rowcount:
+                # Keep the simulation-vs-human comparison joined by the same
+                # durable suggestion id; a pending row can only be reviewed once.
+                conn.execute("UPDATE auto_resolve_decisions SET final_human_outcome=? WHERE assisted_suggestion_id=?", (status, suggestion_id))
+            conn.commit(); return cur.rowcount > 0
+
+    def record_assisted_edit_metrics(self, suggestion_id: int, original: str, final: str) -> Dict[str, Any]:
+        similarity = SequenceMatcher(None, original or "", final or "").ratio()
+        score = round(1.0 - similarity, 4)
+        severity = "Minor Edit" if score <= 0.10 else ("Moderate Edit" if score <= 0.30 else "Major Edit")
+        with self.get_connection() as conn:
+            conn.execute("UPDATE assisted_resolution_suggestions SET edit_score=?, edit_severity=? WHERE id=?", (score, severity, suggestion_id))
             conn.commit()
-        return cursor.rowcount > 0
+        return {"edit_score": score, "edit_severity": severity}
 
     def assisted_metrics(self) -> Dict[str, int]:
+        with self.get_connection() as conn: rows = conn.execute("SELECT status, COUNT(*) AS count FROM assisted_resolution_suggestions GROUP BY status").fetchall()
+        c = {str(r["status"]): int(r["count"]) for r in rows}
+        return {"suggestions_reviewed": sum(c.get(k, 0) for k in ("APPROVED", "EDITED_AND_APPROVED", "REJECTED", "SENT_TO_HUMAN", "RESOLVED")), "approved_as_is": c.get("APPROVED", 0), "edited_before_send": c.get("EDITED_AND_APPROVED", 0), "rejected": c.get("REJECTED", 0), "sent_to_human": c.get("SENT_TO_HUMAN", 0), "teach_required": c.get("TEACH_REQUIRED", 0)}
+
+    def assisted_evaluation(self) -> Dict[str, Any]:
+        """Read-only quality and safety rollups for the review dashboard."""
         with self.get_connection() as conn:
-            rows = conn.execute(
-                "SELECT status, COUNT(*) AS count FROM assisted_resolution_suggestions GROUP BY status"
-            ).fetchall()
-        counts = {str(row["status"]): int(row["count"]) for row in rows}
-        return {
-            "suggestions_reviewed": sum(counts.get(key, 0) for key in ("APPROVED", "EDITED_AND_APPROVED", "REJECTED", "SENT_TO_HUMAN", "TEACH_REQUIRED", "RESOLVED")),
-            "approved_as_is": counts.get("APPROVED", 0),
-            "edited_before_send": counts.get("EDITED_AND_APPROVED", 0),
-            "rejected": counts.get("REJECTED", 0),
-            "sent_to_human": counts.get("SENT_TO_HUMAN", 0),
-            "teach_required": counts.get("TEACH_REQUIRED", 0),
+            rows = [self._decode_assisted(row) for row in conn.execute("SELECT * FROM assisted_resolution_suggestions ORDER BY created_at DESC, id DESC").fetchall()]
+            knowledge_rows = {str(row["id"]): dict(row) for row in conn.execute("SELECT id, topic, source, usage_count, last_used_at, updated_at, status FROM learned_knowledge").fetchall()}
+        reviewed_statuses = {"APPROVED", "EDITED_AND_APPROVED", "REJECTED", "SENT_TO_HUMAN", "RESOLVED"}
+        reviewed = [row for row in rows if row.get("status") in reviewed_statuses]
+        count = lambda values, predicate: sum(1 for value in values if predicate(value))
+        status_counts = {status: count(rows, lambda row, status=status: row.get("status") == status) for status in ("PENDING_REVIEW", "APPROVED", "EDITED_AND_APPROVED", "REJECTED", "SENT_TO_HUMAN", "TEACH_REQUIRED", "RESOLVED")}
+        def rate(n: int) -> float:
+            return round(n / len(reviewed), 4) if reviewed else 0.0
+        performance = {
+            "suggestions_generated": len(rows), "reviewed": len(reviewed),
+            "approved_as_is": status_counts["APPROVED"], "edited_and_approved": status_counts["EDITED_AND_APPROVED"],
+            "rejected": status_counts["REJECTED"], "sent_to_human": status_counts["SENT_TO_HUMAN"],
+            "teach_and_resolve": count(rows, lambda row: row.get("resolution_action") == "TEACH_AND_RESOLVE"),
+            "non_actionable_dismissed": count(rows, lambda row: row.get("resolution_action") == "DISMISSED"),
+            "approval_rate": rate(status_counts["APPROVED"]), "edit_rate": rate(status_counts["EDITED_AND_APPROVED"]),
+            "rejection_rate": rate(status_counts["REJECTED"]), "human_escalation_rate": rate(status_counts["SENT_TO_HUMAN"]),
         }
+        buckets = (("0-49%", 0.0, 0.50), ("50-69%", 0.50, 0.70), ("70-84%", 0.70, 0.85), ("85-94%", 0.85, 0.95), ("95-100%", 0.95, 1.01))
+        def outcome_counts(items: List[Dict[str, Any]]) -> Dict[str, int]:
+            return {"total": len(items), "reviewed": count(items, lambda row: row.get("status") in reviewed_statuses), "approved_as_is": count(items, lambda row: row.get("status") == "APPROVED"), "edited": count(items, lambda row: row.get("status") == "EDITED_AND_APPROVED"), "rejected": count(items, lambda row: row.get("status") == "REJECTED"), "human_handoff": count(items, lambda row: row.get("status") == "SENT_TO_HUMAN")}
+        confidence_buckets = {label: outcome_counts([row for row in rows if low <= float(row.get("confidence") or 0.0) < high]) for label, low, high in buckets}
+        categories = ("AUTO_RESOLVE", "AI_SUGGESTED", "TEACH_REQUIRED", "HUMAN_REQUIRED", "NON_ACTIONABLE", "CONTACT_DETAIL", "UNSUPPORTED")
+        category_breakdown = {category: outcome_counts([row for row in rows if row.get("triage_category") == category]) for category in categories}
+        grounding_breakdown = {value: outcome_counts([row for row in rows if (row.get("grounding_status") or "Not Grounded") == value]) for value in ("Grounded", "Not Grounded")}
+        risk_names = {"price": "Price", "discount": "Discount", "delivery_commitment": "Delivery", "availability": "Availability", "payment": "Payment", "event_date": "Event Date", "hiring": "Hiring", "allergen": "Ingredient / Allergen", "custom_order": "Custom Order", "order_change": "Order Change"}
+        risk_breakdown = {label: outcome_counts([row for row in rows if key in (row.get("risk_flags") or [])]) for key, label in risk_names.items()}
+        def severity(row: Dict[str, Any]) -> str:
+            if row.get("edit_severity"): return str(row["edit_severity"])
+            before, after = str(row.get("original_suggested_answer") or ""), str(row.get("final_answer") or "")
+            if not before or not after: return "Major Edit"
+            score = 1.0 - SequenceMatcher(None, before, after).ratio()
+            return "Minor Edit" if score <= 0.10 else ("Moderate Edit" if score <= 0.30 else "Major Edit")
+        high_confidence = [row for row in rows if float(row.get("confidence") or 0.0) >= 0.85 and (row.get("status") == "REJECTED" or row.get("status") == "SENT_TO_HUMAN" or (row.get("status") == "EDITED_AND_APPROVED" and severity(row) != "Minor Edit"))]
+        shadow_comparison = [{"id": row.get("id"), "shadow_prediction": row.get("shadow_category"), "assisted_prediction": row.get("triage_category"), "human_final_decision": row.get("status"), "confidence": row.get("confidence")} for row in rows if row.get("shadow_category")]
+        knowledge_signals = []
+        for key, group in __import__("itertools").groupby(sorted([row for row in rows if str(row.get("matched_knowledge_id") or "").startswith("learned_knowledge#")], key=lambda row: str(row.get("matched_knowledge_id"))), key=lambda row: str(row.get("matched_knowledge_id"))):
+            items = list(group); numeric_id = key.rsplit("#", 1)[-1]; knowledge = knowledge_rows.get(numeric_id, {})
+            signals = outcome_counts(items)
+            repeated_rejections = signals["rejected"] >= 2
+            major_edits = count(items, lambda row: row.get("edit_severity") == "Major Edit")
+            stale = not knowledge.get("last_used_at") and bool(knowledge.get("updated_at"))
+            knowledge_signals.append({"knowledge_id": key, "topic": knowledge.get("topic"), "source": knowledge.get("source") or items[0].get("matched_knowledge_source"), "usage": knowledge.get("usage_count", 0), "last_used": knowledge.get("last_used_at"), "last_updated": knowledge.get("updated_at"), "assisted_approvals": signals["approved_as_is"], "edits": signals["edited"], "major_edits": major_edits, "rejections": signals["rejected"], "simulation_eligible": any(row.get("would_auto_resolve") for row in rows if row.get("matched_knowledge_id") == key), "health": "Not Eligible for Auto Resolve" if repeated_rejections or major_edits >= 2 or knowledge.get("status") != "ACTIVE" else ("Review Recommended" if stale else "Healthy"), **signals, "knowledge_review_recommended": repeated_rejections})
+        safety = {"source_routing_overrides": count(rows, lambda row: bool(row.get("source_route_present"))), "whatsapp_assisted_activity": count(rows, lambda row: str(row.get("channel")).lower() == "whatsapp"), "protected_order_flow": count(rows, lambda row: bool(row.get("protected_order_flow"))), "cam_interference": count(rows, lambda row: bool(row.get("cam_interference")))}
+        safety["order_flow_interference"] = safety["protected_order_flow"] + safety["cam_interference"]
+        unsafe = count(rows, lambda row: bool(row.get("risk_flags")) and row.get("status") in {"REJECTED", "SENT_TO_HUMAN"})
+        commitment_errors = count(rows, lambda row: any(flag in (row.get("risk_flags") or []) for flag in ("price", "discount", "delivery_commitment")) and row.get("status") in {"REJECTED", "SENT_TO_HUMAN", "EDITED_AND_APPROVED"})
+        grounded_reviewed = len([row for row in reviewed if row.get("grounding_status") == "Grounded" and row.get("triage_category") in {"AUTO_RESOLVE", "AI_SUGGESTED"}])
+        readiness = {"reviewed_grounded_suggestions": {"value": grounded_reviewed, "target": 100}, "unsafe_factual_suggestions": unsafe, "high_confidence_rejected": len(high_confidence), "price_discount_delivery_errors": commitment_errors, "whatsapp_ai_activity": safety["whatsapp_assisted_activity"], "source_routing_overrides": safety["source_routing_overrides"], "order_flow_interference": safety["protected_order_flow"] + safety["cam_interference"], "target_gate": {"grounded_reviewed": ">= 100", "unsafe_factual": 0, "price_discount_delivery": 0, "whatsapp_activity": 0, "source_routing_overrides": 0, "order_flow_interference": 0, "high_confidence_false_decisions": "near 0"}}
+        auto_eval = self.auto_resolve_evaluation()
+        safety.update({
+            "auto_resolve_source_routing_overrides": auto_eval["source_routing_overrides"],
+            "auto_resolve_whatsapp_activity": auto_eval["whatsapp_ai_activity"],
+            "auto_resolve_order_flow_interference": auto_eval["order_cam_interference"],
+        })
+        readiness.update({
+            "simulated_eligible_cases": auto_eval["simulated_eligible_cases"],
+            "simulation_false_positives": auto_eval["simulation_false_positives"],
+            "human_handoffs": performance["sent_to_human"],
+            "major_edits": count(rows, lambda row: row.get("edit_severity") == "Major Edit"),
+            "risk_violations": auto_eval["risk_violations"],
+            "readiness_status": auto_eval["readiness_status"],
+        })
+        return {"performance": performance, "confidence_buckets": confidence_buckets, "category_breakdown": category_breakdown, "grounding_breakdown": grounding_breakdown, "risk_breakdown": risk_breakdown, "high_confidence_problems": [{key: row.get(key) for key in ("id", "customer_message", "confidence", "triage_category", "grounding_status", "matched_knowledge_source", "suggested_answer", "final_answer", "status", "rejection_reason", "edit_severity")} for row in high_confidence], "shadow_vs_assisted": shadow_comparison, "knowledge_signals": knowledge_signals, "safety": safety, "readiness": readiness, "auto_resolve": auto_eval}
+
+    @staticmethod
+    def _decode_auto_resolve(row: sqlite3.Row) -> Dict[str, Any]:
+        item = dict(row)
+        for key in ("risk_flags", "eligibility_reasons"):
+            try:
+                item[key] = json.loads(item.get(key) or "[]")
+            except (TypeError, json.JSONDecodeError):
+                item[key] = []
+        for key in ("simulated", "would_auto_resolve", "actually_sent"):
+            item[key] = bool(item.get(key))
+        return item
+
+    def record_auto_resolve_decision(self, **fields: Any) -> Dict[str, Any]:
+        """Insert one decision, returning the existing row on webhook replay."""
+        key = str(fields.get("idempotency_key") or "")[:300]
+        columns = [
+            "assisted_suggestion_id", "conversation_id", "user_id", "channel",
+            "customer_message", "matched_knowledge_id", "category", "confidence",
+            "grounding_status", "risk_flags", "eligibility", "eligibility_reasons",
+            "simulated", "would_auto_resolve", "actually_sent", "response_text", "idempotency_key",
+        ]
+        values = [fields.get(c) for c in columns]
+        values[9] = json.dumps(fields.get("risk_flags") or [], ensure_ascii=False)
+        values[11] = json.dumps(fields.get("eligibility_reasons") or [], ensure_ascii=False)
+        values[12:15] = [int(bool(fields.get("simulated", True))), int(bool(fields.get("would_auto_resolve"))), int(bool(fields.get("actually_sent")))]
+        with self.get_connection() as conn:
+            existing = conn.execute("SELECT * FROM auto_resolve_decisions WHERE idempotency_key=?", (key,)).fetchone() if key else None
+            if existing:
+                return self._decode_auto_resolve(existing)
+            try:
+                cur = conn.execute(f"INSERT INTO auto_resolve_decisions ({', '.join(columns)}) VALUES ({', '.join('?' for _ in columns)})", values)
+            except sqlite3.IntegrityError:
+                existing = conn.execute("SELECT * FROM auto_resolve_decisions WHERE idempotency_key=?", (key,)).fetchone()
+                if existing:
+                    return self._decode_auto_resolve(existing)
+                raise
+            conn.commit()
+            return self._decode_auto_resolve(conn.execute("SELECT * FROM auto_resolve_decisions WHERE id=?", (cur.lastrowid,)).fetchone())
+
+    def list_auto_resolve_decisions(self, limit: int = 200) -> List[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            rows = conn.execute("SELECT * FROM auto_resolve_decisions ORDER BY id DESC LIMIT ?", (max(1, min(int(limit), 500)),)).fetchall()
+        return [self._decode_auto_resolve(row) for row in rows]
+
+    def auto_resolve_evaluation(self) -> Dict[str, Any]:
+        with self.get_connection() as conn:
+            rows = [self._decode_auto_resolve(row) for row in conn.execute("SELECT * FROM auto_resolve_decisions ORDER BY id DESC").fetchall()]
+        simulated = [row for row in rows if row.get("simulated")]
+        eligible = [row for row in simulated if row.get("would_auto_resolve")]
+        false_positive_statuses = {"REJECTED", "SENT_TO_HUMAN", "TEACH_REQUIRED"}
+        false_positives = [row for row in eligible if row.get("final_human_outcome") in false_positive_statuses or (row.get("final_human_outcome") == "EDITED_AND_APPROVED" and "Major" in str(row.get("edit_severity") or ""))]
+        source_overrides = sum(1 for row in rows if "source_route_precedence" not in (row.get("eligibility_reasons") or []) and str(row.get("channel")).lower() == "instagram" and row.get("would_auto_resolve") and row.get("matched_knowledge_id") and row.get("category") in {"AUTO_RESOLVE", "GENERAL_FAQ"} and row.get("eligibility_reasons") == [])
+        whatsapp_activity = sum(1 for row in rows if str(row.get("channel")).lower() == "whatsapp" and (row.get("actually_sent") or row.get("would_auto_resolve")))
+        order_interference = sum(1 for row in rows if any(reason in (row.get("eligibility_reasons") or []) for reason in ("protected_order_flow", "cam_handoff_conflict")) and row.get("actually_sent"))
+        risk_violations = sum(1 for row in rows if row.get("would_auto_resolve") and set(row.get("risk_flags") or set()) )
+        reviewed_grounded = sum(1 for row in rows if row.get("final_human_outcome") and str(row.get("grounding_status")).lower() == "grounded")
+        if reviewed_grounded >= 100 and len(eligible) >= 50 and not false_positives and not source_overrides and not whatsapp_activity and not order_interference and not risk_violations:
+            readiness_status = "PILOT ELIGIBLE"
+        elif rows:
+            readiness_status = "OBSERVING"
+        else:
+            readiness_status = "NOT READY"
+        return {
+            "decisions": len(rows), "simulated_eligible_cases": len(eligible),
+            "simulation_false_positives": len(false_positives), "source_routing_overrides": source_overrides,
+            "whatsapp_ai_activity": whatsapp_activity, "order_cam_interference": order_interference,
+            "risk_violations": risk_violations, "reviewed_grounded_cases": reviewed_grounded,
+            "approved_as_is": sum(1 for row in rows if row.get("final_human_outcome") == "APPROVED"),
+            "edited_cases": sum(1 for row in rows if row.get("final_human_outcome") == "EDITED_AND_APPROVED"),
+            "rejected_cases": sum(1 for row in rows if row.get("final_human_outcome") == "REJECTED"),
+            "human_handoffs": sum(1 for row in rows if row.get("final_human_outcome") == "SENT_TO_HUMAN"),
+            "readiness_status": readiness_status, "false_positive_rows": false_positives,
+            "false_positive_count": len(false_positives),
+            "simulation_accuracy": round((len(eligible) - len(false_positives)) / len(eligible), 4) if eligible else 0.0,
+            "alerts": [
+                *(["WhatsApp AI activity > 0"] if whatsapp_activity else []),
+                *(["Source-routing override > 0"] if source_overrides else []),
+                *(["Order/CAM interference > 0"] if order_interference else []),
+                *(["Unsafe risk candidate marked eligible"] if risk_violations else []),
+                *(["Simulation false positive"] if false_positives else []),
+            ],
+        }
+
+    def knowledge_resolution_problems(self, knowledge_id: str) -> Dict[str, int]:
+        with self.get_connection() as conn:
+            rows = conn.execute("SELECT status, edit_severity FROM assisted_resolution_suggestions WHERE matched_knowledge_id=?", (knowledge_id,)).fetchall()
+        return {
+            "repeated_rejections": sum(1 for row in rows if row["status"] == "REJECTED") >= 2,
+            "major_edits": sum(1 for row in rows if row["edit_severity"] == "Major Edit") >= 2,
+        }
+
+    def knowledge_health(self, knowledge_id: int) -> Dict[str, Any]:
+        """Operational health for one Custom Q&A without changing its state."""
+        key = f"learned_knowledge#{int(knowledge_id)}"
+        with self.get_connection() as conn:
+            rows = [dict(row) for row in conn.execute("SELECT status, edit_severity FROM assisted_resolution_suggestions WHERE matched_knowledge_id=?", (key,)).fetchall()]
+            decisions = [self._decode_auto_resolve(row) for row in conn.execute("SELECT * FROM auto_resolve_decisions WHERE matched_knowledge_id=?", (key,)).fetchall()]
+        approvals = sum(1 for row in rows if row.get("status") == "APPROVED")
+        edits = sum(1 for row in rows if row.get("status") == "EDITED_AND_APPROVED")
+        major_edits = sum(1 for row in rows if row.get("edit_severity") == "Major Edit")
+        rejections = sum(1 for row in rows if row.get("status") == "REJECTED")
+        not_eligible = rejections >= 2 or major_edits >= 2
+        return {
+            "usage_count": len(rows), "assisted_approvals": approvals, "edits": edits,
+            "major_edits": major_edits, "rejections": rejections,
+            "simulation_eligibility": any(row.get("would_auto_resolve") for row in decisions),
+            "last_used": max((row.get("created_at") for row in decisions), default=None),
+            "health": "Not Eligible for Auto Resolve" if not_eligible else ("Review Recommended" if edits or rejections else "Healthy"),
+        }
+
+    def get_auto_resolve_settings(self) -> Dict[str, Any]:
+        default_categories = {"GENERAL_FAQ": False, "PRODUCT_DESCRIPTION": False, "MENU_EXPLANATION": False, "GENERAL_BRAND_INFORMATION": False, "AUTO_RESOLVE": False}
+        defaults = {"kill_switch": True, "category_controls": default_categories.copy(), "category_settings": {key: {"simulation_enabled": True, "actual_enabled": False, "min_confidence": config.LLM_AUTO_RESOLVE_MIN_CONFIDENCE} for key in default_categories}}
+        with self.get_connection() as conn:
+            rows = {row["key"]: row["value"] for row in conn.execute("SELECT key, value FROM auto_resolve_settings").fetchall()}
+        try: defaults["kill_switch"] = json.loads(rows.get("kill_switch", "true"))
+        except Exception: pass
+        try: defaults["category_controls"].update(json.loads(rows.get("category_controls", "{}")))
+        except Exception: pass
+        try:
+            for key, value in json.loads(rows.get("category_settings", "{}") or "{}").items():
+                if key in defaults["category_settings"] and isinstance(value, dict):
+                    defaults["category_settings"][key].update(value)
+        except Exception: pass
+        defaults.update({"simulation_enabled": bool(config.LLM_AUTO_RESOLVE_SIMULATION_ENABLED), "actual_enabled": bool(config.LLM_AUTO_RESOLVE_ENABLED and defaults["kill_switch"]), "min_confidence": config.LLM_AUTO_RESOLVE_MIN_CONFIDENCE})
+        return defaults
+
+    def set_auto_resolve_setting(self, key: str, value: Any) -> None:
+        with self.get_connection() as conn:
+            conn.execute("INSERT INTO auto_resolve_settings (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at", (key, json.dumps(value), datetime.utcnow().isoformat()))
+            conn.commit()
 
     def increment_learned_knowledge_usage(self, knowledge_id: int) -> bool:
         with self.get_connection() as conn:
-            cursor = conn.execute(
-                "UPDATE learned_knowledge SET usage_count = COALESCE(usage_count, 0) + 1, updated_at = ? WHERE id = ?",
-                (datetime.utcnow().isoformat(), knowledge_id),
-            )
-            conn.commit()
-        return cursor.rowcount > 0
+            cur = conn.execute("UPDATE learned_knowledge SET usage_count=COALESCE(usage_count,0)+1, last_used_at=? WHERE id=?", (datetime.utcnow().isoformat(), knowledge_id)); conn.commit(); return cur.rowcount > 0
 
     def log_rag_audit(
         self,

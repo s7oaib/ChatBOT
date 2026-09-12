@@ -4,10 +4,12 @@ import json
 import random
 import re
 import time
+import unicodedata
 from dataclasses import dataclass
 from typing import Dict, Any, Tuple, Optional, List
 from camellia.config import config
 from camellia.ad_routing import product_for_ad
+from camellia.instagram_routing import route_template_id
 from camellia.monitoring import get_logger, latency_monitor
 from camellia.ai_responder import ai_responder
 from camellia.session_memory import session_memory
@@ -16,6 +18,7 @@ from camellia.order_calculator import order_calculator
 from camellia.rag_fallback import MEDIUM_CONFIDENCE_THRESHOLD, rag_fallback_engine
 from camellia.text_rules import FLOWER_RE, strip_flower_emoji
 from camellia.router import shadow_router
+from camellia.triage import triage_classifier
 from camellia.database import db
 from camellia.trigger_index import trigger_index
 from camellia import weekly_flyer
@@ -26,6 +29,25 @@ from camellia.understanding import BusinessAction, Intent, understanding_engine
 from camellia.knowledge import HUMAN_ONLY_INTENTS, approved_knowledge
 
 log = get_logger("camellia.responder")
+
+
+def compose_topic_response(
+    topic_title: str = "", topic_description: str = "", menu_text: str = "",
+    response_order: str = "description_first",
+) -> str:
+    """Compose the shared Topic response used by preview and live Instagram.
+
+    Existing Topics and malformed values safely retain the historical
+    description-first order.  The menu text is the already-approved response;
+    this helper only changes the order of those existing customer-facing parts.
+    """
+    title = str(topic_title or "").strip()
+    description = str(topic_description or "").strip()
+    menu = str(menu_text or "").strip()
+    order = str(response_order or "").lower()
+    ordered = [menu, description] if order == "menu_first" else [description, menu]
+    parts = [title] + [part for part in ordered if part]
+    return "\n\n".join(part for part in parts if part)
 
 
 def _structured_nlu_enabled_for(user_id: str, channel: str) -> bool:
@@ -79,8 +101,7 @@ _WEEKLY_MENU_BEING_UPDATED = (
     "Our kitchen is finalising this week's menu right now — I'd rather not "
     "send you last week's by mistake.\n\n"
     "It'll be ready shortly! In the meantime, say *Sondesh* to see our sweet "
-    "collections, or message our team on +91 87965 51990 and they'll confirm "
-    "this week's dishes for you directly."
+    "collections."
 )
 
 _DUPLICATE_REPLY_NOTICE = (
@@ -288,6 +309,130 @@ BARE_PRICE_QUESTION_RE = re.compile(
     r"what.?s the price)",
     re.IGNORECASE,
 )
+
+# These turns are conversational openers, not references to a previously
+# shared Instagram object.  Keep this deliberately narrow: a greeting may
+# bypass source-context resolution, but a greeting carrying a real request
+# (for example, "hi, what is the price of Jolbhora?") must continue through
+# the normal intent/product precedence below.
+GREETING_ONLY_RE = re.compile(
+    r'^(?:(?:hi+|hello+|hey+)(?:\s+there)?|good\s+(?:morning|afternoon|evening)|namaste|'
+    r'nomoshkar|nomoskar|greetings)[\W_]*$',
+    re.IGNORECASE,
+)
+
+# A shared Instagram attachment gives the next message a subject, but only
+# when the customer's wording is actually referential.  Keep this as a small
+# deterministic intent layer rather than a growing list of whole sentences:
+# punctuation, casing, apostrophes and one-character typos are normalized,
+# then the terms are combined into an intent.
+_SOURCE_REFERENTIAL_TERMS = frozenset({
+    "this", "that", "it", "above", "reel", "post", "video", "item", "one",
+})
+_SOURCE_DETAIL_TERMS = frozenset({
+    "tell", "more", "details", "detail", "about", "explain", "what", "options",
+    "flavour", "flavours", "flavor", "flavors", "interested",
+})
+_SOURCE_PRICE_TERMS = frozenset({"price", "prices", "cost", "rate", "much"})
+_SOURCE_AVAILABILITY_TERMS = frozenset({"available", "availability"})
+_SOURCE_ACTION_TERMS = frozenset({"want", "need", "like", "get", "order", "buy", "looks", "good"})
+_SOURCE_CONTEXT_FILLER_TERMS = frozenset({
+    "i", "im", "am", "me", "the", "a", "is", "are", "do", "you", "can", "how",
+    "what", "there", "please", "pls", "send", "give", "more", "about", "tell",
+})
+_SOURCE_COMMON_TYPOS = {
+    "thsi": "this", "taht": "that", "tihs": "this", "oen": "one",
+    "ths": "this", "abov": "above", "mor": "more", "moore": "more",
+    "mroe": "more", "tlel": "tell", "detials": "details",
+    "availble": "available", "avialble": "available",
+}
+
+
+def _one_edit_or_exact(left: str, right: str) -> bool:
+    """Allow a single insertion/deletion/substitution/transposition typo."""
+    if left == right:
+        return True
+    if abs(len(left) - len(right)) > 1 or min(len(left), len(right)) < 4:
+        return False
+    if len(left) == len(right):
+        mismatches = [i for i, (a, b) in enumerate(zip(left, right)) if a != b]
+        if len(mismatches) == 1:
+            return True
+        if len(mismatches) == 2:
+            first, second = mismatches
+            return second == first + 1 and left[first] == right[second] and left[second] == right[first]
+        return False
+    # One insertion/deletion: walk once and permit one skipped character.
+    shorter, longer = (left, right) if len(left) < len(right) else (right, left)
+    i = j = 0
+    skipped = False
+    while i < len(shorter) and j < len(longer):
+        if shorter[i] == longer[j]:
+            i += 1
+            j += 1
+            continue
+        if skipped:
+            return False
+        skipped = True
+        j += 1
+    return True
+
+
+def _source_term_set(tokens: List[str], vocabulary: frozenset[str]) -> set[str]:
+    return {
+        candidate for candidate in vocabulary
+        if any(
+            _SOURCE_COMMON_TYPOS.get(token, token) == candidate
+            or (len(candidate) >= 5 and _one_edit_or_exact(token, candidate))
+            for token in tokens
+        )
+    }
+
+
+def source_referential_intent(text: str) -> Optional[str]:
+    """Classify a source-context follow-up without inventing a subject.
+
+    Returns ``price``, ``availability``, ``order``, ``details`` or ``None``.
+    Detail/price/availability shorthand is intentionally accepted without an
+    explicit pronoun because it is a normal continuation immediately after a
+    shared attachment.  Action words such as ``want`` or ``buy`` require a
+    referential term (``this``, ``the reel``, ``above``, etc.) so an unrelated
+    first message cannot borrow a nonexistent source.
+    """
+    normalized = unicodedata.normalize("NFKC", str(text or "")).lower()
+    normalized = normalized.replace("’", "'").replace("‘", "'")
+    normalized = re.sub(r"\bi\s*['’]?\s*m\b", "im", normalized)
+    normalized = re.sub(r"[^a-z0-9\s]", " ", normalized)
+    tokens = normalized.split()
+    if not tokens:
+        return None
+
+    referential = _source_term_set(tokens, _SOURCE_REFERENTIAL_TERMS)
+    details = _source_term_set(tokens, _SOURCE_DETAIL_TERMS)
+    prices = _source_term_set(tokens, _SOURCE_PRICE_TERMS)
+    availability = _source_term_set(tokens, _SOURCE_AVAILABILITY_TERMS)
+    actions = _source_term_set(tokens, _SOURCE_ACTION_TERMS)
+    has_reference = bool(referential)
+    canonical_tokens = [_SOURCE_COMMON_TYPOS.get(token, token) for token in tokens]
+    # "this one" / "that one" / "above one" are covered by the individual
+    # terms, as are natural shorthand forms such as "about the reel".
+    if prices and (has_reference or prices & {"price", "prices", "cost", "rate", "much"}):
+        return "price"
+    if availability and (has_reference or availability):
+        return "availability"
+    if actions and has_reference:
+        return "order"
+    context_only_detail = all(
+        token in _SOURCE_CONTEXT_FILLER_TERMS or token in _SOURCE_DETAIL_TERMS
+        for token in canonical_tokens
+    )
+    if details and (has_reference or context_only_detail):
+        return "details"
+    if has_reference:
+        # "This one please" / "the above one" carry a clear selection even
+        # when the customer omits an explicit verb.
+        return "order"
+    return None
 
 # Words that carry no subject, so they cannot anchor an answer to a question.
 RELEVANCE_STOP_WORDS = frozenset({
@@ -530,16 +675,10 @@ class DeterministicResponder:
         return None
 
     def _generic_fallback(self) -> str:
-        """The scripted 'we've handed this to a human' notice from qa_templates.json."""
-        return self.qa_data.get("escalation_triggers", {}).get(
-            "fallback_response",
-            "Thank you for getting in touch! I've notified our team (+91 87965 51990) regarding "
-            "your request and they'll connect with you directly on WhatsApp/call shortly.\n\n"
-            "In the meantime, feel free to ask me about:\n"
-            "• Our fresh Sondesh, Kanchagolla & Jolbhora (Aamar Mishti & Signature Collections)\n"
-            "• 🍱 This week's fresh Bengali Lunch & Dinner Bento menu\n"
-            "• 🚚 Delivery details across Delhi NCR\n\n"
-            "Or reply 'menu' to see our complete price list!"
+        """Safe first message; the Instagram caller appends the CAM link separately."""
+        return (
+            "Our team can assist you personally on WhatsApp. "
+            "Please continue your enquiry using the link below."
         )
 
     def classify_unmatched_intent(self, text: str) -> str:
@@ -572,41 +711,6 @@ class DeterministicResponder:
         Returns: (response_text, intent_tag)
         """
         intent = self.classify_unmatched_intent(user_message or "")
-
-        if intent == "complaint":
-            return (
-                "I'm really sorry that happened — that is not the experience we want you to have. 🙏\n\n"
-                "I've flagged this to our team (+91 87965 51990) along with this chat, and they will "
-                "reach out to you personally to put it right.\n\n"
-                "If you can share your order date and what went wrong, it helps us fix it faster.",
-                intent,
-            )
-
-        if intent == "bulk":
-            return (
-                "Wonderful — we would love to make this for you!\n\n"
-                "Bulk, corporate and festive orders are quoted personally so we can work out pricing, "
-                "packaging and delivery dates around your date.\n\n"
-                "I've passed this to our team (+91 87965 51990) and they will connect with you shortly. "
-                "To speed things up, do share:\n"
-                "• Approximate quantity\n"
-                "• Delivery date\n"
-                "• Delhi NCR area, or if you'd prefer kitchen pickup",
-                intent,
-            )
-
-        if intent == "order_intent":
-            return (
-                "Lovely — let's get this order placed!\n\n"
-                "Our team (+91 87965 51990) has your chat and will confirm on WhatsApp/call shortly.\n\n"
-                "To make it quick, please share:\n"
-                "1. Item & flavour\n"
-                "2. Pack size (250g / 500g / 1kg)\n"
-                "3. Delivery address & phone number\n"
-                "4. Preferred delivery date\n\n"
-                "Payment is UPI / bank transfer once the order is confirmed.",
-                intent,
-            )
 
         return self._generic_fallback(), intent
 
@@ -645,14 +749,18 @@ class DeterministicResponder:
         # A learned answer may intentionally contain words such as "bulk" or
         # "corporate", but it is still a verified answer rather than a new
         # escalation request.
-        try:
-            learned_match = db.search_learned_knowledge(message)
-            learned_answer = (learned_match or {}).get("verified_answer", "").strip()
-            if learned_answer:
-                session_memory.add_turn(user_id, channel, message, learned_answer)
-                return learned_answer, True, f"learned_{learned_match.get('id')}", None
-        except Exception:
-            pass
+        # Conversational-only turns have a higher precedence than any learned
+        # row, so stale Custom Q&A content cannot turn a greeting into a menu
+        # dump.  The learned matcher remains authoritative for real questions.
+        if not (GREETING_ONLY_RE.fullmatch(text) or CLOSING_ONLY_RE.fullmatch(text) or ACK_ONLY_RE.fullmatch(text)):
+            try:
+                learned_match = db.search_learned_knowledge(message)
+                learned_answer = (learned_match or {}).get("verified_answer", "").strip()
+                if learned_answer:
+                    session_memory.add_turn(user_id, channel, message, learned_answer)
+                    return learned_answer, True, f"learned_{learned_match.get('id')}", None
+            except Exception:
+                pass
         if (self.classify_unmatched_intent(message) == "complaint"
                 or re.search(r"\b(cancel (?:my |the )?order|order is missing|(?:speak|talk) to (?:a |an )?(?:human|person))\b", text)):
             reply, _ = self.build_handover_response(message)
@@ -1270,6 +1378,8 @@ class DeterministicResponder:
             template_id = used_templates[0]
         elif set(intents) == {Intent.MENU_REQUEST.value, Intent.DELIVERY_QUERY.value} and not missing:
             template_id = "delivery_area"
+        elif intents == [Intent.ESCALATION.value]:
+            template_id = "explicit_escalation"
         elif intents:
             template_id = "compound_" + "_".join(intents)
         else:
@@ -1321,20 +1431,34 @@ class DeterministicResponder:
                 history_turns=session_memory.get_session(user_id, channel).get("turns", []),
             )
 
+        # AI Resolution & Answers, Phase 3 slice 2: the triage model only
+        # gets a message that deterministic/canonical resolution already gave
+        # up on — was_matched is False here in exactly the cases that reach
+        # the candidate/escalation/knowledge-gap machinery further down this
+        # same fallback tail. Instagram-only and behind its own flag, on top
+        # of WhatsApp's existing human-only gate in whatsapp_adapter.py, so a
+        # future flip of WHATSAPP_CHATBOT_ENABLED could never also turn this on.
+        if (
+            config.LLM_TRIAGE_ENABLED
+            and channel == "instagram"
+            and not was_matched
+            and template_id != "ad_gate_blocked"
+        ):
+            triage_classifier.record_shadow(
+                user_message=user_message,
+                channel=channel,
+                user_id=user_id,
+                was_matched=was_matched,
+                template_id=template_id,
+            )
+
         if self._should_send_slow_notice(user_id, channel, response_text, template_id):
             session_memory.get_facts(user_id, channel)["slow_notice_sent"] = True
             log.info("Slow-reply notice sent to %s on %s.", user_id, channel)
             if was_matched:
                 response_text = f"{config.SLOW_REPLY_NOTICE_TEXT}\n\n{response_text}"
             else:
-                # The handover copy underneath says we have notified the team and
-                # they will call back. The notice above it says the opposite —
-                # replies are slow this week, please call the manager yourself.
-                # Sending both hands the customer two contradictory instructions
-                # and two phone numbers. The notice already names Guru Dayal as
-                # the single point of contact, which is the whole content of the
-                # handover message, so on an unmatched reply it stands alone.
-                response_text = config.SLOW_REPLY_NOTICE_TEXT
+                response_text = self._generic_fallback()
 
         try:
             audit_facts = session_memory.get_facts(user_id, channel)
@@ -1452,27 +1576,186 @@ class DeterministicResponder:
             "structured_nlu_provider_failed": False,
             "last_route_source": None,
         })
+        # Each turn gets a fresh source-use audit value.  The source route
+        # itself remains available for a later genuine follow-up; only this
+        # turn's decision is reset here.
+        facts["source_context_used"] = False
+        facts["source_referential_intent"] = None
         ad_product = product_for_ad(referral_ad_id, referral_ad_title) or facts.get("ad_product")
         if ad_product:
             facts["ad_product"] = ad_product
 
+        # A direct human request always outranks an active order slot.  Without
+        # this guard, "I need an agent" after a receipt could be treated as a
+        # vague answer to the order flow and never reach the CAM handoff.
+        if (
+            channel == "instagram"
+            and semantic_fallback._ESCALATION_INTENT_RE.search(lowered_text)
+            and not semantic_fallback._IDENTITY_QUESTION_RE.search(lowered_text)
+        ):
+            fallback, _intent = self.build_handover_response(user_message)
+            facts["last_route_source"] = "explicit_rule"
+            facts["last_intents"] = [Intent.ESCALATION.value]
+            facts["last_actions"] = [
+                BusinessAction.ESCALATE_TO_TEAM.value,
+                BusinessAction.SEND_RESPONSE.value,
+            ]
+            facts["knowledge_sufficient"] = False
+            session_memory.add_turn(user_id, channel, user_message, fallback)
+            return fallback, False, "explicit_escalation", None
+
         # A referral is a preference only for genuinely vague openings. It
         # runs before conversational shorthand (such as a bare "price"), so
         # a meal-ad click never receives the sweet-product price prompt.
-        vague_opening = re.fullmatch(r"(?:hi+|hello+|hey+|namaste|menu|show menu|send menu|price|prices|how much|cost|rate|available|is this available)[?!,. ]*", lowered_text)
-        explicit_product = re.search(r"\b(sondesh|mishti|mithai|sweet|bento|meal|savoury|savory|curry|veg|non[ -]?veg)\b", lowered_text)
-        if channel == "instagram" and ad_product and vague_opening and not explicit_product:
-            if ad_product == "sondesh":
-                template_id = "sondesh_price_detailed" if re.search(r"price|cost|rate|how much", lowered_text) else "know_more"
-            elif ad_product == "bento":
-                template_id = "bento_details"
-            else:
-                template_id = "savoury_food_intro"
+        # A bare greeting/acknowledgement/sign-off must never consume an
+        # active reel/post/ad route.  We intentionally bypass source
+        # resolution rather than clearing the route, so "hi" followed by
+        # "tell me more" can still use the shared content.
+        greeting_text = re.sub(r'^(?:h+i+|h+a+i+)\b', 'hi', lowered_text)
+        greeting_text = re.sub(r'^(?:h+e+y+)\b', 'hey', greeting_text)
+        greeting_text = re.sub(r'^(?:h+e+l+o+|h+e+l+l+o+|h+l+o+)\b', 'hello', greeting_text)
+        greeting_text = re.sub(r'^(?:namaskar|nomoshkar|nomoskar)\b', 'namaste', greeting_text)
+        conversational_opener = bool(
+            GREETING_ONLY_RE.fullmatch(greeting_text)
+            or CLOSING_ONLY_RE.fullmatch(greeting_text)
+            or ACK_ONLY_RE.fullmatch(greeting_text)
+        )
+        facts["greeting_intent"] = bool(GREETING_ONLY_RE.fullmatch(greeting_text))
+
+        legacy_vague_opening = re.fullmatch(
+            r"(?:hi+|hello+|hey+|namaste|menu|show menu|send menu|tell me more|interested|"
+            r"price|prices|how much|cost|rate|available|is this available|what about this|"
+            r"can i order this|i saw this|what is this|what else(?: do you have)?)[?!,. ]*",
+            lowered_text,
+        )
+        explicit_product = re.search(
+            r"\b(sondesh|mishti|mithai|sweet|jolbhora|kanchagolla|nolen gur|mahua|"
+            r"aamar|signature|bento|meal|savoury|savory|curry|veg|non[ -]?veg)\b",
+            lowered_text,
+        )
+        source_route = facts.get("source_route") if isinstance(facts.get("source_route"), dict) else None
+        if explicit_product and (source_route or ad_product):
+            # A named product/topic is a new subject. Keep the prior route in
+            # the conversation evidence, but do not let a later pronoun jump
+            # back to that older reel/post/ad after this explicit change.
+            facts["source_context_superseded"] = True
+        # A configured ad may carry a canonical product mapping without a
+        # row in instagram_source_routes; that existing ad context is still a
+        # valid subject for a follow-up. Reel/post context requires the active
+        # source route established by the attachment.
+        source_context_available = bool(
+            (
+                source_route.get("active", True)
+                if source_route is not None
+                else (channel == "instagram" and ad_product)
+            )
+        ) and not facts.get("source_context_superseded")
+        detected_source_intent = (
+            None if conversational_opener else source_referential_intent(user_message)
+        )
+        source_intent = detected_source_intent if source_context_available else None
+        facts["source_referential_intent"] = source_intent
+        has_explicit_source_reference = bool(re.search(
+            r"\b(this|that|it|above|reel|post|video|item|one)\b", lowered_text,
+        ))
+        if (
+            channel == "instagram"
+            and detected_source_intent
+            and (
+                has_explicit_source_reference
+                or detected_source_intent in {"details", "order"}
+            )
+            and not source_context_available
+            and not explicit_product
+            and not facts.get("clarify_sent")
+        ):
+            facts["clarify_sent"] = True
+            clarification = (
+                "Which item are you interested in? Please tell me the sweet, meal, "
+                "or post/reel you mean and I'll share the right details."
+            )
+            session_memory.add_turn(user_id, channel, user_message, clarification)
+            return clarification, True, "clarify_request", None
+        # Keep the historical shorthand behavior, while allowing ordinary
+        # human phrasing such as "this one please" or "price for this".
+        vague_opening = bool(source_intent or (legacy_vague_opening and not conversational_opener))
+        source_topic = (
+            db.get_instagram_topic(source_route["topic_id"])
+            if source_route and source_route.get("topic_id") else None
+        )
+        priorities = [
+            product for product in (source_route or {}).get("priority_products", [])
+            if route_template_id(product)
+        ]
+        active_flow = any(facts.get(flag) for flag in (
+            "awaiting_subscription_booking", "awaiting_menu_choice", "awaiting_product_price",
+            "awaiting_area_confirmation",
+        ))
+        source_product = priorities[0] if priorities else ad_product
+        what_else = bool(re.fullmatch(r"what else(?: do you have)?[?!,. ]*", lowered_text))
+        can_use_source = not active_flow and (not facts.get("last_topic") or what_else)
+        if channel == "instagram" and source_context_available and source_product and vague_opening and not explicit_product and can_use_source:
+            cursor = int(facts.get("source_priority_cursor") or 0)
+            if what_else and priorities:
+                source_product = priorities[min(cursor, len(priorities) - 1)]
+            wants_price = source_intent == "price" or bool(re.search(r"price|cost|rate|how much", lowered_text))
+            template_id = route_template_id(source_product, price=wants_price) or route_template_id(source_product)
             template = self._template_by_id(template_id)
             if template and template.get("response") and not template.get("escalate"):
                 response_text, images = self._format_dynamic_response(template_id, template["response"], user_id=user_id, channel=channel, user_message=user_message)
+                # The Topic's own admin-authored description frames the
+                # approved product answer that follows it — safe because it
+                # is text an operator wrote, not anything inferred from the
+                # topic name or generated here.
+                if source_topic and source_topic.get("description"):
+                    response_text = compose_topic_response(
+                        source_topic.get("name") or source_route.get("routing_topic"),
+                        source_topic.get("description"), response_text,
+                        source_topic.get("response_order") or "description_first",
+                    )
+                facts["source_context_used"] = True
+                facts["source_priority_cursor"] = min(cursor + 1, len(priorities)) if priorities else 1
                 session_memory.add_turn(user_id, channel, user_message, response_text)
-                return response_text, True, f"ad_{ad_product}_{template_id}", images
+                return response_text, True, f"source_{source_product}_{template_id}", images
+
+        # A topic-only route may frame a vague opening, but the body still
+        # comes from the approved overview template. The admin label is not
+        # allowed to supply a price, promise, availability, or other fact.
+        if channel == "instagram" and source_context_available and source_route and vague_opening and not explicit_product and can_use_source:
+            template = self._template_by_id("know_more")
+            if template and template.get("response"):
+                response_text, images = self._format_dynamic_response(
+                    "know_more", template["response"], user_id=user_id, channel=channel,
+                    user_message=user_message,
+                )
+                topic = str(source_route.get("routing_topic") or "").strip()
+                if source_topic and source_topic.get("description"):
+                    # The same helper is used by the admin Preview Reply, so
+                    # a Topic's saved order cannot drift between preview/live.
+                    response_text = compose_topic_response(
+                        topic, source_topic.get("description"), response_text,
+                        source_topic.get("response_order") or "description_first",
+                    )
+                elif topic:
+                    response_text = f"About {topic}:\n\n{response_text}"
+                # The Topic's linked menu image, when one is published, rides
+                # alongside the overview cards already in `images` — never in
+                # place of them, and never inferred from anything but the
+                # admin's own default_menu_id choice on the Topic.
+                linked_menu_id = (source_route or {}).get("menu_id") or (source_topic or {}).get("default_menu_id")
+                if linked_menu_id:
+                    linked_image = current_menu_image(linked_menu_id, None)
+                    if linked_image:
+                        if isinstance(images, list):
+                            if linked_image not in images:
+                                images = images + [linked_image]
+                        elif images:
+                            images = [images, linked_image] if images != linked_image else images
+                        else:
+                            images = [linked_image]
+                facts["source_context_used"] = True
+                session_memory.add_turn(user_id, channel, user_message, response_text)
+                return response_text, True, "source_topic_know_more", images
 
         # An open flow is an answer the bot itself asked for: "which area are
         # you in", "Sondesh or Meals", "Option 1, 2 or 3". Those turns are
@@ -1732,7 +2015,6 @@ class DeterministicResponder:
         
         # Check Self-Healing Learned Knowledge Base (Saved from Staff Escalation Resolutions)
         try:
-            from camellia.database import db
             learned_items = db.get_learned_knowledge(limit=100)
             for item in learned_items:
                 pattern = item.get("question_pattern", "").lower().strip()
@@ -1981,7 +2263,7 @@ class DeterministicResponder:
             {w for w in cleaned_words if w not in VAGUE_FILLER_WORDS} - STOP_WORDS
         )
 
-        templates = self.qa_data.get("templates", [])
+        templates = self._templates_with_overrides()
 
         # Priority Tier Definitions
         TIER_1_GUARDS = {
@@ -2715,11 +2997,50 @@ class DeterministicResponder:
         return len(substantive) <= 1
 
     def _template_by_id(self, template_id: str) -> Dict[str, Any]:
-        """The raw template dict for an id, or {} if it does not exist."""
-        return next(
+        """Return protected template logic plus an optional managed copy override."""
+        template = next(
             (t for t in self.qa_data.get("templates", []) if t.get("id") == template_id),
             {},
         )
+        if not template:
+            return {}
+        try:
+            override = db.get_response_template_override(template_id)
+        except Exception as exc:
+            log.warning("Could not load response-library override for %s: %s", template_id, exc)
+            override = None
+        if not override or str(override.get("status") or "ACTIVE").upper() != "ACTIVE":
+            return template
+        result = dict(template)
+        if result.get("responses"):
+            result["responses"] = [override.get("response") or ""]
+        else:
+            result["response"] = override.get("response") or ""
+        return result
+
+    def _templates_with_overrides(self) -> List[Dict[str, Any]]:
+        """Materialize runtime templates with managed copy overrides applied."""
+        try:
+            overrides = db.list_response_template_overrides()
+        except Exception as exc:
+            log.warning("Could not load response-library overrides: %s", exc)
+            overrides = {}
+        result = []
+        for template in self.qa_data.get("templates", []):
+            template_id = template.get("id")
+            if not template_id:
+                continue
+            override = overrides.get(str(template_id))
+            if not override or str(override.get("status") or "ACTIVE").upper() != "ACTIVE":
+                result.append(template)
+                continue
+            copy = dict(template)
+            if copy.get("responses"):
+                copy["responses"] = [override.get("response") or ""]
+            else:
+                copy["response"] = override.get("response") or ""
+            result.append(copy)
+        return result
 
     def _with_captions(self, template_id: str, images: List[str]) -> List[Any]:
         """
@@ -2802,7 +3123,7 @@ class DeterministicResponder:
         # did nothing" failure the split exists to prevent.
         # A deliberately published Menu Manager image wins immediately and is
         # read from durable metadata on every request; no process restart is
-        # needed.  An explicitly archived image returns no card.
+        # needed. An explicitly archived image returns no card.
         managed = db.get_menu_image_current("weekly_vegetarian")
         if managed:
             return managed["image_path"], None

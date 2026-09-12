@@ -36,6 +36,7 @@ class EntryPoint:
     source: str = "unknown"        # typed | ice_breaker | postback | story_reply | unknown
     ad_id: Optional[str] = None
     ad_title: Optional[str] = None
+    media_id: Optional[str] = None
     from_ad_click: bool = False    # this event carried the ad referral itself
     raw_payload: Optional[str] = None
 
@@ -70,6 +71,14 @@ def describe_entry_point(messaging_event: Dict[str, Any]) -> EntryPoint:
     ads_context = referral.get("ads_context_data")
     ad_title = ads_context.get("ad_title") if isinstance(ads_context, dict) else None
     from_ad_click = str(referral.get("source", "")).upper() == "ADS"
+    # The only media identifier on a *typed* message is the story id attached
+    # to a reply; nothing here infers one from anywhere else. A reel shared as
+    # an attachment does carry its own permalink, but that arrives on a
+    # different event shape and is read by shared_reel_identity() rather than
+    # folded in here.
+    reply_to = message_obj.get("reply_to") or {}
+    story = reply_to.get("story") if isinstance(reply_to, dict) else None
+    media_id = str(story.get("id")) if isinstance(story, dict) and story.get("id") else None
 
     payload = postback_obj.get("payload")
     if postback_obj:
@@ -87,6 +96,7 @@ def describe_entry_point(messaging_event: Dict[str, Any]) -> EntryPoint:
         source=source,
         ad_id=ad_id,
         ad_title=ad_title,
+        media_id=media_id,
         from_ad_click=from_ad_click,
         raw_payload=str(payload) if payload else None,
     )

@@ -130,7 +130,7 @@ def test_event_request_uses_deterministic_human_handoff():
     facts = session_memory.get_facts("structured-event", "whatsapp")
     assert matched is False
     assert template_id == "groq_structured_event_escalation"
-    assert "festive orders" in text.lower() and "team" in text.lower()
+    assert "assist you personally on whatsapp" in text.lower()
     assert facts["last_actions"] == ["ESCALATE_TO_TEAM", "SEND_RESPONSE"]
 
 

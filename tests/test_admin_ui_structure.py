@@ -64,29 +64,82 @@ def test_dashboard_javascript_brackets_balance(script, opener, closer):
     )
 
 
-def test_the_dashboard_has_four_task_tabs(page):
+def test_the_dashboard_has_four_client_facing_tabs(page):
     """
     Eight tabs needed 1655px of nav on a 347px phone, so most of the portal was
-    unreachable on the handset the kitchen actually uses.
+    unreachable on the handset the kitchen actually uses. Menu Manager is its
+    own tab rather than folded into Menu, so it does not disturb the existing
+    Instagram Post & Ad Routing panel that already lives there.
+
+    Customers and Answers were folded a second time, into AI Resolution &
+    Answers, once every action either offered was confirmed reachable from
+    there — see test_ai_resolution_tab_exists_and_reuses_existing_endpoints
+    and the candidate/escalation/knowledge-gap regression tests below. Their
+    old panels stay in the DOM behind the Advanced/Legacy disclosure, not in
+    this main nav bar. Custom Q&A is the fourth: the client-managed reusable
+    knowledge library, on the same learned_knowledge table.
     """
-    buttons = re.findall(r'<button class="tab-btn[^"]*" onclick="switchTab\(', page)
-    assert len(buttons) == 4, f"expected 4 tabs, found {len(buttons)}"
+    nav = page[page.index('<div class="tabs-nav">'):page.index('</div>', page.index('<div class="tabs-nav">'))]
+    buttons = re.findall(r'<button class="tab-btn[^"]*" onclick="switchTab\(', nav)
+    assert len(buttons) == 4, f"expected 4 client-facing tabs, found {len(buttons)}"
+    assert "Custom Q&amp;A" in nav
 
 
-def test_collections_tab_sits_between_menu_and_customers(page):
-    menu = page.index("switchTab('tab-image'")
-    collections = page.index("switchTab('tab-collections'")
-    customers = page.index("switchTab('tab-stats'")
-    assert menu < collections < customers
+def test_menu_manager_sits_between_menu_and_ai_resolution(page):
+    nav = page[page.index('<div class="tabs-nav">'):]
+    nav = nav[:nav.index('</div>')]
+    assert nav.index("tab-image") < nav.index("tab-menu-manager") < nav.index("tab-ai-resolution")
+    assert "Menu Manager" in nav
 
 
-def test_collections_tab_can_browse_and_replace_each_selection(page):
-    assert 'id="allMenuCatalogue"' in page
-    assert 'id="collectionBase"' in page
-    assert 'id="collectionBuilder"' in page
-    assert "function loadCollectionMenus" in page
-    assert "function changeCollectionSelection" in page
-    assert "function copyCollectionSummary" in page
+def test_customers_and_answers_are_not_in_normal_client_navigation(page):
+    """
+    Their functions are not gone -- they are inside AI Resolution & Answers,
+    reached through the exact same candidate/escalation/knowledge-gap/
+    learned-knowledge endpoints. This only checks that a client opening the
+    dashboard is no longer offered two extra buttons for workflows the
+    unified tab already covers.
+    """
+    nav = page[page.index('<div class="tabs-nav">'):]
+    nav = nav[:nav.index('</div>')]
+    assert "💬 Customers" not in nav
+    assert "✅ Answers <span" not in nav
+    assert "🤖 AI Resolution &amp; Answers" in nav
+
+
+def test_legacy_views_are_reachable_only_from_the_advanced_disclosure(page):
+    """
+    The old panels stay in the DOM for regression comparison during this
+    transition, but only behind a collapsed, clearly-labelled disclosure --
+    never as prominent client-facing navigation.
+    """
+    assert "Advanced / Legacy Views" in page
+    assert "Open Legacy Customers View" in page
+    assert "Open Legacy Answers View" in page
+    assert "switchTab('tab-stats', null)" in page
+    assert "switchTab('tab-candidates', null)" in page
+
+
+def test_menu_manager_can_edit_preview_publish_and_restore(page):
+    assert 'id="mmMenuList"' in page
+    assert 'id="mmEditorItems"' in page
+    assert 'id="mmPreviewText"' in page
+    assert 'id="mmImageGrid"' in page
+    assert "mmLoadMenuList()" in page
+    assert "mmSaveDraft()" in page
+    assert "mmPreview()" in page
+    assert "mmPublish()" in page
+    assert "mmRestoreVersion(" in page
+    assert "mmReplaceImage(" in page
+    assert "mmArchiveImage(" in page
+    assert "mmHistoryImage(" in page
+
+
+def test_ad_routing_panel_still_present_alongside_menu_manager(page):
+    """Menu Manager must not have displaced the existing Post & Ad Routing UI."""
+    assert 'id="tab-ad-routing"' in page
+    assert "Instagram Post" in page or "Post &amp; Ad Routing" in page
+    assert 'id="igPriorityProducts"' in page
 
 
 def test_menu_dashboard_explains_how_to_hide_the_current_week(page):
@@ -138,12 +191,12 @@ def test_the_menu_tab_leads_with_the_weekly_job(page):
 
 def test_menu_tab_has_simple_ad_routing_controls(page):
     assert 'id="tab-ad-routing"' in page
-    assert 'id="adRouteId"' in page
-    assert 'id="adRouteProduct"' in page
-    assert "saveAdRoute()" in page
+    assert 'id="igRouteUrl"' in page
+    assert 'id="igProductPicker"' in page
+    assert "saveInstagramRoute()" in page
     assert "loadAdRoutes()" in page
-    for product in ("sondesh", "savoury", "bento"):
-        assert f'value="{product}"' in page
+    assert "product_catalogue" in page
+    assert "igProducts.map" in page
 
 
 def test_the_fake_flyer_test_button_is_gone(page):
@@ -213,7 +266,131 @@ def test_the_dashboard_is_never_cached():
     assert "no-store" in cache, f"dashboard is cacheable: {cache!r}"
 
 
+def test_instagram_routing_has_a_simple_client_first_default_view(page):
+    """The normal route workflow is link -> topic -> save; technical fields stay disclosed."""
+    section = page[page.index('id="tab-ad-routing"'):page.index('<!-- MENU tab, panel 3 of 4')]
+    assert "Instagram Link" in section
+    assert "Instagram Post / Reel Link" not in section
+    assert ">Identify<" not in section
+    assert "id=\"igTopicPicker\"" in section and "+ Add Topic" in section
+    assert "Save Routing" in section
+    assert "Preview Reply" in section
+    assert "Preview Customer Response" not in section
+    assert '<details id="igCustomize"' in section and '<details id="igCustomize" open' not in section
+    assert '<details id="igAdvancedSettings"' in section and '<details id="igAdvancedSettings" open' not in section
+    assert "Advanced settings are normally filled automatically" in section
+
+
+def test_instagram_routing_keeps_client_friendly_cards_and_existing_actions(page):
+    section = page[page.index('async function loadAdRoutes'):page.index('// Shared-post pairing')]
+    assert "View Details" in section
+    for action in ("Edit", "Disable", "Archive", "Status:", "Menu:", "Priority:"):
+        assert action in section
+    assert "/admin/instagram-routes/${id}/active" in page
+    assert "/admin/instagram-routes/${id}" in page
+    assert "/admin/instagram-routes/${routingId}/pairing/start" in page
+    assert "Save Changes" in page
+
+
+def test_instagram_routing_delete_is_client_friendly_and_scoped(page):
+    section = page[page.index('id="tab-ad-routing"'):page.index('<!-- MENU tab, panel 3 of 4')]
+    assert page.count("openIgRemoveModal") >= 3, "active and archived cards need Delete"
+    assert "Delete this Instagram routing connection?" in page
+    assert "Topic:" in page and "Instagram content type:" in page and "Menu:" in page and "Status:" in page
+    assert "This only removes this Instagram routing connection." in page
+    assert "It will not delete the Instagram content, Topic, Menu, products, Custom Q&amp;A, or customer conversations." in page
+    assert ">Cancel</button>" in page
+    assert "Delete Routing" in page
+    assert "confirmIgRemove()" in page
+    assert "method: 'DELETE'" in page and "/admin/instagram-routes/${id}/permanent" in page
+    assert "✓ Instagram routing deleted" in page
+    assert "Remove Permanently" not in page
+
+
+def test_topic_preview_exposes_reply_order_and_uses_the_preview_endpoint(page):
+    section = page[page.index('id="tab-ad-routing"'):page.index('<!-- MENU tab, panel 3 of 4')]
+    assert "Reply Order:" in section
+    assert "⇅ Swap Order" in section
+    assert "Description First" in page and "Menu First" in page
+    assert "swapIgResponseOrder" in page
+    assert "response_order: igResponseOrder" in page
+
+
 def test_both_dashboard_routes_send_the_same_no_cache_headers():
     """/admin and /admin/dashboard are the same page; one must not be stale."""
     for path in ("/admin", "/admin/dashboard"):
         assert "no-store" in client.get(path).headers.get("cache-control", ""), path
+
+
+def test_ai_resolution_tab_exists_and_reuses_existing_endpoints(page):
+    """
+    AI Resolution & Answers merges candidate_templates, escalations and
+    knowledge_gaps into one queue. It must not introduce a parallel workflow:
+    every action it offers has to call the same endpoints the older Answers
+    and Customers tabs already use to approve/reject/edit/resolve.
+    """
+    assert 'id="tab-ai-resolution"' in page
+    assert "AI Resolution &amp; Answers" in page
+    assert "'tab-ai-resolution': 'ai_resolution'" in page
+
+    script = page[page.index("async function loadAiResolution"):]
+    assert "fetch('/admin/candidates'" in script
+    assert "fetch('/admin/escalations?status=pending" in script
+    assert "fetch('/admin/knowledge-gaps?status=OPEN" in script
+
+    assert "fetch(`/admin/candidates/${id}/approve`" in page
+    assert "fetch(`/admin/candidates/${id}`" in page
+    assert "fetch(`/admin/candidates/${id}/reject`" in page
+    assert "fetch(`/admin/knowledge-gaps/${gapId}/status`" in page
+    assert "onclick=\"openResolveModal(" in script, "gap/escalation rows must reuse the existing resolve modal"
+
+
+def test_triage_shadow_section_is_present_and_strictly_read_only(page):
+    """
+    Phase 3 slice 2: the triage model's shadow categorization has to be
+    visible inside AI Resolution & Answers, but it must never gain an
+    approve/reject/resolve action of its own -- a shadow row was never acted
+    on by anything, and the dashboard must not become the first thing that
+    does before an auto-resolve path exists.
+    """
+    assert 'id="triageShadowTableBody"' in page
+    assert "Triage Shadow Mode" in page
+    assert "measurement only" in page
+
+    section = page[page.index("async function loadTriageShadow"):]
+    section = section[:section.index("// CUSTOM Q&A:")]
+    assert "fetch('/admin/triage-shadow" in section
+    for verb in ("method: 'POST'", "method: 'PATCH'", "method: 'DELETE'", "confirm("):
+        assert verb not in section, f"triage shadow section must stay read-only, found {verb!r}"
+
+
+def test_custom_qa_tab_exists_and_reuses_the_same_learned_knowledge_endpoints(page):
+    """
+    Custom Q&A must not be a second knowledge system: every action it offers
+    has to call /admin/custom-qa, which is backed by the same
+    learned_knowledge table (and matcher) Teach & Resolve and candidate
+    approval already use.
+    """
+    assert 'id="tab-custom-qa"' in page
+    assert "Custom Q&amp;A" in page
+    assert "'tab-custom-qa': 'custom_qa'" in page
+    assert "Create and manage approved answers the chatbot can reuse" in page
+
+    script = page[page.index("async function loadCustomQa"):]
+    assert "fetch(`/admin/custom-qa?status=" in script
+    assert "fetch('/admin/custom-qa" in page or "fetch(`/admin/custom-qa" in page
+    assert "/admin/custom-qa/${id}/status" in page or "/admin/custom-qa/${item.id}" in page
+    assert "/admin/custom-qa/export.csv" in page
+    assert "/admin/custom-qa/csv-template" in page
+    assert "/admin/custom-qa/import/dry-run" in page
+    assert "/admin/custom-qa/import/confirm" in page
+    assert "/admin/custom-qa/test" in page
+    assert "/admin/custom-qa/preview" in page
+    assert "/versions" in page and "/restore/" in page
+
+
+def test_custom_qa_lifecycle_and_delete_confirmation_are_present(page):
+    assert "Delete this Custom Q&amp;A permanently?" in page
+    assert "This permanently removes this Q&amp;A and it will no longer be available to the chatbot." in page
+    assert "cqaSetStatus" in page
+    assert "customQaHistoryModal" in page

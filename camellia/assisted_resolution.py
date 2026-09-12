@@ -1,9 +1,4 @@
-"""Human-gated LLM Assisted Resolution.
-
-This module writes reviewable drafts only.  It never sends a customer reply,
-and it is intentionally unreachable from the WhatsApp inbound path.
-"""
-
+"""Human-gated assisted resolution drafts for Instagram review."""
 import re
 from typing import Any, Dict, Optional
 
@@ -13,18 +8,17 @@ from camellia.monitoring import get_logger
 from camellia.rag_fallback import rag_fallback_engine
 
 log = get_logger("camellia.assisted_resolution")
-
-ALLOWED_CATEGORIES = {
-    "AUTO_RESOLVE", "AI_SUGGESTED", "TEACH_REQUIRED", "HUMAN_REQUIRED",
-    "NON_ACTIONABLE", "CONTACT_DETAIL", "UNSUPPORTED",
-}
+ALLOWED_CATEGORIES = {"AUTO_RESOLVE", "AI_SUGGESTED", "TEACH_REQUIRED", "HUMAN_REQUIRED", "NON_ACTIONABLE", "CONTACT_DETAIL", "UNSUPPORTED"}
 
 
 def business_risk_flags(message: str) -> list[str]:
     text = (message or "").lower()
     patterns = (
-        ("price", r"\b(price|prices|cost|rate|₹|rs\.?|inr)\b|₹"),
-        ("discount", r"\b(discount|offer|cheaper)\b"),
+        ("price", r"\b(price|prices|cost|rate|rs\.?|inr)\b|₹"),
+        # "offer" by itself is ordinary catalogue language (for example,
+        # "What do you offer?").  Only explicit pricing/promotion language
+        # should block assisted resolution.
+        ("discount", r"\b(discount|cheaper|coupon|voucher|promo|promotion|promotional\s+price|special\s+price|reduced\s+price|price\s+reduction|deal|discount\s+code)\b|\b\d+(?:\.\d+)?\s*%\s*(?:off|discount)\b|\bspecial\s+offer\b"),
         ("delivery_commitment", r"\b(deliver|delivery|courier|dispatch|arrive|free delivery)\b"),
         ("availability", r"\b(available|availability|in stock|sold out)\b"),
         ("event_date", r"\b(wedding|event|party|function|date|bulk|boxes)\b"),
@@ -33,6 +27,11 @@ def business_risk_flags(message: str) -> list[str]:
         ("hiring", r"\b(job|hire|hiring|work|career|vacancy)\b"),
         ("allergen", r"\b(allerg|nut|gluten|dairy|ingredient)\w*\b"),
         ("custom_order", r"\b(custom|customise|customize|bespoke|special order)\b"),
+        ("order_change", r"\b(change|modify|amend|swap|remove)\b.*\b(order|box|item|flavour|delivery)\b"),
+        ("quantity", r"\b(?:\d+|one|two|three|four|five|ten|twenty|fifty|hundred)\s+(?:boxes?|pieces?|packs?|orders?)\b|\bhow many\b|\bquantity\b"),
+        ("complaint", r"\b(complaint|complain|unhappy|disappointed|bad experience|wrong order)\b"),
+        ("escalation", r"\b(escalat|urgent|immediately|manager)\w*\b"),
+        ("human", r"\b(human|person|agent|representative|speak to|talk to)\b"),
     )
     return [name for name, pattern in patterns if re.search(pattern, text, re.IGNORECASE)]
 
@@ -52,104 +51,53 @@ def classify_message(message: str) -> str:
 
 
 def _approved_match(message: str) -> Dict[str, Any]:
-    learned = db.search_learned_knowledge(message)
+    try:
+        learned = db.search_learned_knowledge(message, count_usage=False)
+    except TypeError:
+        learned = db.search_learned_knowledge(message)
     if learned and learned.get("verified_answer"):
-        return {
-            "answer": learned["verified_answer"],
-            "knowledge_id": f"learned_knowledge#{learned.get('id')}",
-            "source": "learned_knowledge",
-            "source_chunks": [learned["verified_answer"]],
-            "confidence": float(learned.get("confidence") or 1.0),
-        }
-
-    # retrieve() searches only active qa_templates and learned knowledge. Its
-    # proposed answer is used as review material, never as an auto-reply.
+        return {"answer": learned["verified_answer"], "knowledge_id": f"learned_knowledge#{learned.get('id')}", "source": "learned_knowledge", "source_chunks": [learned["verified_answer"]], "confidence": float(learned.get("confidence") or 1.0)}
     try:
         result = rag_fallback_engine.retrieve(message, persist_candidate=False)
     except Exception as exc:
-        log.warning("Assisted approved-knowledge lookup failed: %s", exc)
+        log.warning("Approved-knowledge lookup failed: %s", exc)
         return {}
-    if not result.proposed_response or not result.source_refs:
+    if not result.proposed_response or not result.source_refs or not any(ref.startswith(("qa_templates.json#", "learned_knowledge#")) for ref in result.source_refs):
         return {}
-    if not any(ref.startswith("qa_templates.json#") or ref.startswith("learned_knowledge#") for ref in result.source_refs):
-        return {}
-    refs = list(result.source_refs)
-    knowledge_id = refs[0] if refs and refs[0].startswith("learned_knowledge#") else result.proposed_intent
-    return {
-        "answer": result.proposed_response,
-        "knowledge_id": knowledge_id,
-        "source": refs[0],
-        "source_chunks": result.source_chunks or [result.proposed_response],
-        "confidence": float(result.confidence_score or 0.0),
-    }
+    ref = result.source_refs[0]
+    return {"answer": result.proposed_response, "knowledge_id": ref if ref.startswith("learned_knowledge#") else result.proposed_intent, "source": ref, "source_chunks": result.source_chunks or [result.proposed_response], "confidence": float(result.confidence_score or 0.0)}
 
 
-def create_suggestion(
-    *,
-    user_id: str,
-    channel: str,
-    customer_message: str,
-    escalation_id: Optional[int] = None,
-    conversation_id: Optional[int] = None,
-    deterministic_resolved: bool = False,
-    active_protected_flow: bool = False,
-    source_routed: bool = False,
-    source_routing_id: Optional[str] = None,
-) -> Optional[Dict[str, Any]]:
-    """Analyze one unresolved Instagram message and persist one draft."""
-    if not config.LLM_ASSISTED_RESOLUTION_ENABLED or channel != "instagram":
+def create_suggestion(*, user_id: str, channel: str, customer_message: str, escalation_id: Optional[int] = None, conversation_id: Optional[int] = None, deterministic_resolved: bool = False, active_protected_flow: bool = False, source_routed: bool = False, source_routing_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    if not config.LLM_ASSISTED_RESOLUTION_ENABLED or str(channel).lower() != "instagram":
         return None
     if deterministic_resolved or active_protected_flow or source_routed:
         return None
-
     category = classify_message(customer_message)
     risks = business_risk_flags(customer_message)
     match = _approved_match(customer_message)
     answer = str(match.get("answer") or "").strip()
     grounded = False
-    grounding_details = "No approved knowledge found; human review required."
+    details = "No approved knowledge found; human review required."
     if answer and match.get("source_chunks"):
         grounded, reason = rag_fallback_engine.grounding_report(answer, match["source_chunks"])
-        grounding_details = (
-            "Matched approved Custom Q&A with high confidence."
-            if grounded else f"Approved source failed grounding validation: {reason}."
-        )
-
+        details = "Matched approved knowledge with high confidence." if grounded else f"Approved source failed grounding validation: {reason}."
     if category in {"NON_ACTIONABLE", "CONTACT_DETAIL", "HUMAN_REQUIRED"}:
-        answer = ""
-        grounded = False
-        grounding_details = "Human review is required for this message."
+        answer = ""; grounded = False; details = "Human review is required for this message."
     elif not answer:
-        category = "UNSUPPORTED"
+        category = "TEACH_REQUIRED" if category == "TEACH_REQUIRED" else "UNSUPPORTED"
+    elif category == "TEACH_REQUIRED":
+        category = "TEACH_REQUIRED"
     elif not risks and grounded:
         category = "AUTO_RESOLVE"
     else:
         category = "AI_SUGGESTED"
-
     if category not in ALLOWED_CATEGORIES:
         category = "UNSUPPORTED"
-    suggestion_id = db.create_assisted_suggestion(
-        escalation_id=escalation_id,
-        conversation_id=conversation_id,
-        user_id=user_id,
-        channel=channel,
-        customer_message=customer_message,
-        triage_category=category,
-        detected_intent=category.lower(),
-        confidence=float(match.get("confidence") or 0.0),
-        matched_knowledge_id=match.get("knowledge_id"),
-        matched_knowledge_source=match.get("source"),
-        grounding_status="Grounded" if grounded else "Not Grounded",
-        grounding_details=grounding_details,
-        suggested_answer=answer,
-        original_suggested_answer=answer,
-        risk_flags=risks,
-        model="approved_knowledge" if match else config.GROQ_MODEL,
-        source_routing_id=source_routing_id,
-    )
-    return db.get_assisted_suggestion(suggestion_id)
+    shadow = db.latest_triage_shadow_for(user_id, channel, customer_message)
+    sid = db.create_assisted_suggestion(escalation_id=escalation_id, conversation_id=conversation_id, user_id=user_id, channel=channel, customer_message=customer_message, triage_category=category, detected_intent=category.lower(), confidence=float(match.get("confidence") or 0.0), matched_knowledge_id=match.get("knowledge_id"), matched_knowledge_source=match.get("source"), grounding_status="Grounded" if grounded else "Not Grounded", grounding_details=details, suggested_answer=answer, original_suggested_answer=answer, risk_flags=risks, model="approved_knowledge" if match else config.GROQ_MODEL, source_routing_id=source_routing_id, shadow_category=(shadow or {}).get("category"), shadow_confidence=(shadow or {}).get("confidence"), source_route_present=bool(source_routing_id))
+    return db.get_assisted_suggestion(sid)
 
 
 def is_whatsapp_allowed(channel: str) -> bool:
-    """Explicit hard block used by callers and regression tests."""
     return str(channel or "").lower() != "whatsapp"

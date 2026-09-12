@@ -4,6 +4,7 @@ from camellia.config import config
 from camellia.responder import responder, _strip_flower_emoji
 from camellia.database import db
 from camellia.escalator import escalator
+from camellia.handoff import extract_reference, mark_whatsapp_connected
 from camellia.monitoring import get_logger, delivery_monitor
 
 log = get_logger("camellia.whatsapp")
@@ -11,10 +12,17 @@ log = get_logger("camellia.whatsapp")
 class WhatsAppAdapter:
     """
     Adapter for Meta WhatsApp Business Cloud API.
-    
-    Per PRD Requirement #2:
-    - Same bot logic/session reachable via WhatsApp Business.
-    - Deterministic responses and escalation on WhatsApp.
+
+    Channel policy: WhatsApp is human-only. The client does not want
+    customers talking to an AI bot here at all — Instagram is the only AI
+    chatbot channel, and a customer who needs a person is handed a WhatsApp
+    click-to-chat link from there (see camellia/handoff.py). This class still
+    owns outbound *sending* (used by the human-alert path in escalator.py and
+    by anything staff-triggered), but `process_incoming_message` — the one
+    path that would compose and send an automated reply to a customer message
+    — does not call the understanding/RAG/template stack by default. Flipping
+    `WHATSAPP_CHATBOT_ENABLED` back on is the only way to restore the old
+    behaviour, and it is off by default; see camellia/config.py.
     """
 
     @property
@@ -88,14 +96,63 @@ class WhatsAppAdapter:
             return None
 
     def process_incoming_message(self, sender_phone: str, message_text: str) -> Dict[str, Any]:
-        """Processes an incoming WhatsApp message through responder & escalator."""
-        # Match response with session memory
+        """Records an incoming WhatsApp message. Sends NO automated reply.
+
+        WhatsApp is the human destination after an Instagram handoff, not a
+        second chatbot surface. This never calls understanding_engine.analyze,
+        Groq, RAG, semantic fallback, or a QA-template response — none of
+        that machinery is reachable from here at all when the chatbot is
+        disabled (the default). If the message names a handoff reference
+        ("Ref: CAM-48371"), that reference is marked connected purely for
+        staff-side tracking; the customer still gets no bot reply for it.
+        """
+        if config.WHATSAPP_CHATBOT_ENABLED and not config.WHATSAPP_CHATBOT_ENABLE_CONFIRM:
+            # A lone WHATSAPP_CHATBOT_ENABLED=true is treated as an accidental
+            # flip, not a decision — restoring the old behaviour requires the
+            # separate WHATSAPP_CHATBOT_ENABLE_CONFIRM flag too. Fail safe to
+            # human-only rather than silently answering as a bot.
+            log.error(
+                "WHATSAPP_CHATBOT_ENABLED is true but WHATSAPP_CHATBOT_ENABLE_CONFIRM "
+                "is not set; refusing to run WhatsApp as a chatbot for %s. This is the "
+                "client's explicit channel policy: WhatsApp is human-only. Set both "
+                "flags to true if this is a deliberate policy change.",
+                sender_phone,
+            )
+        elif config.WHATSAPP_CHATBOT_ENABLED:
+            # Explicit, logged escape hatch for a future policy change only —
+            # off by default, and not exercised by any default configuration.
+            log.warning(
+                "WHATSAPP_CHATBOT_ENABLED is on: WhatsApp is answering %s as a "
+                "chatbot, which the client's current channel policy forbids.",
+                sender_phone,
+            )
+            return self._process_as_chatbot(sender_phone, message_text)
+
+        reference = extract_reference(message_text)
+        if reference and config.WHATSAPP_HUMAN_HANDOFF_ENABLED:
+            mark_whatsapp_connected(reference)
+
+        db.log_conversation(sender_phone, "whatsapp", message_text, "", False, "whatsapp_human_only")
+        log.info(
+            "WhatsApp inbound from %s recorded for human reply (handoff_ref=%s). No bot reply sent.",
+            sender_phone, reference,
+        )
+        return {
+            "status": "human_only",
+            "sender_phone": sender_phone,
+            "was_matched": False,
+            "template_id": "whatsapp_human_only",
+            "response_text": None,
+            "handoff_ref": reference,
+            "bot_replied": False,
+        }
+
+    def _process_as_chatbot(self, sender_phone: str, message_text: str) -> Dict[str, Any]:
+        """The old auto-reply behaviour, kept only behind WHATSAPP_CHATBOT_ENABLED."""
         response_text, was_matched, template_id, image_url = responder.match_and_respond(message_text, user_id=sender_phone, channel="whatsapp")
-        
-        # Log to DB
+
         db.log_conversation(sender_phone, "whatsapp", message_text, response_text, was_matched, template_id)
-        
-        # Handle escalation if unmatched OR order confirmation
+
         if not was_matched or template_id == "order_next_steps":
             escalator.handle_escalation(
                 user_id=sender_phone,
@@ -105,12 +162,9 @@ class WhatsAppAdapter:
                 context_data={"phone": sender_phone, "template_id": template_id}
             )
 
-        # Quick reply buttons logic for WhatsApp
         buttons = self._get_contextual_buttons(template_id, was_matched)
-
-        # Send response via WhatsApp API (or mock if no token configured)
         send_result = self.send_message(sender_phone, response_text, image_url=image_url, buttons=buttons)
-        
+
         return {
             "status": "processed",
             "sender_phone": sender_phone,
@@ -119,7 +173,8 @@ class WhatsAppAdapter:
             "response_text": response_text,
             "image_url": image_url,
             "buttons": buttons,
-            "send_result": send_result
+            "send_result": send_result,
+            "bot_replied": True,
         }
 
     def _get_contextual_buttons(self, template_id: Optional[str], was_matched: bool) -> Optional[list]:
