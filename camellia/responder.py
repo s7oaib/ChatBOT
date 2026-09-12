@@ -316,7 +316,7 @@ BARE_PRICE_QUESTION_RE = re.compile(
 # (for example, "hi, what is the price of Jolbhora?") must continue through
 # the normal intent/product precedence below.
 GREETING_ONLY_RE = re.compile(
-    r'^(?:hi+|hello+|hey+|good\s+(?:morning|afternoon|evening)|namaste|'
+    r'^(?:(?:hi+|hello+|hey+)(?:\s+there)?|good\s+(?:morning|afternoon|evening)|namaste|'
     r'nomoshkar|nomoskar|greetings)[\W_]*$',
     re.IGNORECASE,
 )
@@ -749,14 +749,18 @@ class DeterministicResponder:
         # A learned answer may intentionally contain words such as "bulk" or
         # "corporate", but it is still a verified answer rather than a new
         # escalation request.
-        try:
-            learned_match = db.search_learned_knowledge(message)
-            learned_answer = (learned_match or {}).get("verified_answer", "").strip()
-            if learned_answer:
-                session_memory.add_turn(user_id, channel, message, learned_answer)
-                return learned_answer, True, f"learned_{learned_match.get('id')}", None
-        except Exception:
-            pass
+        # Conversational-only turns have a higher precedence than any learned
+        # row, so stale Custom Q&A content cannot turn a greeting into a menu
+        # dump.  The learned matcher remains authoritative for real questions.
+        if not (GREETING_ONLY_RE.fullmatch(text) or CLOSING_ONLY_RE.fullmatch(text) or ACK_ONLY_RE.fullmatch(text)):
+            try:
+                learned_match = db.search_learned_knowledge(message)
+                learned_answer = (learned_match or {}).get("verified_answer", "").strip()
+                if learned_answer:
+                    session_memory.add_turn(user_id, channel, message, learned_answer)
+                    return learned_answer, True, f"learned_{learned_match.get('id')}", None
+            except Exception:
+                pass
         if (self.classify_unmatched_intent(message) == "complaint"
                 or re.search(r"\b(cancel (?:my |the )?order|order is missing|(?:speak|talk) to (?:a |an )?(?:human|person))\b", text)):
             reply, _ = self.build_handover_response(message)
@@ -2259,7 +2263,7 @@ class DeterministicResponder:
             {w for w in cleaned_words if w not in VAGUE_FILLER_WORDS} - STOP_WORDS
         )
 
-        templates = self.qa_data.get("templates", [])
+        templates = self._templates_with_overrides()
 
         # Priority Tier Definitions
         TIER_1_GUARDS = {
@@ -2993,11 +2997,50 @@ class DeterministicResponder:
         return len(substantive) <= 1
 
     def _template_by_id(self, template_id: str) -> Dict[str, Any]:
-        """The raw template dict for an id, or {} if it does not exist."""
-        return next(
+        """Return protected template logic plus an optional managed copy override."""
+        template = next(
             (t for t in self.qa_data.get("templates", []) if t.get("id") == template_id),
             {},
         )
+        if not template:
+            return {}
+        try:
+            override = db.get_response_template_override(template_id)
+        except Exception as exc:
+            log.warning("Could not load response-library override for %s: %s", template_id, exc)
+            override = None
+        if not override or str(override.get("status") or "ACTIVE").upper() != "ACTIVE":
+            return template
+        result = dict(template)
+        if result.get("responses"):
+            result["responses"] = [override.get("response") or ""]
+        else:
+            result["response"] = override.get("response") or ""
+        return result
+
+    def _templates_with_overrides(self) -> List[Dict[str, Any]]:
+        """Materialize runtime templates with managed copy overrides applied."""
+        try:
+            overrides = db.list_response_template_overrides()
+        except Exception as exc:
+            log.warning("Could not load response-library overrides: %s", exc)
+            overrides = {}
+        result = []
+        for template in self.qa_data.get("templates", []):
+            template_id = template.get("id")
+            if not template_id:
+                continue
+            override = overrides.get(str(template_id))
+            if not override or str(override.get("status") or "ACTIVE").upper() != "ACTIVE":
+                result.append(template)
+                continue
+            copy = dict(template)
+            if copy.get("responses"):
+                copy["responses"] = [override.get("response") or ""]
+            else:
+                copy["response"] = override.get("response") or ""
+            result.append(copy)
+        return result
 
     def _with_captions(self, template_id: str, images: List[str]) -> List[Any]:
         """

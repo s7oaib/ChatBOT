@@ -101,6 +101,52 @@ class TestDataModel:
         assert isolated_db.get_custom_qa(kid)["status"] == "DISABLED"
 
 
+class TestResponseLibrary:
+    def test_system_templates_are_searchable_without_duplicate_rows(self, isolated_db):
+        resp = client.get("/admin/response-library?search=hi", headers=_auth())
+        assert resp.status_code == 200
+        greeting = next(item for item in resp.json()["items"] if item.get("template_id") == "greeting")
+        assert greeting["source_label"] == "System Template"
+        assert "hello" in greeting["aliases"]
+        assert greeting["protected_runtime"] is True
+        assert isolated_db.list_custom_qa(status="ALL") == []
+
+    def test_system_response_override_is_live_and_versioned(self, isolated_db):
+        replacement = "Hi there! Welcome to Camellia Artisanal. How can I help you today?"
+        resp = client.patch("/admin/response-library/system/greeting", json={"response": replacement}, headers=_auth())
+        assert resp.status_code == 200
+        reply = responder.match_and_respond("hi", user_id="response_library_greeting", channel="whatsapp")
+        assert reply[2] == "greeting"
+        assert reply[0] == replacement
+        assert isolated_db.get_response_template_override_versions("greeting") == []
+
+        second = "Hello! Welcome to Camellia Artisanal. What can I help you with?"
+        client.patch("/admin/response-library/system/greeting", json={"response": second}, headers=_auth())
+        versions = isolated_db.get_response_template_override_versions("greeting")
+        assert len(versions) == 1 and versions[0]["response"] == replacement
+
+        restored = client.post(f"/admin/response-library/system/greeting/restore/{versions[0]['version_id']}", json={}, headers=_auth())
+        assert restored.status_code == 200
+        assert isolated_db.get_response_template_override("greeting")["response"] == replacement
+
+    def test_response_library_test_is_dry_run(self, isolated_db):
+        client.patch("/admin/response-library/system/greeting", json={"response": "Short approved greeting."}, headers=_auth())
+        before = isolated_db.get_analytics().get("total_conversations", 0)
+        resp = client.post("/admin/response-library/test", json={"message": "hi"}, headers=_auth())
+        assert resp.status_code == 200
+        assert resp.json()["template_id"] == "greeting"
+        assert resp.json()["response"] == "Short approved greeting."
+        assert isolated_db.get_analytics().get("total_conversations", 0) == before
+
+    def test_custom_trigger_conflict_includes_system_template(self, isolated_db):
+        resp = client.post("/admin/custom-qa", json={
+            "topic": "Conversation", "primary_question": "hi", "approved_answer": "Another greeting.",
+        }, headers=_auth())
+        assert resp.status_code == 409
+        existing = resp.json()["detail"]["existing"]
+        assert any(item.get("template_id") == "greeting" for item in existing)
+
+
 # -- 34: matching ------------------------------------------------------------
 
 class TestMatching:

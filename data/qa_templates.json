@@ -18,16 +18,16 @@
         "good evening"
       ],
       "responses": [
-        "Hi! 👋 Welcome to Camellia Artisanal — Bengal-rooted, artisanal food. What can we help you discover today?",
-        "Hello from Camellia Artisanal! Are you in the mood for Sondesh, a Bengali meal, or a little menu browsing?",
-        "Hey there from Camellia Artisanal! Our chhana is fresh, our flavours are thoughtful, and our menu is ready when you are. 😊",
-        "Namaste from Camellia Artisanal! Shall we explore artisanal Sondesh or this week's Bengali bento menu?",
-        "Hi! You’ve reached Camellia Artisanal — where Bengal meets small-batch craft. What are you curious about?",
-        "Hello! A warm Camellia Artisanal welcome to you. Would you like prices, flavours, or this week's menu?",
-        "Hey from Camellia Artisanal! Freshly made Bengali goodness is on the other side of your next question — what shall we look at?",
-        "Hi there from Camellia Artisanal! Sondesh, savoury meals, delivery details — point me toward what you’re craving.",
-        "Hello hello from Camellia Artisanal! 😊 Are we talking mishti today, or should I show you the weekly Bengali menu?",
-        "Hey from Camellia Artisanal! What would make your day sweeter — a flavour guide or the menu?"
+        "Hi there! 👋 Welcome to Camellia Artisanal. How can I help you today?",
+        "Hello! 👋 Welcome to Camellia Artisanal. How can I help you today?",
+        "Hey! 👋 Welcome to Camellia Artisanal. What can I help you with today?",
+        "Good morning! 👋 Welcome to Camellia Artisanal. How can I help you today?",
+        "Good afternoon! 👋 Welcome to Camellia Artisanal. How can I help you today?",
+        "Good evening! 👋 Welcome to Camellia Artisanal. How can I help you today?",
+        "Hi there! 👋 Welcome to Camellia Artisanal. Ask us about Sondesh or Kanchagolla.",
+        "Hello! 👋 Welcome to Camellia Artisanal. Ask us about our weekly menu or prices.",
+        "Hey there! 👋 Welcome to Camellia Artisanal. Ask us about gifting or ordering.",
+        "Hi! 👋 Welcome to Camellia Artisanal. What would you like to know?"
       ],
       "escalate": false,
       "router_hint": "A bare hello with no question attached to it."

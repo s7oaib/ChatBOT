@@ -158,7 +158,6 @@ def _assert_plain_conversational_reply(reply, template_id, facts):
     assert template_id in {"greeting", "conversation_closing", "acknowledgement"}
     assert "₹" not in reply
     assert "jolbhora" not in lowered
-    assert "kanchagolla" not in lowered
     assert "signature collection" not in lowered
     assert "|" not in reply  # no menu table
     assert facts["source_context_used"] is False

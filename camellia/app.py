@@ -32,6 +32,7 @@ from camellia.ice_breakers import (
     MAX_ICE_BREAKERS,
     MAX_ICE_BREAKER_CHARS,
 )
+import camellia.responder as responder_module
 from camellia.responder import compose_topic_response, responder
 from camellia.ai_responder import ai_responder
 from camellia.whatsapp_adapter import whatsapp_adapter
@@ -3048,6 +3049,7 @@ def delete_learned_knowledge_entry(
     return {"status": "deleted", "id": knowledge_id}
 
 SOURCE_LABELS = {
+    "system_template": "System Template",
     "client_admin": "Created by Client",
     "staff_resolution": "Teach & Resolve",
     "staff_dashboard": "Staff Resolution",
@@ -3096,6 +3098,216 @@ def _custom_qa_public(item: Dict[str, Any]) -> Dict[str, Any]:
     return result
 
 
+def _system_template_public(template: Dict[str, Any], override: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Shape protected JSON template logic as a Response Library card.
+
+    The template's triggers and escalation behavior stay read-only.  Only the
+    response copy may be overridden through the managed response store.
+    """
+    template_id = str(template.get("id") or "")
+    responses = template.get("responses") or []
+    answer = (override or {}).get("response") or template.get("response") or (responses[0] if responses else "")
+    trigger_list = [str(t).strip() for t in (template.get("triggers") or []) if str(t).strip()]
+    title = str(template.get("name") or template_id.replace("_", " ").title())
+    category = str(template.get("category") or "System")
+    status = str((override or {}).get("status") or "ACTIVE").upper()
+    return {
+        "library_id": f"system:{template_id}",
+        "kind": "system_template",
+        "template_id": template_id,
+        "title": title,
+        "topic": category,
+        "primary_question": trigger_list[0] if trigger_list else title,
+        "aliases": trigger_list[1:],
+        "triggers": trigger_list,
+        "approved_answer": answer,
+        "source": "system_template",
+        "source_label": "System Template",
+        "status": status,
+        "priority": "PROTECTED",
+        "editable": bool(answer) and not bool(template.get("escalate")),
+        "protected_runtime": True,
+        "created_at": None,
+        "updated_at": (override or {}).get("updated_at"),
+        "updated_by": (override or {}).get("updated_by"),
+        "usage_count": None,
+        "last_used_at": None,
+    }
+
+
+def _response_library_system_items(status: str = "ALL", search: Optional[str] = None) -> List[Dict[str, Any]]:
+    overrides = db.list_response_template_overrides()
+    items = []
+    for template in (responder.qa_data or {}).get("templates", []):
+        item = _system_template_public(template, overrides.get(str(template.get("id"))))
+        if status and status.upper() != "ALL" and item["status"] != status.upper():
+            continue
+        if search:
+            needle = search.strip().lower()
+            haystack = " ".join(str(item.get(key) or "") for key in (
+                "title", "template_id", "topic", "primary_question", "approved_answer", "source_label",
+            )) + " " + " ".join(item.get("aliases") or [])
+            if needle and needle not in haystack.lower():
+                continue
+        items.append(item)
+    return items
+
+
+def _system_trigger_conflicts(primary_question: str, aliases: List[str]) -> List[Dict[str, Any]]:
+    """Find exact trigger collisions without copying system templates into DB."""
+    candidates = {str(value or "").strip().lower() for value in [primary_question, *(aliases or [])] if str(value or "").strip()}
+    conflicts = []
+    for template in (responder.qa_data or {}).get("templates", []):
+        override = db.get_response_template_override(str(template.get("id")))
+        if override and str(override.get("status") or "ACTIVE").upper() != "ACTIVE":
+            continue
+        triggers = {str(value or "").strip().lower() for value in (template.get("triggers") or [])}
+        if candidates & triggers:
+            conflicts.append(_system_template_public(template))
+    return conflicts
+
+
+@app.get("/admin/response-library")
+def list_response_library(
+    status: str = "ACTIVE",
+    source: Optional[str] = None,
+    category: Optional[str] = None,
+    search: Optional[str] = None,
+    limit: int = 500,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """Unified read-only view of protected templates plus managed Q&A rows."""
+    require_admin(x_admin_key, x_admin_pin)
+    limit = max(1, min(limit, 1000))
+    items: List[Dict[str, Any]] = []
+    if not source or source in {"system_template", "system"}:
+        items.extend(_response_library_system_items(status=status, search=search))
+    if not source or source not in {"system_template", "system"}:
+        learned_status = status if status else "ALL"
+        learned = db.list_custom_qa(status=learned_status, source=None if source in {"system_template", "system"} else source, topic=category, search=search, limit=limit)
+        for item in learned:
+            shaped = _custom_qa_public(item)
+            shaped.update({"library_id": f"custom:{item.get('id')}", "kind": "custom_qa", "title": item.get("topic") or item.get("question_pattern"), "category": item.get("topic")})
+            items.append(shaped)
+    if category and (not source or source in {"system_template", "system"}):
+        items = [item for item in items if str(item.get("topic") or item.get("category") or "").lower() == category.lower()]
+    return {"status": "success", "count": len(items[:limit]), "items": items[:limit]}
+
+
+@app.patch("/admin/response-library/system/{template_id}")
+async def edit_response_library_system_template(
+    template_id: str,
+    request: Request,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """Edit customer-facing copy only; protected trigger/runtime fields cannot be changed."""
+    require_admin(x_admin_key, x_admin_pin)
+    template = next((t for t in (responder.qa_data or {}).get("templates", []) if t.get("id") == template_id), None)
+    if not template:
+        raise HTTPException(status_code=404, detail="System template not found")
+    if template.get("escalate") or not (template.get("response") or template.get("responses")):
+        raise HTTPException(status_code=400, detail="This system template has no editable customer-facing response")
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    response = str(body.get("approved_answer") or body.get("response") or "").strip()
+    actor = body.get("updated_by") or "client_admin_dashboard"
+    if not response:
+        raise HTTPException(status_code=400, detail="response is required")
+    _validate_custom_qa_answer(response)
+    status = str(body.get("status") or "ACTIVE").upper()
+    if not db.save_response_template_override(template_id, response, actor, status=status):
+        raise HTTPException(status_code=400, detail="Could not save response override")
+    return {"status": "success", "item": _system_template_public(template, db.get_response_template_override(template_id))}
+
+
+@app.get("/admin/response-library/system/{template_id}/versions")
+def get_response_library_system_versions(
+    template_id: str,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    require_admin(x_admin_key, x_admin_pin)
+    return {"status": "success", "versions": db.get_response_template_override_versions(template_id)}
+
+
+@app.post("/admin/response-library/system/{template_id}/preview")
+def preview_response_library_system_template(
+    template_id: str,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    require_admin(x_admin_key, x_admin_pin)
+    template = next((t for t in (responder.qa_data or {}).get("templates", []) if t.get("id") == template_id), None)
+    if not template:
+        raise HTTPException(status_code=404, detail="System template not found")
+    item = _system_template_public(template, db.get_response_template_override(template_id))
+    return {"preview_text": item["approved_answer"], "template_id": template_id, "note": "Preview only — nothing has been sent."}
+
+
+@app.post("/admin/response-library/system/{template_id}/restore/{version_id:int}")
+async def restore_response_library_system_version(
+    template_id: str,
+    version_id: int,
+    request: Request,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    require_admin(x_admin_key, x_admin_pin)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    actor = body.get("actor") or "client_admin_dashboard"
+    if not db.restore_response_template_override_version(template_id, version_id, actor):
+        raise HTTPException(status_code=404, detail="Version or system template not found")
+    return {"status": "restored", "template_id": template_id, "version_id": version_id}
+
+
+@app.post("/admin/response-library/test")
+async def test_response_library_match(
+    request: Request,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """Dry-run a real deterministic response without session/send/usage side effects."""
+    require_admin(x_admin_key, x_admin_pin)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    message = str(body.get("message") or "").strip()
+    if not message:
+        raise HTTPException(status_code=400, detail="message is required")
+    winner, matched_via, score = db._rank_learned_knowledge(message)
+    if winner:
+        item = _custom_qa_public(winner)
+        return {
+            "matched": True, "template_id": None, "source": item["source_label"],
+            "score": round(score, 3), "matched_via": matched_via,
+            "response": item["approved_answer"], "source_context_used": False,
+        }
+    normalized = " ".join(message.lower().split())
+    candidates = []
+    for template in (responder.qa_data or {}).get("templates", []):
+        triggers = [str(trigger).lower().strip() for trigger in (template.get("triggers") or [])]
+        matched_trigger = next((trigger for trigger in sorted(triggers, key=len, reverse=True) if trigger and trigger in normalized), None)
+        if matched_trigger:
+            item = _system_template_public(template, db.get_response_template_override(str(template.get("id"))))
+            candidates.append((len(matched_trigger), item, matched_trigger))
+    if not candidates:
+        return {"matched": False, "template_id": None, "source": None, "score": 0.0, "response": "", "source_context_used": False}
+    _length, item, matched_trigger = max(candidates, key=lambda candidate: candidate[0])
+    return {
+        "matched": True, "template_id": item["template_id"], "source": item["source_label"],
+        "score": 1.0, "matched_via": matched_trigger,
+        "response": item["approved_answer"], "source_context_used": False,
+    }
+
+
 @app.get("/admin/custom-qa")
 def list_custom_qa(
     status: str = "ACTIVE",
@@ -3110,7 +3322,17 @@ def list_custom_qa(
     """The Custom Q&A tab's list — the same learned_knowledge rows AI Resolution & Answers' Approved Answers filter reads, with aliases attached."""
     require_admin(x_admin_key, x_admin_pin)
     items = db.list_custom_qa(status=status, source=source, priority=priority, topic=topic, search=search, limit=limit)
-    return {"status": "success", "count": len(items), "items": [_custom_qa_public(i) for i in items]}
+    return {
+        "status": "success", "count": len(items), "items": [_custom_qa_public(i) for i in items],
+        # Kept as a separate field for backwards compatibility: existing
+        # Custom Q&A consumers still receive only learned rows in `items`,
+        # while the tab can show the same protected system templates through
+        # the unified Response Library view without duplicating database rows.
+        "system_templates": (
+            _response_library_system_items(status=status, search=search)
+            if not source or source in {"system_template", "system"} else []
+        ),
+    }
 
 
 @app.get("/admin/custom-qa/{knowledge_id:int}")
@@ -3174,6 +3396,12 @@ async def create_custom_qa(
             "message": "An identical question or alias already exists. Edit the existing Q&A instead of creating a duplicate.",
             "existing": [_custom_qa_public(i) for i in dupes["exact"]],
         })
+    system_conflicts = _system_trigger_conflicts(primary_question, aliases)
+    if system_conflicts:
+        raise HTTPException(status_code=409, detail={
+            "message": "Another active response already matches this trigger. Edit the existing response instead of creating an ambiguous match.",
+            "existing": system_conflicts,
+        })
 
     warnings = detect_business_commitment_warnings(answer)
     if (dupes["similar"] or warnings) and not force_save:
@@ -3231,6 +3459,12 @@ async def edit_custom_qa(
         raise HTTPException(status_code=409, detail={
             "message": "An identical question or alias already exists on a different Q&A.",
             "existing": [_custom_qa_public(i) for i in dupes["exact"]],
+        })
+    system_conflicts = _system_trigger_conflicts(primary_question, aliases)
+    if system_conflicts:
+        raise HTTPException(status_code=409, detail={
+            "message": "Another active response already matches this trigger. Edit the existing response instead of creating an ambiguous match.",
+            "existing": system_conflicts,
         })
 
     warnings = detect_business_commitment_warnings(answer)
@@ -5308,8 +5542,8 @@ THIS WEEK'S BENGAL SPECIALS
             <div class="panel-header">
                 <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
                     <div>
-                        <h2>🗂️ Custom Q&amp;A</h2>
-                        <p>Create and manage approved answers the chatbot can reuse when customers ask similar questions.</p>
+                        <h2>🗂️ Custom Q&amp;A / Response Library</h2>
+                        <p>Create and manage approved answers the chatbot can reuse when customers ask similar questions. Search, preview, test and safely edit customer-facing copy; protected runtime rules remain read-only.</p>
                     </div>
                     <div style="display:flex; gap:8px; flex-wrap:wrap;">
                         <button class="btn-primary" onclick="openCustomQaModal()">+ Add Q&amp;A</button>
@@ -5320,7 +5554,7 @@ THIS WEEK'S BENGAL SPECIALS
             </div>
 
             <div style="margin-bottom:12px;">
-                <input type="text" id="customQaSearch" class="field-control" placeholder="🔎 Search questions, answers or topics…" style="max-width:420px;" oninput="renderCustomQaList()">
+                <input type="text" id="customQaSearch" class="field-control" placeholder="🔎 Search questions, triggers, answers, category or template ID…" style="max-width:560px;" oninput="renderCustomQaList(); renderSystemResponseLibrary()">
             </div>
             <div id="customQaAiSignals" style="padding:10px;border:1px solid var(--border);border-radius:10px;margin-bottom:12px;font-size:.82rem;">AI Review Signal: loading…</div>
 
@@ -5331,22 +5565,33 @@ THIS WEEK'S BENGAL SPECIALS
                 <button class="tab-btn" type="button" id="cqaStatusBtn-ALL" onclick="setCustomQaStatusFilter('ALL')">All</button>
             </div>
             <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:14px;">
-                <select class="field-control" id="cqaSourceFilter" style="max-width:200px;" onchange="renderCustomQaList()">
+                <select class="field-control" id="cqaSourceFilter" style="max-width:200px;" onchange="renderCustomQaList(); renderSystemResponseLibrary()">
                     <option value="">All Sources</option>
                     <option value="client_admin">Created by Client</option>
                     <option value="staff_resolution">Teach &amp; Resolve</option>
                     <option value="staff_dashboard">Staff Resolution</option>
                     <option value="csv_import">Imported</option>
+                    <option value="system_template">System Template</option>
+                    <option value="approved_candidate">AI Approved</option>
                 </select>
-                <select class="field-control" id="cqaTopicFilter" style="max-width:200px;" onchange="renderCustomQaList()">
+                <select class="field-control" id="cqaTopicFilter" style="max-width:200px;" onchange="renderCustomQaList(); renderSystemResponseLibrary()">
                     <option value="">All Topics</option>
                 </select>
                 <select class="field-control" id="cqaPriorityFilter" style="max-width:160px;" onchange="renderCustomQaList()">
                     <option value="">All Priorities</option>
                     <option value="NORMAL">Normal</option>
                     <option value="HIGH">High</option>
+                    <option value="PROTECTED">Protected System</option>
                 </select>
                 <button class="btn-secondary" onclick="loadCustomQa()">🔄 Refresh</button>
+            </div>
+
+            <div id="systemResponseLibrary" style="margin:0 0 18px; padding:14px; border:1px solid var(--border); border-radius:12px; background:#FCFBFA;">
+                <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; flex-wrap:wrap;">
+                    <h3 style="margin:0; color:var(--primary);">System Templates</h3>
+                    <span style="font-size:.78rem; color:var(--text-muted);">Triggers and protected runtime logic are read-only; response copy can be safely overridden.</span>
+                </div>
+                <div id="systemResponseLibraryCards" style="display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:10px; margin-top:10px;"></div>
             </div>
 
             <div style="overflow-x: auto;">
@@ -7958,6 +8203,7 @@ Non-Veg:
         // Resolve and candidate approval already use -- there is no second
         // knowledge store or second editor.
         let customQaItems = [];
+        let systemResponseItems = [];
         let customQaStatusFilter = 'ACTIVE';
         let cqaAliasesDraft = [];
 
@@ -7977,18 +8223,26 @@ Non-Veg:
             const tbody = document.getElementById('customQaTableBody');
             tbody.innerHTML = '<tr><td colspan="9" style="text-align: center; color: #888;">Loading...</td></tr>';
             try {
-                const resp = await fetch(`/admin/custom-qa?status=${encodeURIComponent(customQaStatusFilter)}&limit=500`, { headers: getAuthHeaders() });
-                if (!resp.ok) throw new Error('failed');
+                const sourceFilter = document.getElementById('cqaSourceFilter').value;
+                const customSource = sourceFilter === 'system_template' ? '' : sourceFilter;
+                const [resp, systemResp] = await Promise.all([
+                    fetch(`/admin/custom-qa?status=${encodeURIComponent(customQaStatusFilter)}${customSource ? `&source=${encodeURIComponent(customSource)}` : ''}&limit=500`, { headers: getAuthHeaders() }),
+                    fetch(`/admin/response-library?status=${encodeURIComponent(customQaStatusFilter)}${sourceFilter ? `&source=${encodeURIComponent(sourceFilter)}` : ''}&limit=500`, { headers: getAuthHeaders() }),
+                ]);
+                if (!resp.ok || !systemResp.ok) throw new Error('failed');
                 const data = await resp.json();
+                const systemData = await systemResp.json();
                 customQaItems = data.items || [];
+                systemResponseItems = (systemData.items || []).filter(i => i.kind === 'system_template');
 
                 const topicSelect = document.getElementById('cqaTopicFilter');
                 const currentTopic = topicSelect.value;
-                const topics = [...new Set(customQaItems.map(i => i.topic).filter(Boolean))].sort();
+                const topics = [...new Set(customQaItems.concat(systemResponseItems).map(i => i.topic || i.category).filter(Boolean))].sort();
                 topicSelect.innerHTML = '<option value="">All Topics</option>' + topics.map(t => `<option value="${escapeHtml(t)}">${escapeHtml(t)}</option>`).join('');
                 topicSelect.value = topics.includes(currentTopic) ? currentTopic : '';
 
                 renderCustomQaList();
+                renderSystemResponseLibrary();
             } catch (err) {
                 tbody.innerHTML = '<tr><td colspan="9" style="text-align: center; color: red;">Failed to load Custom Q&amp;A.</td></tr>';
             }
@@ -8011,7 +8265,8 @@ Non-Veg:
             const priority = document.getElementById('cqaPriorityFilter').value;
 
             let items = customQaItems;
-            if (source) items = items.filter(i => i.source === source);
+            if (source === 'system_template') items = [];
+            else if (source) items = items.filter(i => i.source === source);
             if (topic) items = items.filter(i => i.topic === topic);
             if (priority) items = items.filter(i => i.priority === priority);
             if (query) {
@@ -8025,6 +8280,99 @@ Non-Veg:
             }
 
             tbody.innerHTML = items.map(renderCustomQaRow).join('');
+        }
+
+        function renderSystemResponseLibrary() {
+            const box = document.getElementById('systemResponseLibraryCards');
+            if (!box) return;
+            const query = (document.getElementById('customQaSearch').value || '').trim().toLowerCase();
+            const source = document.getElementById('cqaSourceFilter').value;
+            const topic = document.getElementById('cqaTopicFilter').value;
+            const priority = document.getElementById('cqaPriorityFilter').value;
+            if (source && source !== 'system_template') { box.innerHTML = ''; return; }
+            const items = systemResponseItems.filter(item => {
+                if (priority && priority !== 'PROTECTED') return false;
+                if (topic && String(item.topic || item.category || '') !== topic) return false;
+                if (!query) return true;
+                return [item.title, item.template_id, item.topic, item.primary_question, item.approved_answer, item.source_label, ...(item.aliases || [])]
+                    .filter(Boolean).some(value => String(value).toLowerCase().includes(query));
+            });
+            if (!items.length) { box.innerHTML = '<div style="font-size:.82rem;color:var(--text-muted);">No matching system templates.</div>'; return; }
+            box.innerHTML = items.map(renderSystemResponseCard).join('');
+        }
+
+        function renderSystemResponseCard(item) {
+            const status = item.status || 'ACTIVE';
+            const aliases = (item.aliases || []).slice(0, 5).map(escapeHtml).join(', ') || '—';
+            const editButton = item.editable ? `<button class="btn-secondary" style="padding:4px 8px;font-size:.72rem;" onclick="openSystemResponseEditor('${escapeHtml(item.template_id)}')">Edit</button>` : '';
+            return `<div style="border:1px solid var(--border);border-radius:10px;padding:12px;background:#fff;">
+                <div style="display:flex;justify-content:space-between;gap:8px;align-items:center;"><b>${escapeHtml(item.title || item.template_id)}</b><span class="badge badge-veg">${escapeHtml(status)}</span></div>
+                <div style="font-size:.78rem;color:var(--text-muted);margin:5px 0;">${escapeHtml(item.primary_question || '')} · ${escapeHtml(item.template_id || '')}</div>
+                <div style="font-size:.76rem;color:var(--text-muted);">Aliases: ${aliases}</div>
+                <div style="white-space:pre-wrap;font-size:.82rem;margin:8px 0;">${escapeHtml(item.approved_answer || '')}</div>
+                <div style="display:flex;gap:6px;flex-wrap:wrap;">
+                    ${editButton}
+                    <button class="btn-secondary" style="padding:4px 8px;font-size:.72rem;" onclick="previewSystemResponse('${escapeHtml(item.template_id)}')">Preview</button>
+                    <button class="btn-secondary" style="padding:4px 8px;font-size:.72rem;" onclick="testSystemResponse('${escapeHtml(item.template_id)}')">Test</button>
+                    <button class="btn-secondary" style="padding:4px 8px;font-size:.72rem;" onclick="historySystemResponse('${escapeHtml(item.template_id)}')">History</button>
+                </div>
+            </div>`;
+        }
+
+        async function openSystemResponseEditor(templateId) {
+            const item = systemResponseItems.find(i => i.template_id === templateId);
+            if (!item || !item.editable) return;
+            const response = window.prompt('Editable Response Text (protected triggers and runtime logic cannot be changed):', item.approved_answer || '');
+            if (response === null || !response.trim() || response.trim() === (item.approved_answer || '').trim()) return;
+            try {
+                const resp = await fetch(`/admin/response-library/system/${encodeURIComponent(templateId)}`, {
+                    method: 'PATCH', headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ response: response.trim(), updated_by: 'client_admin_dashboard' }),
+                });
+                const data = await resp.json().catch(() => ({}));
+                if (!resp.ok) { alert(data.detail || 'Could not save response.'); return; }
+                await loadCustomQa();
+                alert('Response saved and active for the next matching customer message.');
+            } catch (e) { alert('Could not save response.'); }
+        }
+
+        async function previewSystemResponse(templateId) {
+            try {
+                const resp = await fetch(`/admin/response-library/system/${encodeURIComponent(templateId)}/preview`, { method: 'POST', headers: getAuthHeaders() });
+                const data = await resp.json();
+                alert(`${data.preview_text || ''}\n\n(${data.note || 'Preview only — nothing has been sent.'})`);
+            } catch (e) { alert('Preview failed.'); }
+        }
+
+        async function testSystemResponse(templateId) {
+            const message = window.prompt('Message to test (dry-run only):', 'hi');
+            if (!message) return;
+            try {
+                const resp = await fetch('/admin/response-library/test', {
+                    method: 'POST', headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ message, focus_template_id: templateId }),
+                });
+                const data = await resp.json();
+                alert(`Detected template: ${data.template_id || 'none'}\nSource: ${data.source || 'none'}\nScore: ${Math.round((data.score || 0) * 100)}%\n\n${data.response || 'No approved response matched.'}`);
+            } catch (e) { alert('Test failed.'); }
+        }
+
+        async function historySystemResponse(templateId) {
+            try {
+                const resp = await fetch(`/admin/response-library/system/${encodeURIComponent(templateId)}/versions`, { headers: getAuthHeaders() });
+                const data = await resp.json();
+                const versions = data.versions || [];
+                if (!versions.length) { alert('No edits yet — this system response is using its approved default copy.'); return; }
+                const choice = window.prompt('Version IDs (newest first):\n' + versions.map(v => `${v.version_id}: ${v.changed_at} — ${v.response}`).join('\n\n') + '\n\nEnter a version ID to restore, or Cancel:');
+                if (!choice) return;
+                const restore = await fetch(`/admin/response-library/system/${encodeURIComponent(templateId)}/restore/${encodeURIComponent(choice)}`, {
+                    method: 'POST', headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ actor: 'client_admin_dashboard' }),
+                });
+                if (!restore.ok) { alert('Could not restore that version.'); return; }
+                await loadCustomQa();
+                alert('Previous response restored.');
+            } catch (e) { alert('History failed.'); }
         }
 
         function timeAgo(iso) {

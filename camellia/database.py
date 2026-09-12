@@ -266,6 +266,34 @@ class Database:
             );
             """)
 
+            # Customer-editable copy for system templates.  This is an
+            # override layer, not a duplicate template/knowledge store: the
+            # protected qa_templates.json record remains authoritative for
+            # triggers and runtime logic, while this table stores only the
+            # approved response text an operator has intentionally changed.
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS response_template_overrides (
+                template_id TEXT PRIMARY KEY,
+                response TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'ACTIVE',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_by TEXT
+            );
+            """)
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS response_template_override_versions (
+                version_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                template_id TEXT NOT NULL,
+                response TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'ACTIVE',
+                changed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                changed_by TEXT,
+                change_reason TEXT
+            );
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_response_override_versions_template ON response_template_override_versions(template_id, version_id DESC)")
+
             # Candidate templates table for human approval workflow
             cursor.execute("""
             CREATE TABLE IF NOT EXISTS candidate_templates (
@@ -2263,6 +2291,94 @@ class Database:
             affected = cursor.rowcount
             conn.commit()
             return affected > 0
+
+    # -- Response Library: safe overrides for protected system templates --
+
+    def get_response_template_override(self, template_id: str) -> Optional[Dict[str, Any]]:
+        """Return the active editable copy for one protected template, if any."""
+        if not template_id:
+            return None
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM response_template_overrides WHERE template_id = ?",
+                (template_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def list_response_template_overrides(self) -> Dict[str, Dict[str, Any]]:
+        with self.get_connection() as conn:
+            rows = conn.execute("SELECT * FROM response_template_overrides").fetchall()
+            return {str(row["template_id"]): dict(row) for row in rows}
+
+    def save_response_template_override(
+        self, template_id: str, response: str, updated_by: Optional[str] = None,
+        status: str = "ACTIVE", change_reason: str = "edited",
+    ) -> bool:
+        """Upsert only customer-facing copy while preserving template logic."""
+        template_id = (template_id or "").strip()
+        response = (response or "").strip()
+        status = (status or "ACTIVE").upper()
+        if not template_id or not response or status not in {"ACTIVE", "DISABLED", "ARCHIVED"}:
+            return False
+        with self.get_connection() as conn:
+            current = conn.execute(
+                "SELECT * FROM response_template_overrides WHERE template_id = ?",
+                (template_id,),
+            ).fetchone()
+            now = datetime.utcnow().isoformat()
+            if current:
+                current = dict(current)
+                conn.execute(
+                    "INSERT INTO response_template_override_versions "
+                    "(template_id, response, status, changed_at, changed_by, change_reason) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (template_id, current["response"], current.get("status") or "ACTIVE", now, updated_by, change_reason),
+                )
+                conn.execute(
+                    "UPDATE response_template_overrides SET response = ?, status = ?, updated_at = ?, updated_by = ? WHERE template_id = ?",
+                    (response, status, now, updated_by, template_id),
+                )
+            else:
+                conn.execute(
+                    "INSERT INTO response_template_overrides (template_id, response, status, created_at, updated_at, updated_by) VALUES (?, ?, ?, ?, ?, ?)",
+                    (template_id, response, status, now, now, updated_by),
+                )
+            conn.commit()
+            return True
+
+    def get_response_template_override_versions(self, template_id: str) -> List[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM response_template_override_versions WHERE template_id = ? ORDER BY version_id DESC",
+                (template_id,),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def restore_response_template_override_version(self, template_id: str, version_id: int, actor: Optional[str] = None) -> bool:
+        with self.get_connection() as conn:
+            version = conn.execute(
+                "SELECT * FROM response_template_override_versions WHERE template_id = ? AND version_id = ?",
+                (template_id, version_id),
+            ).fetchone()
+            current = conn.execute(
+                "SELECT * FROM response_template_overrides WHERE template_id = ?",
+                (template_id,),
+            ).fetchone()
+            if not version or not current:
+                return False
+            now = datetime.utcnow().isoformat()
+            current = dict(current)
+            conn.execute(
+                "INSERT INTO response_template_override_versions "
+                "(template_id, response, status, changed_at, changed_by, change_reason) VALUES (?, ?, ?, ?, ?, ?)",
+                (template_id, current["response"], current.get("status") or "ACTIVE", now, actor, f"restored_from_version_{version_id}"),
+            )
+            conn.execute(
+                "UPDATE response_template_overrides SET response = ?, status = ?, updated_at = ?, updated_by = ? WHERE template_id = ?",
+                (version["response"], version["status"], now, actor, template_id),
+            )
+            conn.commit()
+            return True
 
     # -- Custom Q&A: full editor on top of the same learned_knowledge store --
 
