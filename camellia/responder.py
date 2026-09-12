@@ -310,6 +310,17 @@ BARE_PRICE_QUESTION_RE = re.compile(
     re.IGNORECASE,
 )
 
+# These turns are conversational openers, not references to a previously
+# shared Instagram object.  Keep this deliberately narrow: a greeting may
+# bypass source-context resolution, but a greeting carrying a real request
+# (for example, "hi, what is the price of Jolbhora?") must continue through
+# the normal intent/product precedence below.
+GREETING_ONLY_RE = re.compile(
+    r'^(?:hi+|hello+|hey+|good\s+(?:morning|afternoon|evening)|namaste|'
+    r'nomoshkar|nomoskar|greetings)[\W_]*$',
+    re.IGNORECASE,
+)
+
 # A shared Instagram attachment gives the next message a subject, but only
 # when the customer's wording is actually referential.  Keep this as a small
 # deterministic intent layer rather than a growing list of whole sentences:
@@ -1561,6 +1572,11 @@ class DeterministicResponder:
             "structured_nlu_provider_failed": False,
             "last_route_source": None,
         })
+        # Each turn gets a fresh source-use audit value.  The source route
+        # itself remains available for a later genuine follow-up; only this
+        # turn's decision is reset here.
+        facts["source_context_used"] = False
+        facts["source_referential_intent"] = None
         ad_product = product_for_ad(referral_ad_id, referral_ad_title) or facts.get("ad_product")
         if ad_product:
             facts["ad_product"] = ad_product
@@ -1587,6 +1603,21 @@ class DeterministicResponder:
         # A referral is a preference only for genuinely vague openings. It
         # runs before conversational shorthand (such as a bare "price"), so
         # a meal-ad click never receives the sweet-product price prompt.
+        # A bare greeting/acknowledgement/sign-off must never consume an
+        # active reel/post/ad route.  We intentionally bypass source
+        # resolution rather than clearing the route, so "hi" followed by
+        # "tell me more" can still use the shared content.
+        greeting_text = re.sub(r'^(?:h+i+|h+a+i+)\b', 'hi', lowered_text)
+        greeting_text = re.sub(r'^(?:h+e+y+)\b', 'hey', greeting_text)
+        greeting_text = re.sub(r'^(?:h+e+l+o+|h+e+l+l+o+|h+l+o+)\b', 'hello', greeting_text)
+        greeting_text = re.sub(r'^(?:namaskar|nomoshkar|nomoskar)\b', 'namaste', greeting_text)
+        conversational_opener = bool(
+            GREETING_ONLY_RE.fullmatch(greeting_text)
+            or CLOSING_ONLY_RE.fullmatch(greeting_text)
+            or ACK_ONLY_RE.fullmatch(greeting_text)
+        )
+        facts["greeting_intent"] = bool(GREETING_ONLY_RE.fullmatch(greeting_text))
+
         legacy_vague_opening = re.fullmatch(
             r"(?:hi+|hello+|hey+|namaste|menu|show menu|send menu|tell me more|interested|"
             r"price|prices|how much|cost|rate|available|is this available|what about this|"
@@ -1615,7 +1646,9 @@ class DeterministicResponder:
                 else (channel == "instagram" and ad_product)
             )
         ) and not facts.get("source_context_superseded")
-        detected_source_intent = source_referential_intent(user_message)
+        detected_source_intent = (
+            None if conversational_opener else source_referential_intent(user_message)
+        )
         source_intent = detected_source_intent if source_context_available else None
         facts["source_referential_intent"] = source_intent
         has_explicit_source_reference = bool(re.search(
@@ -1641,7 +1674,7 @@ class DeterministicResponder:
             return clarification, True, "clarify_request", None
         # Keep the historical shorthand behavior, while allowing ordinary
         # human phrasing such as "this one please" or "price for this".
-        vague_opening = bool(source_intent or legacy_vague_opening)
+        vague_opening = bool(source_intent or (legacy_vague_opening and not conversational_opener))
         source_topic = (
             db.get_instagram_topic(source_route["topic_id"])
             if source_route and source_route.get("topic_id") else None

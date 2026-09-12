@@ -112,7 +112,9 @@ def test_ordered_priorities_handle_vague_then_what_else_without_overriding_expli
     facts = session_memory.get_facts(user_id, "instagram")
     facts["source_route"] = {"priority_products": ["jolbhora", "bento"], "routing_topic": "reel", "active": True}
     common = {"user_id": user_id, "channel": "instagram", "referral_source": "ADS", "referral_ad_id": "route-ad"}
-    first = responder.match_and_respond("hi", **common)
+    # A bare greeting is conversational even when a source route is active;
+    # use an actual referential follow-up to exercise ordered priorities.
+    first = responder.match_and_respond("Tell me more", **common)
     second = responder.match_and_respond("what else", **common)
     explicit = responder.match_and_respond("what is the price of kanchagolla?", **common)
     assert first[2].startswith("source_jolbhora_")

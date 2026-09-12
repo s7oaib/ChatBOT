@@ -220,7 +220,7 @@ def test_the_handoff_link_carries_no_conversation_or_personal_data():
     assert user_id not in decoded
 
 
-def test_savoury_ad_context_routes_a_vague_opening_but_explicit_sweet_wins():
+def test_savoury_ad_context_does_not_hijack_a_greeting_and_explicit_sweet_wins():
     user_id = "client_savoury_ad"
     session_memory.clear_session(user_id, "instagram")
     with patch.object(app, "send_instagram_reply") as send_reply:
@@ -228,7 +228,9 @@ def test_savoury_ad_context_routes_a_vague_opening_but_explicit_sweet_wins():
             user_id, "Hi", "ad-savoury",
             app.EntryPoint(ad_id="ad-savoury", ad_title="Fresh Bengali Savoury Meals"),
         )
-        assert "Bengali food" in send_reply.call_args.args[1]
+        assert send_reply.call_args.args[1]
+        assert "Bengali food" not in send_reply.call_args.args[1]
+        assert "₹" not in send_reply.call_args.args[1]
 
         app._process_instagram_event(user_id, "Sondesh price", "ad-savoury")
         assert "Sondesh" in send_reply.call_args.args[1]

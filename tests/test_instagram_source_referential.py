@@ -151,3 +151,66 @@ def test_source_audit_trace_preserves_routing_evidence_and_intent(deterministic_
     assert trace["source_routing_id"] == 41
     assert trace["source_match_method"] == "shared_media_url"
     assert facts["source_referential_intent"] == "details"
+
+
+def _assert_plain_conversational_reply(reply, template_id, facts):
+    lowered = reply.lower()
+    assert template_id in {"greeting", "conversation_closing", "acknowledgement"}
+    assert "₹" not in reply
+    assert "jolbhora" not in lowered
+    assert "kanchagolla" not in lowered
+    assert "signature collection" not in lowered
+    assert "|" not in reply  # no menu table
+    assert facts["source_context_used"] is False
+    assert facts["source_referential_intent"] is None
+
+
+def test_fresh_hi_uses_normal_greeting_not_source_context(deterministic_responder):
+    uid = "greeting_fresh"
+    session_memory.clear_session(uid, "instagram")
+    facts = session_memory.get_facts(uid, "instagram")
+    reply, matched, template_id, _images = _reply(uid, "hi")
+    assert matched is True
+    _assert_plain_conversational_reply(reply, template_id, facts)
+
+
+def test_reel_then_hi_bypasses_source_but_preserves_it_for_followup(deterministic_responder):
+    uid = "greeting_after_reel"
+    facts = _set_source(uid)
+    reply, matched, template_id, _images = _reply(uid, "hi")
+    assert matched is True
+    _assert_plain_conversational_reply(reply, template_id, facts)
+    assert facts["source_route"]["routing_id"] == 41
+
+    followup, followup_matched, followup_template, _images = _reply(uid, "Tell me more")
+    assert followup_matched is True
+    assert followup_template.startswith("source_")
+    assert followup
+    assert facts["source_context_used"] is True
+
+
+def test_greeting_trace_records_source_available_but_not_used(deterministic_responder, monkeypatch):
+    uid = "greeting_trace"
+    facts = _set_source(uid)
+    logged = []
+    sent = []
+    monkeypatch.setattr(app_module.db, "log_conversation", lambda *args, **kwargs: logged.append(kwargs) or 902)
+    monkeypatch.setattr(app_module, "send_instagram_reply", lambda *args, **kwargs: sent.append((args, kwargs)))
+
+    app_module._process_instagram_event(uid, "hi", None)
+
+    assert sent
+    trace = logged[0]
+    assert trace["source_routing_id"] == 41
+    assert trace["source_context_used"] is False
+    assert facts["source_referential_intent"] is None
+    assert facts["greeting_intent"] is True
+
+
+@pytest.mark.parametrize("text", ["hello", "hey", "good morning", "good evening", "thanks", "okay"])
+def test_conversational_turns_never_dump_active_source_menu(deterministic_responder, text):
+    uid = "conversation_only_" + text.replace(" ", "_")
+    facts = _set_source(uid)
+    reply, matched, template_id, _images = _reply(uid, text)
+    assert matched is True
+    _assert_plain_conversational_reply(reply, template_id, facts)
