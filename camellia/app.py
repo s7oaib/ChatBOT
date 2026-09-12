@@ -3219,7 +3219,8 @@ async def edit_response_library_system_template(
         raise HTTPException(status_code=400, detail="response is required")
     _validate_custom_qa_answer(response)
     status = str(body.get("status") or "ACTIVE").upper()
-    if not db.save_response_template_override(template_id, response, actor, status=status):
+    default_response = template.get("response") or ((template.get("responses") or [""])[0])
+    if not db.save_response_template_override(template_id, response, actor, status=status, previous_response=default_response):
         raise HTTPException(status_code=400, detail="Could not save response override")
     return {"status": "success", "item": _system_template_public(template, db.get_response_template_override(template_id))}
 

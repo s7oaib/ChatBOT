@@ -118,12 +118,13 @@ class TestResponseLibrary:
         reply = responder.match_and_respond("hi", user_id="response_library_greeting", channel="whatsapp")
         assert reply[2] == "greeting"
         assert reply[0] == replacement
-        assert isolated_db.get_response_template_override_versions("greeting") == []
+        versions = isolated_db.get_response_template_override_versions("greeting")
+        assert len(versions) == 1
 
         second = "Hello! Welcome to Camellia Artisanal. What can I help you with?"
         client.patch("/admin/response-library/system/greeting", json={"response": second}, headers=_auth())
         versions = isolated_db.get_response_template_override_versions("greeting")
-        assert len(versions) == 1 and versions[0]["response"] == replacement
+        assert len(versions) == 2 and versions[0]["response"] == replacement
 
         restored = client.post(f"/admin/response-library/system/greeting/restore/{versions[0]['version_id']}", json={}, headers=_auth())
         assert restored.status_code == 200

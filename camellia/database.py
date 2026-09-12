@@ -2312,7 +2312,7 @@ class Database:
 
     def save_response_template_override(
         self, template_id: str, response: str, updated_by: Optional[str] = None,
-        status: str = "ACTIVE", change_reason: str = "edited",
+        status: str = "ACTIVE", change_reason: str = "edited", previous_response: Optional[str] = None,
     ) -> bool:
         """Upsert only customer-facing copy while preserving template logic."""
         template_id = (template_id or "").strip()
@@ -2339,6 +2339,12 @@ class Database:
                     (response, status, now, updated_by, template_id),
                 )
             else:
+                if previous_response:
+                    conn.execute(
+                        "INSERT INTO response_template_override_versions "
+                        "(template_id, response, status, changed_at, changed_by, change_reason) VALUES (?, ?, ?, ?, ?, ?)",
+                        (template_id, previous_response, "ACTIVE", now, updated_by, "initial_override_default"),
+                    )
                 conn.execute(
                     "INSERT INTO response_template_overrides (template_id, response, status, created_at, updated_at, updated_by) VALUES (?, ?, ?, ?, ?, ?)",
                     (template_id, response, status, now, now, updated_by),
