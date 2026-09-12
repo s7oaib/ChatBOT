@@ -5,7 +5,7 @@ import pytest
 import camellia.app as app_module
 import camellia.responder as responder_module
 from camellia.config import config
-from camellia.responder import responder, source_referential_intent
+from camellia.responder import responder, source_referential_intent, split_conversational_opener
 from camellia.session_memory import session_memory
 
 
@@ -213,3 +213,78 @@ def test_conversational_turns_never_dump_active_source_menu(deterministic_respon
     reply, matched, template_id, _images = _reply(uid, text)
     assert matched is True
     _assert_plain_conversational_reply(reply, template_id, facts)
+
+
+@pytest.mark.parametrize("text, expected_opener, expected_remainder", [
+    ("hi tell me more", "hi", "tell me more"),
+    ("hello what is Jolbhora", "hello", "what is jolbhora"),
+    ("hey how much is Sondesh", "hey", "how much is sondesh"),
+    ("hi there, tell me more", "hi", "tell me more"),
+])
+def test_composite_greeting_is_split_before_business_resolution(
+    deterministic_responder, text, expected_opener, expected_remainder,
+):
+    opener, remainder = split_conversational_opener(text)
+    assert opener == expected_opener
+    assert remainder.lower() == expected_remainder
+
+
+def test_greeting_plus_referential_without_context_clarifies(deterministic_responder):
+    uid = "composite_no_context"
+    session_memory.clear_session(uid, "instagram")
+    reply, matched, template_id, _images = _reply(uid, "hi tell me more")
+    facts = session_memory.get_facts(uid, "instagram")
+    assert matched is True
+    assert template_id == "clarify_request"
+    assert "which item" in reply.lower()
+    assert "bengali home table" not in reply.lower()
+    assert facts["conversational_opener"] == "hi"
+    assert facts["semantic_remainder"] == "tell me more"
+    assert facts["source_context_used"] is False
+
+
+def test_greeting_plus_referential_uses_fresh_reel_context(deterministic_responder):
+    uid = "composite_reel_context"
+    facts = _set_source(uid)
+    reply, matched, template_id, _images = _reply(uid, "hi tell me more")
+    assert matched is True
+    assert template_id.startswith("source_")
+    assert reply
+    assert facts["source_context_used"] is True
+    assert facts["source_referential_intent"] == "details"
+
+
+def test_composite_explicit_product_and_topic_precedence(deterministic_responder):
+    uid = "composite_explicit_product"
+    facts = _set_source(uid)
+    reply, matched, template_id, _images = _reply(
+        uid, "hi tell me more about Kanchagolla",
+    )
+    assert matched is True
+    assert "kanchagolla" in reply.lower()
+    assert not template_id.startswith("source_")
+    assert facts["source_context_used"] is False
+
+    uid = "composite_home_table"
+    session_memory.clear_session(uid, "instagram")
+    reply, matched, template_id, _images = _reply(
+        uid, "What is the Kolkata Home Table event?",
+    )
+    assert matched is True
+    assert template_id == "kolkata_expansion_info"
+    assert "kolkata" in reply.lower()
+
+
+def test_composite_greeting_keeps_menu_and_handoff_intents(deterministic_responder):
+    uid = "composite_menu"
+    session_memory.clear_session(uid, "instagram")
+    reply, matched, template_id, _images = _reply(uid, "hey show me this week's menu")
+    assert matched is True
+    assert template_id != "clarify_request"
+    assert "weekly menu" in reply.lower() or "menu" in reply.lower()
+
+    uid = "composite_handoff"
+    session_memory.clear_session(uid, "instagram")
+    reply, matched, template_id, _images = _reply(uid, "hi I want to talk to a human")
+    assert template_id == "explicit_escalation"
+    assert "whatsapp" in reply.lower()

@@ -1,8 +1,8 @@
 # Camellia Artisanal Chatbot v1.0 — Final Acceptance
 
 Date: 2026-09-13  
-Accepted production commit: `6d22cbc6dac3efd17a28f49b08e85b8df51c718c`  
-Current deployed HEAD (docs-only checklist update): `15458c202d956a7fdf9d35e0252705b1eb24ebde`  
+Accepted production commit: `pending deployment of composite-intent fix`
+Current deployed HEAD: `15458c202d956a7fdf9d35e0252705b1eb24ebde`
 Verified production baseline: `c1aa23edeb9fb31e7d3e14d3a63821563e7eaa60`  
 Business-data implementation: `d0f13058cbbf1bbb1f35db09ad82d9baf69a52ee`
 
@@ -18,7 +18,7 @@ confirmation request.
 
 ## Automated acceptance
 
-- Full suite: **1,390 passed**, 0 failed, 1 deprecation warning.
+- Full suite: **1,398 passed**, 0 failed, 1 deprecation warning.
 - Deterministic 50-scenario pack: **50 passed, 0 failed**.
 - Reel/Post/Ad, referential-intent, order/CAM and channel-policy tests:
   **162 passed**.
@@ -32,6 +32,13 @@ confirmation request.
 The previous assisted-resolution failure was fixed in the test fixture: the
 mock now accepts the sender's existing audit/correlation keyword arguments.
 Production code was not weakened.
+
+The final pre-release production bug fix adds deterministic conversational
+opener parsing. A leading greeting is separated from its semantic remainder;
+explicit product/order/human intent wins, then referential source context is
+used only for a meaningful remainder and only when valid context exists. This
+prevents `hi tell me more` from selecting stale legacy content while preserving
+`hi` greeting bypass and later source-context follow-ups.
 
 ## Canonical data and safety
 

@@ -340,6 +340,42 @@ GREETING_ONLY_RE = re.compile(
     re.IGNORECASE,
 )
 
+# A greeting may be a prefix to a real request ("hi tell me more"), not the
+# whole intent.  Keep the opener grammar deterministic and deliberately
+# conservative so only a leading conversational opener is removed.  The
+# remainder is then resolved by the normal product/order/source precedence.
+CONVERSATIONAL_OPENER_RE = re.compile(
+    r"^(?P<opener>hi+|hello+|hey+|good\s+(?:morning|afternoon|evening)|"
+    r"namaste|nomoshkar|nomoskar|greetings)(?:\s+there)?"
+    r"(?:[\s,!?;:.-]+(?P<remainder>.*))?$",
+    re.IGNORECASE,
+)
+
+
+def split_conversational_opener(text: str) -> Tuple[Optional[str], str]:
+    """Return ``(canonical opener, semantic remainder)`` for a leading opener.
+
+    The opener is not treated as business intent.  For opener-only messages
+    the remainder is empty, preserving the existing greeting behavior.  The
+    function intentionally does not fuzzy-match arbitrary words so a product
+    or topic name at the start of a message cannot be stripped accidentally.
+    """
+    normalized = unicodedata.normalize("NFKC", str(text or "")).strip()
+    if not normalized:
+        return None, ""
+    match = CONVERSATIONAL_OPENER_RE.fullmatch(normalized)
+    if not match:
+        return None, normalized
+    opener = re.sub(r"\s+", " ", match.group("opener").lower()).strip()
+    remainder = (match.group("remainder") or "").strip()
+    if opener.startswith("hi"):
+        opener = "hi"
+    elif opener.startswith("hello"):
+        opener = "hello"
+    elif opener.startswith("hey"):
+        opener = "hey"
+    return opener, remainder
+
 # A shared Instagram attachment gives the next message a subject, but only
 # when the customer's wording is actually referential.  Keep this as a small
 # deterministic intent layer rather than a growing list of whole sentences:
@@ -365,6 +401,11 @@ _SOURCE_COMMON_TYPOS = {
     "mroe": "more", "tlel": "tell", "detials": "details",
     "availble": "available", "avialble": "available",
 }
+
+_SOURCE_EXPLICIT_SUBJECT_TERMS = frozenset({
+    "menu", "menus", "week", "weekly", "jolbhora", "kanchagolla", "sondesh",
+    "mahua", "bento", "meal", "meals", "savoury", "savory",
+})
 
 
 def _one_edit_or_exact(left: str, right: str) -> bool:
@@ -439,7 +480,12 @@ def source_referential_intent(text: str) -> Optional[str]:
         return "price"
     if availability and (has_reference or availability):
         return "availability"
-    if actions and has_reference:
+    # A real subject in the same utterance wins over the generic ``this``
+    # pronoun.  For example, "hey show me this week's menu" is a fresh menu
+    # request, not an order for the previously shared reel.
+    if actions and has_reference and not (
+        set(canonical_tokens) & _SOURCE_EXPLICIT_SUBJECT_TERMS
+    ):
         return "order"
     context_only_detail = all(
         token in _SOURCE_CONTEXT_FILLER_TERMS or token in _SOURCE_DETAIL_TERMS
@@ -447,7 +493,7 @@ def source_referential_intent(text: str) -> Optional[str]:
     )
     if details and (has_reference or context_only_detail):
         return "details"
-    if has_reference:
+    if has_reference and not (set(canonical_tokens) & _SOURCE_EXPLICIT_SUBJECT_TERMS):
         # "This one please" / "the above one" carry a clear selection even
         # when the customer omits an explicit verb.
         return "order"
@@ -1580,6 +1626,9 @@ class DeterministicResponder:
             return self._generic_fallback(), False, None, None
 
         lowered_text = user_message.lower().strip()
+        opener_name, semantic_remainder = split_conversational_opener(
+            lowered_text
+        )
         facts = session_memory.get_facts(user_id, channel)
         facts.update({
             "last_intents": [],
@@ -1635,11 +1684,14 @@ class DeterministicResponder:
         greeting_text = re.sub(r'^(?:h+e+l+o+|h+e+l+l+o+|h+l+o+)\b', 'hello', greeting_text)
         greeting_text = re.sub(r'^(?:namaskar|nomoshkar|nomoskar)\b', 'namaste', greeting_text)
         conversational_opener = bool(
-            GREETING_ONLY_RE.fullmatch(greeting_text)
+            (opener_name and not semantic_remainder)
+            or GREETING_ONLY_RE.fullmatch(greeting_text)
             or CLOSING_ONLY_RE.fullmatch(greeting_text)
             or ACK_ONLY_RE.fullmatch(greeting_text)
         )
         facts["greeting_intent"] = bool(GREETING_ONLY_RE.fullmatch(greeting_text))
+        facts["conversational_opener"] = opener_name
+        facts["semantic_remainder"] = semantic_remainder
 
         legacy_vague_opening = re.fullmatch(
             r"(?:hi+|hello+|hey+|namaste|menu|show menu|send menu|tell me more|interested|"
@@ -1670,7 +1722,9 @@ class DeterministicResponder:
             )
         ) and not facts.get("source_context_superseded")
         detected_source_intent = (
-            None if conversational_opener else source_referential_intent(user_message)
+            None
+            if conversational_opener
+            else source_referential_intent(semantic_remainder or user_message)
         )
         source_intent = detected_source_intent if source_context_available else None
         facts["source_referential_intent"] = source_intent

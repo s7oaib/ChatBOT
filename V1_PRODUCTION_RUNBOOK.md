@@ -66,9 +66,8 @@ overwrite an earlier backup.
 
 ## v1.0 release verification (2026-09-13)
 
-- Accepted production code commit: `6d22cbc6dac3efd17a28f49b08e85b8df51c718c`.
-- Current deployed HEAD (docs-only checklist update):
-  `15458c202d956a7fdf9d35e0252705b1eb24ebde`.
+- Accepted production code commit: `pending deployment of composite-intent fix`.
+- Current deployed HEAD: `15458c202d956a7fdf9d35e0252705b1eb24ebde`.
 - Authenticated backup: `/app/var/camellia.db.backup-20260912_220436`.
 - Backup timestamp: `2026-09-12 22:04:36 UTC`.
 - Backup size: `1,937,408` bytes; `PRAGMA integrity_check`: `ok`.
@@ -79,7 +78,10 @@ overwrite an earlier backup.
   `LLM_AUTO_RESOLVE_ENABLED=false`,
   `WHATSAPP_CHATBOT_ENABLED=false`,
   `WHATSAPP_CHATBOT_ENABLE_CONFIRM=false`; WhatsApp remains HUMAN ONLY.
-- Full automated suite: **1,390 passed, 0 failed, 1 warning**.
+- Full automated suite: **1,398 passed, 0 failed, 1 warning**.
+- Composite-intent hardening: leading greetings are parsed separately from
+  meaningful remainder text; explicit intent takes precedence over source
+  context; greeting-only messages bypass stale source content.
 - Instagram live acceptance: **MANUAL INSTAGRAM SIGN-OFF REQUIRED**. Use
   `docs/MANUAL_INSTAGRAM_ACCEPTANCE.md`; no automated customer messages were
   sent.
