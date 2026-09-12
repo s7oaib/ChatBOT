@@ -8554,9 +8554,14 @@ Non-Veg:
                 const item = entry.item;
                 const id = item.template_id || item.id;
                 const primary = item.primary_question || item.question_pattern || '—';
+                const normalizedQuery = responseLibraryNormalise(query);
+                const matchingAliases = (item.aliases || [])
+                    .filter(alias => normalizedQuery.length <= 2 && responseLibraryNormalise(alias).startsWith(normalizedQuery))
+                    .slice(0, 3);
+                const triggerSummary = [primary, ...matchingAliases].filter(Boolean).join(' · ');
                 const sourceLabel = item.source_label || (item.kind === 'system_template' ? 'System Template' : 'Client Q&A');
                 return `<button type="button" class="response-library-suggestion" role="option" data-index="${index}" onclick="chooseResponseLibrarySuggestion('${escapeHtml(id)}','${escapeHtml(item.kind || 'custom_qa')}')" style="display:block;width:100%;text-align:left;border:0;border-bottom:1px solid #EEF2F7;background:#fff;padding:9px 11px;cursor:pointer;">
-                    <b>${responseLibraryHighlight(item.title || id, query)}</b><br><small>${responseLibraryHighlight(primary, query)} · ${escapeHtml(sourceLabel)}</small>
+                    <b>${responseLibraryHighlight(item.title || id, query)}</b><br><small>${responseLibraryHighlight(triggerSummary, query)} · ${escapeHtml(sourceLabel)}</small>
                 </button>`;
             }).join('');
             box.style.display = 'block';
