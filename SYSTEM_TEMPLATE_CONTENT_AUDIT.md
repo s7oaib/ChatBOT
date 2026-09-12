@@ -1,8 +1,8 @@
 # Camellia Artisanal — System Template Content-Integrity Audit
 
 Audit date: 2026-09-13  
-Audited seed: `data/qa_templates.json`, `seed_version=19`  
-Production health: HTTP 200, `status=healthy`, 58 templates loaded, seed warning cleared (`live_seed_version=19`).
+Audited seed before remediation: `data/qa_templates.json`, `seed_version=19`
+Production health before remediation: HTTP 200, `status=healthy`, 58 templates loaded, seed warning cleared (`live_seed_version=19`). The remediation deployment bumps the seed to 20 for the neutral dietary copy.
 
 ## Executive summary
 
@@ -12,10 +12,31 @@ All 58 system templates in the production seed were inventoried. The audit revie
 |---|---:|
 | SUPPORTED | 22 |
 | OUTDATED | 0 |
-| UNSUPPORTED | 1 |
-| CONFLICTING | 4 |
+| UNSUPPORTED | 0 |
+| CONFLICTING | 0 |
 | NEEDS CLIENT CONFIRMATION | 16 |
 | Total grouped claims reviewed | 43 |
+
+## Controlled remediation (2026-09-13)
+
+The four canonical conflicts and the unsupported dietary wording were corrected
+through the versioned `response_template_overrides` mechanism. The startup
+migration is idempotent, records the prior copy in
+`response_template_override_versions` with reason
+`approved_canonical_content_correction`, and never overwrites a distinct
+client-authored override.
+
+| Template | Old copy | New copy | Canonical source | Reason | Version-history entry |
+|---|---|---|---|---|---|
+| `weekly_menu_veg` | Legacy six-row ₹300 table | Current Aloor Dom, Chaal Potol, Chholar Daal and Chanar Kofta/Dalna rows | `data/menu.json` → `weekly_menus[-1].vegetarian` | Remove stale dishes/prices | Created by `content_integrity_audit_2026-09-13` at deployment |
+| `weekly_menu_nonveg` | Legacy Contai/Robibarer/Bhetki/Golda table | Current Mangsho, Bhetki Paturi, Chingri Malaikari and Kolkata Chicken Chaap rows | `data/menu.json` → `weekly_menus[-1].non_vegetarian` | Remove stale dishes/prices | Created by `content_integrity_audit_2026-09-13` at deployment |
+| `combo_bento` | Legacy four-option combo table | Current Veg Bento ₹400 and Non-Veg Bento ₹700 with canonical inclusions | `data/menu.json` → `weekly_menus[-1].bengali_bento` | Align contents/prices | Created by `content_integrity_audit_2026-09-13` at deployment |
+| `bento_details` | ₹350/₹400/₹600 legacy details and fee claims | Same current Veg/Non-Veg Bento copy as `combo_bento` | `data/menu.json` → `weekly_menus[-1].bengali_bento` | Align contents/prices; omit unsupported fee claims | Created by `content_integrity_audit_2026-09-13` at deployment |
+| `sugar_free_options` | Lower-glycemic and diabetic guidance | Neutral ingredient/sugar-free limitation and ask-before-ordering wording | Audit finding: no approved medical evidence | Remove unsupported medical claim | Seed version 20 + managed override |
+
+Jolbhora pricing/piece-count and sourcing, team, availability, gifting and
+event/corporate claims remain `CLIENT CONFIRMATION REQUIRED`; no guessed copy
+was published.
 
 Risk summary: 7 critical, 24 high, 10 medium, and 2 low claim rows. See the claim matrix below for the actionable items.
 
@@ -111,10 +132,10 @@ Repeated occurrences in price tables are compared against the single canonical m
 | `delivery_area`, `signature_collection`, `sondesh_price_detailed` | Porter/courier charged on actuals | SUPPORTED | `menu.json` delivery.courier_note | HIGH | Keep; no fixed delivery promise |
 | `delivery_time`, `savoury_best_time_to_book` | Pre-order recommended/required to avoid sell-outs | SUPPORTED | client-confirmed source; menu quantities are finite | MEDIUM | Keep as recommendation, not a guarantee |
 | Sondesh price templates and pack-size templates | Sondesh prices and 9/18/36 piece counts | SUPPORTED | `menu.json` both collections | CRITICAL | Keep; use matrix below as regression oracle |
-| `jolbhora`, `jolbhora_talgash_details`, pack-size templates | Jolbhora prices and 6/12/24 counts | NEEDS CLIENT CONFIRMATION | `menu.json` describes Jolbhora but has no price/pack rows | HIGH | Confirm current Aamar/Signature price table; do not infer from template repetition |
-| `weekly_menu_veg` | Current vegetarian dish names/prices (₹300 rows) | CONFLICTING | Current `menu.json` has Aloor Dom ₹280, Chaal Potol ₹340, Chholar Daal ₹260, Chanar Kofta/Dalna ₹360 | CRITICAL | Regenerate from `menu.json`; do not publish this copy as current |
-| `weekly_menu_nonveg` | Current non-vegetarian dish names/prices (₹400–₹900 rows) | CONFLICTING | Current `menu.json` has Mangsho ₹650, Bhetki ₹550, Chingri ₹580, Chicken Chaap ₹420 | CRITICAL | Regenerate from `menu.json`; do not publish this copy as current |
-| `combo_bento`, `bento_details` | Bento contents/prices | CONFLICTING | `menu.json` has Veg ₹400 and Non-Veg ₹700; `bento_details` says ₹350/₹400/₹600 and different contents | CRITICAL | Reconcile against current `menu.json` before customer delivery |
+| `jolbhora`, `jolbhora_talgash_details`, pack-size templates | Jolbhora prices and 6/12/24 counts | NEEDS CLIENT CONFIRMATION | Audit confirmation scope deliberately excludes repeated template tables; client approval still required | HIGH | Confirm current Aamar/Signature price table; do not infer from repetition |
+| `weekly_menu_veg` | Current vegetarian dish names/prices | SUPPORTED after remediation | Current `menu.json` weekly vegetarian block; applied as a managed override | CRITICAL | Keep override; re-run after each menu rotation |
+| `weekly_menu_nonveg` | Current non-vegetarian dish names/prices | SUPPORTED after remediation | Current `menu.json` weekly non-vegetarian block; applied as a managed override | CRITICAL | Keep override; re-run after each menu rotation |
+| `combo_bento`, `bento_details` | Bento contents/prices | SUPPORTED after remediation | Current `menu.json` Bengali Bento block; applied as a managed override | CRITICAL | Keep override; re-run after each menu rotation |
 | `sondesh_classic_rose` | ₹450/800/1500 Aamar and ₹600/1100/2000 Signature | SUPPORTED | `menu.json` Sondesh Classic/Rose | HIGH | Keep prices; separately confirm ingredient adjectives |
 | `sondesh_mango_kesar` | Mango/Kesar and Signature Vanilla/Dalchini prices | SUPPORTED | `menu.json` flavour rows | HIGH | Keep; preserve collection restriction |
 | `sondesh_nolen_gur` | Nolen Gur/Chocolate price rows and Chocolate Signature-only | SUPPORTED | `menu.json` flavour rows | HIGH | Keep |
@@ -131,7 +152,7 @@ Repeated occurrences in price tables are compared against the single canonical m
 | `GUARD_halal_ingredients_oil` | Mutton halal; mustard oil from a farmer; no industrial processing | SUPPORTED | client-confirmed source and regression tests | HIGH | Keep protected guard; re-confirm if supplier changes |
 | `GUARD_allergen_nutfree_glutenfree` | Sondesh contains milk and sugar only; no nuts | SUPPORTED | client-confirmed allergen source/tests | CRITICAL | Keep guard; advise exact-dish check for severe allergies |
 | `GUARD_dietary_suitability` | Eggless, gluten-free Sondesh; dairy-based/not vegan | NEEDS CLIENT CONFIRMATION | Partly inferred from guard/menu copy, not a structured allergen field | HIGH | Confirm cross-contact and ingredient policy |
-| `sugar_free_options` | Lower glycemic index / suitable-sounding diabetic guidance | UNSUPPORTED | No medical evidence or canonical nutrition data | CRITICAL | Remove medical comparison; retain only “not certified sugar-free; consult physician” |
+| `sugar_free_options` | Lower glycemic index / suitable-sounding diabetic guidance | REMOVED | No medical evidence or canonical nutrition data | CRITICAL | Neutral copy omits health claims and asks for ingredient confirmation |
 | `GUARD_shelf_life_storage` | Refrigerated shelf life one week; heat 12 seconds | SUPPORTED | client-confirmed source/tests | HIGH | Keep; confirm if packaging/storage changes |
 | `GUARD_payment_method` | UPI/bank transfer only; no COD; cash on pickup | SUPPORTED | client-confirmed source/tests | HIGH | Keep protected guard |
 | `GUARD_staff_names_manager_contact` | Guru Dayal Singh and kitchen email | SUPPORTED | client-confirmed source/tests | HIGH | Keep; verify contact remains current |
@@ -179,14 +200,23 @@ Template price mismatches against this matrix: none for the Sondesh/Mahua rows; 
 
 ## Automatic cleanup
 
-None. The unsupported/conflicting claims require either canonical data updates or client confirmation. No protected runtime logic, route data, menu data, or Response Library copy was silently changed during this audit.
+Safe canonical corrections and removal of the unsupported medical wording are
+now applied by the controlled, versioned override migration. No protected
+runtime logic, route data, menu data, or uncertain client-confirmation claim was
+changed.
+
+Conflict re-check: weekly vegetarian **RESOLVED**; weekly non-vegetarian
+**RESOLVED**; Bento **RESOLVED**; Jolbhora **CLIENT CONFIRMATION REQUIRED**.
 
 ## Response Library and runtime consistency
 
 - Local `/admin/response-library` inventory, exact-phrase search, preview, dry-run, edit, restore, and history paths are covered by `tests/test_custom_qa.py` and `tests/test_admin_ui_structure.py`.
-- Production health confirms the deployed seed is reconciled (`seed_version=19`, `undelivered_seed_changes=false`) and 58 templates are loaded.
+- Production health before this remediation confirms the deployed seed was reconciled (`seed_version=19`, `undelivered_seed_changes=false`) and 58 templates were loaded; the remediation deployment is expected to report seed version 20 after rollout.
 - Production authenticated Response Library rows/overrides were not read in this audit because the endpoint requires admin credentials; therefore production override-by-override consistency remains a verification item for the client/admin session.
-- No runtime routing, source-context, reel/post/ad, order/CAM, Meta outbound, autocomplete, or WhatsApp code was changed by this audit.
+- No runtime routing, source-context, reel/post/ad, order/CAM, Meta outbound,
+  autocomplete, or WhatsApp behavior was changed. Existing dynamic menu
+  attachment behavior is preserved; the migration only writes versioned copy
+  overrides and the existing renderer consumes them where applicable.
 
 ## Seed warning analysis
 

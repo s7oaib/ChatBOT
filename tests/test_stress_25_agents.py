@@ -101,8 +101,8 @@ class Test25AgentStressScenarios(unittest.TestCase):
         # Turn 1: Diabetic / sugar free
         resp1 = self.responder.respond("Do you have sugar free or diabetic friendly options?", user_id=user_id, channel=channel)
         self.assertTrue(resp1.was_matched)
-        self.assertIn("Nolen Gur", resp1.text)
-        self.assertIn("glycemic", resp1.text.lower())
+        self.assertNotIn("glycemic", resp1.text.lower())
+        self.assertNotIn("diabetic-friendly", resp1.text.lower())
 
         # Turn 2: Halal & Mustard oil check (Confirmed with client: Mutton is Halal, Mustard oil from farmer)
         resp2 = self.responder.respond("Is your meat halal and which oil do you cook in?", user_id=user_id, channel=channel)

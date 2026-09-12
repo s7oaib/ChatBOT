@@ -79,6 +79,7 @@ from camellia.knowledge import SOURCE_MAP
 from camellia.candidate_safety import candidate_eligibility, detect_business_commitment_warnings, validate_candidate_answer
 from camellia.assisted_resolution import create_suggestion
 from camellia.auto_resolve import simulate_auto_resolve
+from camellia.content_integrity import apply_safe_content_remediations
 
 log = get_logger("camellia.app")
 
@@ -125,6 +126,23 @@ async def lifespan(app: FastAPI):
     _prune_expired_weekly_menus()
 
     db.init_db()
+    # Apply only the audited, canonical copy corrections through the existing
+    # versioned Response Library store.  This is idempotent and deliberately
+    # preserves any distinct client-authored override.
+    # Production uses the durable /app/var database.  Keep local/unit-test
+    # databases opt-in so a test that deliberately exercises legacy seed copy
+    # is not mutated merely by constructing a TestClient.
+    db_path = str(getattr(config, "DB_PATH", "")).replace("\\", "/")
+    if db_path.startswith("/app/var/") or os.getenv("CONTENT_INTEGRITY_REMEDIATION") == "true":
+        try:
+            apply_safe_content_remediations(
+                db, responder.menu_data, responder.qa_data.get("templates", []), log
+            )
+        except Exception:
+            # Copy remediation must never make the service fail to start; the
+            # protected seed/runtime remains available if the durable volume
+            # is temporarily unavailable.
+            log.exception("Could not apply content-integrity copy remediations.")
     # Built-in menu catalogue rows are seeded inside init_db() itself (every
     # Database instance gets them, test fixtures included); only the
     # Topic-backfill migration needs a separate call here.

@@ -1,5 +1,5 @@
 {
-  "seed_version": 19,
+  "seed_version": 20,
   "matching_rules": {
     "guard_precedence": "GUARD_ templates (id starting with GUARD_) have absolute precedence over any answer template. When matched, they escalate immediately with response: null to prevent unverified brand statements.",
     "how_it_works": "Each template has 'triggers' (keywords/phrases). If a customer message contains ANY trigger from a template's list, that template fires. If multiple templates match, the one with the MOST matched keywords wins. If nothing matches confidently, escalate to human — never guess.",
@@ -1257,7 +1257,7 @@
         "elderly diabetic",
         "sugar patients"
       ],
-      "response": "At Camellia Artisanal, all our Sondesh are handcrafted without artificial chemical sweeteners or corn syrups:\n\n• *Authentic Nolen Gur Norom Pak*: Made with 100% natural, unrefined date palm jaggery (Nolen Gur). It has a lower glycemic index and a mild, natural sweetness compared to refined white sugar sweets.\n• *Mild Sweetness Profile*: Because we make fresh small batches with pure dairy / A2 cow milk chhena, our Sondesh is noticeably light and subtly sweetened, never cloying.\n• *Diabetic Guidance*: While naturally sweetened with pure Nolen Gur or minimal unrefined cane sugar, it is not certified medical zero-calorie sugar-free. We recommend moderation or consulting with a physician for strict diabetic diets.\n\nWould you like to try our subtly sweetened Nolen Gur Norom Pak or Classic Sondesh?",
+      "response": "Our Sondesh is made in small batches without artificial chemical sweeteners or corn syrups. We do not offer a certified sugar-free product. If you have a dietary or medical requirement, please tell us before ordering so our team can check the ingredients with you.",
       "escalate": false,
       "source_ref": "dietary guidelines > sugar and diabetes"
     },
