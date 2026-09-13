@@ -5248,6 +5248,10 @@ def get_admin_dashboard():
             box-shadow: 0 25px 50px rgba(0,0,0,0.3); text-align: center; border: 1px solid rgba(212,175,55,0.3);
             animation: fadeIn 0.4s ease-out;
         }
+        .auth-restoring {
+            background: var(--surface); width: 100%; max-width: 420px; border-radius: 24px; padding: 36px 28px;
+            box-shadow: 0 25px 50px rgba(0,0,0,0.3); text-align: center; border: 1px solid rgba(212,175,55,0.3);
+        }
         .auth-icon {
             width: 68px; height: 68px; background: #FDF2F4; color: var(--primary); border-radius: 50%;
             display: flex; align-items: center; justify-content: center; font-size: 28px; margin: 0 auto 16px;
@@ -5535,7 +5539,12 @@ def get_admin_dashboard():
 
     <!-- Server-side session authentication overlay -->
     <div class="auth-overlay" id="authOverlay">
-        <div class="auth-card" id="authCard">
+        <div class="auth-restoring" id="authRestoring">
+            <div class="auth-icon">🔐</div>
+            <h2>Restoring secure session</h2>
+            <p>Checking your existing administrator session…</p>
+        </div>
+        <div class="auth-card" id="authCard" style="display:none">
             <div class="auth-icon">🔐</div>
             <h2>Kitchen Admin Portal</h2>
             <p>Protected access for Camellia Artisanal kitchen managers & staff.</p>
@@ -6503,6 +6512,7 @@ THIS WEEK'S BENGAL SPECIALS
         // sees only the short-lived CSRF token, never the session token,
         // password, PIN, or machine API key.
         let adminAuthenticated = false;
+        let authRequestGeneration = 0;
         let selectedFile = null;
 
         function readCookie(name) {
@@ -6511,16 +6521,38 @@ THIS WEEK'S BENGAL SPECIALS
             return item ? decodeURIComponent(item.slice(prefix.length)) : '';
         }
 
+        function showAuthChecking() {
+            document.getElementById('authOverlay').style.display = 'flex';
+            document.getElementById('authRestoring').style.display = 'block';
+            document.getElementById('authCard').style.display = 'none';
+        }
+
+        function showAuthLogin() {
+            document.getElementById('authOverlay').style.display = 'flex';
+            document.getElementById('authRestoring').style.display = 'none';
+            document.getElementById('authCard').style.display = 'block';
+        }
+
+        function hideAuthOverlay() {
+            document.getElementById('authRestoring').style.display = 'none';
+            document.getElementById('authCard').style.display = 'none';
+            document.getElementById('authOverlay').style.display = 'none';
+        }
+
         async function checkAdminSession() {
+            const requestGeneration = ++authRequestGeneration;
+            showAuthChecking();
             try {
                 const resp = await fetch('/admin/session', { credentials: 'same-origin' });
                 if (!resp.ok) throw new Error('not authenticated');
+                if (requestGeneration !== authRequestGeneration) return;
                 adminAuthenticated = true;
-                document.getElementById('authOverlay').style.display = 'none';
+                hideAuthOverlay();
                 loadActiveMenu(); loadAdRoutes(); loadAnalytics(); refreshCandidateBadge();
             } catch (e) {
+                if (requestGeneration !== authRequestGeneration) return;
                 adminAuthenticated = false;
-                document.getElementById('authOverlay').style.display = 'flex';
+                showAuthLogin();
             }
         }
 
@@ -6568,6 +6600,7 @@ THIS WEEK'S BENGAL SPECIALS
         });
 
         async function loginAdmin() {
+            const requestGeneration = ++authRequestGeneration;
             const username = document.getElementById('usernameInput').value.trim();
             const passwordInput = document.getElementById('passwordInput');
             const totpInput = document.getElementById('totpInput');
@@ -6584,6 +6617,7 @@ THIS WEEK'S BENGAL SPECIALS
                 });
                 const data = await resp.json().catch(() => ({}));
 
+                if (requestGeneration !== authRequestGeneration) return;
                 if (resp.ok) {
                     if (data.mfa_required) {
                         document.getElementById('totpInputWrap').style.display = 'block';
@@ -6593,7 +6627,7 @@ THIS WEEK'S BENGAL SPECIALS
                     adminAuthenticated = true;
                     passwordInput.value = '';
                     totpInput.value = '';
-                    document.getElementById('authOverlay').style.display = 'none';
+                    hideAuthOverlay();
                     loadActiveMenu();
                     loadAdRoutes();
                     loadAnalytics();
@@ -6616,12 +6650,13 @@ THIS WEEK'S BENGAL SPECIALS
         }
 
         async function lockPortal() {
+            ++authRequestGeneration;
             try { await fetch('/admin/logout', { method: 'POST', headers: getAuthHeaders(), credentials: 'same-origin' }); } catch (e) { /* session expires server-side */ }
             adminAuthenticated = false;
             document.getElementById('passwordInput').value = '';
             document.getElementById('totpInput').value = '';
             document.getElementById('totpInputWrap').style.display = 'none';
-            document.getElementById('authOverlay').style.display = 'flex';
+            showAuthLogin();
         }
 
         function getAuthHeaders() {
