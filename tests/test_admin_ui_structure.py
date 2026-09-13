@@ -297,12 +297,18 @@ def test_instagram_routing_has_unified_connected_media_registry(page):
     for marker in (
         "Connected Instagram media filters", "igMediaSearch", "Posts", "Reels", "Ads",
         "ig-media-card", "preview_url", "POST", "REEL", "Open Instagram",
-        "Refresh Media Preview", "/metadata/refresh", "Add Cover", "Change Cover",
+        "/metadata/refresh", "Add Cover", "Change Cover",
         "Save Cover", "Cancel", "Uploading...", "/preview", "Remove Cover",
         "target=\"_blank\"",
     ):
         assert marker in page, marker
     assert "lookup_instagram_media" not in section[section.index("async function loadAdRoutes"):]
+
+
+def test_instagram_refresh_capability_is_preserved_but_hidden_from_normal_ui(page):
+    assert "Refresh Media Preview" not in page
+    assert "function refreshInstagramRouteMetadata" in page
+    assert "/admin/instagram-routes/${id}/metadata/refresh" in page
 
 
 def test_instagram_cover_management_is_inline_and_admin_only(page):
