@@ -694,20 +694,6 @@ def _establish_shared_post_context(sender_id: str, post_media_id: str) -> bool:
         route_row = db.get_instagram_source_route(pairing["routing_id"])
         if not route_row:
             return False
-        # Pairing establishes the verified routing identifier. Best-effort
-        # metadata capture is deliberately separate from that decision: a
-        # Graph failure must never undo or disable the paired route.
-        try:
-            metadata = verify_media_by_id(post_media_id)
-            if metadata.get("status") == "verified":
-                db.update_instagram_source_route_metadata(
-                    pairing["routing_id"],
-                    preview_url=metadata.get("preview_url"),
-                    media_type=metadata.get("media_type"),
-                )
-                route_row = db.get_instagram_source_route(pairing["routing_id"]) or route_row
-        except Exception:
-            log.info("Could not capture optional preview metadata for paired post %s.", post_media_id)
         route = decode_route(route_row)
         _apply_source_context(sender_id, route, "shared_post_media_id")
         log.info(
