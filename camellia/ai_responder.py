@@ -281,7 +281,7 @@ class AIResponder:
 
         # Learned Knowledge & Verified Resolutions from Staff
         try:
-            learned_items = db.get_learned_knowledge(limit=30)
+            learned_items = db.get_active_learned_knowledge(limit=30)
             if learned_items:
                 context_parts.append("\n--- VERIFIED KNOWLEDGE & POLICIES (LEARNED FROM STAFF) ---")
                 for lk in learned_items:

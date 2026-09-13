@@ -2192,12 +2192,22 @@ class Database:
             return new_id
 
     def get_learned_knowledge(self, limit: int = 100) -> List[Dict[str, Any]]:
-        """Retrieves learned knowledge entries ordered by most recently created, any status."""
+        """Retrieves learned knowledge entries ordered by most recently created, any status.
+
+        This is an admin/history accessor. Customer-facing code must use
+        :meth:`get_active_learned_knowledge` or
+        :meth:`search_learned_knowledge`, both of which enforce the ACTIVE
+        lifecycle contract.
+        """
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM learned_knowledge ORDER BY id DESC LIMIT ?", (limit,))
             rows = cursor.fetchall()
             return [dict(row) for row in rows]
+
+    def get_active_learned_knowledge(self, limit: int = 100) -> List[Dict[str, Any]]:
+        """Return only learned knowledge eligible for customer-facing runtime use."""
+        return self._active_learned_knowledge_with_aliases(limit=limit)
 
     def get_learned_knowledge_aliases(self, learned_knowledge_id: int) -> List[Dict[str, Any]]:
         with self.get_connection() as conn:

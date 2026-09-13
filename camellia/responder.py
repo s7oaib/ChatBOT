@@ -2192,7 +2192,7 @@ class DeterministicResponder:
         
         # Check Self-Healing Learned Knowledge Base (Saved from Staff Escalation Resolutions)
         try:
-            learned_items = db.get_learned_knowledge(limit=100)
+            learned_items = db.get_active_learned_knowledge(limit=100)
             for item in learned_items:
                 pattern = item.get("question_pattern", "").lower().strip()
                 ans = item.get("verified_answer", "").strip()

@@ -32,6 +32,7 @@ def isolated_db(tmp_path, monkeypatch):
     monkeypatch.setattr("camellia.rag_fallback.db", database)
     monkeypatch.setattr("camellia.ai_responder.db", database)
     monkeypatch.setattr("camellia.triage.db", database)
+    monkeypatch.setattr("camellia.assisted_resolution.db", database)
     return database
 
 
@@ -220,6 +221,81 @@ class TestResponseLibrary:
 # -- 34: matching ------------------------------------------------------------
 
 class TestMatching:
+    def test_active_runtime_accessor_excludes_archived_but_history_keeps_it(self, isolated_db):
+        archived_id = isolated_db.add_learned_knowledge(
+            "Retired topic",
+            "tell me about the retired topic",
+            "ARCHIVED ANSWER MUST NEVER BE SERVED",
+            status="ARCHIVED",
+            aliases=["retired topic details"],
+        )
+
+        assert any(row["id"] == archived_id for row in isolated_db.get_learned_knowledge())
+        assert all(row["id"] != archived_id for row in isolated_db.get_active_learned_knowledge())
+        assert isolated_db.search_learned_knowledge("tell me about the retired topic", count_usage=False) is None
+        assert isolated_db.search_learned_knowledge("retired topic details", count_usage=False) is None
+
+    def test_archived_knowledge_is_blocked_across_runtime_paths(self, isolated_db):
+        archived_id = isolated_db.add_learned_knowledge(
+            "Retired runtime topic",
+            "tell me about the retired runtime topic",
+            "ARCHIVED RUNTIME ANSWER MUST NEVER BE SERVED",
+            status="ARCHIVED",
+            aliases=["retired runtime details"],
+        )
+
+        response, matched, template_id, _ = responder.match_and_respond(
+            "tell me about the retired runtime topic",
+            user_id="archived_runtime_test",
+            channel="instagram",
+        )
+        assert "ARCHIVED RUNTIME ANSWER MUST NEVER BE SERVED" not in response
+        assert template_id != f"learned_{archived_id}"
+        assert not (matched and template_id == f"learned_{archived_id}")
+
+        rag_result = __import__("camellia.rag_fallback", fromlist=["rag_fallback_engine"]).rag_fallback_engine.retrieve(
+            "retired runtime details",
+            persist_candidate=False,
+        )
+        assert f"learned_knowledge#{archived_id}" not in rag_result.retrieved_sources
+        assert "ARCHIVED RUNTIME ANSWER MUST NEVER BE SERVED" not in rag_result.proposed_response
+
+        from camellia.assisted_resolution import _approved_match
+        from camellia.triage import triage_classifier
+
+        assert _approved_match("retired runtime details") == {}
+        assert triage_classifier._grounding_for("retired runtime details")["matched_knowledge_id"] is None
+
+    def test_active_equivalent_remains_callable(self, isolated_db):
+        active_id = isolated_db.add_learned_knowledge(
+            "Active runtime topic",
+            "tell me about the active runtime topic",
+            "ACTIVE APPROVED ANSWER",
+            aliases=["active runtime details"],
+        )
+
+        response, matched, template_id, _ = responder.match_and_respond(
+            "active runtime details",
+            user_id="active_runtime_test",
+            channel="instagram",
+        )
+        assert matched is True
+        assert template_id == f"learned_{active_id}"
+        assert response == "ACTIVE APPROVED ANSWER"
+
+    def test_archived_knowledge_is_excluded_from_ai_context(self, isolated_db):
+        isolated_db.add_learned_knowledge(
+            "Retired AI context topic",
+            "retired ai context question",
+            "ARCHIVED AI CONTEXT MUST NEVER BE INCLUDED",
+            status="ARCHIVED",
+        )
+
+        from camellia.ai_responder import ai_responder
+
+        context = ai_responder._build_context_string()
+        assert "ARCHIVED AI CONTEXT MUST NEVER BE INCLUDED" not in context
+
     def test_primary_question_matches(self, isolated_db):
         isolated_db.add_learned_knowledge("Topic", "do you cater weddings", "Yes we do wedding catering.")
         assert isolated_db.search_learned_knowledge("do you cater weddings", count_usage=False)
