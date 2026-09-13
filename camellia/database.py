@@ -103,6 +103,7 @@ class Database:
             meta_trace_id TEXT,
             duration_ms REAL,
             retry_count INTEGER NOT NULL DEFAULT 0,
+            delivery_status TEXT,
             exception_class TEXT,
             exception_message TEXT
         )
@@ -122,6 +123,7 @@ class Database:
             ("character_count", "INTEGER"),
             ("overall_success", "INTEGER"),
             ("overall_failure_chunk", "INTEGER"),
+            ("delivery_status", "TEXT"),
         ):
             cls._ensure_column(cursor, "instagram_outbound_audit", column, declaration)
 
@@ -1958,6 +1960,7 @@ class Database:
         meta_error_message: Optional[str] = None,
         meta_trace_id: Optional[str] = None,
         duration_ms: Optional[float] = None,
+        delivery_status: Optional[str] = None,
         exception_class: Optional[str] = None,
         exception_message: Optional[str] = None,
         overall_success: Optional[bool] = None,
@@ -1972,6 +1975,7 @@ class Database:
                 SET http_status = ?, success = ?, meta_message_id = ?,
                     meta_error_code = ?, meta_error_subcode = ?,
                     meta_error_message = ?, meta_trace_id = ?, duration_ms = ?,
+                    delivery_status = ?,
                     exception_class = ?, exception_message = ?,
                     overall_success = ?, overall_failure_chunk = ?
                 WHERE id = ?
@@ -1985,6 +1989,7 @@ class Database:
                     meta_error_message,
                     meta_trace_id,
                     duration_ms,
+                    delivery_status,
                     exception_class,
                     exception_message,
                     int(bool(overall_success)) if overall_success is not None else None,
@@ -2042,7 +2047,27 @@ class Database:
                 f"WHERE {' AND '.join(clauses)} ORDER BY id DESC LIMIT ?",
                 tuple(params),
             ).fetchall()
-            return [dict(row) for row in rows]
+            result = []
+            for row in rows:
+                item = dict(row)
+                if not item.get("delivery_status") and any(
+                    item.get(field) is not None
+                    for field in (
+                        "http_status", "success", "meta_error_code", "meta_error_subcode",
+                        "exception_class", "exception_message",
+                    )
+                ):
+                    from camellia.monitoring import classify_instagram_delivery
+                    item["delivery_status"] = classify_instagram_delivery(
+                        http_status=item.get("http_status"),
+                        meta_code=item.get("meta_error_code"),
+                        meta_subcode=item.get("meta_error_subcode"),
+                        exception_class=item.get("exception_class"),
+                        exception_message=item.get("exception_message"),
+                        success=bool(item.get("success")),
+                    )
+                result.append(item)
+            return result
 
     def instagram_outbound_health(self) -> Dict[str, Any]:
         """Summarize send activity without making traffic absence unhealthy."""

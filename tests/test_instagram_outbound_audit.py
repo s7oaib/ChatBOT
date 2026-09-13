@@ -8,7 +8,7 @@ from camellia.database import Database
 from fastapi.testclient import TestClient
 from camellia.app import app
 from camellia import app as app_module
-from camellia.monitoring import delivery_monitor
+from camellia.monitoring import DeliveryHealthMonitor, classify_instagram_delivery, delivery_monitor
 
 
 def test_instagram_outbound_audit_round_trip_and_health(tmp_path):
@@ -97,6 +97,147 @@ def test_instagram_sender_records_meta_error_without_credentials_in_audit():
     assert completed[0][1]["meta_error_code"] == 100
     assert completed[0][1]["meta_error_subcode"] == 33
     assert completed[0][1]["meta_trace_id"] == "trace.error"
+    assert completed[0][1]["delivery_status"] == "OTHER_PROVIDER_FAILURE"
+
+
+def test_meta_recipient_not_found_is_a_permanent_delivery_failure():
+    assert classify_instagram_delivery(
+        http_status=400,
+        meta_code=100,
+        meta_subcode=2534014,
+    ) == "PERMANENT_RECIPIENT_FAILURE"
+    assert classify_instagram_delivery(
+        http_status=400,
+        meta_code=100,
+        meta_subcode=33,
+    ) == "OTHER_PROVIDER_FAILURE"
+
+    class Response:
+        status_code = 400
+        headers = {"x-fb-trace-id": "trace.recipient"}
+
+        def json(self):
+            return {
+                "error": {
+                    "code": 100,
+                    "error_subcode": 2534014,
+                    "message": "The requested user cannot be found.",
+                }
+            }
+
+        def raise_for_status(self):
+            raise RuntimeError("HTTP 400")
+
+    class Client:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def post(self, *args, **kwargs):
+            return Response()
+
+    monitor = DeliveryHealthMonitor()
+    created = []
+    completed = []
+    with patch.object(config, "INSTAGRAM_ACCESS_TOKEN", "token-value"), \
+         patch.object(app_module.httpx, "Client", lambda *args, **kwargs: Client()), \
+         patch.object(app_module, "delivery_monitor", monitor), \
+         patch.object(app_module.db, "create_instagram_outbound_audit", side_effect=lambda **kwargs: created.append(kwargs) or 1092), \
+         patch.object(app_module.db, "complete_instagram_outbound_audit", side_effect=lambda *args, **kwargs: completed.append(kwargs)):
+        result = app_module.send_instagram_reply(
+            "customer-123",
+            "hello",
+            inbound_message_id=1092,
+        )
+
+    assert result["status"] == "failed"
+    assert created[0]["retry_count"] == 0
+    assert completed[0]["success"] is False
+    assert completed[0]["delivery_status"] == "PERMANENT_RECIPIENT_FAILURE"
+    assert monitor.snapshot()["consecutive_failures"].get("instagram", 0) == 0
+    assert monitor.snapshot()["healthy"] is True
+
+
+def test_permanent_recipient_failures_do_not_degrade_health_or_delete_history():
+    monitor = DeliveryHealthMonitor()
+    for _ in range(3):
+        monitor.record_failure(
+            "instagram",
+            "The requested user cannot be found.",
+            classification="PERMANENT_RECIPIENT_FAILURE",
+        )
+    assert monitor.snapshot() == {
+        "consecutive_failures": {},
+        "channels_alerting": [],
+        "healthy": True,
+    }
+
+
+def test_health_stays_healthy_after_three_recipient_failures():
+    monitor = DeliveryHealthMonitor()
+    for _ in range(3):
+        monitor.record_failure(
+            "instagram",
+            "The requested user cannot be found.",
+            classification="PERMANENT_RECIPIENT_FAILURE",
+        )
+
+    with patch.object(app_module, "delivery_monitor", monitor):
+        payload = json.loads(app_module.health_check().body)
+
+    assert payload["status"] == "healthy"
+    assert payload["outbound_delivery"]["healthy"] is True
+    assert payload["outbound_delivery"]["consecutive_failures"].get("instagram", 0) == 0
+
+
+def test_historical_recipient_failure_remains_in_audit_and_is_classified_on_read(tmp_path):
+    database = Database(str(tmp_path / "historical.db"))
+    audit_id = database.create_instagram_outbound_audit(
+        inbound_message_id=1092,
+        recipient_id="sha256:historical",
+        response_type="text",
+        parent_send_id="historical-parent",
+        chunk_number=1,
+        total_chunks=1,
+        character_count=5,
+    )
+    database.complete_instagram_outbound_audit(
+        audit_id,
+        http_status=400,
+        success=False,
+        meta_error_code=100,
+        meta_error_subcode=2534014,
+        meta_error_message="The requested user cannot be found.",
+    )
+    database.finalize_instagram_outbound_audit("historical-parent", overall_success=False)
+
+    rows = database.get_instagram_outbound_audit(inbound_message_id=1092)
+    assert len(rows) == 1
+    assert rows[0]["id"] == audit_id
+    assert rows[0]["delivery_status"] == "PERMANENT_RECIPIENT_FAILURE"
+    assert rows[0]["success"] == 0
+
+
+def test_provider_failures_still_degrade_and_success_recovers():
+    monitor = DeliveryHealthMonitor()
+    with patch.object(monitor, "_send_owner_alert"):
+        for _ in range(3):
+            monitor.record_failure(
+                "instagram",
+                "Meta provider failure",
+                classification="TRANSIENT_PROVIDER_FAILURE",
+            )
+    assert monitor.snapshot()["healthy"] is False
+    assert monitor.snapshot()["consecutive_failures"]["instagram"] == 3
+
+    monitor.record_success("instagram")
+    assert monitor.snapshot() == {
+        "consecutive_failures": {"instagram": 0},
+        "channels_alerting": [],
+        "healthy": True,
+    }
 
 
 def test_instagram_text_chunk_boundaries_and_content():

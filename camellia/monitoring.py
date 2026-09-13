@@ -25,6 +25,34 @@ def get_logger(name: str) -> logging.Logger:
 log = get_logger("camellia")
 
 
+def classify_instagram_delivery(
+    *,
+    http_status=None,
+    meta_code=None,
+    meta_subcode=None,
+    exception_class=None,
+    exception_message=None,
+    success=False,
+) -> str:
+    """Classify one Instagram send without conflating recipient and provider failures."""
+    if success:
+        return "SUCCESS"
+    code = str(meta_code) if meta_code is not None else ""
+    subcode = str(meta_subcode) if meta_subcode is not None else ""
+    if code == "100" and subcode == "2534014":
+        return "PERMANENT_RECIPIENT_FAILURE"
+    if http_status == 429 or code in {"4", "613"}:
+        return "RATE_LIMIT"
+    if http_status in {401, 403} or code in {"10", "190", "102"}:
+        return "AUTH_FAILURE"
+    if http_status is not None and int(http_status) >= 500:
+        return "TRANSIENT_PROVIDER_FAILURE"
+    exception_text = " ".join(str(value or "") for value in (exception_class, exception_message)).lower()
+    if any(marker in exception_text for marker in ("timeout", "network", "connect", "transport", "dns")):
+        return "NETWORK_FAILURE"
+    return "OTHER_PROVIDER_FAILURE"
+
+
 class DeliveryHealthMonitor:
     """
     Watches outbound Meta API calls and alerts the owner once when sending
@@ -47,7 +75,19 @@ class DeliveryHealthMonitor:
         self._consecutive_failures[channel] = 0
         self._alerted.discard(channel)
 
-    def record_failure(self, channel: str, detail: str) -> None:
+    def record_failure(
+        self,
+        channel: str,
+        detail: str,
+        *,
+        classification: str = "OTHER_PROVIDER_FAILURE",
+    ) -> None:
+        if classification == "PERMANENT_RECIPIENT_FAILURE":
+            log.warning(
+                "Outbound delivery failed for one recipient on %s; provider health unchanged: %s",
+                channel, detail,
+            )
+            return
         count = self._consecutive_failures.get(channel, 0) + 1
         self._consecutive_failures[channel] = count
         log.error("Outbound delivery failed on %s (%s consecutive): %s", channel, count, detail)

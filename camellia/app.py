@@ -74,7 +74,7 @@ from camellia import menu_images
 from camellia import menu_catalogue
 from camellia.menu_catalogue import MenuCatalogueError
 from camellia.session_memory import session_memory
-from camellia.monitoring import get_logger, delivery_monitor, latency_monitor
+from camellia.monitoring import get_logger, delivery_monitor, latency_monitor, classify_instagram_delivery
 from camellia.knowledge import SOURCE_MAP
 from camellia.candidate_safety import candidate_eligibility, detect_business_commitment_warnings, validate_candidate_answer
 from camellia.assisted_resolution import create_suggestion
@@ -1242,6 +1242,7 @@ def send_instagram_reply(
     }
     parent_send_id = uuid.uuid4().hex
     failed_chunk_number = None
+    failure_classification = None
 
     try:
         with httpx.Client(timeout=10.0) as client:
@@ -1256,6 +1257,8 @@ def send_instagram_reply(
                 character_count: Optional[int] = None,
             ):
                 nonlocal last
+                nonlocal failure_classification
+                failure_classification = None
                 audit_id = None
                 try:
                     audit_id = db.create_instagram_outbound_audit(
@@ -1288,6 +1291,14 @@ def send_instagram_reply(
                     ok = 200 <= status_code < 300 and not (
                         isinstance(payload, dict) and payload.get("error")
                     )
+                    delivery_status = classify_instagram_delivery(
+                        http_status=status_code,
+                        meta_code=code,
+                        meta_subcode=subcode,
+                        success=bool(ok),
+                    )
+                    if not ok:
+                        failure_classification = delivery_status
                     message_id = payload.get("message_id") or payload.get("id") if isinstance(payload, dict) else None
                     payload_error = payload.get("error") if isinstance(payload, dict) else None
                     trace_id = (
@@ -1304,6 +1315,7 @@ def send_instagram_reply(
                                 meta_error_subcode=subcode, meta_error_message=message,
                                 meta_trace_id=trace_id,
                                 duration_ms=round((time.perf_counter() - started) * 1000, 2),
+                                delivery_status=delivery_status,
                             )
                         except Exception as audit_error:
                             log.warning(
@@ -1332,6 +1344,11 @@ def send_instagram_reply(
                                 success=False,
                                 meta_trace_id=getattr(resp, "headers", {}).get("x-fb-trace-id") if resp is not None else None,
                                 duration_ms=round((time.perf_counter() - started) * 1000, 2),
+                                delivery_status=failure_classification or classify_instagram_delivery(
+                                    http_status=getattr(resp, "status_code", None) if resp is not None else None,
+                                    exception_class=type(exc).__name__,
+                                    exception_message=_safe_outbound_exception(exc),
+                                ),
                                 exception_class=type(exc).__name__,
                                 exception_message=_safe_outbound_exception(exc),
                             )
@@ -1423,7 +1440,12 @@ def send_instagram_reply(
                 "Could not finalize failed Instagram outbound audit %s: %s",
                 parent_send_id, _safe_outbound_exception(audit_error),
             )
-        delivery_monitor.record_failure("instagram", str(e))
+        delivery_monitor.record_failure(
+            "instagram", str(e),
+            classification=failure_classification or classify_instagram_delivery(
+                exception_class=type(e).__name__, exception_message=_safe_outbound_exception(e),
+            ),
+        )
         if hasattr(e, "response") and getattr(e, "response", None) is not None:
             log.error("Instagram Meta API Error Body: %s", e.response.text)
         return {"error": str(e), "status": "failed"}
