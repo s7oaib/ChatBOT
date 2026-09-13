@@ -220,6 +220,111 @@ def test_shared_topic_response_renderer_keeps_both_orders_explicit():
     assert second.index(menu) < second.index(description)
 
 
+def _set_source_route_for_test(topic, *, source_type, menu_mode, menu_id=None, priority_products=None):
+    return {
+        "source_type": source_type,
+        "topic_id": topic["topic_id"],
+        "routing_topic": topic["name"],
+        "menu_id": menu_id,
+        "menu_mode": menu_mode,
+        "priority_products": priority_products or [],
+        "active": True,
+    }
+
+
+@pytest.mark.parametrize("source_type", ["post", "reel", "ad"])
+def test_explicit_none_sends_description_only_for_every_instagram_source(catalogue_db, bypass_ad_gate, source_type):
+    topic = create_topic(
+        "Sondesh", "TEST DESCRIPTION ONLY", default_menu_id="aamar_mishti", priority_products=["jolbhora"],
+    )
+    uid = f"none_{source_type}"
+    session_memory.clear_session(uid, "instagram")
+    facts = session_memory.get_facts(uid, "instagram")
+    facts["source_route"] = _set_source_route_for_test(
+        topic, source_type=source_type, menu_mode="NONE", priority_products=["jolbhora"],
+    )
+    facts["source_match_method"] = "test"
+
+    text, matched, template_id, _images = responder.match_and_respond(
+        "Tell me more", user_id=uid, channel="instagram",
+    )
+
+    assert matched is True
+    assert template_id == "source_topic_description_only"
+    assert text == "TEST DESCRIPTION ONLY"
+    assert "Jolbhora" not in text
+    assert "₹" not in text
+
+
+def test_selected_menu_keeps_description_and_approved_menu(catalogue_db, bypass_ad_gate):
+    topic = create_topic(
+        "Sondesh", "TEST DESCRIPTION ONLY", default_menu_id="aamar_mishti", priority_products=["jolbhora"],
+    )
+    expected_menu = responder._template_by_id("jolbhora")["response"]
+    uid = "selected_sondesh_menu"
+    session_memory.clear_session(uid, "instagram")
+    facts = session_memory.get_facts(uid, "instagram")
+    facts["source_route"] = _set_source_route_for_test(
+        topic, source_type="post", menu_mode="SELECTED", menu_id="aamar_mishti", priority_products=["jolbhora"],
+    )
+    facts["source_match_method"] = "test"
+
+    text, matched, _template_id, _images = responder.match_and_respond(
+        "Tell me more", user_id=uid, channel="instagram",
+    )
+
+    assert matched is True
+    assert "TEST DESCRIPTION ONLY" in text
+    assert expected_menu.splitlines()[0] in text
+
+
+def test_topic_identity_does_not_inherit_menu_when_none_is_explicit(catalogue_db, bypass_ad_gate):
+    topic = create_topic(
+        "Another Topic", "ANOTHER DESCRIPTION", default_menu_id="signature", priority_products=["kanchagolla"],
+    )
+    uid = "none_other_topic"
+    session_memory.clear_session(uid, "instagram")
+    facts = session_memory.get_facts(uid, "instagram")
+    facts["source_route"] = _set_source_route_for_test(
+        topic, source_type="reel", menu_mode="NONE", priority_products=["kanchagolla"],
+    )
+    facts["source_match_method"] = "test"
+
+    text, _matched, _template_id, _images = responder.match_and_respond(
+        "Tell me more", user_id=uid, channel="instagram",
+    )
+
+    assert text == "ANOTHER DESCRIPTION"
+    assert "Kanchagolla" not in text
+    assert "Signature Collection" not in text
+
+
+def test_preview_and_runtime_use_identical_none_composition(catalogue_db, admin_client, bypass_ad_gate):
+    client, headers = admin_client
+    topic = create_topic(
+        "Preview NONE Topic", "PREVIEW DESCRIPTION ONLY", default_menu_id="aamar_mishti", priority_products=["jolbhora"],
+    )
+    preview = client.get(
+        f"/admin/instagram-routes/preview?topic_id={topic['topic_id']}&menu_mode=NONE&product=jolbhora",
+        headers=headers,
+    )
+    assert preview.status_code == 200
+    preview_text = preview.json()["approved_response"]
+
+    uid = "preview_runtime_none"
+    session_memory.clear_session(uid, "instagram")
+    facts = session_memory.get_facts(uid, "instagram")
+    facts["source_route"] = _set_source_route_for_test(
+        topic, source_type="post", menu_mode="NONE", priority_products=["jolbhora"],
+    )
+    facts["source_match_method"] = "test"
+    runtime_text, _matched, _template_id, _images = responder.match_and_respond(
+        "Tell me more", user_id=uid, channel="instagram",
+    )
+
+    assert preview_text == runtime_text == "PREVIEW DESCRIPTION ONLY"
+
+
 def test_topic_response_order_applies_to_reel_post_and_ad_contexts(catalogue_db, bypass_ad_gate):
     topic = create_topic("Ordered Topic", "Description from the Topic.", default_menu_id="aamar_mishti", response_order="menu_first", priority_products=["jolbhora"])
     expected_menu = responder._template_by_id("jolbhora")["response"]
@@ -324,6 +429,7 @@ def test_route_stores_topic_reference_and_inherits_defaults(catalogue_db):
     clean = validate_route_payload({"url": "https://www.instagram.com/reel/DdAnO6MTok1/", "topic_id": topic["topic_id"]})
     assert clean["topic_id"] == topic["topic_id"]
     assert clean["menu_id"] == "aamar_mishti"
+    assert clean["menu_mode"] == "INHERIT"
     assert clean["priority_products"] == ["jolbhora", "kanchagolla"]
     assert clean["routing_topic"] == "Wedding / Event Sondesh"
 
@@ -346,6 +452,17 @@ def test_route_can_override_topic_default_menu(catalogue_db):
         "url": "https://www.instagram.com/reel/DdAnO6MTok1/", "topic_id": topic["topic_id"], "menu_id": "signature",
     })
     assert clean["menu_id"] == "signature"
+    assert clean["menu_mode"] == "SELECTED"
+
+
+def test_route_can_save_explicit_none_without_topic_default(catalogue_db):
+    topic = create_topic("Sondesh NONE", "Description.", default_menu_id="aamar_mishti")
+    clean = validate_route_payload({
+        "url": "https://www.instagram.com/reel/DdAnO6MTok1/",
+        "topic_id": topic["topic_id"], "menu_id": "", "menu_mode": "NONE",
+    })
+    assert clean["menu_id"] is None
+    assert clean["menu_mode"] == "NONE"
 
 
 def test_unknown_topic_id_rejected(catalogue_db):

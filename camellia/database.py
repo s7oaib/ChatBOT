@@ -585,7 +585,8 @@ class Database:
                 active INTEGER NOT NULL DEFAULT 1,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                archived_at TIMESTAMP
+                archived_at TIMESTAMP,
+                menu_mode TEXT NOT NULL DEFAULT 'INHERIT'
             );
             """)
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_instagram_routes_ad ON instagram_source_routes(ad_id, active)")
@@ -694,6 +695,14 @@ class Database:
             # but is its own column so a route can override it independently —
             # "the client may override it if needed" without changing the Topic.
             self._ensure_column(cursor, "instagram_source_routes", "menu_id", "TEXT")
+            self._ensure_column(cursor, "instagram_source_routes", "menu_mode", "TEXT NOT NULL DEFAULT 'INHERIT'")
+            # Existing rows with a concrete route menu are already configured;
+            # retain their behavior. Null-menu legacy rows remain INHERIT until
+            # an operator explicitly saves NONE or SELECTED through the admin UI.
+            cursor.execute(
+                "UPDATE instagram_source_routes SET menu_mode='SELECTED' "
+                "WHERE menu_id IS NOT NULL AND (menu_mode IS NULL OR menu_mode='INHERIT')"
+            )
 
             # Menu Manager: one row per unpublished edit in progress. A menu_key
             # ("collections.aamar_mishti", "weekly.vegetarian", ...) has at most
@@ -964,13 +973,16 @@ class Database:
     def save_instagram_source_route(self, route: Dict[str, Any], routing_id: Optional[int] = None) -> Dict[str, Any]:
         """Create/update one source route, deduplicating URL and identifiers."""
         now = datetime.utcnow().isoformat()
+        menu_mode = str(route.get("menu_mode") or "").strip().upper()
+        if menu_mode not in {"NONE", "SELECTED", "INHERIT"}:
+            menu_mode = "SELECTED" if route.get("menu_id") else "INHERIT"
         values = (
             route["source_type"], route.get("canonical_url"), route.get("shortcode"),
             route.get("media_id"), route.get("ad_id"), route.get("campaign_id"),
             route.get("routing_topic", ""), json.dumps(route.get("knowledge_scope", [])),
             route.get("escalation_policy", "human_if_unsupported"),
             json.dumps(route.get("priority_products", [])), int(bool(route.get("active", True))),
-            route.get("topic_id"), route.get("menu_id"), now,
+            route.get("topic_id"), route.get("menu_id"), menu_mode, now,
         )
         with self.get_connection() as conn:
             if routing_id is None:
@@ -989,8 +1001,8 @@ class Database:
                     """INSERT INTO instagram_source_routes
                     (source_type, canonical_url, shortcode, media_id, ad_id, campaign_id,
                      routing_topic, knowledge_scope, escalation_policy, priority_products,
-                     active, topic_id, menu_id, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    active, topic_id, menu_id, menu_mode, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     values[:-1] + (now, now),
                 )
                 routing_id = int(cursor.lastrowid)
@@ -998,7 +1010,7 @@ class Database:
                 cursor = conn.execute(
                     """UPDATE instagram_source_routes SET source_type=?, canonical_url=?, shortcode=?,
                     media_id=?, ad_id=?, campaign_id=?, routing_topic=?, knowledge_scope=?,
-                    escalation_policy=?, priority_products=?, active=?, topic_id=?, menu_id=?, updated_at=?, archived_at=NULL
+                    escalation_policy=?, priority_products=?, active=?, topic_id=?, menu_id=?, menu_mode=?, updated_at=?, archived_at=NULL
                     WHERE routing_id=?""",
                     values + (routing_id,),
                 )

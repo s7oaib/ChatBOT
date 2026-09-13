@@ -4478,7 +4478,7 @@ async def update_instagram_topic_route(
 
 @app.get("/admin/instagram-routes/preview")
 def preview_instagram_route_response(
-    topic_id: str = "", product: str = "", menu_id: str = "", response_order: str = "",
+    topic_id: str = "", product: str = "", menu_id: str = "", response_order: str = "", menu_mode: str = "INHERIT",
     x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None),
 ):
     """
@@ -4498,18 +4498,21 @@ def preview_instagram_route_response(
         raise HTTPException(status_code=404, detail=f"No topic '{topic_id}'")
 
     topic_view = decode_topic(topic) if topic else {}
+    menu_mode = str(menu_mode or "INHERIT").strip().upper()
+    if menu_mode not in {"NONE", "SELECTED", "INHERIT"}:
+        raise HTTPException(status_code=400, detail="menu_mode must be NONE, SELECTED, or INHERIT.")
     priority = topic_view.get("priority_products", []) if topic else []
-    chosen_product = product or (priority[0] if priority else None)
+    chosen_product = product or (priority[0] if priority and menu_mode != "NONE" else None)
     template_id = route_template_id(chosen_product) if chosen_product else None
     template = responder._template_by_id(template_id) if template_id else None
 
-    resolved_menu_id = menu_id or (topic or {}).get("default_menu_id")
+    resolved_menu_id = menu_id if menu_mode == "SELECTED" else ((topic or {}).get("default_menu_id") if menu_mode == "INHERIT" else None)
     menu_entry = menu_catalogue.get_menu(resolved_menu_id) if resolved_menu_id else None
     image_url = menu_images.current_url(resolved_menu_id) if resolved_menu_id else None
-    menu_response = (template or {}).get("response") or ""
+    menu_response = ((template or {}).get("response") or "") if menu_mode != "NONE" else ""
     chosen_order = response_order if response_order in RESPONSE_ORDERS else (topic_view.get("response_order") or "description_first")
     ordered_response = compose_topic_response(
-        topic_view.get("name"), topic_view.get("description"), menu_response, chosen_order,
+        topic_view.get("name"), topic_view.get("description"), menu_response, chosen_order, menu_mode,
     )
 
     return {
@@ -4522,6 +4525,7 @@ def preview_instagram_route_response(
         "approved_response": ordered_response,
         "menu_response": menu_response,
         "response_order": chosen_order,
+        "menu_mode": menu_mode,
     }
 
 
@@ -6491,7 +6495,7 @@ THIS WEEK'S BENGAL SPECIALS
                     `<option value="${escapeHtml(t.topic_id)}">${escapeHtml(t.name)}</option>`).join('');
                 document.getElementById('igTopicPicker').innerHTML = topicOptions;
 
-                const menuOptions = '<option value="">Select Menu</option>' + igMenus.map(m =>
+                const menuOptions = '<option value="">No menu — description only</option>' + igMenus.map(m =>
                     `<option value="${escapeHtml(m.menu_id)}">${escapeHtml(m.name)}</option>`).join('');
                 document.getElementById('igMenuPicker').innerHTML = menuOptions;
                 const topicDefaultMenuEl = document.getElementById('topicDefaultMenu');
@@ -6506,9 +6510,6 @@ THIS WEEK'S BENGAL SPECIALS
             const editTopicButton = document.getElementById('igEditTopicButton');
             if (editTopicButton) editTopicButton.disabled = !topic;
             document.getElementById('igTopicDescription').value = topic ? (topic.description || '') : '';
-            if (topic && topic.default_menu_id) {
-                document.getElementById('igMenuPicker').value = topic.default_menu_id;
-            }
             // A new Topic owns the normal defaults. Edit mode passes true so
             // an existing route override is preserved until the client changes
             // it in Customize.
@@ -6523,7 +6524,7 @@ THIS WEEK'S BENGAL SPECIALS
             const box = document.getElementById('igTopicPreview');
             const topic = igTopics.find(t => t.topic_id === document.getElementById('igTopicPicker').value);
             if (!box || !topic) { if (box) box.style.display = 'none'; return; }
-            const menuId = document.getElementById('igMenuPicker').value || topic.default_menu_id;
+            const menuId = document.getElementById('igMenuPicker').value;
             const menu = igMenus.find(item => item.menu_id === menuId);
             const labels = igPriority.map(id => {
                 const product = igProducts.find(item => item.id === id);
@@ -6622,7 +6623,8 @@ THIS WEEK'S BENGAL SPECIALS
 
         async function saveInstagramRoute() {
             const result=document.getElementById('adRouteResult');
-            const payload={routing_id:igEditingId,url:document.getElementById('igRouteUrl').value.trim(),topic_id:document.getElementById('igTopicPicker').value,menu_id:document.getElementById('igMenuPicker').value,media_id:document.getElementById('igMediaId').value.trim(),ad_id:document.getElementById('igAdId').value.trim(),campaign_id:document.getElementById('igCampaignId').value.trim(),escalation_policy:document.getElementById('igEscalationPolicy').value,priority_products:igPriority,knowledge_scope:Array.from(document.getElementById('igKnowledgeScope').selectedOptions).map(o=>o.value),active:true};
+            const selectedMenuId=document.getElementById('igMenuPicker').value;
+            const payload={routing_id:igEditingId,url:document.getElementById('igRouteUrl').value.trim(),topic_id:document.getElementById('igTopicPicker').value,menu_id:selectedMenuId,menu_mode:selectedMenuId?'SELECTED':'NONE',media_id:document.getElementById('igMediaId').value.trim(),ad_id:document.getElementById('igAdId').value.trim(),campaign_id:document.getElementById('igCampaignId').value.trim(),escalation_policy:document.getElementById('igEscalationPolicy').value,priority_products:igPriority,knowledge_scope:Array.from(document.getElementById('igKnowledgeScope').selectedOptions).map(o=>o.value),active:true};
             const resp=await fetch('/admin/instagram-routes',{method:'POST',headers:{...getAuthHeaders(),'Content-Type':'application/json'},body:JSON.stringify(payload)});
             const data=await resp.json().catch(()=>({})); result.style.display='block';
             if(!resp.ok){result.className='result-box error';result.innerText=data.detail||'Could not save route.';return;}
@@ -6645,7 +6647,7 @@ THIS WEEK'S BENGAL SPECIALS
             box.innerHTML = 'Loading preview…';
             const menuId = document.getElementById('igMenuPicker').value;
             const product = igPriority[0] || '';
-            const params = new URLSearchParams({ topic_id: topicId, menu_id: menuId, product, response_order: igResponseOrder });
+            const params = new URLSearchParams({ topic_id: topicId, menu_id: menuId, menu_mode: menuId ? 'SELECTED' : 'NONE', product, response_order: igResponseOrder });
             try {
                 const resp = await fetch(`/admin/instagram-routes/preview?${params}`, { headers: getAuthHeaders() });
                 const data = await resp.json();

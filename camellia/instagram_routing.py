@@ -27,6 +27,7 @@ from camellia.knowledge import CATALOGUE, SOURCE_MAP
 _SHORTCODE_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _SOURCE_TYPES = {"post", "reel", "ad"}
 _ESCALATION_POLICIES = {"canonical", "human_if_unsupported", "always_human"}
+_MENU_MODES = {"NONE", "SELECTED", "INHERIT"}
 
 
 def _media_list_url(client: httpx.Client, token: str, version: str) -> Optional[str]:
@@ -286,9 +287,31 @@ def validate_route_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     if topic_id and not topic:
         raise ValueError("Unknown topic.")
 
-    menu_id = str(payload.get("menu_id") or "").strip() or None
-    if not menu_id and topic:
+    raw_menu_id = str(payload.get("menu_id") or "").strip()
+    requested_menu_mode = str(payload.get("menu_mode") or "").strip().upper()
+    if raw_menu_id:
+        menu_mode = "SELECTED"
+        menu_id = raw_menu_id
+    elif requested_menu_mode:
+        if requested_menu_mode not in _MENU_MODES:
+            raise ValueError("menu_mode must be NONE, SELECTED, or INHERIT.")
+        menu_mode = requested_menu_mode
+        menu_id = None
+    elif "menu_id" in payload:
+        # The current admin form always sends menu_id. An empty value is an
+        # intentional NONE selection, not permission to inherit the Topic's
+        # default menu.
+        menu_mode = "NONE"
+        menu_id = None
+    else:
+        # Older API clients did not send a menu field. Preserve their existing
+        # Topic-default behavior until they explicitly save the route again.
+        menu_mode = "INHERIT"
+        menu_id = topic.get("default_menu_id") or None if topic else None
+    if menu_mode == "INHERIT" and topic:
         menu_id = topic.get("default_menu_id") or None
+    if menu_mode == "SELECTED" and not menu_id:
+        raise ValueError("A selected menu is required when menu_mode is SELECTED.")
     if menu_id and not db.get_menu_catalogue_entry(menu_id):
         raise ValueError("Unknown menu.")
 
@@ -343,6 +366,7 @@ def validate_route_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         "campaign_id": str(payload.get("campaign_id") or "").strip() or None,
         "topic_id": topic_id,
         "menu_id": menu_id,
+        "menu_mode": menu_mode,
         "routing_topic": routing_topic,
         "knowledge_scope": scope,
         "escalation_policy": escalation,
@@ -365,6 +389,9 @@ def decode_route(row: Dict[str, Any]) -> Dict[str, Any]:
         except (json.JSONDecodeError, TypeError):
             route[field] = []
     route["active"] = bool(route.get("active"))
+    route["menu_mode"] = str(route.get("menu_mode") or "").strip().upper()
+    if route["menu_mode"] not in _MENU_MODES:
+        route["menu_mode"] = "SELECTED" if route.get("menu_id") else "INHERIT"
     available = product_ids()
     route["unavailable_priority_products"] = [
         item for item in route["priority_products"] if item not in available

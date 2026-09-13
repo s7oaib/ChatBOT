@@ -38,7 +38,7 @@ log = get_logger("camellia.responder")
 
 def compose_topic_response(
     topic_title: str = "", topic_description: str = "", menu_text: str = "",
-    response_order: str = "description_first",
+    response_order: str = "description_first", menu_mode: str = "SELECTED",
 ) -> str:
     """Compose the shared Topic response used by preview and live Instagram.
 
@@ -49,6 +49,8 @@ def compose_topic_response(
     title = str(topic_title or "").strip()
     description = str(topic_description or "").strip()
     menu = str(menu_text or "").strip()
+    if str(menu_mode or "").strip().upper() == "NONE":
+        return description
     order = str(response_order or "").lower()
     ordered = [menu, description] if order == "menu_first" else [description, menu]
     parts = [title] + [part for part in ordered if part]
@@ -1864,9 +1866,11 @@ class DeterministicResponder:
             "awaiting_area_confirmation",
         ))
         source_product = priorities[0] if priorities else ad_product
+        route_menu_mode = str((source_route or {}).get("menu_mode") or "INHERIT").strip().upper()
+        menu_attached = route_menu_mode != "NONE"
         what_else = bool(re.fullmatch(r"what else(?: do you have)?[?!,. ]*", lowered_text))
         can_use_source = not active_flow and (not facts.get("last_topic") or what_else)
-        if channel == "instagram" and source_context_available and source_product and vague_opening and not explicit_product and can_use_source:
+        if channel == "instagram" and source_context_available and source_product and menu_attached and vague_opening and not explicit_product and can_use_source:
             cursor = int(facts.get("source_priority_cursor") or 0)
             if what_else and priorities:
                 source_product = priorities[min(cursor, len(priorities) - 1)]
@@ -1884,6 +1888,7 @@ class DeterministicResponder:
                         source_topic.get("name") or source_route.get("routing_topic"),
                         source_topic.get("description"), response_text,
                         source_topic.get("response_order") or "description_first",
+                        route_menu_mode,
                     )
                 facts["source_context_used"] = True
                 facts["source_priority_cursor"] = min(cursor + 1, len(priorities)) if priorities else 1
@@ -1893,7 +1898,7 @@ class DeterministicResponder:
         # A topic-only route may frame a vague opening, but the body still
         # comes from the approved overview template. The admin label is not
         # allowed to supply a price, promise, availability, or other fact.
-        if channel == "instagram" and source_context_available and source_route and vague_opening and not explicit_product and can_use_source:
+        if channel == "instagram" and source_context_available and source_route and vague_opening and not explicit_product and can_use_source and menu_attached:
             template = self._template_by_id("know_more")
             if template and template.get("response"):
                 response_text, images = self._format_dynamic_response(
@@ -1907,6 +1912,7 @@ class DeterministicResponder:
                     response_text = compose_topic_response(
                         topic, source_topic.get("description"), response_text,
                         source_topic.get("response_order") or "description_first",
+                        route_menu_mode,
                     )
                 elif topic:
                     response_text = f"About {topic}:\n\n{response_text}"
@@ -1928,6 +1934,19 @@ class DeterministicResponder:
                 facts["source_context_used"] = True
                 session_memory.add_turn(user_id, channel, user_message, response_text)
                 return response_text, True, "source_topic_know_more", images
+
+        # An explicit NONE route may publish its admin-authored description,
+        # but must not inherit a Topic menu, priority product, or overview
+        # template. With no description, the normal safe fallback continues.
+        if channel == "instagram" and source_context_available and source_route and route_menu_mode == "NONE" and not explicit_product and can_use_source:
+            description = (source_topic or {}).get("description") or ""
+            if description:
+                response_text = compose_topic_response(
+                    "", description, "", "description_first", "NONE",
+                )
+                facts["source_context_used"] = True
+                session_memory.add_turn(user_id, channel, user_message, response_text)
+                return response_text, True, "source_topic_description_only", None
 
         # An open flow is an answer the bot itself asked for: "which area are
         # you in", "Sondesh or Meals", "Option 1, 2 or 3". Those turns are
