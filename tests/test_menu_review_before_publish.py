@@ -20,9 +20,9 @@ from camellia.config import config
 db_module.db.init_db()
 client = TestClient(app)
 
-TEST_ADMIN_PIN = "test_pin_98765"
-config.ADMIN_PIN = TEST_ADMIN_PIN
-ADMIN_HEADERS = {"x-admin-pin": TEST_ADMIN_PIN}
+TEST_ADMIN_API_KEY = "test_admin_api_key_98765_long_enough"
+config.ADMIN_API_KEY = TEST_ADMIN_API_KEY
+ADMIN_HEADERS = {"x-admin-key": TEST_ADMIN_API_KEY}
 
 PASTED = """Veg:
 - Shukto (250g) - 280

@@ -162,6 +162,52 @@ class Database:
             );
             """)
 
+            # Admin authentication state is durable so a process restart does
+            # not erase brute-force throttles or revive a revoked session.
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS admin_login_throttles (
+                scope TEXT PRIMARY KEY,
+                failures INTEGER NOT NULL DEFAULT 0,
+                first_failed_at REAL,
+                last_failed_at REAL,
+                blocked_until REAL NOT NULL DEFAULT 0
+            );
+            """)
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS admin_sessions (
+                session_hash TEXT PRIMARY KEY,
+                username TEXT NOT NULL,
+                csrf_hash TEXT NOT NULL,
+                security_version TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                last_seen_at REAL NOT NULL,
+                expires_at REAL NOT NULL,
+                revoked_at REAL
+            );
+            """)
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS admin_recovery_codes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                code_hash TEXT NOT NULL UNIQUE,
+                created_at REAL NOT NULL,
+                used_at REAL
+            );
+            """)
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS admin_security_audit (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_type TEXT NOT NULL,
+                username TEXT,
+                ip_hash TEXT,
+                user_agent TEXT,
+                occurred_at REAL NOT NULL
+            );
+            """)
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_admin_security_audit_time "
+                "ON admin_security_audit(occurred_at DESC)"
+            )
+
             # Conversations log table
             cursor.execute("""
             CREATE TABLE IF NOT EXISTS conversations (
@@ -3577,5 +3623,189 @@ class Database:
                 approval_status, final_customer_response, datetime.utcnow().isoformat()
             ))
             conn.commit()
+
+    def admin_login_rate_status(self, scopes: List[str], now: float, window_seconds: float = 300.0) -> int:
+        """Return the remaining cooldown, if any, across login throttle scopes."""
+        with self.get_connection() as conn:
+            rows = conn.execute(
+                "SELECT scope, last_failed_at, blocked_until FROM admin_login_throttles "
+                f"WHERE scope IN ({','.join('?' for _ in scopes)})",
+                tuple(scopes),
+            ).fetchall() if scopes else []
+        retry_after = 0
+        for row in rows:
+            blocked_until = float(row["blocked_until"] or 0)
+            last_failed_at = row["last_failed_at"]
+            if blocked_until > now:
+                retry_after = max(retry_after, int(blocked_until - now) + 1)
+            elif last_failed_at is not None and now - float(last_failed_at) > window_seconds:
+                continue
+        return retry_after
+
+    def record_admin_login_failure(
+        self,
+        scopes: List[Tuple[str, int, float]],
+        now: float,
+        window_seconds: float = 300.0,
+    ) -> int:
+        """Atomically increment persistent throttle scopes and return cooldown."""
+        retry_after = 0
+        with self.get_connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            for scope, threshold, cooldown in scopes:
+                row = conn.execute(
+                    "SELECT failures, first_failed_at, last_failed_at, blocked_until "
+                    "FROM admin_login_throttles WHERE scope=?",
+                    (scope,),
+                ).fetchone()
+                failures = int(row["failures"] or 0) if row else 0
+                last_failed_at = float(row["last_failed_at"]) if row and row["last_failed_at"] is not None else None
+                if last_failed_at is None or now - last_failed_at > window_seconds:
+                    failures = 0
+                failures += 1
+                blocked_until = float(row["blocked_until"] or 0) if row else 0
+                if failures >= threshold:
+                    blocked_until = max(blocked_until, now + cooldown)
+                conn.execute(
+                    "INSERT INTO admin_login_throttles "
+                    "(scope, failures, first_failed_at, last_failed_at, blocked_until) "
+                    "VALUES (?, ?, ?, ?, ?) "
+                    "ON CONFLICT(scope) DO UPDATE SET failures=excluded.failures, "
+                    "first_failed_at=excluded.first_failed_at, last_failed_at=excluded.last_failed_at, "
+                    "blocked_until=excluded.blocked_until",
+                    (
+                        scope,
+                        failures,
+                        now if not row or last_failed_at is None or now - last_failed_at > window_seconds else row["first_failed_at"],
+                        now,
+                        blocked_until,
+                    ),
+                )
+                if blocked_until > now:
+                    retry_after = max(retry_after, int(blocked_until - now) + 1)
+            conn.commit()
+        return retry_after
+
+    def reset_admin_login_scopes(self, scopes: List[str]) -> None:
+        if not scopes:
+            return
+        with self.get_connection() as conn:
+            conn.executemany(
+                "DELETE FROM admin_login_throttles WHERE scope=?",
+                ((scope,) for scope in scopes),
+            )
+            conn.commit()
+
+    def create_admin_session(
+        self,
+        session_hash: str,
+        username: str,
+        csrf_hash: str,
+        security_version: str,
+        created_at: float,
+        expires_at: float,
+    ) -> None:
+        with self.get_connection() as conn:
+            conn.execute(
+                "INSERT INTO admin_sessions "
+                "(session_hash, username, csrf_hash, security_version, created_at, last_seen_at, expires_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (session_hash, username, csrf_hash, security_version, created_at, created_at, expires_at),
+            )
+            conn.commit()
+
+    def get_admin_session(
+        self,
+        session_hash: str,
+        now: float,
+        idle_seconds: float,
+        security_version: str,
+    ) -> Optional[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM admin_sessions WHERE session_hash=? AND revoked_at IS NULL",
+                (session_hash,),
+            ).fetchone()
+            if not row:
+                return None
+            if (
+                float(row["expires_at"]) <= now
+                or now - float(row["last_seen_at"]) > idle_seconds
+                or row["security_version"] != security_version
+            ):
+                conn.execute("UPDATE admin_sessions SET revoked_at=? WHERE session_hash=?", (now, session_hash))
+                conn.commit()
+                return None
+            conn.execute("UPDATE admin_sessions SET last_seen_at=? WHERE session_hash=?", (now, session_hash))
+            conn.commit()
+            return dict(row)
+
+    def revoke_admin_session(self, session_hash: str, now: float) -> None:
+        with self.get_connection() as conn:
+            conn.execute("UPDATE admin_sessions SET revoked_at=? WHERE session_hash=? AND revoked_at IS NULL", (now, session_hash))
+            conn.commit()
+
+    def revoke_admin_sessions_for_user(self, username: str, now: float) -> None:
+        with self.get_connection() as conn:
+            conn.execute("UPDATE admin_sessions SET revoked_at=? WHERE username=? AND revoked_at IS NULL", (now, username))
+            conn.commit()
+
+    def seed_admin_recovery_codes(self, code_hashes: List[str], now: float) -> None:
+        if not code_hashes:
+            return
+        with self.get_connection() as conn:
+            conn.executemany(
+                "INSERT OR IGNORE INTO admin_recovery_codes (code_hash, created_at) VALUES (?, ?)",
+                ((code_hash, now) for code_hash in code_hashes if code_hash),
+            )
+            conn.commit()
+
+    def consume_admin_recovery_code(self, code: str, verify_hash, now: float) -> bool:
+        with self.get_connection() as conn:
+            rows = conn.execute(
+                "SELECT id, code_hash FROM admin_recovery_codes WHERE used_at IS NULL ORDER BY id"
+            ).fetchall()
+            for row in rows:
+                if verify_hash(code, row["code_hash"]):
+                    updated = conn.execute(
+                        "UPDATE admin_recovery_codes SET used_at=? WHERE id=? AND used_at IS NULL",
+                        (now, row["id"]),
+                    )
+                    conn.commit()
+                    return updated.rowcount == 1
+        return False
+
+    def add_admin_recovery_code(self, code_hash: str, now: float) -> None:
+        with self.get_connection() as conn:
+            conn.execute(
+                "INSERT INTO admin_recovery_codes (code_hash, created_at) VALUES (?, ?)",
+                (code_hash, now),
+            )
+            conn.commit()
+
+    def record_admin_security_event(
+        self,
+        event_type: str,
+        username: Optional[str],
+        ip_hash: Optional[str],
+        user_agent: Optional[str],
+        occurred_at: float,
+    ) -> None:
+        with self.get_connection() as conn:
+            conn.execute(
+                "INSERT INTO admin_security_audit "
+                "(event_type, username, ip_hash, user_agent, occurred_at) VALUES (?, ?, ?, ?, ?)",
+                (str(event_type)[:80], str(username or "")[:200] or None, str(ip_hash or "")[:128] or None, str(user_agent or "")[:300] or None, occurred_at),
+            )
+            conn.commit()
+
+    def list_admin_security_events(self, limit: int = 100) -> List[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            rows = conn.execute(
+                "SELECT id, event_type, username, ip_hash, user_agent, occurred_at "
+                "FROM admin_security_audit ORDER BY id DESC LIMIT ?",
+                (max(1, min(int(limit), 500)),),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
 db = Database()

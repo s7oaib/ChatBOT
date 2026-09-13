@@ -7,15 +7,17 @@ import io
 import json
 import os
 import re
+import secrets
 import time
 import uuid
 import httpx
 from datetime import datetime
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from pathlib import Path
 from urllib.parse import urlsplit
 from fastapi import FastAPI, Request, Response, Query, Header, HTTPException, File, Form, UploadFile, BackgroundTasks
-from fastapi.responses import PlainTextResponse, HTMLResponse, RedirectResponse
+from fastapi.responses import PlainTextResponse, HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from typing import Dict, Any, List, Optional, Tuple
 from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -75,6 +77,16 @@ from camellia import menu_catalogue
 from camellia.menu_catalogue import MenuCatalogueError
 from camellia.session_memory import session_memory
 from camellia.monitoring import get_logger, delivery_monitor, latency_monitor, classify_instagram_delivery
+from camellia.admin_security import (
+    digest as security_digest,
+    generate_recovery_code,
+    hash_secret,
+    new_token,
+    normalize_username,
+    token_hash,
+    verify_password,
+    verify_totp,
+)
 from camellia.knowledge import SOURCE_MAP
 from camellia.candidate_safety import candidate_eligibility, detect_business_commitment_warnings, validate_candidate_answer
 from camellia.assisted_resolution import create_suggestion
@@ -82,6 +94,65 @@ from camellia.auto_resolve import simulate_auto_resolve
 from camellia.content_integrity import apply_confirmed_menu_facts, apply_safe_content_remediations
 
 log = get_logger("camellia.app")
+
+ADMIN_SESSION_COOKIE = "camellia_admin_session"
+ADMIN_CSRF_COOKIE = "camellia_admin_csrf"
+_admin_context: ContextVar[Optional[Dict[str, Any]]] = ContextVar("admin_context", default=None)
+
+
+def _admin_security_version() -> str:
+    return security_digest(
+        f"{config.ADMIN_PASSWORD_HASH}\x00{config.ADMIN_MFA_TOTP_SECRET}\x00{config.ADMIN_USERNAME}"
+    )
+
+
+def _admin_ip(request: Request) -> str:
+    return (request.client.host if request.client else "unknown")[:128]
+
+
+def _admin_scopes(username: str, ip: str) -> List[str]:
+    username_key = security_digest(normalize_username(username))
+    ip_key = security_digest(ip)
+    # The endpoint-wide bucket limits distributed guessing without making a
+    # single account lockout permanent or allowing username rotation to evade
+    # the network controls.
+    return [f"account:{username_key}", f"ip:{ip_key}", "endpoint:admin-login"]
+
+
+def _audit_admin_event(event_type: str, username: str, request: Request) -> None:
+    try:
+        db.record_admin_security_event(
+            event_type,
+            normalize_username(username)[:200] or None,
+            security_digest(_admin_ip(request)),
+            request.headers.get("user-agent", "")[:300],
+            time.time(),
+        )
+    except Exception:
+        log.warning("Could not record admin security event %s", event_type)
+
+
+def _request_is_secure(request: Request) -> bool:
+    forwarded = request.headers.get("x-forwarded-proto", "").split(",", 1)[0].strip().lower()
+    return request.url.scheme == "https" or forwarded == "https"
+
+
+def _require_secure_admin_request(request: Request) -> None:
+    # Railway terminates TLS at the edge and supplies X-Forwarded-Proto. Local
+    # TestClient can opt into HTTP only by explicitly disabling this setting.
+    if config.ADMIN_REQUIRE_HTTPS and not _request_is_secure(request):
+        raise HTTPException(status_code=400, detail="HTTPS is required for admin authentication.")
+
+
+def _set_admin_cookies(response: Response, session_token: str, csrf_token: str) -> None:
+    response.set_cookie(
+        ADMIN_SESSION_COOKIE, session_token, max_age=config.ADMIN_SESSION_ABSOLUTE_SECONDS,
+        httponly=True, secure=True, samesite="strict", path="/",
+    )
+    response.set_cookie(
+        ADMIN_CSRF_COOKIE, csrf_token, max_age=config.ADMIN_SESSION_ABSOLUTE_SECONDS,
+        httponly=False, secure=True, samesite="strict", path="/",
+    )
 
 
 def _prune_expired_weekly_menus() -> None:
@@ -126,6 +197,12 @@ async def lifespan(app: FastAPI):
     _prune_expired_weekly_menus()
 
     db.init_db()
+    configured_recovery_hashes = [
+        item.strip()
+        for item in re.split(r"[\s,]+", config.ADMIN_MFA_RECOVERY_CODE_HASHES or "")
+        if item.strip()
+    ]
+    db.seed_admin_recovery_codes(configured_recovery_hashes, time.time())
     # Apply only the audited, canonical copy corrections through the existing
     # versioned Response Library store.  This is idempotent and deliberately
     # preserves any distinct client-authored override.
@@ -162,26 +239,14 @@ async def lifespan(app: FastAPI):
             "trigger real escalation alerts. Set META_APP_SECRET (Meta App Dashboard "
             "> Settings > Basic > App Secret), then set REQUIRE_WEBHOOK_SIGNATURE=true."
         )
-    if not (config.ADMIN_API_KEY or config.ADMIN_PIN):
-        # require_admin() fails closed, so this is the admin UI being unusable
-        # rather than being exposed.
-        log.warning(
-            "Neither ADMIN_API_KEY nor ADMIN_PIN is set. /admin/* endpoints will "
-            "refuse every request with 503 — the dashboard cannot be opened."
-        )
-    else:
-        # A rejected login is otherwise unfalsifiable from the outside: the
-        # portal says "Incorrect PIN" whether the value is wrong, quoted, or
-        # carries a character that did not survive being pasted. Lengths are
-        # enough to spot every one of those and are only visible in the
-        # deployment's own logs — never on /health, which is public.
-        log.info(
-            "Admin credentials configured: ADMIN_PIN %s, ADMIN_API_KEY %s. "
-            "If a correct-looking value is refused, compare these lengths with "
-            "what you are typing.",
-            f"{len(config.ADMIN_PIN)} characters" if config.ADMIN_PIN else "not set",
-            f"{len(config.ADMIN_API_KEY)} characters" if config.ADMIN_API_KEY else "not set",
-        )
+    if not (config.ADMIN_USERNAME and config.ADMIN_PASSWORD_HASH):
+        log.critical("Browser admin authentication is not configured; password login fails closed.")
+    if config.ADMIN_MFA_REQUIRED and not config.ADMIN_MFA_TOTP_SECRET:
+        log.critical("Production admin MFA is required but ADMIN_MFA_TOTP_SECRET is not configured.")
+    if config.ADMIN_PIN:
+        log.warning("ADMIN_PIN is configured only as a legacy value and is never accepted for browser admin authentication.")
+    if config.ADMIN_API_KEY:
+        log.info("Machine admin API authentication is configured separately from browser sessions.")
     if not config.WHATSAPP_MOCK_MODE and not (config.WHATSAPP_ACCESS_TOKEN and config.WHATSAPP_PHONE_NUMBER_ID):
         log.critical(
             "WhatsApp is in live mode but WHATSAPP_ACCESS_TOKEN / WHATSAPP_PHONE_NUMBER_ID "
@@ -246,7 +311,52 @@ async def add_security_headers(request: Request, call_next):
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
     response.headers["X-XSS-Protection"] = "1; mode=block"
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; "
+        "form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' "
+        "https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; "
+        "img-src 'self' data: blob: https:; connect-src 'self'"
+    )
+    if request.url.path.startswith("/admin"):
+        response.headers["Cache-Control"] = "no-store, max-age=0"
+    if _request_is_secure(request):
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     return response
+
+
+@app.middleware("http")
+async def admin_session_middleware(request: Request, call_next):
+    """Load server-side admin sessions and enforce browser CSRF protection."""
+    public_paths = {"/admin", "/admin/dashboard", "/admin/login", "/admin/verify-pin"}
+    if not request.url.path.startswith("/admin"):
+        return await call_next(request)
+    if request.url.path in public_paths:
+        return await call_next(request)
+    if config.ADMIN_REQUIRE_HTTPS and not _request_is_secure(request):
+        return JSONResponse(status_code=400, content={"detail": "HTTPS is required for admin access."})
+
+    session_token = request.cookies.get(ADMIN_SESSION_COOKIE, "")
+    context_token = None
+    if session_token:
+        session = db.get_admin_session(
+            token_hash(session_token), time.time(),
+            config.ADMIN_SESSION_IDLE_SECONDS, _admin_security_version(),
+        )
+        if session:
+            if request.method not in {"GET", "HEAD", "OPTIONS"}:
+                csrf_token = request.headers.get("x-csrf-token", "")
+                if not csrf_token or not hmac.compare_digest(
+                    token_hash(csrf_token), session["csrf_hash"]
+                ):
+                    return JSONResponse(status_code=403, content={"detail": "CSRF validation failed."})
+            context_token = _admin_context.set({"kind": "session", **session})
+        elif session_token:
+            _audit_admin_event("SESSION_EXPIRED", "", request)
+    try:
+        return await call_next(request)
+    finally:
+        if context_token is not None:
+            _admin_context.reset(context_token)
 
 # Serve menu photo JPEGs from the dedicated images/ subdirectory.
 # Mounting BASE_DIR directly would expose .env, source files and the database.
@@ -298,21 +408,17 @@ def verify_meta_signature(raw_body: bytes, signature_header: Optional[str]) -> N
         raise HTTPException(status_code=403, detail="Invalid payload signature")
 
 def require_admin(provided_key: Optional[str] = None, provided_pin: Optional[str] = None) -> None:
-    """
-    Guards /admin/* routes, which expose customer conversations and can
-    overwrite the live menu. Accepts either ADMIN_API_KEY or ADMIN_PIN.
-    Fails closed if no admin keys or pins are configured in the environment.
-    """
-    valid_keys = [k.strip() for k in (config.ADMIN_API_KEY, config.ADMIN_PIN) if k and k.strip()]
-    if not valid_keys:
-        log.error("Admin access blocked: neither ADMIN_API_KEY nor ADMIN_PIN is configured.")
-        raise HTTPException(
-            status_code=503,
-            detail="Admin interface disabled: no ADMIN_API_KEY or ADMIN_PIN configured in environment"
-        )
-    token = (provided_key or provided_pin or "").strip()
-    if not token or not any(hmac.compare_digest(k, token) for k in valid_keys):
-        raise HTTPException(status_code=403, detail="Invalid or missing X-Admin-Key or PIN")
+    """Require a server-side browser session or the separate machine API key."""
+    if provided_key and config.ADMIN_API_KEY and hmac.compare_digest(
+        config.ADMIN_API_KEY.strip(), provided_key.strip()
+    ):
+        return
+    # x-admin-pin is intentionally ignored. Leaving the parameter in the
+    # endpoint signatures avoids a broad route rewrite, but a short PIN can no
+    # longer authenticate any browser or API request.
+    if _admin_context.get() and _admin_context.get().get("kind") == "session":
+        return
+    raise HTTPException(status_code=403, detail="Authentication required.")
 
 def require_web_tester() -> None:
     """
@@ -2027,6 +2133,13 @@ def health_check():
             "webhook_signature": signature,
             "outbound_delivery": outbound,
             "instagram_token": instagram_token,
+            "admin_auth": {
+                "password_configured": bool(config.ADMIN_USERNAME and config.ADMIN_PASSWORD_HASH),
+                "mfa_required": bool(config.ADMIN_MFA_REQUIRED),
+                "mfa_configured": bool(config.ADMIN_MFA_TOTP_SECRET),
+                "machine_api_configured": bool(config.ADMIN_API_KEY),
+                "https_required": bool(config.ADMIN_REQUIRE_HTTPS),
+            },
             # Diagnostic only: no traffic is not an outage, so this block never
             # participates in the overall healthy/degraded calculation.
             "instagram_outbound": instagram_outbound,
@@ -2059,28 +2172,144 @@ def health_check():
 
 MAX_UPLOAD_SIZE = 10 * 1024 * 1024  # 10 MB limit for menu images
 
+def _admin_login_rate_limit(request: Request, username: str) -> int:
+    return db.admin_login_rate_status(_admin_scopes(username, _admin_ip(request)), time.time())
+
+
+def _admin_login_failed(request: Request, username: str, event_type: str) -> int:
+    retry_after = db.record_admin_login_failure(
+        [
+            (f"account:{security_digest(normalize_username(username))}", 5, 60),
+            (f"ip:{security_digest(_admin_ip(request))}", 5, 60),
+            ("endpoint:admin-login", 50, 300),
+        ],
+        time.time(),
+    )
+    _audit_admin_event(event_type, username, request)
+    return retry_after
+
+
+def _generic_login_failure(retry_after: int = 0) -> JSONResponse:
+    if retry_after:
+        return JSONResponse(
+            status_code=429,
+            content={"detail": "Too many login attempts. Try again later."},
+            headers={"Retry-After": str(retry_after)},
+        )
+    return JSONResponse(status_code=401, content={"detail": "Invalid credentials."})
+
+
+@app.post("/admin/login")
+@limiter.limit("60/minute")
+async def admin_login(request: Request):
+    """Authenticate the browser without returning or storing a raw secret."""
+    _require_secure_admin_request(request)
+    if int(request.headers.get("content-length", "0") or 0) > 8192:
+        raise HTTPException(status_code=413, detail="Login request too large.")
+    try:
+        raw = await request.body()
+        if len(raw) > 8192:
+            raise HTTPException(status_code=413, detail="Login request too large.")
+        body = json.loads(raw or b"{}")
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid login request.")
+
+    username = str(body.get("username") or "").strip()
+    password = str(body.get("password") or "")
+    totp_code = str(body.get("totp") or "").strip()
+    retry_after = _admin_login_rate_limit(request, username)
+    if retry_after:
+        _audit_admin_event("RATE_LIMIT", username, request)
+        return _generic_login_failure(retry_after)
+
+    configured_username = normalize_username(config.ADMIN_USERNAME)
+    password_ok = verify_password(password, config.ADMIN_PASSWORD_HASH)
+    username_ok = bool(configured_username) and hmac.compare_digest(
+        normalize_username(username), configured_username
+    )
+    if not username_ok or not password_ok:
+        retry_after = _admin_login_failed(request, username, "LOGIN_FAILURE")
+        return _generic_login_failure(retry_after)
+
+    recovery_used = False
+    if config.ADMIN_MFA_REQUIRED:
+        if not config.ADMIN_MFA_TOTP_SECRET:
+            _audit_admin_event("MFA_UNAVAILABLE", username, request)
+            return JSONResponse(status_code=503, content={"detail": "Admin authentication is not configured."})
+        if not totp_code:
+            return JSONResponse(status_code=200, content={"mfa_required": True})
+        totp_ok = verify_totp(config.ADMIN_MFA_TOTP_SECRET, totp_code)
+        if not totp_ok and totp_code:
+            recovery_used = db.consume_admin_recovery_code(totp_code, verify_password, time.time())
+        if not totp_ok and not recovery_used:
+            retry_after = _admin_login_failed(request, username, "MFA_FAILURE")
+            return _generic_login_failure(retry_after)
+        _audit_admin_event("MFA_SUCCESS", username, request)
+
+    now = time.time()
+    db.reset_admin_login_scopes(_admin_scopes(username, _admin_ip(request))[:2])
+    session_token = new_token()
+    csrf_token = new_token()
+    db.create_admin_session(
+        token_hash(session_token), normalize_username(username), token_hash(csrf_token),
+        _admin_security_version(), now, now + config.ADMIN_SESSION_ABSOLUTE_SECONDS,
+    )
+    _audit_admin_event("LOGIN_SUCCESS", username, request)
+    response = JSONResponse(content={"status": "authenticated", "username": normalize_username(username)})
+    _set_admin_cookies(response, session_token, csrf_token)
+    return response
+
+
 @app.post("/admin/verify-pin")
 @limiter.limit("10/minute")
 async def verify_admin_pin(request: Request):
-    """Validates the 5-digit PIN or API key for the Admin dashboard."""
-    try:
-        body = await request.json()
-        pin = str(body.get("pin", "")).strip()
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    """Retired legacy endpoint; it cannot authenticate or bypass sessions."""
+    _require_secure_admin_request(request)
+    _audit_admin_event("LEGACY_PIN_REJECTED", "", request)
+    return JSONResponse(
+        status_code=410,
+        content={"detail": "Legacy PIN authentication is retired. Use username and password."},
+    )
 
-    valid_keys = [k.strip() for k in (config.ADMIN_PIN, config.ADMIN_API_KEY) if k and k.strip()]
-    if not valid_keys:
-        log.error("Admin PIN verification blocked: no credentials configured in environment.")
-        raise HTTPException(
-            status_code=503, 
-            detail="Admin interface disabled: no ADMIN_PIN or ADMIN_API_KEY configured in environment"
-        )
 
-    if pin and any(hmac.compare_digest(k, pin) for k in valid_keys):
-        return {"valid": True, "message": "PIN verified successfully."}
+@app.get("/admin/session")
+def admin_session_status():
+    require_admin()
+    session = _admin_context.get() or {}
+    return {"authenticated": True, "username": session.get("username")}
 
-    raise HTTPException(status_code=401, detail="Incorrect Admin PIN or Key")
+
+@app.post("/admin/logout")
+def admin_logout(request: Request):
+    require_admin()
+    session = _admin_context.get() or {}
+    session_hash = session.get("session_hash")
+    if session_hash:
+        db.revoke_admin_session(session_hash, time.time())
+    _audit_admin_event("LOGOUT", session.get("username", ""), request)
+    response = JSONResponse(content={"status": "logged_out"})
+    response.delete_cookie(ADMIN_SESSION_COOKIE, path="/", secure=True, httponly=True, samesite="strict")
+    response.delete_cookie(ADMIN_CSRF_COOKIE, path="/", secure=True, httponly=False, samesite="strict")
+    return response
+
+
+@app.post("/admin/security/recovery-codes")
+def generate_admin_recovery_codes(request: Request):
+    require_admin()
+    codes = [generate_recovery_code() for _ in range(10)]
+    now = time.time()
+    for code in codes:
+        db.add_admin_recovery_code(hash_secret(code), now)
+    _audit_admin_event("RECOVERY_CODES_GENERATED", (_admin_context.get() or {}).get("username", ""), request)
+    return {"status": "generated", "codes": codes, "warning": "Shown once. Store securely; they cannot be retrieved again."}
+
+
+@app.get("/admin/security/audit")
+def get_admin_security_audit(limit: int = 100):
+    require_admin()
+    return {"events": db.list_admin_security_events(limit)}
 
 @app.get("/admin/menu/active")
 def get_active_menu(x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
@@ -4964,7 +5193,7 @@ def get_admin_dashboard():
     """
     Dedicated PIN-Protected Kitchen & Menu Management Portal for Camellia Artisanal.
     Features:
-    - PIN Authentication (Configured ADMIN_PIN or ADMIN_API_KEY from environment)
+    - Username/password authentication with optional production MFA
     - 📋 Paste Menu Card Text Parser
     - 📸 Drag-and-Drop Image Flyer Upload with Groq Vision OCR
     - 📊 Google Sheets Live Sync
@@ -4976,7 +5205,7 @@ def get_admin_dashboard():
     # sees it: a JS "\n" became a real newline and "\'" became a bare quote,
     # each of which terminated a JavaScript string literal early. One such line
     # was enough to make the whole <script> fail to parse, so every function in
-    # the dashboard — verifyPin included — was never defined and the Unlock
+    # the dashboard — including its login handler — was never defined and the Unlock
     # button silently did nothing. Raw keeps escapes intact for JavaScript, and
     # nothing here relies on Python expanding them.
     html_content = r"""<!DOCTYPE html>
@@ -5009,7 +5238,7 @@ def get_admin_dashboard():
         * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Plus Jakarta Sans', sans-serif; }
         body { background: var(--bg); color: var(--text-dark); min-height: 100vh; display: flex; flex-direction: column; }
         
-        /* PIN Lock Overlay */
+        /* Secure admin login overlay */
         .auth-overlay {
             position: fixed; inset: 0; background: rgba(31,28,27,0.96);
             backdrop-filter: blur(12px); display: flex; justify-content: center; align-items: center; z-index: 1000; padding: 20px;
@@ -5026,13 +5255,14 @@ def get_admin_dashboard():
         }
         .auth-card h2 { font-family: 'Outfit', sans-serif; font-size: 1.45rem; color: var(--primary); margin-bottom: 6px; }
         .auth-card p { font-size: 0.88rem; color: var(--text-muted); margin-bottom: 24px; line-height: 1.4; }
-        .pin-input-wrap { margin-bottom: 20px; }
-        .pin-input {
-            width: 100%; max-width: 260px; font-size: 2rem; letter-spacing: 12px; text-align: center;
-            padding: 12px 16px; border: 2px solid #E2E8F0; border-radius: 16px; outline: none; font-weight: 700;
+        .credential-input-wrap { margin-bottom: 14px; text-align: left; }
+        .credential-input-wrap label { display:block; font-size:.78rem; color:var(--text-muted); margin:0 0 6px 4px; }
+        .credential-input {
+            width: 100%; max-width: 320px; font-size: 1rem; letter-spacing: 0; text-align: left;
+            padding: 12px 16px; border: 2px solid #E2E8F0; border-radius: 12px; outline: none; font-weight: 500;
             color: var(--primary); background: #FAF9F8; transition: all 0.2s ease;
         }
-        .pin-input:focus { border-color: var(--primary); background: #FFFFFF; box-shadow: 0 0 0 4px rgba(139,30,63,0.12); }
+        .credential-input:focus { border-color: var(--primary); background: #FFFFFF; box-shadow: 0 0 0 4px rgba(139,30,63,0.12); }
         .auth-btn {
             width: 100%; max-width: 260px; background: var(--primary); color: white; border: none; padding: 14px 20px;
             border-radius: 14px; font-size: 1rem; font-weight: 600; cursor: pointer; transition: all 0.2s;
@@ -5303,29 +5533,31 @@ def get_admin_dashboard():
 </head>
 <body>
 
-    <!-- Authentication PIN Overlay -->
+    <!-- Server-side session authentication overlay -->
     <div class="auth-overlay" id="authOverlay">
         <div class="auth-card" id="authCard">
             <div class="auth-icon">🔐</div>
             <h2>Kitchen Admin Portal</h2>
             <p>Protected access for Camellia Artisanal kitchen managers & staff.</p>
             
-            <div class="pin-input-wrap">
-                <!-- No maxlength: the browser truncates silently, so a PIN or
-                     API key longer than the cap was cut down before it was ever
-                     sent and came back "Incorrect PIN" while being correct.
-                     This box also accepts ADMIN_API_KEY, which is far longer
-                     than any PIN. -->
-                <input type="password" id="pinInput" class="pin-input" placeholder="•••••" autofocus onkeydown="if(event.key==='Enter') verifyPin()">
+            <div class="credential-input-wrap">
+                <label for="usernameInput">Username</label>
+                <input type="text" id="usernameInput" class="credential-input" autocomplete="username" autofocus onkeydown="if(event.key==='Enter') loginAdmin()">
+            </div>
+            <div class="credential-input-wrap">
+                <label for="passwordInput">Password</label>
+                <input type="password" id="passwordInput" class="credential-input" autocomplete="current-password" onkeydown="if(event.key==='Enter') loginAdmin()">
+            </div>
+            <div class="credential-input-wrap" id="totpInputWrap" style="display:none">
+                <label for="totpInput">Authenticator code</label>
+                <input type="text" id="totpInput" class="credential-input" inputmode="numeric" autocomplete="one-time-code" maxlength="6" onkeydown="if(event.key==='Enter') loginAdmin()">
             </div>
             
-            <button class="auth-btn" onclick="verifyPin()">
+            <button class="auth-btn" onclick="loginAdmin()">
                 <span>Unlock Portal</span> ➔
             </button>
             
-            <p class="auth-hint">
-                💡 <b>Kitchen Staff PIN:</b> Enter configured staff PIN or API Key (from server environment) to manage dishes & live bot responses.
-            </p>
+            <p class="auth-hint">Use your configured admin username, password, and authenticator code when prompted.</p>
         </div>
     </div>
 
@@ -6267,26 +6499,30 @@ THIS WEEK'S BENGAL SPECIALS
     </div>
 
     <script>
-        // Remembering the PIN between page loads is a convenience, never part
-        // of authentication — so no storage failure may stand between a valid
-        // PIN and the portal. Every one of these throws when site data is
-        // blocked, in private browsing, and inside in-app browsers such as
-        // Instagram's. The read below used to be bare and at top-level scope,
-        // where a single SecurityError aborted the whole script: verifyPin was
-        // then never defined and the Unlock button did nothing at all, with no
-        // message to explain it.
-        function safeStorageGet(key) {
-            try { return sessionStorage.getItem(key) || ''; } catch (e) { return ''; }
-        }
-        function safeStorageSet(key, value) {
-            try { sessionStorage.setItem(key, value); } catch (e) { /* not fatal */ }
-        }
-        function safeStorageRemove(key) {
-            try { sessionStorage.removeItem(key); } catch (e) { /* not fatal */ }
+        // Authentication state lives in an HttpOnly server cookie. JavaScript
+        // sees only the short-lived CSRF token, never the session token,
+        // password, PIN, or machine API key.
+        let adminAuthenticated = false;
+        let selectedFile = null;
+
+        function readCookie(name) {
+            const prefix = name + '=';
+            const item = document.cookie.split('; ').find(row => row.startsWith(prefix));
+            return item ? decodeURIComponent(item.slice(prefix.length)) : '';
         }
 
-        let currentAdminKey = safeStorageGet('camellia_admin_pin');
-        let selectedFile = null;
+        async function checkAdminSession() {
+            try {
+                const resp = await fetch('/admin/session', { credentials: 'same-origin' });
+                if (!resp.ok) throw new Error('not authenticated');
+                adminAuthenticated = true;
+                document.getElementById('authOverlay').style.display = 'none';
+                loadActiveMenu(); loadAdRoutes(); loadAnalytics(); refreshCandidateBadge();
+            } catch (e) {
+                adminAuthenticated = false;
+                document.getElementById('authOverlay').style.display = 'flex';
+            }
+        }
 
         // On Load: check if authenticated
         // The reader light used to be hardcoded to Ready. /health knows whether
@@ -6327,37 +6563,37 @@ THIS WEEK'S BENGAL SPECIALS
             // leading panel shows and the rest look like they do not exist.
             showGroup('menu');
             refreshReaderStatus();
-            if (currentAdminKey) {
-                document.getElementById('authOverlay').style.display = 'none';
-                loadActiveMenu();
-                loadAdRoutes();
-                loadAnalytics();
-                refreshCandidateBadge();
-            } else {
-                document.getElementById('authOverlay').style.display = 'flex';
-            }
+            checkAdminSession();
             setupDragAndDrop();
         });
 
-        async function verifyPin() {
-            const pin = document.getElementById('pinInput').value.trim();
-            if (!pin) return;
+        async function loginAdmin() {
+            const username = document.getElementById('usernameInput').value.trim();
+            const passwordInput = document.getElementById('passwordInput');
+            const totpInput = document.getElementById('totpInput');
+            const password = passwordInput.value;
+            const totp = totpInput.value.trim();
+            if (!username || !password) return;
 
             try {
-                const resp = await fetch('/admin/verify-pin', {
+                const resp = await fetch('/admin/login', {
                     method: 'POST',
+                    credentials: 'same-origin',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({ pin: pin })
+                    body: JSON.stringify({ username: username, password: password, totp: totp })
                 });
+                const data = await resp.json().catch(() => ({}));
 
                 if (resp.ok) {
-                    // Unlock first. Persisting the PIN is optional, and doing
-                    // it first meant a storage failure threw before the overlay
-                    // was hidden — the outer catch then reported a correct PIN
-                    // as "Connection error" and the portal stayed locked.
-                    currentAdminKey = pin;
+                    if (data.mfa_required) {
+                        document.getElementById('totpInputWrap').style.display = 'block';
+                        totpInput.focus();
+                        return;
+                    }
+                    adminAuthenticated = true;
+                    passwordInput.value = '';
+                    totpInput.value = '';
                     document.getElementById('authOverlay').style.display = 'none';
-                    safeStorageSet('camellia_admin_pin', pin);
                     loadActiveMenu();
                     loadAdRoutes();
                     loadAnalytics();
@@ -6366,38 +6602,31 @@ THIS WEEK'S BENGAL SPECIALS
                     const card = document.getElementById('authCard');
                     card.classList.add('shake');
                     setTimeout(() => card.classList.remove('shake'), 400);
-                    // Every failure used to read "Incorrect PIN", which sent
-                    // people hunting for a wrong password when the real cause
-                    // was the rate limit or an unconfigured server.
                     if (resp.status === 429) {
-                        alert('Too many attempts. The server allows 10 per minute — wait a minute and try again.');
+                        alert('Too many login attempts. Try again later.');
                     } else if (resp.status === 503) {
-                        alert('No ADMIN_PIN or ADMIN_API_KEY is configured on the server, so the portal cannot be opened. Set one in the deployment environment and redeploy.');
+                        alert('Admin authentication is temporarily unavailable.');
                     } else {
-                        alert('Incorrect PIN. Please enter your configured admin PIN or admin key.');
+                        alert('Invalid credentials.');
                     }
                 }
             } catch (err) {
-                // Naming the error matters: this branch also catches faults
-                // that have nothing to do with the network, and calling all of
-                // them "Connection error" hid a browser-side failure behind a
-                // server-side explanation.
-                alert('Could not verify the PIN: ' + (err && err.message ? err.message : err));
+                alert('Could not complete admin login.');
             }
         }
 
-        function lockPortal() {
-            safeStorageRemove('camellia_admin_pin');
-            currentAdminKey = '';
-            document.getElementById('pinInput').value = '';
+        async function lockPortal() {
+            try { await fetch('/admin/logout', { method: 'POST', headers: getAuthHeaders(), credentials: 'same-origin' }); } catch (e) { /* session expires server-side */ }
+            adminAuthenticated = false;
+            document.getElementById('passwordInput').value = '';
+            document.getElementById('totpInput').value = '';
+            document.getElementById('totpInputWrap').style.display = 'none';
             document.getElementById('authOverlay').style.display = 'flex';
         }
 
         function getAuthHeaders() {
-            return {
-                'X-Admin-Key': currentAdminKey,
-                'X-Admin-Pin': currentAdminKey
-            };
+            const csrf = readCookie('camellia_admin_csrf');
+            return csrf ? { 'X-CSRF-Token': csrf } : {};
         }
 
         function escapeHtml(str) {
@@ -6453,7 +6682,7 @@ THIS WEEK'S BENGAL SPECIALS
 
         async function mmLoadMenuList() {
             const list = document.getElementById('mmMenuList');
-            if (!list || !currentAdminKey) return;
+            if (!list || !adminAuthenticated) return;
             try {
                 const resp = await fetch('/admin/menu-manager/menus', { headers: getAuthHeaders() });
                 const data = await resp.json();
@@ -6480,7 +6709,7 @@ THIS WEEK'S BENGAL SPECIALS
         // catalogue directly means every menu, old or brand new, shows up.
         async function mmRenderImageGallery() {
             const grid = document.getElementById('mmImageGrid');
-            if (!grid || !currentAdminKey) return;
+            if (!grid || !adminAuthenticated) return;
             try {
                 const resp = await fetch('/admin/menu-manager/images', { headers: getAuthHeaders() });
                 const data = await resp.json();
@@ -7260,7 +7489,7 @@ THIS WEEK'S BENGAL SPECIALS
         }
         async function loadAdRoutes() {
             const list = document.getElementById('adRouteList');
-            if (!list || !currentAdminKey) return;
+            if (!list || !adminAuthenticated) return;
             try {
                 const query = igRouteTab === 'archived' ? '?include_archived=true' : '';
                 const resp = await fetch(`/admin/instagram-routes${query}`, { headers: getAuthHeaders() });

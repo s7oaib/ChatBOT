@@ -62,7 +62,7 @@ def test_risky_request_remains_human_gated(isolated_assisted):
 def test_authenticated_approval_is_the_only_send_path(monkeypatch, tmp_path):
     database = Database(str(tmp_path / "api.db"))
     monkeypatch.setattr(app_module, "db", database)
-    monkeypatch.setattr(config, "ADMIN_PIN", "assisted-test-pin")
+    monkeypatch.setattr(config, "ADMIN_API_KEY", "assisted-test-api-key-long-enough")
     sent = []
     # The production sender accepts correlation/audit metadata as keyword-only
     # arguments.  Keep this test focused on the approval gate while allowing
@@ -81,7 +81,7 @@ def test_authenticated_approval_is_the_only_send_path(monkeypatch, tmp_path):
     assert client.post(f"/admin/assisted-resolutions/{suggestion_id}/approve", json={}).status_code in {401, 403}
     response = client.post(
         f"/admin/assisted-resolutions/{suggestion_id}/approve",
-        headers={"x-admin-pin": "assisted-test-pin"}, json={},
+        headers={"x-admin-key": "assisted-test-api-key-long-enough"}, json={},
     )
     assert response.status_code == 200
     assert sent == [("u3", "Jolbhora is a sweet.")]

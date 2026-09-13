@@ -56,14 +56,14 @@ db_module.db.init_db()
 
 client = TestClient(app)
 
-TEST_ADMIN_PIN = "test_pin_98765"
-config.ADMIN_PIN = TEST_ADMIN_PIN
-ADMIN_HEADERS = {"x-admin-pin": TEST_ADMIN_PIN}
+TEST_ADMIN_API_KEY = "test_admin_api_key_98765_long_enough"
+config.ADMIN_API_KEY = TEST_ADMIN_API_KEY
+ADMIN_HEADERS = {"x-admin-key": TEST_ADMIN_API_KEY}
 
 @pytest.fixture(autouse=True)
 def ensure_db():
     db_module.db.init_db()
-    config.ADMIN_PIN = TEST_ADMIN_PIN
+    config.ADMIN_API_KEY = TEST_ADMIN_API_KEY
 
 
 def test_admin_dashboard_page():
@@ -78,36 +78,26 @@ def test_admin_dashboard_page():
     assert resp_dash.status_code == 200
     assert resp_dash.text == resp.text
 
-def test_verify_pin_endpoint():
-    """Tests the PIN validation API endpoint."""
-    # Correct PIN
-    resp = client.post("/admin/verify-pin", json={"pin": TEST_ADMIN_PIN})
-    assert resp.status_code == 200
-    data = resp.json()
-    assert data.get("valid") is True
-
-    # Incorrect PIN
-    resp_bad = client.post("/admin/verify-pin", json={"pin": "wrong_pin_00000"})
-    assert resp_bad.status_code == 401
-    assert "detail" in resp_bad.json()
+def test_verify_pin_endpoint_is_retired():
+    """The legacy PIN endpoint cannot authenticate or bypass sessions."""
+    response = client.post("/admin/verify-pin", json={"pin": "anything"})
+    assert response.status_code == 410
 
 def test_admin_auth_fails_closed_when_unconfigured():
-    """Ensures /admin endpoints return 503 Service Unavailable if no ADMIN_PIN or ADMIN_API_KEY is configured in env."""
+    """Ensures admin endpoints fail closed if machine auth is unconfigured."""
     orig_pin = config.ADMIN_PIN
     orig_key = config.ADMIN_API_KEY
     try:
         config.ADMIN_PIN = ""
         config.ADMIN_API_KEY = ""
         
-        # Protected route fails closed with 503
+        # Protected route rejects the request; no legacy PIN bypass remains.
         resp = client.get("/admin/menu/active", headers={"x-admin-pin": "any_pin"})
-        assert resp.status_code == 503
-        assert "disabled" in resp.json().get("detail", "").lower()
+        assert resp.status_code == 403
         
-        # Verify PIN endpoint also fails closed with 503
+        # The retired endpoint remains unavailable regardless of configuration.
         resp_pin = client.post("/admin/verify-pin", json={"pin": "any_pin"})
-        assert resp_pin.status_code == 503
-        assert "disabled" in resp_pin.json().get("detail", "").lower()
+        assert resp_pin.status_code == 410
     finally:
         config.ADMIN_PIN = orig_pin
         config.ADMIN_API_KEY = orig_key
@@ -122,7 +112,7 @@ def test_admin_auth_protection():
     resp = client.get("/admin/menu/active", headers={"x-admin-pin": "wrongpin"})
     assert resp.status_code == 403
 
-    # With valid PIN header
+    # With valid machine API-key header
     resp = client.get("/admin/menu/active", headers=ADMIN_HEADERS)
     assert resp.status_code == 200
     assert resp.json().get("status") == "success"
@@ -487,35 +477,23 @@ def test_blocked_browser_storage_cannot_prevent_login():
     """
     page = client.get("/admin").text
 
-    assert "function safeStorageGet" in page
-    assert "function safeStorageSet" in page
-    # No bare sessionStorage call may remain outside the wrappers.
-    body = page.replace("try { return sessionStorage.getItem(key)", "") \
-               .replace("try { sessionStorage.setItem(key, value)", "") \
-               .replace("try { sessionStorage.removeItem(key)", "")
-    assert "sessionStorage." not in body, "a bare sessionStorage call can abort the script"
-
-    # The unlock must happen before the PIN is persisted.
-    unlock = page.index("authOverlay').style.display = 'none'")
-    persist = page.index("safeStorageSet('camellia_admin_pin'")
-    assert unlock < persist, "the portal must unlock before it tries to remember the PIN"
+    assert "function checkAdminSession" in page
+    assert "function loginAdmin" in page
+    assert "sessionStorage" not in page
+    assert "X-Admin-Key': currentAdminKey" not in page
 
 
-def test_pin_box_never_truncates_the_credential():
+def test_password_login_fields_do_not_expose_or_truncate_credentials():
     """
     The login box must not cap what can be typed into it.
 
-    It carried maxlength="8", so the browser silently cut a longer credential
-    down before sending it. The backend then compared the truncated value and
-    answered "Incorrect PIN" for a PIN that was correct — and ADMIN_API_KEY,
-    which this same box accepts, is far longer than eight characters and could
-    never have been entered at all.
+    The browser login uses username/password fields and does not persist a
+    password, PIN, or machine API key in browser storage.
     """
     page = client.get("/admin").text
-    pin_input = page[page.index('id="pinInput"') - 200: page.index('id="pinInput"') + 200]
-    assert "maxlength" not in pin_input, (
-        "a maxlength on the PIN box silently truncates the credential before it is sent"
-    )
+    assert 'id="usernameInput"' in page
+    assert 'id="passwordInput"' in page
+    assert 'id="pinInput"' not in page
 
 
 def test_login_distinguishes_rate_limiting_from_a_wrong_pin():

@@ -3242,11 +3242,11 @@ class TestGoogleSheetMenuSync(unittest.TestCase):
 
         client = TestClient(fastapi_app)
         with patch.object(config, "GOOGLE_SHEET_CSV_URL", "https://docs.google.com/x/pub?output=csv"), \
-             patch.object(config, "ADMIN_PIN", "1234"), \
+             patch.object(config, "ADMIN_API_KEY", "test-api-key-long-enough"), \
              patch("camellia.app.sheet_sync.sync_from_csv_url") as mock_remote, \
              patch("camellia.app.sheet_sync.sync_local_reload") as mock_local:
             mock_remote.return_value = {"status": "success", "updated_items_count": 3}
-            resp = client.post("/admin/sync-menu", headers={"X-Admin-Pin": "1234"})
+            resp = client.post("/admin/sync-menu", headers={"X-Admin-Key": "test-api-key-long-enough"})
 
         self.assertEqual(resp.status_code, 200)
         mock_remote.assert_called_once()

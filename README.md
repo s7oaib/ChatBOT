@@ -43,7 +43,7 @@ Built to convert Meta Ad leads, filter out organic DM noise, send high-resolutio
 - **Owner Notification**: Logs customer IDs, channels, and message snippets in `camellia.db`, then alerts human staff via SMS/Email.
 
 ### 5. 🔐 Kitchen & Menu Admin Portal (`/admin` / `/admin/dashboard`)
-- **PIN Authentication**: Secure PIN access for kitchen staff and managers (configured via `ADMIN_PIN` in `.env`; blocks access if unconfigured).
+- **Secure Admin Authentication**: Browser access uses `ADMIN_USERNAME` + an Argon2id `ADMIN_PASSWORD_HASH`, production TOTP MFA, durable rate limiting, CSRF-protected server sessions, and logout revocation. `ADMIN_API_KEY` remains a separate machine credential; legacy `ADMIN_PIN` is not accepted.
 - **📋 Paste Menu Card Parser**: Extracts dish names, descriptions, weights, and prices from raw WhatsApp text, flyer notes, or dish lists, automatically categorizing items as Veg or Non-Veg.
 - **📸 Flyer Photo & Graphic OCR**: Scans printed menu photos or Instagram flyers with a Groq vision model, using the same key the bot already needs for replies.
 - **📊 Google Sheets Live Sync**: One-click sync from Google Sheets CSV without server restarts or touching code.

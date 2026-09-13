@@ -24,8 +24,8 @@ db_module.db.init_db()
 client = TestClient(app)
 
 
-TEST_PIN = "test_pin_decouple"
-ADMIN = {"x-admin-pin": TEST_PIN}
+TEST_ADMIN_API_KEY = "test_admin_api_key_decouple_long_enough"
+ADMIN = {"x-admin-key": TEST_ADMIN_API_KEY}
 
 JPEG = b"\xff\xd8\xff\xe0" + b"0" * 64
 
@@ -33,11 +33,11 @@ JPEG = b"\xff\xd8\xff\xe0" + b"0" * 64
 @pytest.fixture(autouse=True)
 def isolated(tmp_path):
     original = config.MENU_JSON_PATH
-    original_pin = config.ADMIN_PIN
+    original_key = config.ADMIN_API_KEY
     with open(original, "r", encoding="utf-8") as f:
         (tmp_path / "menu.json").write_text(f.read(), encoding="utf-8")
     config.MENU_JSON_PATH = str(tmp_path / "menu.json")
-    config.ADMIN_PIN = TEST_PIN
+    config.ADMIN_API_KEY = TEST_ADMIN_API_KEY
     # The upload route allows 10/minute per client address. This module
     # uploads repeatedly from one address and shares that budget with the
     # admin-portal tests, so later uploads came back 429 with nothing saved
@@ -54,7 +54,7 @@ def isolated(tmp_path):
         weekly_flyer.clear()
         app.state.limiter.enabled = limiter_was
         config.MENU_JSON_PATH = original
-        config.ADMIN_PIN = original_pin
+        config.ADMIN_API_KEY = original_key
 
 
 def _upload(parser_result):

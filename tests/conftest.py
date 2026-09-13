@@ -24,6 +24,9 @@ def isolate_process_session_cache(monkeypatch, request):
     from camellia.session_memory import session_memory
 
     monkeypatch.setattr(session_memory, "persistence_enabled", False)
+    # Security tests explicitly use HTTPS; ordinary unit tests use the local
+    # HTTP TestClient and must not be mistaken for production edge traffic.
+    monkeypatch.setattr(app_module.config, "ADMIN_REQUIRE_HTTPS", False)
     # Keep modules that imported the singleton before a test swapped it on a
     # single canonical object. Individual tests can still monkeypatch these
     # attributes and pytest will restore them afterwards.

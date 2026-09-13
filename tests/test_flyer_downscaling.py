@@ -128,8 +128,8 @@ def test_the_photo_customers_are_sent_is_the_full_size_original(tmp_path):
 
     db_module.db.init_db()
     client = TestClient(app)
-    original_pin, original_menu = config.ADMIN_PIN, config.MENU_JSON_PATH
-    config.ADMIN_PIN = "pin_downscale_test"
+    original_key, original_menu = config.ADMIN_API_KEY, config.MENU_JSON_PATH
+    config.ADMIN_API_KEY = "test-api-key-downscale-long-enough"
     # weekly_flyer resolves its upload directory from MENU_JSON_PATH, and
     # clear() does not delete the flyer image itself — so without redirecting
     # this the test leaves a photo in the real data/uploads and quietly breaks
@@ -146,7 +146,7 @@ def test_the_photo_customers_are_sent_is_the_full_size_original(tmp_path):
             resp = client.post(
                 "/admin/menu/upload-image",
                 files={"file": ("flyer.jpg", original, "image/jpeg")},
-                headers={"x-admin-pin": "pin_downscale_test"},
+                headers={"x-admin-key": "test-api-key-downscale-long-enough"},
             )
         assert resp.status_code == 200
 
@@ -158,4 +158,4 @@ def test_the_photo_customers_are_sent_is_the_full_size_original(tmp_path):
     finally:
         weekly_flyer.clear()
         app.state.limiter.enabled = True
-        config.ADMIN_PIN, config.MENU_JSON_PATH = original_pin, original_menu
+        config.ADMIN_API_KEY, config.MENU_JSON_PATH = original_key, original_menu
