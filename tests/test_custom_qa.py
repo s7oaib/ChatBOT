@@ -277,7 +277,7 @@ class TestMatching:
         response, matched, template_id, _ = responder.match_and_respond(
             "active runtime details",
             user_id="active_runtime_test",
-            channel="instagram",
+            channel="whatsapp",
         )
         assert matched is True
         assert template_id == f"learned_{active_id}"
