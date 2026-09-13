@@ -64,6 +64,10 @@ def test_graph_lookup_verifies_media_without_inventing_metadata(monkeypatch):
         "thumbnail_url": "https://cdn.example/thumb.jpg",
         "preview_url": "https://cdn.example/thumb.jpg",
         "media_type": "VIDEO",
+        "graph_fields": {
+            "id": True, "media_type": True, "media_url": False,
+            "thumbnail_url": True, "permalink": True, "children": False,
+        },
         "caption": "Verified caption",
     }
 

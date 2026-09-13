@@ -700,6 +700,20 @@ class Database:
             self._ensure_column(cursor, "instagram_source_routes", "menu_mode", "TEXT NOT NULL DEFAULT 'INHERIT'")
             self._ensure_column(cursor, "instagram_source_routes", "preview_url", "TEXT")
             self._ensure_column(cursor, "instagram_source_routes", "media_type", "TEXT")
+
+            # Admin-only visual fallback for connected media whose Meta
+            # preview is unavailable. This table is deliberately separate
+            # from the routing identity and is never read by the matcher.
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS instagram_route_previews (
+                routing_id INTEGER PRIMARY KEY,
+                image_path TEXT NOT NULL,
+                content_type TEXT NOT NULL,
+                uploaded_by TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
             # Existing rows with a concrete route menu are already configured;
             # retain their behavior. Null-menu legacy rows remain INHERIT until
             # an operator explicitly saves NONE or SELECTED through the admin UI.
@@ -1046,6 +1060,59 @@ class Database:
             row = conn.execute(
                 "SELECT * FROM instagram_source_routes WHERE routing_id = ?", (routing_id,)
             ).fetchone()
+        return dict(row)
+
+    def get_instagram_route_preview(self, routing_id: int) -> Optional[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM instagram_route_previews WHERE routing_id = ?", (routing_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def list_instagram_route_previews(self) -> Dict[int, Dict[str, Any]]:
+        with self.get_connection() as conn:
+            rows = conn.execute("SELECT * FROM instagram_route_previews").fetchall()
+        return {int(row["routing_id"]): dict(row) for row in rows}
+
+    def save_instagram_route_preview(
+        self, routing_id: int, image_path: str, content_type: str, uploaded_by: str,
+    ) -> Optional[Dict[str, Any]]:
+        now = datetime.utcnow().isoformat()
+        with self.get_connection() as conn:
+            if not conn.execute(
+                "SELECT 1 FROM instagram_source_routes WHERE routing_id = ?", (routing_id,)
+            ).fetchone():
+                return None
+            old = conn.execute(
+                "SELECT * FROM instagram_route_previews WHERE routing_id = ?", (routing_id,)
+            ).fetchone()
+            conn.execute(
+                """
+                INSERT INTO instagram_route_previews
+                    (routing_id, image_path, content_type, uploaded_by, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(routing_id) DO UPDATE SET
+                    image_path=excluded.image_path,
+                    content_type=excluded.content_type,
+                    uploaded_by=excluded.uploaded_by,
+                    updated_at=excluded.updated_at
+                """,
+                (routing_id, image_path, content_type, uploaded_by, now, now),
+            )
+            conn.commit()
+        return dict(old) if old else None
+
+    def delete_instagram_route_preview(self, routing_id: int) -> Optional[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM instagram_route_previews WHERE routing_id = ?", (routing_id,)
+            ).fetchone()
+            if not row:
+                return None
+            conn.execute(
+                "DELETE FROM instagram_route_previews WHERE routing_id = ?", (routing_id,)
+            )
+            conn.commit()
         return dict(row)
 
     def list_instagram_source_routes(self, include_archived: bool = False) -> List[Dict[str, Any]]:

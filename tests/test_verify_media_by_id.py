@@ -128,6 +128,26 @@ def test_a_transport_failure_is_reported_not_guessed(monkeypatch):
     assert verify_media_by_id("123")["status"] == "lookup_failed"
 
 
+@pytest.mark.parametrize(("code", "expected"), [
+    (100, "unsupported media ID"),
+    (190, "invalid/expired token"),
+])
+def test_graph_failure_is_reported_as_a_sanitized_category(monkeypatch, code, expected):
+    monkeypatch.setattr(instagram_routing.config, "INSTAGRAM_ACCESS_TOKEN", "IGAAtoken")
+
+    class _Client:
+        def get(self, url, params=None):
+            return _FakeResponse({"error": {"code": code, "type": "OAuthException", "message": "secret-free test error"}}, status_code=400)
+
+        def __enter__(self): return self
+        def __exit__(self, *exc): return False
+
+    monkeypatch.setattr(instagram_routing.httpx, "Client", lambda **kw: _Client())
+    result = verify_media_by_id("123")
+    assert result["failure_category"] == expected
+    assert "message" not in result
+
+
 def test_endpoint_requires_admin_auth():
     from fastapi.testclient import TestClient
     import camellia.database as db_module

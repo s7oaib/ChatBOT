@@ -30,6 +30,53 @@ _ESCALATION_POLICIES = {"canonical", "human_if_unsupported", "always_human"}
 _MENU_MODES = {"NONE", "SELECTED", "INHERIT"}
 
 
+def _graph_failure_category(response: httpx.Response, *, media_lookup: bool = False) -> str:
+    """Map Graph failures to a small safe diagnostic vocabulary."""
+    try:
+        error = response.json().get("error") or {}
+    except (ValueError, TypeError):
+        error = {}
+    code = error.get("code")
+    message = str(error.get("message") or "").lower()
+    if code == 190 or "invalid oauth" in message or "application has been deleted" in message:
+        return "invalid/expired token"
+    if code in {10, 200, 294} or "permission" in message or "access" in message and "denied" in message:
+        return "permission denied"
+    if code == 100:
+        return "unsupported media ID" if media_lookup else "permission denied"
+    if "field" in message and ("unsupported" in message or "invalid" in message):
+        return "field unavailable"
+    if response.status_code in {404, 405}:
+        return "Graph API endpoint mismatch"
+    return "other"
+
+
+def _media_field_presence(media: Dict[str, Any]) -> Dict[str, bool]:
+    return {
+        field: bool(media.get(field))
+        for field in ("id", "media_type", "media_url", "thumbnail_url", "permalink", "children")
+    }
+
+
+def _media_list_details(client: httpx.Client, token: str, version: str) -> tuple[Optional[str], Optional[str]]:
+    """Return the owned-media endpoint and a sanitized setup failure, if any."""
+    if token.startswith("IGAA"):
+        return f"https://graph.instagram.com/{version}/me/media", None
+    base = f"https://graph.facebook.com/{version}"
+    page_id = (config.INSTAGRAM_PAGE_ID or "me").strip()
+    account = client.get(
+        f"{base}/{page_id}",
+        params={"fields": "instagram_business_account", "access_token": token},
+    )
+    if account.status_code != 200:
+        return None, _graph_failure_category(account)
+    try:
+        ig_id = ((account.json().get("instagram_business_account") or {}).get("id"))
+    except (ValueError, TypeError):
+        ig_id = None
+    return (f"{base}/{ig_id}/media", None) if ig_id else (None, "permission denied")
+
+
 def _media_list_url(client: httpx.Client, token: str, version: str) -> Optional[str]:
     """
     Where this token can list the account's own media, or None.
@@ -42,17 +89,7 @@ def _media_list_url(client: httpx.Client, token: str, version: str) -> Optional[
     rather than the wrong address. A page token still has to go the long way
     round, via the page's linked instagram_business_account.
     """
-    if token.startswith("IGAA"):
-        return f"https://graph.instagram.com/{version}/me/media"
-    base = f"https://graph.facebook.com/{version}"
-    page_id = (config.INSTAGRAM_PAGE_ID or "me").strip()
-    account = client.get(
-        f"{base}/{page_id}",
-        params={"fields": "instagram_business_account", "access_token": token},
-    )
-    account_data = account.json() if account.status_code == 200 else {}
-    ig_id = ((account_data.get("instagram_business_account") or {}).get("id"))
-    return f"{base}/{ig_id}/media" if ig_id else None
+    return _media_list_details(client, token, version)[0]
 
 
 def verify_media_by_id(media_id: str) -> Dict[str, Any]:
@@ -82,7 +119,11 @@ def verify_media_by_id(media_id: str) -> Dict[str, Any]:
                 "access_token": token,
             })
         if response.status_code != 200:
-            return {"status": "not_found_or_unauthorized", "http_status": response.status_code}
+            return {
+                "status": "not_found_or_unauthorized",
+                "http_status": response.status_code,
+                "failure_category": _graph_failure_category(response, media_lookup=True),
+            }
         data = response.json()
         permalink = data.get("permalink")
         try:
@@ -94,6 +135,7 @@ def verify_media_by_id(media_id: str) -> Dict[str, Any]:
             "media_id": str(data.get("id") or media_id),
             "media_type": data.get("media_type"),
             "preview_url": _preview_url_from_media(data),
+            "graph_fields": _media_field_presence(data),
             "timestamp": data.get("timestamp"),
             "canonical_url": (identity or {}).get("canonical_url"),
             "shortcode": (identity or {}).get("shortcode"),
@@ -115,14 +157,17 @@ def lookup_instagram_media(identity: Dict[str, str]) -> Dict[str, Any]:
     fields = "id,caption,media_type,media_url,permalink,thumbnail_url,children{media_type,media_url,thumbnail_url}"
     try:
         with httpx.Client(timeout=8.0) as client:
-            url = _media_list_url(client, token, version)
+            url, setup_failure = _media_list_details(client, token, version)
             if not url:
-                return {"metadata_status": "permission_or_account_unavailable"}
+                return {"metadata_status": "permission_or_account_unavailable", "failure_category": setup_failure or "other"}
             params = {"fields": fields, "limit": 100, "access_token": token}
             for _ in range(3):
                 response = client.get(url, params=params)
                 if response.status_code != 200:
-                    return {"metadata_status": "permission_or_account_unavailable"}
+                    return {
+                        "metadata_status": "permission_or_account_unavailable",
+                        "failure_category": _graph_failure_category(response),
+                    }
                 payload = response.json()
                 for media in payload.get("data") or []:
                     try:
@@ -136,6 +181,7 @@ def lookup_instagram_media(identity: Dict[str, str]) -> Dict[str, Any]:
                             "thumbnail_url": media.get("thumbnail_url") or media.get("media_url"),
                             "preview_url": _preview_url_from_media(media),
                             "media_type": media.get("media_type"),
+                            "graph_fields": _media_field_presence(media),
                             "caption": media.get("caption"),
                         }
                 next_url = ((payload.get("paging") or {}).get("next"))
@@ -144,7 +190,10 @@ def lookup_instagram_media(identity: Dict[str, str]) -> Dict[str, Any]:
                 url, params = next_url, None
     except (httpx.HTTPError, ValueError, TypeError):
         return {"metadata_status": "lookup_failed"}
-    return {"metadata_status": "not_found_on_connected_account"}
+    return {
+        "metadata_status": "not_found_on_connected_account",
+        "failure_category": "media belongs to another account",
+    }
 
 
 def _preview_url_from_media(media: Dict[str, Any]) -> Optional[str]:

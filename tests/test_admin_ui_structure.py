@@ -297,7 +297,8 @@ def test_instagram_routing_has_unified_connected_media_registry(page):
     for marker in (
         "Connected Instagram media filters", "igMediaSearch", "Posts", "Reels", "Ads",
         "ig-media-card", "preview_url", "POST", "REEL", "Open Instagram",
-        "Refresh preview", "/metadata/refresh", "target=\"_blank\"",
+        "Refresh Media Preview", "/metadata/refresh", "Set Preview Image",
+        "/preview", "Remove Preview", "target=\"_blank\"",
     ):
         assert marker in page, marker
     assert "lookup_instagram_media" not in section[section.index("async function loadAdRoutes"):]

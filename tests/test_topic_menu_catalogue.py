@@ -477,6 +477,33 @@ def test_media_preview_metadata_is_persisted_without_changing_route_identity(cat
     assert matched["routing_id"] == route["routing_id"]
 
 
+def test_admin_preview_fallback_is_separate_from_route_identity(catalogue_db, admin_client):
+    client, headers = admin_client
+    route = catalogue_db.save_instagram_source_route({
+        "source_type": "post",
+        "canonical_url": "https://www.instagram.com/p/PreviewOnly123/",
+        "shortcode": "PreviewOnly123",
+        "routing_topic": "Preview Topic",
+        "menu_mode": "NONE",
+        "active": True,
+    })
+    original_identity = (route["routing_id"], route["media_id"], route["canonical_url"], route["menu_mode"])
+    response = client.post(
+        f"/admin/instagram-routes/{route['routing_id']}/preview",
+        files={"file": ("preview.png", _png(), "image/png")},
+        headers=headers,
+    )
+    assert response.status_code == 200
+    listed = client.get("/admin/instagram-routes", headers=headers).json()["routes"]
+    saved = next(item for item in listed if item["routing_id"] == route["routing_id"])
+    assert saved["admin_preview_url"].startswith("/uploads/instagram-previews/")
+    assert (saved["routing_id"], saved["media_id"], saved["canonical_url"], saved["menu_mode"]) == original_identity
+    removed = client.delete(f"/admin/instagram-routes/{route['routing_id']}/preview", headers=headers)
+    assert removed.status_code == 200
+    listed = client.get("/admin/instagram-routes", headers=headers).json()["routes"]
+    assert next(item for item in listed if item["routing_id"] == route["routing_id"])["admin_preview_url"] is None
+
+
 def test_route_can_save_explicit_none_without_topic_default(catalogue_db):
     topic = create_topic("Sondesh NONE", "Description.", default_menu_id="aamar_mishti")
     clean = validate_route_payload({

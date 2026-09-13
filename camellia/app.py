@@ -2183,12 +2183,16 @@ def list_instagram_routes(
         for topic in db.list_instagram_topics()
     }
     pairings = db.list_latest_post_pairings()
+    previews = db.list_instagram_route_previews()
     for route in routes:
         topic = topics.get(route.get("topic_id")) or {}
         route["topic_description"] = topic.get("description") or ""
         pairing = pairings.get(route.get("routing_id")) or {}
         route["pairing_status"] = pairing.get("status")
         route["pairing_expires_at"] = pairing.get("expires_at")
+        preview = previews.get(route.get("routing_id")) or {}
+        route["admin_preview_url"] = preview.get("image_path")
+        route["admin_preview_updated_at"] = preview.get("updated_at")
     return {
         "status": "success",
         "routes": routes,
@@ -2222,9 +2226,89 @@ def refresh_instagram_route_metadata(
     )
     return {
         "status": "success",
+        "lookup_attempted": bool(route.get("canonical_url") or route.get("media_id")),
         "metadata_status": metadata.get("metadata_status") or metadata.get("status") or "unavailable",
+        "failure_category": metadata.get("failure_category"),
+        "graph_fields": metadata.get("graph_fields") or {},
         "route": decode_route(refreshed or route),
     }
+
+
+MAX_INSTAGRAM_PREVIEW_SIZE = 2 * 1024 * 1024
+
+
+def _instagram_preview_dir() -> str:
+    directory = os.path.join(weekly_flyer.uploads_dir(), "instagram-previews")
+    os.makedirs(directory, exist_ok=True)
+    return directory
+
+
+def _instagram_preview_file_path(image_path: Optional[str]) -> Optional[str]:
+    prefix = "/uploads/instagram-previews/"
+    if not image_path or not image_path.startswith(prefix):
+        return None
+    filename = os.path.basename(image_path)
+    path = os.path.abspath(os.path.join(_instagram_preview_dir(), filename))
+    directory = os.path.abspath(_instagram_preview_dir())
+    return path if os.path.commonpath([path, directory]) == directory else None
+
+
+def _remove_instagram_preview_file(image_path: Optional[str]) -> None:
+    path = _instagram_preview_file_path(image_path)
+    if path and os.path.exists(path):
+        os.remove(path)
+
+
+@app.post("/admin/instagram-routes/{routing_id}/preview")
+async def set_instagram_route_preview(
+    routing_id: int,
+    file: Optional[UploadFile] = File(None),
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """Store an admin-selected visual fallback separately from route identity."""
+    require_admin(x_admin_key, x_admin_pin)
+    if not db.get_instagram_source_route(routing_id):
+        raise HTTPException(status_code=404, detail="Routing record not found.")
+    if file is None:
+        raise HTTPException(status_code=400, detail="Choose a preview image.")
+    data = await file.read()
+    if len(data) > MAX_INSTAGRAM_PREVIEW_SIZE:
+        raise HTTPException(status_code=413, detail="Preview image is too large.")
+    content_type = (file.content_type or "").split(";", 1)[0].lower()
+    try:
+        extension = menu_images.validate_image(data, content_type)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    filename = f"route-{routing_id}-{uuid.uuid4().hex[:12]}.{extension}"
+    image_path = os.path.join(_instagram_preview_dir(), filename)
+    with open(image_path, "wb") as handle:
+        handle.write(data)
+    public_path = f"/uploads/instagram-previews/{filename}"
+    old = db.save_instagram_route_preview(
+        routing_id, public_path, content_type, x_admin_key or x_admin_pin or "admin",
+    )
+    if old:
+        _remove_instagram_preview_file(old.get("image_path"))
+    return {
+        "status": "success",
+        "message": "Preview updated.",
+        "preview_url": public_path,
+    }
+
+
+@app.delete("/admin/instagram-routes/{routing_id}/preview")
+def delete_instagram_route_preview(
+    routing_id: int,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    require_admin(x_admin_key, x_admin_pin)
+    old = db.delete_instagram_route_preview(routing_id)
+    if not old:
+        raise HTTPException(status_code=404, detail="No admin preview is set.")
+    _remove_instagram_preview_file(old.get("image_path"))
+    return {"status": "success", "message": "Preview removed."}
 
 
 @app.post("/admin/instagram-routes")
@@ -2305,8 +2389,12 @@ def delete_instagram_route(
     handoffs are never touched by removing a route.
     """
     require_admin(x_admin_key, x_admin_pin)
+    old_preview = db.get_instagram_route_preview(routing_id)
     if not db.delete_instagram_source_route(routing_id, removed_by=x_admin_key or "admin"):
         raise HTTPException(status_code=404, detail="Routing record not found.")
+    if old_preview:
+        db.delete_instagram_route_preview(routing_id)
+        _remove_instagram_preview_file(old_preview.get("image_path"))
     return {"status": "success", "routing_id": routing_id, "removed": True}
 
 
@@ -6954,9 +7042,10 @@ THIS WEEK'S BENGAL SPECIALS
         }
         function instagramPreview(route, large = false) {
             const label = instagramMediaLabel(route);
+            const imageUrl = route.preview_url || route.admin_preview_url;
             const placeholder = `<div class="ig-media-placeholder"><span class="ig-media-placeholder-icon">◎</span><span>INSTAGRAM</span><span>${label}</span></div>`;
-            const body = route.preview_url
-                ? `<img class="${large ? 'ig-media-large' : 'ig-media-thumb'}" src="${escapeHtml(route.preview_url)}" alt="${label} preview" onerror="this.style.display='none';this.nextElementSibling.style.display='flex';"><div class="ig-media-placeholder" style="display:none;">${placeholder.replace('<div class="ig-media-placeholder">','').replace('</div>','')}</div>`
+            const body = imageUrl
+                ? `<img class="${large ? 'ig-media-large' : 'ig-media-thumb'}" src="${escapeHtml(imageUrl)}" alt="${label} preview" onerror="this.style.display='none';this.nextElementSibling.style.display='flex';"><div class="ig-media-placeholder" style="display:none;">${placeholder.replace('<div class="ig-media-placeholder">','').replace('</div>','')}</div>`
                 : placeholder;
             const preview = `<span class="ig-media-preview">${body}<span class="ig-media-badge">${label}</span></span>`;
             return route.canonical_url ? `<a href="${escapeHtml(route.canonical_url)}" target="_blank" rel="noopener noreferrer" aria-label="Open ${label} on Instagram">${preview}</a>` : preview;
@@ -6977,8 +7066,27 @@ THIS WEEK'S BENGAL SPECIALS
             const result = document.getElementById('adRouteResult');
             fetch(`/admin/instagram-routes/${id}/metadata/refresh`, { method:'POST', headers:getAuthHeaders() })
                 .then(async resp => { const data = await resp.json(); if (!resp.ok) throw new Error(data.detail || 'Could not refresh preview.'); return data; })
-                .then(data => { result.style.display='block'; result.className='result-box success'; result.innerText = data.metadata_status === 'verified_graph_api' || data.metadata_status === 'verified' ? 'Preview metadata refreshed.' : 'No preview metadata was available.'; loadAdRoutes(); })
+                .then(data => { result.style.display='block'; result.className='result-box success'; result.innerText = data.metadata_status === 'verified_graph_api' || data.metadata_status === 'verified' ? 'Preview updated.' : 'Meta did not provide preview metadata — you can set a preview manually.'; loadAdRoutes(); })
                 .catch(err => { result.style.display='block'; result.className='result-box error'; result.innerText = err.message || 'Could not refresh preview.'; });
+        }
+        async function setInstagramAdminPreview(id, file) {
+            if (!file) return;
+            const result = document.getElementById('adRouteResult');
+            const form = new FormData(); form.append('file', file);
+            try {
+                const resp = await fetch(`/admin/instagram-routes/${id}/preview`, { method:'POST', headers:getAuthHeaders(), body:form });
+                const data = await resp.json(); if (!resp.ok) throw new Error(data.detail || 'Could not set preview image.');
+                result.style.display='block'; result.className='result-box success'; result.innerText='Preview updated.'; loadAdRoutes();
+            } catch (err) { result.style.display='block'; result.className='result-box error'; result.innerText=err.message || 'Could not set preview image.'; }
+        }
+        async function removeInstagramAdminPreview(id) {
+            if (!confirm('Remove the admin preview image? The Meta preview and placeholder remain available.')) return;
+            const result = document.getElementById('adRouteResult');
+            try {
+                const resp = await fetch(`/admin/instagram-routes/${id}/preview`, { method:'DELETE', headers:getAuthHeaders() });
+                const data = await resp.json(); if (!resp.ok) throw new Error(data.detail || 'Could not remove preview image.');
+                result.style.display='block'; result.className='result-box success'; result.innerText='Preview removed.'; loadAdRoutes();
+            } catch (err) { result.style.display='block'; result.className='result-box error'; result.innerText=err.message || 'Could not remove preview image.'; }
         }
         function renderInstagramMediaCard(route) {
             const status = instagramMediaStatus(route);
@@ -6987,14 +7095,17 @@ THIS WEEK'S BENGAL SPECIALS
             const priority = (route.priority_products || []).map(id => ((igProducts.find(p => p.id === id) || {}).label || id)).join(' → ') || 'Normal conversation routing';
             const link = route.canonical_url ? `<a class="ig-media-link" href="${escapeHtml(route.canonical_url)}" target="_blank" rel="noopener noreferrer">Open Instagram · ${escapeHtml(instagramShortUrl(route.canonical_url))}</a>` : '<span class="ig-media-muted">Instagram link unavailable</span>';
             const pairingNote = route.source_type === 'post' && route.media_id && route.pairing_status === 'bound' ? '<span class="ig-media-muted">Connected via Post Pairing</span>' : '';
-            const detailsImage = route.preview_url ? instagramPreview(route, true) : '<span class="ig-media-muted">Preview unavailable; route remains active.</span>';
-            const details = `<details class="ig-media-details"><summary style="cursor:pointer;">View Details</summary>${detailsImage}<div>Full permalink: ${escapeHtml(route.canonical_url || '—')}<br>Media ID: ${escapeHtml(route.media_id || '—')}<br>Media type: ${escapeHtml(route.media_type || '—')}<br>Shortcode: ${escapeHtml(route.shortcode || '—')}<br>Topic: ${escapeHtml(route.routing_topic || 'Instagram content')}<br>Description: ${escapeHtml(description || '—')}<br>Menu mode: ${escapeHtml(route.menu_mode || 'INHERIT')}<br>Selected menu: ${escapeHtml(route.menu_id || '—')}<br>Routing ID: ${escapeHtml(String(route.routing_id || '—'))}<br>Updated: ${escapeHtml(route.updated_at || route.created_at || '—')}<br>Priority: ${escapeHtml(priority)}</div></details>`;
+            const detailsImage = (route.preview_url || route.admin_preview_url) ? instagramPreview(route, true) : '<span class="ig-media-muted">Preview unavailable; route remains active.</span>';
+            const previewSource = route.preview_url ? 'Meta-provided preview' : route.admin_preview_url ? 'Admin preview fallback' : 'Placeholder';
+            const details = `<details class="ig-media-details"><summary style="cursor:pointer;">View Details</summary>${detailsImage}<div>Full permalink: ${escapeHtml(route.canonical_url || '—')}<br>Media ID: ${escapeHtml(route.media_id || '—')}<br>Media type: ${escapeHtml(route.media_type || '—')}<br>Shortcode: ${escapeHtml(route.shortcode || '—')}<br>Preview source: ${escapeHtml(previewSource)}<br>Topic: ${escapeHtml(route.routing_topic || 'Instagram content')}<br>Description: ${escapeHtml(description || '—')}<br>Menu mode: ${escapeHtml(route.menu_mode || 'INHERIT')}<br>Selected menu: ${escapeHtml(route.menu_id || '—')}<br>Routing ID: ${escapeHtml(String(route.routing_id || '—'))}<br>Updated: ${escapeHtml(route.updated_at || route.created_at || '—')}<br>Priority: ${escapeHtml(priority)}</div></details>`;
             let actions = '';
             if (route.archived_at) {
                 actions = `<button class="btn-secondary" type="button" onclick="restoreInstagramRoute(${route.routing_id})">Restore</button> <button class="btn-danger" type="button" onclick="openIgRemoveModal(${route.routing_id})">Delete</button>`;
             } else if (route.routing_id) {
                 const connect = route.source_type === 'post' ? `<button class="btn-secondary" type="button" onclick="pairInstagramPost(${route.routing_id})">${route.media_id ? 'Reconnect Post' : 'Connect Post'}</button>` : '';
-                actions = `<button class="btn-secondary" type="button" onclick="editInstagramRoute(${route.routing_id})">Edit</button><button class="btn-secondary" type="button" onclick="refreshInstagramRouteMetadata(${route.routing_id})">Refresh preview</button><button class="btn-secondary" type="button" onclick="setInstagramRouteActive(${route.routing_id},${!route.active})">${route.active ? 'Disable' : 'Enable'}</button><button class="btn-danger" type="button" onclick="archiveInstagramRoute(${route.routing_id})">Archive</button><button class="btn-danger" type="button" onclick="openIgRemoveModal(${route.routing_id})">Delete</button>${connect}`;
+                const previewInput = `<label class="btn-secondary" style="cursor:pointer;">${route.admin_preview_url ? 'Replace Preview Image' : 'Set Preview Image'}<input type="file" accept="image/jpeg,image/png,image/webp" hidden onchange="setInstagramAdminPreview(${route.routing_id},this.files[0])"></label>`;
+                const removePreview = route.admin_preview_url ? `<button class="btn-danger" type="button" onclick="removeInstagramAdminPreview(${route.routing_id})">Remove Preview</button>` : '';
+                actions = `<button class="btn-secondary" type="button" onclick="editInstagramRoute(${route.routing_id})">Edit</button><button class="btn-secondary" type="button" onclick="refreshInstagramRouteMetadata(${route.routing_id})">Refresh Media Preview</button>${previewInput}${removePreview}<button class="btn-secondary" type="button" onclick="setInstagramRouteActive(${route.routing_id},${!route.active})">${route.active ? 'Disable' : 'Enable'}</button><button class="btn-danger" type="button" onclick="archiveInstagramRoute(${route.routing_id})">Archive</button><button class="btn-danger" type="button" onclick="openIgRemoveModal(${route.routing_id})">Delete</button>${connect}`;
             } else {
                 actions = `<button class="btn-danger" type="button" onclick="removeAdRoute('${escapeHtml(route.ad_id || '')}')">Remove</button>`;
             }
