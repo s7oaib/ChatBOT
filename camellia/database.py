@@ -194,6 +194,32 @@ class Database:
             );
             """)
             cursor.execute("""
+            CREATE TABLE IF NOT EXISTS admin_credentials (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                username TEXT NOT NULL,
+                password_hash TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            );
+            """)
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS admin_password_reset_tokens (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT NOT NULL,
+                token_hash TEXT NOT NULL UNIQUE,
+                created_at REAL NOT NULL,
+                expires_at REAL NOT NULL,
+                used_at REAL,
+                cancelled_at REAL,
+                requested_ip_hash TEXT,
+                status TEXT NOT NULL DEFAULT 'ACTIVE'
+            );
+            """)
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_admin_reset_tokens_active "
+                "ON admin_password_reset_tokens(username, status, expires_at)"
+            )
+            cursor.execute("""
             CREATE TABLE IF NOT EXISTS admin_security_audit (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 event_type TEXT NOT NULL,
@@ -3782,6 +3808,127 @@ class Database:
                 (code_hash, now),
             )
             conn.commit()
+
+    def get_admin_credential(self) -> Optional[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT id, username, password_hash, created_at, updated_at "
+                "FROM admin_credentials WHERE id=1"
+            ).fetchone()
+        return dict(row) if row else None
+
+    def bootstrap_admin_credential(self, username: str, password_hash: str, now: float) -> bool:
+        """Seed the mutable credential exactly once from deployment config."""
+        if not username or not password_hash:
+            return False
+        with self.get_connection() as conn:
+            cursor = conn.execute(
+                "INSERT OR IGNORE INTO admin_credentials "
+                "(id, username, password_hash, created_at, updated_at) "
+                "VALUES (1, ?, ?, ?, ?)",
+                (username, password_hash, now, now),
+            )
+            conn.commit()
+        return cursor.rowcount == 1
+
+    def update_admin_password(self, username: str, password_hash: str, now: float) -> None:
+        with self.get_connection() as conn:
+            conn.execute(
+                "UPDATE admin_credentials SET username=?, password_hash=?, updated_at=? WHERE id=1",
+                (username, password_hash, now),
+            )
+            conn.commit()
+
+    def issue_admin_password_reset_token(
+        self,
+        username: str,
+        token_hash_value: str,
+        created_at: float,
+        expires_at: float,
+        requested_ip_hash: str,
+    ) -> None:
+        with self.get_connection() as conn:
+            conn.execute(
+                "UPDATE admin_password_reset_tokens SET status='CANCELLED', cancelled_at=? "
+                "WHERE username=? AND status='ACTIVE' AND used_at IS NULL AND cancelled_at IS NULL",
+                (created_at, username),
+            )
+            conn.execute(
+                "INSERT INTO admin_password_reset_tokens "
+                "(username, token_hash, created_at, expires_at, requested_ip_hash, status) "
+                "VALUES (?, ?, ?, ?, ?, 'ACTIVE')",
+                (username, token_hash_value, created_at, expires_at, requested_ip_hash),
+            )
+            conn.commit()
+
+    def get_active_admin_password_reset_token(self, token_hash_value: str, now: float) -> Optional[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM admin_password_reset_tokens "
+                "WHERE token_hash=? AND status='ACTIVE' AND used_at IS NULL AND cancelled_at IS NULL",
+                (token_hash_value,),
+            ).fetchone()
+            if not row:
+                return None
+            if float(row["expires_at"]) <= now:
+                conn.execute(
+                    "UPDATE admin_password_reset_tokens SET status='EXPIRED' WHERE id=? AND status='ACTIVE'",
+                    (row["id"],),
+                )
+                conn.commit()
+                return None
+        return dict(row)
+
+    def complete_admin_password_reset(
+        self,
+        token_hash_value: str,
+        password_hash: str,
+        now: float,
+    ) -> Optional[Dict[str, Any]]:
+        """Atomically consume the token, update the credential, and revoke sessions."""
+        with self.get_connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM admin_password_reset_tokens "
+                "WHERE token_hash=? AND status='ACTIVE' AND used_at IS NULL AND cancelled_at IS NULL",
+                (token_hash_value,),
+            ).fetchone()
+            if not row or float(row["expires_at"]) <= now:
+                if row and float(row["expires_at"]) <= now:
+                    conn.execute(
+                        "UPDATE admin_password_reset_tokens SET status='EXPIRED' WHERE id=? AND status='ACTIVE'",
+                        (row["id"],),
+                    )
+                conn.commit()
+                return None
+            credential_update = conn.execute(
+                "UPDATE admin_credentials SET password_hash=?, updated_at=? WHERE id=1",
+                (password_hash, now),
+            )
+            if credential_update.rowcount != 1:
+                conn.rollback()
+                return None
+            conn.execute(
+                "UPDATE admin_password_reset_tokens SET status='USED', used_at=? "
+                "WHERE id=? AND status='ACTIVE' AND used_at IS NULL",
+                (now, row["id"]),
+            )
+            conn.execute(
+                "UPDATE admin_sessions SET revoked_at=? WHERE username=? AND revoked_at IS NULL",
+                (now, row["username"]),
+            )
+            conn.commit()
+        return dict(row)
+
+    def cancel_admin_password_reset_token(self, token_hash_value: str, now: float) -> bool:
+        with self.get_connection() as conn:
+            cursor = conn.execute(
+                "UPDATE admin_password_reset_tokens SET status='CANCELLED', cancelled_at=? "
+                "WHERE token_hash=? AND status='ACTIVE' AND used_at IS NULL AND cancelled_at IS NULL",
+                (now, token_hash_value),
+            )
+            conn.commit()
+        return cursor.rowcount == 1
 
     def record_admin_security_event(
         self,

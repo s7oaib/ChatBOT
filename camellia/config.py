@@ -112,6 +112,16 @@ class Config:
     ADMIN_PIN: str = _env_secret("ADMIN_PIN")
     ADMIN_USERNAME: str = _env_secret("ADMIN_USERNAME")
     ADMIN_PASSWORD_HASH: str = _env_secret("ADMIN_PASSWORD_HASH")
+    ADMIN_RECOVERY_EMAIL: str = _env_secret("ADMIN_RECOVERY_EMAIL")
+    ADMIN_EMAIL_PROVIDER: str = os.getenv("ADMIN_EMAIL_PROVIDER", "").strip().lower()
+    ADMIN_EMAIL_FROM: str = _env_secret("ADMIN_EMAIL_FROM")
+    ADMIN_EMAIL_API_KEY: str = _env_secret("ADMIN_EMAIL_API_KEY")
+    ADMIN_EMAIL_API_URL: str = os.getenv("ADMIN_EMAIL_API_URL", "https://api.resend.com/emails").strip()
+    ADMIN_PUBLIC_BASE_URL: str = os.getenv("ADMIN_PUBLIC_BASE_URL", "").strip().rstrip("/")
+    try:
+        ADMIN_RESET_TOKEN_TTL_SECONDS: int = max(300, int(os.getenv("ADMIN_RESET_TOKEN_TTL_SECONDS", "900")))
+    except ValueError:
+        ADMIN_RESET_TOKEN_TTL_SECONDS: int = 900
     ADMIN_MFA_TOTP_SECRET: str = _env_secret("ADMIN_MFA_TOTP_SECRET")
     ADMIN_MFA_RECOVERY_CODE_HASHES: str = _env_secret("ADMIN_MFA_RECOVERY_CODE_HASHES")
     ADMIN_MFA_REQUIRED: bool = os.getenv("ADMIN_MFA_REQUIRED", "true").lower() in ("true", "1", "t", "yes")

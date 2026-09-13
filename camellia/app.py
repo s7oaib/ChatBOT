@@ -77,6 +77,7 @@ from camellia import menu_catalogue
 from camellia.menu_catalogue import MenuCatalogueError
 from camellia.session_memory import session_memory
 from camellia.monitoring import get_logger, delivery_monitor, latency_monitor, classify_instagram_delivery
+from camellia import admin_mailer
 from camellia.admin_security import (
     digest as security_digest,
     generate_recovery_code,
@@ -101,9 +102,25 @@ _admin_context: ContextVar[Optional[Dict[str, Any]]] = ContextVar("admin_context
 
 
 def _admin_security_version() -> str:
+    credential = _active_admin_credential()
     return security_digest(
-        f"{config.ADMIN_PASSWORD_HASH}\x00{config.ADMIN_MFA_TOTP_SECRET}\x00{config.ADMIN_USERNAME}"
+        f"{credential.get('password_hash', '')}\x00{config.ADMIN_MFA_TOTP_SECRET}\x00{credential.get('username', '')}"
     )
+
+
+def _active_admin_credential() -> Dict[str, str]:
+    """Return the durable credential, bootstrapping it from env exactly once."""
+    credential = db.get_admin_credential()
+    if credential:
+        return credential
+    username = normalize_username(config.ADMIN_USERNAME)
+    password_hash = config.ADMIN_PASSWORD_HASH or ""
+    if username and password_hash:
+        db.bootstrap_admin_credential(username, password_hash, time.time())
+        credential = db.get_admin_credential()
+        if credential:
+            return credential
+    return {"username": username, "password_hash": password_hash}
 
 
 def _admin_ip(request: Request) -> str:
@@ -117,6 +134,56 @@ def _admin_scopes(username: str, ip: str) -> List[str]:
     # single account lockout permanent or allowing username rotation to evade
     # the network controls.
     return [f"account:{username_key}", f"ip:{ip_key}", "endpoint:admin-login"]
+
+
+def _admin_reset_scopes(kind: str, identity: str, ip: str) -> List[str]:
+    return [
+        f"{kind}:identity:{security_digest(identity)}",
+        f"{kind}:ip:{security_digest(ip)}",
+        f"endpoint:{kind}",
+    ]
+
+
+def _admin_action_rate_status(scopes: List[str]) -> int:
+    return db.admin_login_rate_status(scopes, time.time(), window_seconds=900.0)
+
+
+def _admin_action_failed(scopes: List[str], thresholds: List[int], request: Request, event_type: str) -> int:
+    retry_after = _admin_action_record(scopes, thresholds)
+    _audit_admin_event(event_type, "", request)
+    return retry_after
+
+
+def _admin_action_record(scopes: List[str], thresholds: List[int]) -> int:
+    return db.record_admin_login_failure(
+        list(zip(scopes, thresholds, [900.0] * len(scopes))),
+        time.time(),
+        window_seconds=900.0,
+    )
+
+
+def _normalize_recovery_email(value: str) -> str:
+    return str(value or "").strip().casefold()
+
+
+def _reset_public_base_url(request: Request) -> str:
+    configured = (config.ADMIN_PUBLIC_BASE_URL or "").strip().rstrip("/")
+    if configured:
+        return configured
+    # Never build a production reset link from an attacker-controlled Host
+    # header. Local HTTP tests may use their own origin explicitly.
+    if not config.ADMIN_REQUIRE_HTTPS:
+        return f"{request.url.scheme}://{request.url.netloc}"
+    return ""
+
+
+def _verify_reset_mfa(code: str, now: float) -> bool:
+    totp_ok = bool(config.ADMIN_MFA_TOTP_SECRET) and verify_totp(config.ADMIN_MFA_TOTP_SECRET, code)
+    if totp_ok:
+        return True
+    if code:
+        return db.consume_admin_recovery_code(code, verify_password, now)
+    return False
 
 
 def _audit_admin_event(event_type: str, username: str, request: Request) -> None:
@@ -197,6 +264,12 @@ async def lifespan(app: FastAPI):
     _prune_expired_weekly_menus()
 
     db.init_db()
+    if config.ADMIN_USERNAME and config.ADMIN_PASSWORD_HASH:
+        db.bootstrap_admin_credential(
+            normalize_username(config.ADMIN_USERNAME),
+            config.ADMIN_PASSWORD_HASH,
+            time.time(),
+        )
     configured_recovery_hashes = [
         item.strip()
         for item in re.split(r"[\s,]+", config.ADMIN_MFA_RECOVERY_CODE_HASHES or "")
@@ -319,6 +392,8 @@ async def add_security_headers(request: Request, call_next):
     )
     if request.url.path.startswith("/admin"):
         response.headers["Cache-Control"] = "no-store, max-age=0"
+        if request.url.path in {"/admin/forgot-password", "/admin/reset-password"}:
+            response.headers["Referrer-Policy"] = "no-referrer"
     if _request_is_secure(request):
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     return response
@@ -2134,7 +2209,7 @@ def health_check():
             "outbound_delivery": outbound,
             "instagram_token": instagram_token,
             "admin_auth": {
-                "password_configured": bool(config.ADMIN_USERNAME and config.ADMIN_PASSWORD_HASH),
+                "password_configured": bool(_active_admin_credential().get("password_hash")),
                 "mfa_required": bool(config.ADMIN_MFA_REQUIRED),
                 "mfa_configured": bool(config.ADMIN_MFA_TOTP_SECRET),
                 "machine_api_configured": bool(config.ADMIN_API_KEY),
@@ -2199,6 +2274,119 @@ def _generic_login_failure(retry_after: int = 0) -> JSONResponse:
     return JSONResponse(status_code=401, content={"detail": "Invalid credentials."})
 
 
+FORGOT_PASSWORD_HTML = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="referrer" content="no-referrer"><title>Reset Admin Password · Camellia Artisanal</title>
+    <style>
+        :root { color-scheme: light; font-family: Arial, sans-serif; }
+        body { margin:0; min-height:100vh; display:grid; place-items:center; background:#e6e2dd; color:#1f1c1b; }
+        main { width:min(420px,calc(100% - 32px)); background:#fff; border-radius:18px; padding:28px; box-shadow:0 12px 30px #0002; }
+        h1 { margin:0 0 8px; font-size:1.35rem; } p { color:#6f6965; line-height:1.45; }
+        label { display:block; margin:16px 0 6px; font-size:.85rem; font-weight:600; }
+        input { width:100%; padding:12px; box-sizing:border-box; border:1px solid #d9d3ce; border-radius:9px; font-size:1rem; }
+        button { width:100%; margin-top:20px; padding:12px; border:0; border-radius:9px; background:#524036; color:#fff; font-weight:700; cursor:pointer; }
+        a { color:#524036; } #message { margin-top:16px; font-size:.9rem; }
+    </style>
+</head>
+<body><main>
+    <h1>Reset Admin Password</h1>
+    <p>Enter the registered recovery email. If it is configured for an admin account, a one-time reset link will be sent.</p>
+    <form id="forgotForm">
+        <label for="email">Recovery email</label>
+        <input id="email" name="email" type="email" autocomplete="email" required>
+        <button type="submit">Send Reset Link</button>
+    </form>
+    <div id="message" role="status"></div>
+    <p><a href="/admin">Return to Admin Portal</a></p>
+</main>
+<script>
+function readCookie(name) {
+    const prefix = name + '=';
+    const item = document.cookie.split('; ').find(row => row.startsWith(prefix));
+    return item ? decodeURIComponent(item.slice(prefix.length)) : '';
+}
+document.getElementById('forgotForm').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const message = document.getElementById('message');
+    try {
+        const csrf = readCookie('camellia_admin_csrf');
+        const headers = {'Content-Type': 'application/json'};
+        if (csrf) headers['X-CSRF-Token'] = csrf;
+        const response = await fetch('/admin/forgot-password', {
+            method: 'POST', credentials: 'same-origin',
+            headers,
+            body: JSON.stringify({email: document.getElementById('email').value})
+        });
+        const data = await response.json().catch(() => ({}));
+        message.textContent = response.status === 429 ? 'Too many requests. Try again later.' : (data.message || data.detail || 'Request received.');
+    } catch (error) { message.textContent = 'Could not submit the request. Try again later.'; }
+});
+</script></body></html>"""
+
+
+RESET_PASSWORD_HTML = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="referrer" content="no-referrer"><title>Set New Admin Password · Camellia Artisanal</title>
+    <style>
+        :root { color-scheme: light; font-family: Arial, sans-serif; }
+        body { margin:0; min-height:100vh; display:grid; place-items:center; background:#e6e2dd; color:#1f1c1b; }
+        main { width:min(420px,calc(100% - 32px)); background:#fff; border-radius:18px; padding:28px; box-shadow:0 12px 30px #0002; }
+        h1 { margin:0 0 8px; font-size:1.35rem; } p { color:#6f6965; line-height:1.45; }
+        label { display:block; margin:16px 0 6px; font-size:.85rem; font-weight:600; }
+        input { width:100%; padding:12px; box-sizing:border-box; border:1px solid #d9d3ce; border-radius:9px; font-size:1rem; }
+        button { width:100%; margin-top:20px; padding:12px; border:0; border-radius:9px; background:#524036; color:#fff; font-weight:700; cursor:pointer; }
+        a { color:#524036; } #message { margin-top:16px; font-size:.9rem; }
+    </style>
+</head>
+<body><main>
+    <h1>Set New Admin Password</h1>
+    <p>This link expires in approximately 15 minutes. A valid authenticator code is required; password reset never disables MFA.</p>
+    <form id="resetForm">
+        <label for="password">New password</label>
+        <input id="password" type="password" autocomplete="new-password" minlength="12" required>
+        <label for="confirm">Confirm new password</label>
+        <input id="confirm" type="password" autocomplete="new-password" minlength="12" required>
+        <label for="totp">Authenticator code</label>
+        <input id="totp" inputmode="numeric" autocomplete="one-time-code" maxlength="6" required>
+        <button type="submit">Reset Password</button>
+    </form>
+    <div id="message" role="status"></div>
+    <p><a href="/admin">Return to Admin Portal</a></p>
+</main>
+<script>
+const fragment = new URLSearchParams(window.location.hash.slice(1));
+const query = new URLSearchParams(window.location.search);
+const resetToken = fragment.get('token') || query.get('token') || '';
+window.history.replaceState({}, document.title, '/admin/reset-password');
+function readCookie(name) {
+    const prefix = name + '=';
+    const item = document.cookie.split('; ').find(row => row.startsWith(prefix));
+    return item ? decodeURIComponent(item.slice(prefix.length)) : '';
+}
+document.getElementById('resetForm').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const message = document.getElementById('message');
+    try {
+        const csrf = readCookie('camellia_admin_csrf');
+        const headers = {'Content-Type': 'application/json'};
+        if (csrf) headers['X-CSRF-Token'] = csrf;
+        const response = await fetch('/admin/reset-password', {
+            method: 'POST', credentials: 'same-origin', headers,
+            body: JSON.stringify({token: resetToken, password: document.getElementById('password').value,
+                confirm_password: document.getElementById('confirm').value, totp: document.getElementById('totp').value})
+        });
+        const data = await response.json().catch(() => ({}));
+        message.textContent = response.ok ? data.message : (data.detail || 'Could not reset the password.');
+        if (response.ok) document.getElementById('resetForm').style.display = 'none';
+    } catch (error) { message.textContent = 'Could not complete the reset. Try again later.'; }
+});
+</script></body></html>"""
+
+
 @app.post("/admin/login")
 @limiter.limit("60/minute")
 async def admin_login(request: Request):
@@ -2224,8 +2412,9 @@ async def admin_login(request: Request):
         _audit_admin_event("RATE_LIMIT", username, request)
         return _generic_login_failure(retry_after)
 
-    configured_username = normalize_username(config.ADMIN_USERNAME)
-    password_ok = verify_password(password, config.ADMIN_PASSWORD_HASH)
+    credential = _active_admin_credential()
+    configured_username = normalize_username(credential.get("username", ""))
+    password_ok = verify_password(password, credential.get("password_hash", ""))
     username_ok = bool(configured_username) and hmac.compare_digest(
         normalize_username(username), configured_username
     )
@@ -2253,13 +2442,167 @@ async def admin_login(request: Request):
     session_token = new_token()
     csrf_token = new_token()
     db.create_admin_session(
-        token_hash(session_token), normalize_username(username), token_hash(csrf_token),
+        token_hash(session_token), configured_username, token_hash(csrf_token),
         _admin_security_version(), now, now + config.ADMIN_SESSION_ABSOLUTE_SECONDS,
     )
     _audit_admin_event("LOGIN_SUCCESS", username, request)
-    response = JSONResponse(content={"status": "authenticated", "username": normalize_username(username)})
+    response = JSONResponse(content={"status": "authenticated", "username": configured_username})
     _set_admin_cookies(response, session_token, csrf_token)
     return response
+
+
+FORGOT_PASSWORD_MESSAGE = "If an admin account exists for that email, a password reset link has been sent."
+
+
+@app.get("/admin/forgot-password", response_class=HTMLResponse)
+def forgot_password_page():
+    return HTMLResponse(content=FORGOT_PASSWORD_HTML)
+
+
+@app.post("/admin/forgot-password")
+@limiter.limit("30/minute")
+async def request_password_reset(request: Request):
+    _require_secure_admin_request(request)
+    if int(request.headers.get("content-length", "0") or 0) > 2048:
+        raise HTTPException(status_code=413, detail="Request too large.")
+    try:
+        raw = await request.body()
+        if len(raw) > 2048:
+            raise HTTPException(status_code=413, detail="Request too large.")
+        body = json.loads(raw or b"{}")
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid request.")
+
+    email = _normalize_recovery_email(body.get("email"))
+    scopes = _admin_reset_scopes("admin-forgot", email, _admin_ip(request))
+    retry_after = _admin_action_rate_status(scopes)
+    if retry_after:
+        _audit_admin_event("PASSWORD_RESET_RATE_LIMIT", "", request)
+        return JSONResponse(
+            status_code=429,
+            content={"detail": "Too many password reset attempts. Try again later."},
+            headers={"Retry-After": str(retry_after)},
+        )
+
+    _admin_action_record(scopes, [3, 3, 30])
+    configured_email = _normalize_recovery_email(config.ADMIN_RECOVERY_EMAIL)
+    credential = _active_admin_credential()
+    if email and configured_email and hmac.compare_digest(email, configured_email) and credential.get("password_hash"):
+        now = time.time()
+        reset_token = new_token()
+        db.issue_admin_password_reset_token(
+            credential["username"],
+            token_hash(reset_token),
+            now,
+            now + config.ADMIN_RESET_TOKEN_TTL_SECONDS,
+            security_digest(_admin_ip(request)),
+        )
+        public_base_url = _reset_public_base_url(request)
+        # Keep the bearer token in the URL fragment so it is not sent in the
+        # reset-page HTTP request, access logs, or a downstream Referer.
+        reset_url = f"{public_base_url}/admin/reset-password#token={reset_token}" if public_base_url else ""
+        sent = bool(reset_url) and admin_mailer.send_password_reset_email(
+            configured_email,
+            reset_url,
+            max(1, int(config.ADMIN_RESET_TOKEN_TTL_SECONDS // 60)),
+        )
+        _audit_admin_event("PASSWORD_RESET_REQUESTED", credential["username"], request)
+        if sent:
+            _audit_admin_event("PASSWORD_RESET_EMAIL_SENT", credential["username"], request)
+        else:
+            db.cancel_admin_password_reset_token(token_hash(reset_token), time.time())
+            _audit_admin_event("PASSWORD_RESET_EMAIL_FAILED", credential["username"], request)
+    else:
+        _audit_admin_event("PASSWORD_RESET_UNKNOWN_EMAIL", "", request)
+
+    return JSONResponse(content={"message": FORGOT_PASSWORD_MESSAGE})
+
+
+@app.get("/admin/reset-password", response_class=HTMLResponse)
+def reset_password_page():
+    return HTMLResponse(content=RESET_PASSWORD_HTML)
+
+
+@app.post("/admin/reset-password")
+@limiter.limit("30/minute")
+async def reset_password(request: Request):
+    _require_secure_admin_request(request)
+    if int(request.headers.get("content-length", "0") or 0) > 8192:
+        raise HTTPException(status_code=413, detail="Request too large.")
+    try:
+        raw = await request.body()
+        if len(raw) > 8192:
+            raise HTTPException(status_code=413, detail="Request too large.")
+        body = json.loads(raw or b"{}")
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid request.")
+
+    reset_token = str(body.get("token") or "").strip()
+    scopes = _admin_reset_scopes("admin-reset", reset_token, _admin_ip(request))
+    retry_after = _admin_action_rate_status(scopes)
+    if retry_after:
+        _audit_admin_event("PASSWORD_RESET_RATE_LIMIT", "", request)
+        return JSONResponse(
+            status_code=429,
+            content={"detail": "Too many password reset attempts. Try again later."},
+            headers={"Retry-After": str(retry_after)},
+        )
+    _admin_action_record(scopes, [5, 10, 50])
+
+    row = db.get_active_admin_password_reset_token(token_hash(reset_token), time.time()) if reset_token else None
+    if not row:
+        _audit_admin_event("PASSWORD_RESET_TOKEN_INVALID", "", request)
+        return JSONResponse(status_code=400, content={"detail": "Invalid or expired reset link."})
+
+    password = str(body.get("password") or "")
+    confirmation = str(body.get("confirm_password") or "")
+    if len(password) < 12 or password != confirmation:
+        _audit_admin_event("PASSWORD_RESET_INVALID_PASSWORD", row["username"], request)
+        return JSONResponse(
+            status_code=400,
+            content={"detail": "Password must be at least 12 characters and match its confirmation."},
+        )
+
+    totp_code = str(body.get("totp") or "").strip()
+    if not _verify_reset_mfa(totp_code, time.time()):
+        _audit_admin_event("PASSWORD_RESET_MFA_FAILURE", row["username"], request)
+        return JSONResponse(status_code=401, content={"detail": "Invalid authenticator code."})
+
+    completed = db.complete_admin_password_reset(
+        token_hash(reset_token), hash_secret(password), time.time()
+    )
+    if not completed:
+        _audit_admin_event("PASSWORD_RESET_TOKEN_INVALID", "", request)
+        return JSONResponse(status_code=400, content={"detail": "Invalid or expired reset link."})
+    _audit_admin_event("PASSWORD_RESET_COMPLETED", completed["username"], request)
+    return {"status": "password_reset", "message": "Password reset complete. Sign in with your new password."}
+
+
+@app.post("/admin/reset-password/cancel")
+@limiter.limit("30/minute")
+async def cancel_password_reset(request: Request):
+    _require_secure_admin_request(request)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    reset_token = str(body.get("token") or "").strip()
+    scopes = _admin_reset_scopes("admin-reset-cancel", reset_token, _admin_ip(request))
+    retry_after = _admin_action_rate_status(scopes)
+    if retry_after:
+        return JSONResponse(
+            status_code=429,
+            content={"detail": "Too many password reset attempts. Try again later."},
+            headers={"Retry-After": str(retry_after)},
+        )
+    _admin_action_record(scopes, [5, 10, 50])
+    if reset_token and db.cancel_admin_password_reset_token(token_hash(reset_token), time.time()):
+        _audit_admin_event("PASSWORD_RESET_CANCELLED", "", request)
+    return {"message": "If that reset link was active, it has been cancelled."}
 
 
 @app.post("/admin/verify-pin")
@@ -5191,7 +5534,7 @@ def _reviewed_menu_items(raw: Any, field: str) -> List[Dict[str, Any]]:
 @app.get("/admin/dashboard", response_class=HTMLResponse)
 def get_admin_dashboard():
     """
-    Dedicated PIN-Protected Kitchen & Menu Management Portal for Camellia Artisanal.
+    Password- and MFA-protected Kitchen & Menu Management Portal for Camellia Artisanal.
     Features:
     - Username/password authentication with optional production MFA
     - 📋 Paste Menu Card Text Parser
@@ -5556,6 +5899,8 @@ def get_admin_dashboard():
             <button class="auth-btn" onclick="loginAdmin()">
                 <span>Unlock Portal</span> ➔
             </button>
+
+            <p style="margin:14px 0 0;"><a href="/admin/forgot-password" style="color:var(--primary); font-weight:600;">Forgot Password?</a></p>
             
             <p class="auth-hint">Use your configured admin username, password, and authenticator code when prompted.</p>
         </div>

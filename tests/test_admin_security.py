@@ -165,7 +165,10 @@ def test_security_headers_and_admin_endpoint_inventory(security_client):
     assert response.headers["cache-control"].startswith("no-store")
     assert response.headers["strict-transport-security"].startswith("max-age=")
 
-    public = {"/admin", "/admin/dashboard", "/admin/login", "/admin/verify-pin"}
+    public = {
+        "/admin", "/admin/dashboard", "/admin/login", "/admin/verify-pin",
+        "/admin/forgot-password", "/admin/reset-password", "/admin/reset-password/cancel",
+    }
     missing = []
     for route in app.routes:
         if not route.path.startswith("/admin") or route.path in public:
