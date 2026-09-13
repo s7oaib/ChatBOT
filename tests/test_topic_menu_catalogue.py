@@ -455,6 +455,28 @@ def test_route_can_override_topic_default_menu(catalogue_db):
     assert clean["menu_mode"] == "SELECTED"
 
 
+def test_media_preview_metadata_is_persisted_without_changing_route_identity(catalogue_db):
+    route = catalogue_db.save_instagram_source_route({
+        "source_type": "reel",
+        "canonical_url": "https://www.instagram.com/reel/DdAnO6MTok1/",
+        "shortcode": "DdAnO6MTok1",
+        "routing_topic": "Sondesh",
+        "menu_mode": "NONE",
+        "preview_url": "https://cdn.example/reel-cover.jpg",
+        "media_type": "VIDEO",
+        "active": True,
+    })
+    metadata_only = catalogue_db.update_instagram_source_route_metadata(
+        route["routing_id"], preview_url="https://cdn.example/refreshed-cover.jpg", media_type="VIDEO",
+    )
+    assert metadata_only["canonical_url"] == route["canonical_url"]
+    assert metadata_only["shortcode"] == route["shortcode"]
+    assert metadata_only["menu_mode"] == "NONE"
+    assert metadata_only["preview_url"] == "https://cdn.example/refreshed-cover.jpg"
+    matched, method = route_for_inbound(ad_id=None, media_id=None, shortcode="DdAnO6MTok1")
+    assert matched["routing_id"] == route["routing_id"]
+
+
 def test_route_can_save_explicit_none_without_topic_default(catalogue_db):
     topic = create_topic("Sondesh NONE", "Description.", default_menu_id="aamar_mishti")
     clean = validate_route_payload({

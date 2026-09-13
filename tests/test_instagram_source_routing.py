@@ -9,6 +9,7 @@ from camellia import app
 from camellia.config import config
 from camellia.database import Database
 from camellia.instagram_routing import (
+    _preview_url_from_media,
     decode_route,
     lookup_instagram_media,
     normalize_instagram_url,
@@ -57,7 +58,14 @@ def test_graph_lookup_verifies_media_without_inventing_metadata(monkeypatch):
     monkeypatch.setattr(config, "INSTAGRAM_PAGE_ID", "page-1")
     monkeypatch.setattr("camellia.instagram_routing.httpx.Client", lambda *args, **kwargs: Client())
     result = lookup_instagram_media(normalize_instagram_url("https://instagram.com/reel/DdAnO6MTok1/"))
-    assert result == {"metadata_status": "verified_graph_api", "verified_media_identifier": "media-1", "thumbnail_url": "https://cdn.example/thumb.jpg", "caption": "Verified caption"}
+    assert result == {
+        "metadata_status": "verified_graph_api",
+        "verified_media_identifier": "media-1",
+        "thumbnail_url": "https://cdn.example/thumb.jpg",
+        "preview_url": "https://cdn.example/thumb.jpg",
+        "media_type": "VIDEO",
+        "caption": "Verified caption",
+    }
 
 
 def test_priority_products_preserve_order_and_allow_empty():
@@ -127,6 +135,26 @@ def test_admin_route_ui_has_ordering_crud_and_advanced_compatibility():
     html = app.get_admin_dashboard().body.decode()
     for expected in ("Instagram Link", "Priority Products", "+ Add Product", "moveIgPriority", "Remove", "Edit", "Disable", "Archive", "Advanced", "igAdId", "igMediaId", "igCampaignId"):
         assert expected in html
+
+
+def test_carousel_preview_uses_first_suitable_child_image():
+    assert _preview_url_from_media({
+        "media_type": "CAROUSEL_ALBUM",
+        "children": {"data": [
+            {"media_type": "VIDEO", "thumbnail_url": "https://cdn.example/video.jpg"},
+            {"media_type": "IMAGE", "media_url": "https://cdn.example/first-image.jpg"},
+        ]},
+    }) == "https://cdn.example/video.jpg"
+
+
+def test_carousel_preview_falls_back_to_first_image_without_video_thumbnail():
+    assert _preview_url_from_media({
+        "media_type": "CAROUSEL_ALBUM",
+        "children": {"data": [
+            {"media_type": "VIDEO"},
+            {"media_type": "IMAGE", "media_url": "https://cdn.example/first-image.jpg"},
+        ]},
+    }) == "https://cdn.example/first-image.jpg"
 
 
 def test_webhook_audit_does_not_infer_url_or_shortcode():

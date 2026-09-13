@@ -78,7 +78,8 @@ def verify_media_by_id(media_id: str) -> Dict[str, Any]:
     try:
         with httpx.Client(timeout=8.0) as client:
             response = client.get(url, params={
-                "fields": "id,permalink,media_type,timestamp", "access_token": token,
+                "fields": "id,permalink,media_type,media_url,thumbnail_url,children{media_type,media_url,thumbnail_url},timestamp",
+                "access_token": token,
             })
         if response.status_code != 200:
             return {"status": "not_found_or_unauthorized", "http_status": response.status_code}
@@ -92,6 +93,7 @@ def verify_media_by_id(media_id: str) -> Dict[str, Any]:
             "status": "verified",
             "media_id": str(data.get("id") or media_id),
             "media_type": data.get("media_type"),
+            "preview_url": _preview_url_from_media(data),
             "timestamp": data.get("timestamp"),
             "canonical_url": (identity or {}).get("canonical_url"),
             "shortcode": (identity or {}).get("shortcode"),
@@ -110,7 +112,7 @@ def lookup_instagram_media(identity: Dict[str, str]) -> Dict[str, Any]:
     if not token:
         return {"metadata_status": "not_configured"}
     version = config.WHATSAPP_API_VERSION
-    fields = "id,caption,media_type,media_url,permalink,thumbnail_url"
+    fields = "id,caption,media_type,media_url,permalink,thumbnail_url,children{media_type,media_url,thumbnail_url}"
     try:
         with httpx.Client(timeout=8.0) as client:
             url = _media_list_url(client, token, version)
@@ -132,6 +134,8 @@ def lookup_instagram_media(identity: Dict[str, str]) -> Dict[str, Any]:
                             "metadata_status": "verified_graph_api",
                             "verified_media_identifier": str(media.get("id") or "") or None,
                             "thumbnail_url": media.get("thumbnail_url") or media.get("media_url"),
+                            "preview_url": _preview_url_from_media(media),
+                            "media_type": media.get("media_type"),
                             "caption": media.get("caption"),
                         }
                 next_url = ((payload.get("paging") or {}).get("next"))
@@ -141,6 +145,22 @@ def lookup_instagram_media(identity: Dict[str, str]) -> Dict[str, Any]:
     except (httpx.HTTPError, ValueError, TypeError):
         return {"metadata_status": "lookup_failed"}
     return {"metadata_status": "not_found_on_connected_account"}
+
+
+def _preview_url_from_media(media: Dict[str, Any]) -> Optional[str]:
+    """Choose a stable-looking admin preview without using captions or routing data."""
+    media_type = str(media.get("media_type") or "").upper()
+    if media_type in {"VIDEO", "REEL"}:
+        return media.get("thumbnail_url") or media.get("media_url")
+    if media_type == "CAROUSEL_ALBUM":
+        for child in (media.get("children") or {}).get("data", []) if isinstance(media.get("children"), dict) else []:
+            if not isinstance(child, dict):
+                continue
+            child_type = str(child.get("media_type") or "").upper()
+            preview = child.get("thumbnail_url") if child_type in {"VIDEO", "REEL"} else child.get("media_url")
+            if preview:
+                return preview
+    return media.get("thumbnail_url") or media.get("media_url")
 
 
 def normalize_instagram_url(raw_url: str) -> Dict[str, str]:
@@ -357,6 +377,13 @@ def validate_route_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         topic["name"] if topic else str(payload.get("routing_topic") or "").strip()
     )
 
+    preview_url = str(payload.get("preview_url") or "").strip() or None
+    if preview_url and (len(preview_url) > 2000 or not preview_url.lower().startswith(("http://", "https://"))):
+        raise ValueError("preview_url must be an http(s) URL.")
+    media_type = str(payload.get("media_type") or "").strip() or None
+    if media_type and len(media_type) > 80:
+        raise ValueError("media_type is too long.")
+
     clean = {
         "source_type": source_type,
         "canonical_url": normalized.get("canonical_url"),
@@ -367,6 +394,8 @@ def validate_route_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         "topic_id": topic_id,
         "menu_id": menu_id,
         "menu_mode": menu_mode,
+        "preview_url": str(payload.get("preview_url") or "").strip() or None,
+        "media_type": str(payload.get("media_type") or "").strip() or None,
         "routing_topic": routing_topic,
         "knowledge_scope": scope,
         "escalation_policy": escalation,

@@ -282,7 +282,7 @@ def test_instagram_routing_has_a_simple_client_first_default_view(page):
 
 
 def test_instagram_routing_keeps_client_friendly_cards_and_existing_actions(page):
-    section = page[page.index('async function loadAdRoutes'):page.index('// Shared-post pairing')]
+    section = page[page.index('function renderInstagramMediaCard'):page.index('// Shared-post pairing')]
     assert "View Details" in section
     for action in ("Edit", "Disable", "Archive", "Status:", "Menu:", "Priority:"):
         assert action in section
@@ -290,6 +290,17 @@ def test_instagram_routing_keeps_client_friendly_cards_and_existing_actions(page
     assert "/admin/instagram-routes/${id}" in page
     assert "/admin/instagram-routes/${routingId}/pairing/start" in page
     assert "Save Changes" in page
+
+
+def test_instagram_routing_has_unified_connected_media_registry(page):
+    section = page[page.index('function renderInstagramMediaCard'):page.index('// Shared-post pairing')]
+    for marker in (
+        "Connected Instagram media filters", "igMediaSearch", "Posts", "Reels", "Ads",
+        "ig-media-card", "preview_url", "POST", "REEL", "Open Instagram",
+        "Refresh preview", "/metadata/refresh", "target=\"_blank\"",
+    ):
+        assert marker in page, marker
+    assert "lookup_instagram_media" not in section[section.index("async function loadAdRoutes"):]
 
 
 def test_instagram_routing_delete_is_client_friendly_and_scoped(page):

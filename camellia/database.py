@@ -586,7 +586,9 @@ class Database:
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 archived_at TIMESTAMP,
-                menu_mode TEXT NOT NULL DEFAULT 'INHERIT'
+                menu_mode TEXT NOT NULL DEFAULT 'INHERIT',
+                preview_url TEXT,
+                media_type TEXT
             );
             """)
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_instagram_routes_ad ON instagram_source_routes(ad_id, active)")
@@ -696,6 +698,8 @@ class Database:
             # "the client may override it if needed" without changing the Topic.
             self._ensure_column(cursor, "instagram_source_routes", "menu_id", "TEXT")
             self._ensure_column(cursor, "instagram_source_routes", "menu_mode", "TEXT NOT NULL DEFAULT 'INHERIT'")
+            self._ensure_column(cursor, "instagram_source_routes", "preview_url", "TEXT")
+            self._ensure_column(cursor, "instagram_source_routes", "media_type", "TEXT")
             # Existing rows with a concrete route menu are already configured;
             # retain their behavior. Null-menu legacy rows remain INHERIT until
             # an operator explicitly saves NONE or SELECTED through the admin UI.
@@ -982,7 +986,8 @@ class Database:
             route.get("routing_topic", ""), json.dumps(route.get("knowledge_scope", [])),
             route.get("escalation_policy", "human_if_unsupported"),
             json.dumps(route.get("priority_products", [])), int(bool(route.get("active", True))),
-            route.get("topic_id"), route.get("menu_id"), menu_mode, now,
+            route.get("topic_id"), route.get("menu_id"), menu_mode,
+            route.get("preview_url"), route.get("media_type"), now,
         )
         with self.get_connection() as conn:
             if routing_id is None:
@@ -1001,8 +1006,8 @@ class Database:
                     """INSERT INTO instagram_source_routes
                     (source_type, canonical_url, shortcode, media_id, ad_id, campaign_id,
                      routing_topic, knowledge_scope, escalation_policy, priority_products,
-                    active, topic_id, menu_id, menu_mode, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    active, topic_id, menu_id, menu_mode, preview_url, media_type, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     values[:-1] + (now, now),
                 )
                 routing_id = int(cursor.lastrowid)
@@ -1010,12 +1015,33 @@ class Database:
                 cursor = conn.execute(
                     """UPDATE instagram_source_routes SET source_type=?, canonical_url=?, shortcode=?,
                     media_id=?, ad_id=?, campaign_id=?, routing_topic=?, knowledge_scope=?,
-                    escalation_policy=?, priority_products=?, active=?, topic_id=?, menu_id=?, menu_mode=?, updated_at=?, archived_at=NULL
+                    escalation_policy=?, priority_products=?, active=?, topic_id=?, menu_id=?, menu_mode=?,
+                    preview_url=?, media_type=?, updated_at=?, archived_at=NULL
                     WHERE routing_id=?""",
                     values + (routing_id,),
                 )
                 if cursor.rowcount == 0:
                     raise ValueError("Routing record not found.")
+            conn.commit()
+            row = conn.execute(
+                "SELECT * FROM instagram_source_routes WHERE routing_id = ?", (routing_id,)
+            ).fetchone()
+        return dict(row)
+
+    def update_instagram_source_route_metadata(
+        self, routing_id: int, *, preview_url: Optional[str] = None,
+        media_type: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Update display-only media metadata without touching routing fields."""
+        now = datetime.utcnow().isoformat()
+        with self.get_connection() as conn:
+            cursor = conn.execute(
+                "UPDATE instagram_source_routes SET preview_url=?, media_type=?, updated_at=? "
+                "WHERE routing_id=?",
+                (preview_url, media_type, now, routing_id),
+            )
+            if not cursor.rowcount:
+                return None
             conn.commit()
             row = conn.execute(
                 "SELECT * FROM instagram_source_routes WHERE routing_id = ?", (routing_id,)
@@ -1189,6 +1215,22 @@ class Database:
                 (routing_id,),
             ).fetchone()
         return dict(row) if row else None
+
+    def list_latest_post_pairings(self) -> Dict[int, Dict[str, Any]]:
+        """Return the newest pairing attempt per route in one database query."""
+        with self.get_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT p.*
+                FROM instagram_post_pairings p
+                JOIN (
+                    SELECT routing_id, MAX(id) AS id
+                    FROM instagram_post_pairings
+                    GROUP BY routing_id
+                ) latest ON latest.id = p.id
+                """
+            ).fetchall()
+        return {int(row["routing_id"]): dict(row) for row in rows}
 
     def cancel_post_pairing(self, routing_id: int) -> bool:
         with self.get_connection() as conn:
