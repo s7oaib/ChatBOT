@@ -9,7 +9,7 @@ import uuid
 from io import BytesIO
 from typing import Any, Dict, Optional
 
-from PIL import Image
+from PIL import Image, ImageOps
 
 from camellia.database import db
 from camellia import weekly_flyer
@@ -30,6 +30,8 @@ CANONICAL_ALIASES = {
     "weekly.bengali_bento": "bento",
 }
 ALLOWED_TYPES = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}
+PREVIEW_MAX_EDGE = 640
+PREVIEW_MAX_BYTES = 2 * 1024 * 1024
 
 
 def _dir() -> str:
@@ -59,6 +61,37 @@ def validate_image(data: bytes, content_type: str) -> str:
     except Exception as exc:
         raise ValueError("The uploaded file is not a valid image.") from exc
     return ALLOWED_TYPES[mime]
+
+
+def prepare_admin_preview(data: bytes, content_type: str) -> tuple[bytes, str, str]:
+    """Validate and compact an admin-only preview without changing route data.
+
+    Normal-sized images keep their original format. Larger or very high
+    resolution uploads are reduced to a visual thumbnail so the durable
+    preview store never keeps an unnecessarily large original.
+    """
+    extension = validate_image(data, content_type)
+    mime = (content_type or "").split(";", 1)[0].lower()
+    with Image.open(BytesIO(data)) as opened:
+        image = ImageOps.exif_transpose(opened)
+        if max(image.size) <= PREVIEW_MAX_EDGE and len(data) <= PREVIEW_MAX_BYTES:
+            return data, mime, extension
+        image.thumbnail((PREVIEW_MAX_EDGE, PREVIEW_MAX_EDGE), Image.LANCZOS)
+        if image.mode not in ("RGB", "L"):
+            background = Image.new("RGB", image.size, "white")
+            alpha = image.getchannel("A") if "A" in image.getbands() else None
+            background.paste(image, mask=alpha)
+            image = background
+        elif image.mode == "L":
+            image = image.convert("RGB")
+        output = BytesIO()
+        for quality in (88, 78, 68, 58):
+            output.seek(0)
+            output.truncate(0)
+            image.save(output, format="JPEG", quality=quality, optimize=True, progressive=True)
+            if output.tell() <= PREVIEW_MAX_BYTES:
+                break
+        return output.getvalue(), "image/jpeg", "jpg"
 
 
 def _fallback(menu_key: str) -> Optional[str]:

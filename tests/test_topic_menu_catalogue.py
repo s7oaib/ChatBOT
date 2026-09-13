@@ -504,6 +504,41 @@ def test_admin_preview_fallback_is_separate_from_route_identity(catalogue_db, ad
     assert next(item for item in listed if item["routing_id"] == route["routing_id"])["admin_preview_url"] is None
 
 
+def test_admin_preview_validates_and_compacts_large_images(catalogue_db, admin_client, tmp_path):
+    client, headers = admin_client
+    route = catalogue_db.save_instagram_source_route({
+        "source_type": "reel",
+        "canonical_url": "https://www.instagram.com/reel/CoverCompact123/",
+        "shortcode": "CoverCompact123",
+        "routing_topic": "Cover Topic",
+        "menu_mode": "NONE",
+        "active": True,
+    })
+    invalid = client.post(
+        f"/admin/instagram-routes/{route['routing_id']}/preview",
+        files={"file": ("cover.txt", b"not-an-image", "text/plain")},
+        headers=headers,
+    )
+    assert invalid.status_code == 400
+
+    noisy = Image.frombytes("RGB", (1800, 1800), os.urandom(1800 * 1800 * 3))
+    stream = io.BytesIO()
+    noisy.save(stream, "JPEG", quality=100)
+    assert len(stream.getvalue()) > 2 * 1024 * 1024
+    uploaded = client.post(
+        f"/admin/instagram-routes/{route['routing_id']}/preview",
+        files={"file": ("large.jpg", stream.getvalue(), "image/jpeg")},
+        headers=headers,
+    )
+    assert uploaded.status_code == 200
+    saved = catalogue_db.get_instagram_route_preview(route["routing_id"])
+    assert saved["content_type"] == "image/jpeg"
+    stored = str(tmp_path / "uploads" / "instagram-previews" / saved["image_path"].rsplit("/", 1)[-1])
+    with Image.open(stored) as image:
+        assert max(image.size) <= 640
+    assert catalogue_db.get_instagram_source_route(route["routing_id"])["routing_id"] == route["routing_id"]
+
+
 def test_route_can_save_explicit_none_without_topic_default(catalogue_db):
     topic = create_topic("Sondesh NONE", "Description.", default_menu_id="aamar_mishti")
     clean = validate_route_payload({

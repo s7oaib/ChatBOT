@@ -2235,6 +2235,7 @@ def refresh_instagram_route_metadata(
 
 
 MAX_INSTAGRAM_PREVIEW_SIZE = 2 * 1024 * 1024
+MAX_INSTAGRAM_PREVIEW_UPLOAD_SIZE = 10 * 1024 * 1024
 
 
 def _instagram_preview_dir() -> str:
@@ -2273,13 +2274,14 @@ async def set_instagram_route_preview(
     if file is None:
         raise HTTPException(status_code=400, detail="Choose a preview image.")
     data = await file.read()
-    if len(data) > MAX_INSTAGRAM_PREVIEW_SIZE:
-        raise HTTPException(status_code=413, detail="Preview image is too large.")
     content_type = (file.content_type or "").split(";", 1)[0].lower()
     try:
-        extension = menu_images.validate_image(data, content_type)
+        if len(data) > MAX_INSTAGRAM_PREVIEW_UPLOAD_SIZE:
+            raise ValueError("Preview image is too large. Choose an image under 10 MB.")
+        data, content_type, extension = menu_images.prepare_admin_preview(data, content_type)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        status = 413 if "too large" in str(exc).lower() else 400
+        raise HTTPException(status_code=status, detail=str(exc))
     filename = f"route-{routing_id}-{uuid.uuid4().hex[:12]}.{extension}"
     image_path = os.path.join(_instagram_preview_dir(), filename)
     with open(image_path, "wb") as handle:
@@ -5095,6 +5097,22 @@ def get_admin_dashboard():
         .ig-media-status.disabled { background:#F3F4F6; color:#4B5563; }
         .ig-media-actions { display:flex; gap:6px; flex-wrap:wrap; justify-content:flex-end; }
         .ig-media-actions .btn-secondary, .ig-media-actions .btn-danger { padding:7px 10px; font-size:0.74rem; }
+        .ig-cover-controls { display:flex; gap:6px; flex-wrap:wrap; margin-top:7px; }
+        .ig-cover-controls button { padding:6px 9px; font-size:0.72rem; }
+        .ig-cover-label { color:var(--text-muted); font-size:0.7rem; line-height:1.3; }
+        .ig-cover-modal-preview { width:180px; height:180px; margin:0 auto; border-radius:10px; overflow:hidden; background:#EDE8E3; display:flex; align-items:center; justify-content:center; }
+        .ig-cover-modal-preview img { width:100%; height:100%; object-fit:cover; display:block; }
+        .ig-cover-modal-preview .ig-media-placeholder { min-height:100%; }
+        .ig-cover-file-name { min-height:1.2em; text-align:center; color:var(--text-muted); font-size:0.78rem; overflow-wrap:anywhere; }
+        .ig-cover-modal-status { min-height:1.2em; color:var(--text-muted); font-size:0.78rem; }
+        .ig-cover-modal-overlay { display:none; position:fixed; inset:0; z-index:1000; background:rgba(34,29,26,.52); justify-content:center; align-items:center; padding:16px; }
+        .ig-cover-modal-box { width:min(100%, 440px); max-height:calc(100vh - 32px); overflow:auto; padding:18px; background:#fff; border-radius:12px; box-shadow:0 10px 30px rgba(0,0,0,.25); display:flex; flex-direction:column; gap:12px; }
+        .ig-cover-modal-box h3 { margin:0; color:var(--primary); font-size:1.05rem; }
+        .ig-cover-modal-actions { display:flex; justify-content:flex-end; gap:8px; }
+        .ig-cover-modal-actions button { padding:8px 16px; border-radius:18px; border:0; font-weight:600; cursor:pointer; font-size:.85rem; }
+        .ig-cover-modal-actions .ig-cover-cancel { background:#e9ecef; color:#495057; }
+        .ig-cover-modal-actions .ig-cover-save { background:var(--primary); color:#fff; }
+        .ig-cover-modal-actions button:disabled { opacity:.55; cursor:not-allowed; }
         .ig-media-details { grid-column:2 / -1; color:var(--text-muted); font-size:0.76rem; line-height:1.55; }
         .ig-media-large { max-width:240px; max-height:240px; border-radius:10px; display:block; margin:8px 0; object-fit:cover; }
         @media (max-width: 660px) { .ig-media-card { grid-template-columns:76px minmax(0,1fr); } .ig-media-preview { width:76px; height:76px; } .ig-media-actions { grid-column:1 / -1; justify-content:flex-start; } .ig-media-details { grid-column:1 / -1; } }
@@ -6211,6 +6229,21 @@ THIS WEEK'S BENGAL SPECIALS
         </div>
     </div>
 
+    <div class="ig-cover-modal-overlay" id="instagramCoverModal" aria-hidden="true">
+        <div class="ig-cover-modal-box" role="dialog" aria-modal="true" aria-labelledby="instagramCoverModalTitle">
+            <h3 id="instagramCoverModalTitle">Add Cover</h3>
+            <p style="margin:0;font-size:0.8rem;color:#555;">Choose a small image for this admin-only route preview. It never changes routing or customer replies.</p>
+            <div id="instagramCoverModalPreview" class="ig-cover-modal-preview"><span class="ig-media-muted">Choose an image to preview it here.</span></div>
+            <input id="instagramCoverFile" type="file" accept="image/jpeg,image/png,image/webp" onchange="previewInstagramCoverFile(this)">
+            <div id="instagramCoverFileName" class="ig-cover-file-name"></div>
+            <div id="instagramCoverModalStatus" class="ig-cover-modal-status" role="status"></div>
+            <div class="ig-cover-modal-actions">
+                <button class="ig-cover-cancel" type="button" onclick="closeInstagramCoverModal()">Cancel</button>
+                <button class="ig-cover-save" id="instagramCoverSaveButton" type="button" onclick="saveInstagramCover()" disabled>Save Cover</button>
+            </div>
+        </div>
+    </div>
+
     <script>
         // Remembering the PIN between page loads is a convenience, never part
         // of authentication — so no storage failure may stand between a valid
@@ -7069,24 +7102,106 @@ THIS WEEK'S BENGAL SPECIALS
                 .then(data => { result.style.display='block'; result.className='result-box success'; result.innerText = data.metadata_status === 'verified_graph_api' || data.metadata_status === 'verified' ? 'Preview updated.' : 'Meta did not provide preview metadata — you can set a preview manually.'; loadAdRoutes(); })
                 .catch(err => { result.style.display='block'; result.className='result-box error'; result.innerText = err.message || 'Could not refresh preview.'; });
         }
-        async function setInstagramAdminPreview(id, file) {
-            if (!file) return;
-            const result = document.getElementById('adRouteResult');
-            const form = new FormData(); form.append('file', file);
+        let instagramCoverRouteId = null;
+        let instagramCoverDraftFile = null;
+        let instagramCoverUploadBusy = false;
+        const MAX_INSTAGRAM_COVER_UPLOAD_BYTES = 10 * 1024 * 1024;
+
+        function instagramCoverModalStatus(message, error = false) {
+            const status = document.getElementById('instagramCoverModalStatus');
+            status.innerText = message || '';
+            status.style.color = error ? 'var(--danger)' : 'var(--text-muted)';
+        }
+        function openInstagramCoverModal(id) {
+            const route = (window.igRoutes || []).find(item => item.routing_id === id);
+            if (!route) return;
+            instagramCoverRouteId = id;
+            instagramCoverDraftFile = null;
+            instagramCoverUploadBusy = false;
+            document.getElementById('instagramCoverModalTitle').innerText = route.admin_preview_url || route.preview_url ? 'Change Cover' : 'Add Cover';
+            document.getElementById('instagramCoverFile').value = '';
+            document.getElementById('instagramCoverFileName').innerText = '';
+            document.getElementById('instagramCoverSaveButton').disabled = true;
+            instagramCoverModalStatus('');
+            const preview = document.getElementById('instagramCoverModalPreview');
+            preview.innerHTML = '<span class="ig-media-muted">Choose an image to preview it here.</span>';
+            document.getElementById('instagramCoverModal').style.display = 'flex';
+            document.getElementById('instagramCoverModal').setAttribute('aria-hidden', 'false');
+            document.getElementById('instagramCoverFile').focus();
+        }
+        function closeInstagramCoverModal() {
+            if (instagramCoverUploadBusy) return;
+            const modal = document.getElementById('instagramCoverModal');
+            modal.style.display = 'none';
+            modal.setAttribute('aria-hidden', 'true');
+            instagramCoverRouteId = null;
+            instagramCoverDraftFile = null;
+        }
+        function previewInstagramCoverFile(input) {
+            const file = input.files && input.files[0];
+            const save = document.getElementById('instagramCoverSaveButton');
+            const preview = document.getElementById('instagramCoverModalPreview');
+            instagramCoverDraftFile = null;
+            save.disabled = true;
+            if (!file) {
+                preview.innerHTML = '<span class="ig-media-muted">Choose an image to preview it here.</span>';
+                document.getElementById('instagramCoverFileName').innerText = '';
+                instagramCoverModalStatus('');
+                return;
+            }
+            const allowed = ['image/jpeg', 'image/png', 'image/webp'];
+            if (!allowed.includes(file.type)) {
+                instagramCoverModalStatus('Only JPG, PNG, and WEBP images are supported.', true);
+                return;
+            }
+            if (file.size > MAX_INSTAGRAM_COVER_UPLOAD_BYTES) {
+                instagramCoverModalStatus('Choose an image under 10 MB.', true);
+                return;
+            }
+            document.getElementById('instagramCoverFileName').innerText = `${file.name} · ${(file.size / 1024 / 1024).toFixed(2)} MB`;
+            const reader = new FileReader();
+            reader.onload = event => {
+                preview.innerHTML = `<img src="${event.target.result}" alt="Selected cover preview">`;
+                instagramCoverDraftFile = file;
+                save.disabled = false;
+                instagramCoverModalStatus('Ready to save. Large images are compacted for the admin thumbnail.');
+            };
+            reader.onerror = () => instagramCoverModalStatus('Could not preview this image. Choose another file.', true);
+            reader.readAsDataURL(file);
+        }
+        async function saveInstagramCover() {
+            if (!instagramCoverRouteId || !instagramCoverDraftFile || instagramCoverUploadBusy) return;
+            const save = document.getElementById('instagramCoverSaveButton');
+            const cancel = document.querySelector('#instagramCoverModal .ig-cover-cancel');
+            const input = document.getElementById('instagramCoverFile');
+            instagramCoverUploadBusy = true;
+            save.disabled = true; cancel.disabled = true; input.disabled = true;
+            instagramCoverModalStatus('Uploading...');
+            const form = new FormData(); form.append('file', instagramCoverDraftFile);
             try {
-                const resp = await fetch(`/admin/instagram-routes/${id}/preview`, { method:'POST', headers:getAuthHeaders(), body:form });
-                const data = await resp.json(); if (!resp.ok) throw new Error(data.detail || 'Could not set preview image.');
-                result.style.display='block'; result.className='result-box success'; result.innerText='Preview updated.'; loadAdRoutes();
-            } catch (err) { result.style.display='block'; result.className='result-box error'; result.innerText=err.message || 'Could not set preview image.'; }
+                const resp = await fetch(`/admin/instagram-routes/${instagramCoverRouteId}/preview`, { method:'POST', headers:getAuthHeaders(), body:form });
+                const data = await resp.json(); if (!resp.ok) throw new Error(data.detail || 'Could not save cover.');
+                instagramCoverUploadBusy = false;
+                closeInstagramCoverModal();
+                const result = document.getElementById('adRouteResult');
+                result.style.display='block'; result.className='result-box success'; result.innerText='Cover updated';
+                await loadAdRoutes();
+            } catch (err) {
+                instagramCoverModalStatus(err.message || 'Could not save cover. The existing cover is unchanged.', true);
+            } finally {
+                instagramCoverUploadBusy = false;
+                save.disabled = !instagramCoverDraftFile;
+                cancel.disabled = false; input.disabled = false;
+            }
         }
         async function removeInstagramAdminPreview(id) {
-            if (!confirm('Remove the admin preview image? The Meta preview and placeholder remain available.')) return;
+            if (!confirm('Remove this cover image? Routing will not be affected.')) return;
             const result = document.getElementById('adRouteResult');
             try {
                 const resp = await fetch(`/admin/instagram-routes/${id}/preview`, { method:'DELETE', headers:getAuthHeaders() });
                 const data = await resp.json(); if (!resp.ok) throw new Error(data.detail || 'Could not remove preview image.');
-                result.style.display='block'; result.className='result-box success'; result.innerText='Preview removed.'; loadAdRoutes();
-            } catch (err) { result.style.display='block'; result.className='result-box error'; result.innerText=err.message || 'Could not remove preview image.'; }
+                result.style.display='block'; result.className='result-box success'; result.innerText='Cover removed'; await loadAdRoutes();
+            } catch (err) { result.style.display='block'; result.className='result-box error'; result.innerText=err.message || 'Could not remove cover.'; }
         }
         function renderInstagramMediaCard(route) {
             const status = instagramMediaStatus(route);
@@ -7103,13 +7218,14 @@ THIS WEEK'S BENGAL SPECIALS
                 actions = `<button class="btn-secondary" type="button" onclick="restoreInstagramRoute(${route.routing_id})">Restore</button> <button class="btn-danger" type="button" onclick="openIgRemoveModal(${route.routing_id})">Delete</button>`;
             } else if (route.routing_id) {
                 const connect = route.source_type === 'post' ? `<button class="btn-secondary" type="button" onclick="pairInstagramPost(${route.routing_id})">${route.media_id ? 'Reconnect Post' : 'Connect Post'}</button>` : '';
-                const previewInput = `<label class="btn-secondary" style="cursor:pointer;">${route.admin_preview_url ? 'Replace Preview Image' : 'Set Preview Image'}<input type="file" accept="image/jpeg,image/png,image/webp" hidden onchange="setInstagramAdminPreview(${route.routing_id},this.files[0])"></label>`;
-                const removePreview = route.admin_preview_url ? `<button class="btn-danger" type="button" onclick="removeInstagramAdminPreview(${route.routing_id})">Remove Preview</button>` : '';
-                actions = `<button class="btn-secondary" type="button" onclick="editInstagramRoute(${route.routing_id})">Edit</button><button class="btn-secondary" type="button" onclick="refreshInstagramRouteMetadata(${route.routing_id})">Refresh Media Preview</button>${previewInput}${removePreview}<button class="btn-secondary" type="button" onclick="setInstagramRouteActive(${route.routing_id},${!route.active})">${route.active ? 'Disable' : 'Enable'}</button><button class="btn-danger" type="button" onclick="archiveInstagramRoute(${route.routing_id})">Archive</button><button class="btn-danger" type="button" onclick="openIgRemoveModal(${route.routing_id})">Delete</button>${connect}`;
+                actions = `<button class="btn-secondary" type="button" onclick="editInstagramRoute(${route.routing_id})">Edit</button><button class="btn-secondary" type="button" onclick="refreshInstagramRouteMetadata(${route.routing_id})">Refresh Media Preview</button><button class="btn-secondary" type="button" onclick="setInstagramRouteActive(${route.routing_id},${!route.active})">${route.active ? 'Disable' : 'Enable'}</button><button class="btn-danger" type="button" onclick="archiveInstagramRoute(${route.routing_id})">Archive</button><button class="btn-danger" type="button" onclick="openIgRemoveModal(${route.routing_id})">Delete</button>${connect}`;
             } else {
                 actions = `<button class="btn-danger" type="button" onclick="removeAdRoute('${escapeHtml(route.ad_id || '')}')">Remove</button>`;
             }
-            return `<article class="ig-media-card"><div>${instagramPreview(route)}</div><div class="ig-media-main"><div class="ig-media-title"><b class="ig-media-topic">${escapeHtml(route.routing_topic || 'Instagram content')}</b><span class="ig-media-status ${status.className}">${escapeHtml(status.label)}</span></div><div>${link}</div><div class="ig-media-summary">${escapeHtml(description || 'No description configured.')}</div><div class="ig-media-facts"><span><b>Menu:</b> ${escapeHtml(menu)}</span><span><b>Status:</b> ${escapeHtml(status.label)}</span><span><b>Updated:</b> ${escapeHtml(route.updated_at || route.created_at || '—')}</span>${pairingNote}</div></div><div class="ig-media-actions">${actions}</div>${details}</article>`;
+            const coverManaged = route.routing_id && (route.source_type === 'post' || route.source_type === 'reel');
+            const hasCover = Boolean(route.preview_url || route.admin_preview_url);
+            const coverControls = coverManaged ? `<div class="ig-cover-controls"><button class="btn-secondary" type="button" onclick="openInstagramCoverModal(${route.routing_id})">${hasCover ? 'Change Cover' : 'Add Cover'}</button>${route.admin_preview_url ? `<button class="btn-danger" type="button" onclick="removeInstagramAdminPreview(${route.routing_id})">Remove Cover</button>` : ''}</div><div class="ig-cover-label">Admin-only visual metadata</div>` : '';
+            return `<article class="ig-media-card"><div>${instagramPreview(route)}${coverControls}</div><div class="ig-media-main"><div class="ig-media-title"><b class="ig-media-topic">${escapeHtml(route.routing_topic || 'Instagram content')}</b><span class="ig-media-status ${status.className}">${escapeHtml(status.label)}</span></div><div>${link}</div><div class="ig-media-summary">${escapeHtml(description || 'No description configured.')}</div><div class="ig-media-facts"><span><b>Menu:</b> ${escapeHtml(menu)}</span><span><b>Status:</b> ${escapeHtml(status.label)}</span><span><b>Updated:</b> ${escapeHtml(route.updated_at || route.created_at || '—')}</span>${pairingNote}</div></div><div class="ig-media-actions">${actions}</div>${details}</article>`;
         }
         function renderInstagramMediaRegistry() {
             const list = document.getElementById('adRouteList');
