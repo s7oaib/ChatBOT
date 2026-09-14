@@ -385,6 +385,7 @@
     },
     "everyday_meal_subscription": {
       "type_name": "Everyday Meal Subscription",
+      "availability": "Gurgaon only",
       "package_meals_count": 5,
       "pricing_note": "Includes GST, packaging, and portal charges; Porter delivery on actuals.",
       "rules": [

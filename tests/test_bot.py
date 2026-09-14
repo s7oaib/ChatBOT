@@ -2133,7 +2133,7 @@ class TestCamelliaBot(unittest.TestCase):
         self.assertIn("No minimum order", resp)
         self.assertIn("BENGALI BENTO", resp)
         self.assertIn("EVERYDAY MEAL SUBSCRIPTION", resp)
-        self.assertNotIn("Gurgaon only", resp)
+        self.assertIn("Gurgaon only", resp)
         self.assertIn("include GST", resp)
         self.assertIn("Delivery charges are at actuals", resp)
         # Image attachment must be weekly menu card
@@ -2174,7 +2174,7 @@ class TestCamelliaBot(unittest.TestCase):
         resp1, matched1, tmpl1, _ = responder.match_and_respond(msg1, user_id=uid, channel="whatsapp")
         self.assertTrue(matched1)
         self.assertEqual(tmpl1, "subscription_details")
-        # The client's own copy names the kitchen, not a delivery restriction.
+        self.assertIn("Gurgaon only", resp1)
         self.assertIn("Sushant Lok Gurgaon kitchen", resp1)
         self.assertIn("₹1,500", resp1)
         self.assertIn("₹1,750", resp1)
@@ -2213,7 +2213,7 @@ class TestCamelliaBot(unittest.TestCase):
         self.assertNotIn("phone number", resp.lower())
         self.assertIn("preferred day or meal slot", resp)
         self.assertNotIn("Google location pin", resp)
-        self.assertNotIn("8796551990", resp)
+        self.assertIn("+91 87965 51990", resp)
 
     def test_phase_b_sondesh_dispatch_time(self):
         """Phase B: Test sondesh_dispatch_time returns standard dispatch timings."""
@@ -2323,7 +2323,7 @@ class TestCamelliaBot(unittest.TestCase):
         self.assertTrue(matched)
         self.assertEqual(tmpl, "savoury_delivery_time")
         self.assertIn("within 45 minutes", resp)
-        self.assertNotIn("8796551990", resp)
+        self.assertIn("+91 87965 51990", resp)
 
     def test_phase_e_kolkata_expansion_info(self):
         """Phase E: Test kolkata_expansion_info template response."""
@@ -2343,6 +2343,7 @@ class TestCamelliaBot(unittest.TestCase):
         self.assertEqual(tmpl, "GUARD_staff_names_manager_contact")
         self.assertIn("camellia.artisanal.gurgaon@gmail.com", resp)
         self.assertIn("Guru Dayal Singh", resp)
+        self.assertIn("+91 87965 51990", resp)
 
     def test_phase_c_subscription_booking_nudge(self):
         """Phase C: Test subscription_details response explicitly ends with 'Would you like to book?'."""

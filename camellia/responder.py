@@ -592,6 +592,30 @@ OUT_OF_AREA_GENERIC_RE = re.compile(
     re.IGNORECASE,
 )
 
+# These are narrow, approved-area/contact questions. They run before the
+# general NLU path because a model may otherwise classify them as unsupported
+# stock availability or generic contact requests instead of using the exact
+# approved QA template.
+SUBSCRIPTION_AREA_QUERY_RE = re.compile(
+    r"(?=.*\b(?:subscription|subscriptions|meal plan|meal package|everyday meal|"
+    r"meal subscription|tiffin)\b)"
+    r"(?=.*\b(?:available|availability|deliver|delivery|offered|get|take)\b)"
+    r"(?=.*\b(?:delhi|new delhi|gurgaon|noida|greater noida|ghaziabad|faridabad|"
+    r"dwarka|ncr|mumbai|pune|bangalore|bengaluru|kolkata|hyderabad|chennai|"
+    r"jaipur|ahmedabad|chandigarh|lucknow)\b)",
+    re.IGNORECASE,
+)
+PICKUP_CONTACT_QUERY_RE = re.compile(
+    r"\b(?:where is (?:your|the) kitchen|kitchen address|pickup directions|"
+    r"directions for pickup|number .*\bpickup\b|call .*\bpickup\b)\b",
+    re.IGNORECASE,
+)
+MEAL_PREORDER_QUERY_RE = re.compile(
+    r"(?=.*\b(?:pre[- ]?order|pre[- ]?book|prebook)\b)"
+    r"(?=.*\b(?:meal|food|savoury|savory|lunch|dinner)\b)",
+    re.IGNORECASE,
+)
+
 BARE_VEG_RE = re.compile(
     r'^(is it veg|is this veg|is that veg|is it vegetarian|is this vegetarian|'
     r'veg or non.?veg|veg or nonveg)[\s\?\.\!]*$',
@@ -2117,6 +2141,33 @@ class DeterministicResponder:
             EXPLICIT_SUBJECT_RE.search(semantic_resolution_text)
             and GENERIC_DETAIL_WRAPPER_RE.search(semantic_resolution_text)
         )
+
+        # Keep the client-confirmed subscription area, pickup contact, and
+        # savoury pre-order answers deterministic when the wording is explicit.
+        # These are approved template replies, not new facts or model guesses.
+        if SUBSCRIPTION_AREA_QUERY_RE.search(lowered_text):
+            template = self._template_by_id("subscription_details") or {}
+            response_text = template.get("response") or self._generic_fallback()
+            facts["awaiting_subscription_booking"] = True
+            facts["subscription_context"] = True
+            session_memory.add_turn(user_id, channel, user_message, response_text)
+            return response_text, True, "subscription_details", None
+
+        if PICKUP_CONTACT_QUERY_RE.search(lowered_text):
+            template = self._template_by_id("GUARD_pickup_address_hours") or {}
+            response_text = template.get("response") or self._generic_fallback()
+            session_memory.add_turn(user_id, channel, user_message, response_text)
+            return response_text, True, "GUARD_pickup_address_hours", None
+
+        if MEAL_PREORDER_QUERY_RE.search(lowered_text):
+            template = self._template_by_id("alacarte_prebooking_steps") or {}
+            response_text = template.get("response") or self._generic_fallback()
+            response_text, images = self._apply_crosssell_nudges(
+                "alacarte_prebooking_steps", response_text, None, facts,
+            )
+            session_memory.add_turn(user_id, channel, user_message, response_text)
+            return response_text, True, "alacarte_prebooking_steps", images
+
         if not active_conversation_flow and not explicit_subject_in_detail_wrapper:
             structured = self._structured_nlu_response(
                 user_message, user_id, channel, intro_greeting_prefix,

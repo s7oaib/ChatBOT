@@ -35,6 +35,9 @@ def reply_to(message):
     ("can i pay cash on delivery", "GUARD_payment_method"),
     ("where is your kitchen", "GUARD_pickup_address_hours"),
     ("who can i speak to directly", "GUARD_staff_names_manager_contact"),
+    ("is the meal subscription available in delhi", "subscription_details"),
+    ("what number should i call for pickup directions", "GUARD_pickup_address_hours"),
+    ("how do i pre-order a meal", "alacarte_prebooking_steps"),
     # "can i talk to someone" is deliberately excluded here: it now resolves
     # to the direct human-escalation intent (semantic_fallback's
     # _ESCALATION_INTENT_RE) rather than this template, so the customer gets
@@ -65,13 +68,17 @@ class TestTheFactsThemselves:
         ("GUARD_shelf_life_storage", "12 seconds"),
         ("GUARD_payment_method", "No COD"),
         ("GUARD_pickup_address_hours", "E144"),
+        ("GUARD_pickup_address_hours", "+91 87965 51990"),
         ("GUARD_staff_names_manager_contact", "Guru Dayal Singh"),
+        ("GUARD_staff_names_manager_contact", "+91 87965 51990"),
         ("GUARD_staff_names_manager_contact", "camellia.artisanal.gurgaon@gmail.com"),
         ("bento_details", "₹350"),
         ("bento_details", "₹400"),
         ("bento_details", "₹600"),
         ("subscription_details", "₹1,500"),
+        ("subscription_details", "Gurgaon only"),
         ("subscription_details", "gift you the 11th"),
+        ("alacarte_prebooking_steps", "+91 87965 51990"),
         ("savoury_food_intro", "No minimum order"),
         ("sondesh_dispatch_time", "within 15 minutes"),
         ("savoury_delivery_time", "within 45 minutes"),
