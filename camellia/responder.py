@@ -611,8 +611,13 @@ PICKUP_CONTACT_QUERY_RE = re.compile(
     re.IGNORECASE,
 )
 MEAL_PREORDER_QUERY_RE = re.compile(
+    r"(?:"
     r"(?=.*\b(?:pre[- ]?order|pre[- ]?book|prebook)\b)"
-    r"(?=.*\b(?:meal|food|savoury|savory|lunch|dinner)\b)",
+    r"(?=.*\b(?:meal|food|savoury|savory|lunch|dinner|menu|a la carte|à la carte|alacarte)\b)"
+    r"|"
+    r"(?=.*\bbook(?:ing)?\b)"
+    r"(?=.*\b(?:meal|lunch|dinner|menu|a la carte|à la carte|alacarte)\b)"
+    r")",
     re.IGNORECASE,
 )
 
@@ -856,22 +861,10 @@ class DeterministicResponder:
         knowledge id and sufficiency instead of answering blind.
         """
         text = " ".join(message.lower().split()).strip(" .?!")
-        # Staff-approved answers must win over broad conversational routing.
-        # A learned answer may intentionally contain words such as "bulk" or
-        # "corporate", but it is still a verified answer rather than a new
-        # escalation request.
-        # Conversational-only turns have a higher precedence than any learned
-        # row, so stale Custom Q&A content cannot turn a greeting into a menu
-        # dump.  The learned matcher remains authoritative for real questions.
-        if not (GREETING_ONLY_RE.fullmatch(text) or CLOSING_ONLY_RE.fullmatch(text) or ACK_ONLY_RE.fullmatch(text)):
-            try:
-                learned_match = db.search_learned_knowledge(message)
-                learned_answer = (learned_match or {}).get("verified_answer", "").strip()
-                if learned_answer:
-                    session_memory.add_turn(user_id, channel, message, learned_answer)
-                    return learned_answer, True, f"learned_{learned_match.get('id')}", None
-            except Exception:
-                pass
+        # Learned knowledge is deliberately not consulted here. Canonical
+        # customer intent must be resolved before a broad ACTIVE Custom Q&A
+        # row gets a chance to answer it; the learned fallback runs only after
+        # canonical guards/templates have declined the message.
         if (self.classify_unmatched_intent(message) == "complaint"
                 or re.search(r"\b(cancel (?:my |the )?order|order is missing|(?:speak|talk) to (?:a |an )?(?:human|person))\b", text)):
             reply, _ = self.build_handover_response(message)
@@ -2260,25 +2253,6 @@ class DeterministicResponder:
                 session_memory.add_turn(user_id, channel, user_message, response_text)
                 return response_text, True, "order_draft_receipt", None
         
-        # Check Self-Healing Learned Knowledge Base (Saved from Staff Escalation Resolutions)
-        try:
-            learned_items = db.get_active_learned_knowledge(limit=100)
-            for item in learned_items:
-                pattern = item.get("question_pattern", "").lower().strip()
-                ans = item.get("verified_answer", "").strip()
-                if not pattern or not ans:
-                    continue
-                p_words = set(re.findall(r'\b\w+\b', pattern))
-                sub_p_words = p_words - STOP_WORDS
-                sub_u_words = user_words - STOP_WORDS
-                if pattern in lowered_text or (sub_p_words and sub_p_words.issubset(sub_u_words)):
-                    if intro_greeting_prefix:
-                        ans = intro_greeting_prefix + ans
-                    session_memory.add_turn(user_id, channel, user_message, ans)
-                    return ans, True, f"learned_{item.get('id')}", None
-        except Exception:
-            pass
-
         # 3. Clean Conversational Preamble to isolate Business Intent
         cleaned_business_text = re.sub(
             r'^(hi|hello|hey|good morning|good afternoon|good evening|namaste|nomoshkar|greetings|hie|hii+)[,\s!.-]*', '', lowered_text
@@ -3050,6 +3024,21 @@ class DeterministicResponder:
             image_url = _strip_flower_emoji(image_url)
             session_memory.add_turn(user_id, channel, user_message, response_text)
             return response_text, True, tmpl_id, image_url
+
+        # Canonical resolution has had first refusal. Only now consult the
+        # ACTIVE learned-knowledge store for a genuine uncovered question.
+        # The database accessor enforces the ACTIVE-only customer-serving
+        # boundary; ARCHIVED and DISABLED rows never reach this path.
+        try:
+            learned_match = db.search_learned_knowledge(user_message)
+            learned_answer = (learned_match or {}).get("verified_answer", "").strip()
+            if learned_answer:
+                if intro_greeting_prefix:
+                    learned_answer = intro_greeting_prefix + learned_answer
+                session_memory.add_turn(user_id, channel, user_message, learned_answer)
+                return learned_answer, True, f"learned_{learned_match.get('id')}", None
+        except Exception:
+            pass
 
         # Check the active AI provider (Groq RAG) when enabled
         fallback, _intent = self.build_handover_response(user_message)
