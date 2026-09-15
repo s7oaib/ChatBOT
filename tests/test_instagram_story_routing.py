@@ -368,6 +368,55 @@ def test_story_temporary_url_is_sanitized_and_not_exposed_by_admin(story_db):
     assert "fragment" not in str(admin_payload)
 
 
+def test_deleting_story_is_a_local_tombstone_and_disables_exact_route(story_db):
+    story_db.record_instagram_story_source("story-delete", seen_at="2026-01-01T00:00:00")
+    story_db.record_instagram_story_source("story-keep", seen_at="2026-01-02T00:00:00")
+    route = story_db.save_instagram_source_route(_story_route("story-delete"))
+
+    assert story_db.delete_instagram_story_source("story-delete", removed_by="qa") is True
+    assert story_db.list_instagram_story_sources() == [
+        {**story_db.get_instagram_story_source("story-keep"), "media_id": "story-keep", "mapping_status": "UNMAPPED", "status": "UNMAPPED", "routing_id": None, "topic_id": None, "routing_topic": None}
+    ]
+    history = story_db.list_instagram_story_sources(include_deleted=True)
+    deleted = next(item for item in history if item["story_media_id"] == "story-delete")
+    assert deleted["mapping_status"] == "DELETED"
+    assert deleted["deleted_at"]
+    assert deleted["deleted_by"] == "qa"
+
+    saved_route = story_db.get_instagram_source_route(route["routing_id"])
+    assert saved_route["active"] == 0
+    assert saved_route["archived_at"]
+    assert route_for_inbound(
+        ad_id=None, media_id="story-delete", source_type="story_reply",
+    ) == (None, None)
+
+
+def test_story_restore_preserves_tombstone_and_does_not_reactivate_route(story_db):
+    story_db.record_instagram_story_source("story-restore", seen_at="2026-01-01T00:00:00")
+    route = story_db.save_instagram_source_route(_story_route("story-restore"))
+    story_db.delete_instagram_story_source("story-restore", removed_by="qa")
+
+    assert story_db.restore_instagram_story_source("story-restore", restored_by="qa") is True
+    source = story_db.get_instagram_story_source("story-restore")
+    assert source["admin_deleted"] == 0
+    assert source["deleted_at"]
+    assert source["restored_at"]
+    restored_route = story_db.get_instagram_source_route(route["routing_id"])
+    assert restored_route["active"] == 0
+    assert restored_route["archived_at"]
+    assert route_for_inbound(
+        ad_id=None, media_id="story-restore", source_type="story_reply",
+    ) == (None, None)
+
+    story_db.record_instagram_story_source("story-restore", seen_at="2026-01-03T00:00:00")
+    with story_db.get_connection() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM instagram_story_sources WHERE story_media_id=?",
+            ("story-restore",),
+        ).fetchone()[0] == 1
+    assert story_db.get_instagram_story_source("story-restore")["admin_deleted"] == 0
+
+
 def test_story_id_rendering_uses_data_not_inline_executable_id(monkeypatch, story_db):
     hostile_ids = ['"', "'", "<", ">", "&", '123" onclick="alert(1)']
     for index, media_id in enumerate(hostile_ids):

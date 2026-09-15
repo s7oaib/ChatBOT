@@ -298,13 +298,26 @@ def test_instagram_story_refresh_does_not_clear_the_list_before_it_settles(page)
 def test_instagram_stories_exposes_status_filters_and_safe_actions(page):
     section = page[page.index('id="tab-instagram-stories"'):page.index('<!-- MENU tab, panel 3 of 4')]
     render = page[page.index('function renderInstagramStories'):page.index('async function loadInstagramStories')]
-    for label in ("All", "Unmapped", "Mapped", "Disabled", "Archived", "Map Story", "Edit Mapping", "Disable", "Enable", "Archive", "Restore"):
+    for label in ("All", "Unmapped", "Mapped", "Disabled", "Archived", "Deleted", "Map Story", "Edit Mapping", "Disable", "Enable", "Archive", "Restore", "Delete"):
         assert label in section or label in render
-    assert 'data-story-action="delete"' not in render
-    assert "/permanent" not in render
+    assert 'data-story-action="delete"' in render
+    assert 'data-story-action="restore-source"' in render
+    assert 'Delete this Story from Camellia Admin?' in page
+    assert 'This removes the Story from the Admin dashboard and disables its Story routing.' in page
+    assert '/admin/instagram-story-sources/${encodeURIComponent(mediaId)}' in page
+    assert '/permanent' not in render
     assert "setInstagramStoryActive" in render
     assert "archiveInstagramStory" in render
     assert "restoreInstagramStory" in render
+
+
+def test_instagram_story_delete_is_local_and_history_is_explicit(page):
+    section = page[page.index('id="tab-instagram-stories"'):page.index('<!-- MENU tab, panel 3 of 4')]
+    assert 'data-story-filter="DELETED"' in section
+    assert "loadInstagramStories(true)" in page
+    assert "Story itself was not deleted" in page
+    assert "does not delete the Story from Instagram" in page
+    assert "admin_deleted" in page
 
 
 def test_instagram_stories_refreshes_from_source_and_mapping_endpoints(page):

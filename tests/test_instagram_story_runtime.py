@@ -438,3 +438,49 @@ class TestStoryRefreshResilience:
         """))
         assert result["searchValue"] == "story-1"
         assert result["filterValue"] == "MAPPED"
+
+
+class TestStoryDeleteActions:
+    def test_delete_requires_confirmation_and_uses_local_soft_delete_endpoint(self):
+        result = _run_node(_seed_common_pickers() + textwrap.dedent("""
+            adminAuthenticated = true;
+            igStorySources = [{ story_media_id: 'story-delete', mapping_status: 'UNMAPPED', last_seen: '2026-01-01' }];
+            let confirmation = '';
+            global.confirm = message => { confirmation = message; return true; };
+            queueFetch('/admin/instagram-story-sources/story-delete', 'DELETE', () => okResponse({ deleted: true }));
+            queueFetch('/admin/instagram-story-sources', 'GET', () => okResponse({ story_sources: [] }));
+            queueFetch('/admin/instagram-routes?include_archived=true', 'GET', () => okResponse({ routes: [] }));
+            queueFetch('/admin/instagram-routes', 'GET', () => okResponse({ routes: [] }));
+
+            deleteInstagramStory('story-delete').then(() => {
+                const call = fetchLog.find(item => item.method === 'DELETE');
+                console.log('RESULT::' + JSON.stringify({
+                    confirmation,
+                    deleteUrl: call && call.url,
+                    deleteMethod: call && call.method,
+                    successText: document.getElementById('igStoryResult').innerText,
+                }));
+            });
+        """))
+        assert result["deleteMethod"] == "DELETE"
+        assert result["deleteUrl"].endswith("/admin/instagram-story-sources/story-delete")
+        assert "Delete this Story from Camellia Admin?" in result["confirmation"]
+        assert "does not delete the Story from Instagram" in result["confirmation"]
+        assert "not deleted" in result["successText"]
+
+    def test_deleted_filter_requests_history_without_changing_default_load(self):
+        result = _run_node(_seed_common_pickers() + textwrap.dedent("""
+            adminAuthenticated = true;
+            queueFetch('/admin/instagram-story-sources?include_deleted=true', 'GET', () => okResponse({ story_sources: [{ story_media_id: 'story-deleted', admin_deleted: 1, deleted_at: '2026-01-02', last_seen: '2026-01-02' }] }));
+            queueFetch('/admin/instagram-routes?include_archived=true', 'GET', () => okResponse({ routes: [] }));
+            queueFetch('/admin/instagram-routes', 'GET', () => okResponse({ routes: [] }));
+            setInstagramStoryFilter('DELETED');
+            setTimeout(() => {
+                console.log('RESULT::' + JSON.stringify({
+                    historyUrl: fetchLog[0] && fetchLog[0].url,
+                    listHtml: document.getElementById('igStoryList').innerHTML,
+                }));
+            }, 10);
+        """))
+        assert "include_deleted=true" in result["historyUrl"]
+        assert "story-deleted" in result["listHtml"]

@@ -657,10 +657,23 @@ class Database:
                 first_seen TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 last_seen TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 last_sender_id TEXT,
-                last_event_metadata TEXT NOT NULL DEFAULT '{}'
+                last_event_metadata TEXT NOT NULL DEFAULT '{}',
+                admin_deleted INTEGER NOT NULL DEFAULT 0,
+                deleted_at TIMESTAMP,
+                deleted_by TEXT,
+                restored_at TIMESTAMP,
+                restored_by TEXT
             );
             """)
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_instagram_story_sources_seen ON instagram_story_sources(last_seen)")
+            # Admin deletion is a local tombstone, never a hard delete. Keep
+            # existing captured evidence and allow a later webhook to update
+            # last-seen metadata without silently restoring visibility.
+            self._ensure_column(cursor, "instagram_story_sources", "admin_deleted", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(cursor, "instagram_story_sources", "deleted_at", "TIMESTAMP")
+            self._ensure_column(cursor, "instagram_story_sources", "deleted_by", "TEXT")
+            self._ensure_column(cursor, "instagram_story_sources", "restored_at", "TIMESTAMP")
+            self._ensure_column(cursor, "instagram_story_sources", "restored_by", "TEXT")
 
             # A shared post carries no shortcode/URL Meta will put in a
             # webhook, and its messaging-attachment id has not been shown to
@@ -1212,6 +1225,12 @@ class Database:
             where = (
                 f"{field} = ? AND active = 1 AND archived_at IS NULL"
                 + (" AND source_type = ?" if source_type else "")
+                + (
+                    " AND NOT EXISTS (SELECT 1 FROM instagram_story_sources "
+                    "WHERE story_media_id = instagram_source_routes.media_id "
+                    "AND admin_deleted = 1)"
+                    if source_type == "story" else ""
+                )
             )
             params = (value, source_type) if source_type else (value,)
             row = conn.execute(
@@ -1264,11 +1283,17 @@ class Database:
             ).fetchone()
         return dict(row) if row else None
 
-    def list_instagram_story_sources(self) -> List[Dict[str, Any]]:
-        """Return captured Stories with exact mapping status for admin."""
+    def list_instagram_story_sources(self, include_deleted: bool = False) -> List[Dict[str, Any]]:
+        """Return captured Stories with exact mapping status for admin.
+
+        Deleted Stories stay in the database as local tombstones. The normal
+        list hides them; History asks explicitly for ``include_deleted``.
+        """
         with self.get_connection() as conn:
             rows = conn.execute(
-                "SELECT * FROM instagram_story_sources ORDER BY last_seen DESC, story_media_id"
+                "SELECT * FROM instagram_story_sources "
+                + ("" if include_deleted else "WHERE admin_deleted = 0 ")
+                + "ORDER BY last_seen DESC, story_media_id"
             ).fetchall()
             output = []
             for row in rows:
@@ -1282,7 +1307,9 @@ class Database:
                     """,
                     (item["story_media_id"],),
                 ).fetchone()
-                if route and route["archived_at"]:
+                if item.get("admin_deleted"):
+                    mapping_status = "DELETED"
+                elif route and route["archived_at"]:
                     mapping_status = "ARCHIVED"
                 elif route and not route["active"]:
                     mapping_status = "DISABLED"
@@ -1304,10 +1331,74 @@ class Database:
         if not media_id:
             return None
         return next(
-            (item for item in self.list_instagram_story_sources()
+            (item for item in self.list_instagram_story_sources(include_deleted=True)
              if item.get("story_media_id") == media_id),
             None,
         )
+
+    def delete_instagram_story_source(
+        self, story_media_id: str, removed_by: Optional[str] = None,
+    ) -> bool:
+        """Soft-delete one Story from the local Admin registry.
+
+        The captured source row is retained as evidence. Any route for the
+        exact Story ID is archived and disabled in the same transaction, so a
+        later webhook can update evidence but cannot restore visibility or
+        customer-facing routing by itself.
+        """
+        media_id = str(story_media_id or "").strip()
+        if not media_id:
+            return False
+        now = datetime.utcnow().isoformat()
+        actor = str(removed_by or "admin").strip()[:160] or "admin"
+        with self.get_connection() as conn:
+            source = conn.execute(
+                "SELECT story_media_id FROM instagram_story_sources WHERE story_media_id = ?",
+                (media_id,),
+            ).fetchone()
+            if not source:
+                return False
+            conn.execute(
+                """
+                UPDATE instagram_story_sources
+                SET admin_deleted=1,
+                    deleted_at=COALESCE(deleted_at, ?),
+                    deleted_by=COALESCE(deleted_by, ?)
+                WHERE story_media_id = ?
+                """,
+                (now, actor, media_id),
+            )
+            conn.execute(
+                """
+                UPDATE instagram_source_routes
+                SET active=0, archived_at=COALESCE(archived_at, ?), updated_at=?
+                WHERE source_type='story' AND media_id=?
+                """,
+                (now, now, media_id),
+            )
+            conn.commit()
+        return True
+
+    def restore_instagram_story_source(
+        self, story_media_id: str, restored_by: Optional[str] = None,
+    ) -> bool:
+        """Restore local Story visibility without restoring its route."""
+        media_id = str(story_media_id or "").strip()
+        if not media_id:
+            return False
+        now = datetime.utcnow().isoformat()
+        actor = str(restored_by or "admin").strip()[:160] or "admin"
+        with self.get_connection() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE instagram_story_sources
+                SET admin_deleted=0, restored_at=?, restored_by=?
+                WHERE story_media_id=? AND admin_deleted=1
+                """,
+                (now, actor, media_id),
+            )
+            conn.commit()
+        return cursor.rowcount > 0
 
     def set_instagram_source_route_active(self, routing_id: int, active: bool) -> bool:
         with self.get_connection() as conn:
