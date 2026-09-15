@@ -66,6 +66,7 @@ from camellia.instagram_routing import (
     update_topic,
     validate_route_payload,
     verify_media_by_id,
+    run_story_sync,
 )
 from camellia.sheet_sync import sheet_sync
 from camellia.menu_parser import menu_parser
@@ -2723,12 +2724,36 @@ def list_instagram_routes(
 
 @app.get("/admin/instagram-story-sources")
 def list_instagram_story_sources(
+    include_expired: bool = False,
     x_admin_key: Optional[str] = Header(None),
     x_admin_pin: Optional[str] = Header(None),
 ):
-    """Lists captured Story IDs, including unmapped IDs, for admin routing."""
+    """Lists captured Story IDs, including unmapped IDs, for admin routing.
+
+    Defaults to the Active view; ``include_expired=true`` is the
+    History/Expired view — the same rows, evidence and mapping history
+    intact, never deleted.
+    """
     require_admin(x_admin_key, x_admin_pin)
-    return {"status": "success", "story_sources": db.list_instagram_story_sources()}
+    return {"status": "success", "story_sources": db.list_instagram_story_sources(include_expired=include_expired)}
+
+
+@app.post("/admin/instagram-story-sources/sync")
+def sync_instagram_story_sources(
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """Actively syncs Stories from Meta — the automatic-discovery entry point.
+
+    Called when the Instagram Stories admin tab opens and when the operator
+    presses Refresh Stories. Never polls on a timer. A sync failure (Meta
+    outage, token/permission error, malformed or incomplete response) is
+    returned as an error and never changes any Story's lifecycle state.
+    """
+    require_admin(x_admin_key, x_admin_pin)
+    result = run_story_sync(db)
+    result["story_sources"] = db.list_instagram_story_sources(include_expired=True)
+    return result
 
 
 @app.post("/admin/instagram-routes/{routing_id}/metadata/refresh")
@@ -6050,6 +6075,7 @@ def get_admin_dashboard():
                 <button class="ig-media-filter ig-story-filter" type="button" data-story-filter="MAPPED">Mapped</button>
                 <button class="ig-media-filter ig-story-filter" type="button" data-story-filter="DISABLED">Disabled</button>
                 <button class="ig-media-filter ig-story-filter" type="button" data-story-filter="ARCHIVED">Archived</button>
+                <button class="ig-media-filter ig-story-filter" type="button" data-story-filter="EXPIRED">History / Expired</button>
             </div>
 
             <div id="igStoryMapForm" class="ig-story-form-card" style="display:none;">
@@ -6967,7 +6993,7 @@ THIS WEEK'S BENGAL SPECIALS
             refreshReaderStatus();
             checkAdminSession();
             setupDragAndDrop();
-            document.getElementById('igStoryRefreshButton')?.addEventListener('click', loadInstagramStories);
+            document.getElementById('igStoryRefreshButton')?.addEventListener('click', syncAndLoadInstagramStories);
             document.getElementById('igStorySearch')?.addEventListener('input', renderInstagramStories);
             document.querySelectorAll('.ig-story-filter').forEach(button => {
                 button.addEventListener('click', () => setInstagramStoryFilter(button.dataset.storyFilter || 'all'));
@@ -7085,7 +7111,7 @@ THIS WEEK'S BENGAL SPECIALS
             if (group === 'answers') { loadCandidates(); loadKnowledge(); }
             if (group === 'ai_resolution') { loadAiResolution(); loadTriageShadow(); }
             if (group === 'custom_qa') { loadCustomQa(); loadAssistedEvaluation(); }
-            if (group === 'instagram_stories') { loadInstagramStories(); }
+            if (group === 'instagram_stories') { syncAndLoadInstagramStories(); }
         }
 
         // MENU MANAGER tab: every menu is edited as a draft (server-side, in
@@ -7457,8 +7483,11 @@ THIS WEEK'S BENGAL SPECIALS
         }
 
         function onInstagramSourceTypeChange() {
-            // Story capture, mapping, and lifecycle live only in the dedicated
-            // Instagram Stories tab. This form handles post/reel/ad URLs.
+            // Story is no longer an option here -- Story capture, mapping,
+            // and lifecycle live only in the dedicated Instagram Stories
+            // tab (see loadInstagramStories/syncAndLoadInstagramStories).
+            // This form now only ever handles post/reel/ad, all of which
+            // use the normal URL-identify flow.
             const url = document.getElementById('igRouteUrl');
             if (url) url.required = true;
         }
@@ -7917,7 +7946,7 @@ THIS WEEK'S BENGAL SPECIALS
         let igStoryKnowledgeScopes = [];
 
         function storyStatusClass(status) {
-            return status === 'UNMAPPED' || status === 'DISABLED' || status === 'ARCHIVED' ? 'disabled' : '';
+            return status === 'UNMAPPED' || status === 'DISABLED' || status === 'ARCHIVED' || status === 'EXPIRED' ? 'disabled' : '';
         }
 
         function storyPreviewMetadata(value) {
@@ -7931,9 +7960,26 @@ THIS WEEK'S BENGAL SPECIALS
             }
         }
 
+        function storyEffectiveStatus(source) {
+            // Two consecutive successful complete Meta syncs missing a Story
+            // confirms it EXPIRED -- that lifecycle state overrides whatever
+            // mapping status the (now-archived) route last had, since the
+            // client-facing question here is "is this still on Instagram?".
+            if (String(source.lifecycle_state || 'ACTIVE').toUpperCase() === 'EXPIRED') return 'EXPIRED';
+            return String(source.mapping_status || source.status || 'UNMAPPED').toUpperCase();
+        }
+
         function storyMatches(source) {
-            const status = String(source.mapping_status || source.status || 'UNMAPPED').toUpperCase();
-            if (igStoryFilter !== 'all' && status !== igStoryFilter) return false;
+            const status = storyEffectiveStatus(source);
+            // The default/"All" view is the Active view: an expired Story
+            // stays out of it and only shows up under the explicit History
+            // filter, exactly like the client asked for -- never deleted,
+            // just out of the way until asked for.
+            if (igStoryFilter === 'all') {
+                if (status === 'EXPIRED') return false;
+            } else if (status !== igStoryFilter) {
+                return false;
+            }
             const query = (document.getElementById('igStorySearch')?.value || '').trim().toLowerCase();
             if (!query) return true;
             return [source.story_media_id, source.routing_topic, source.topic_description, source.story_status, status]
@@ -8115,15 +8161,16 @@ THIS WEEK'S BENGAL SPECIALS
             const sources = [...igStorySources].filter(storyMatches).sort((left, right) => storyTimestamp(right) - storyTimestamp(left));
             if (!sources.length) { list.innerHTML = '<p style="color:var(--text-muted);font-size:0.84rem;">No captured Stories match this filter.</p>'; return; }
             list.innerHTML = sources.map(source => {
-                const status = String(source.mapping_status || source.status || 'UNMAPPED').toUpperCase();
+                const status = storyEffectiveStatus(source);
                 const routeId = source.routing_id ? Number(source.routing_id) : null;
                 let actions = '';
-                if (status === 'UNMAPPED') actions = `<button class="btn-secondary" type="button" data-story-action="map" data-story-media-id="${escapeHtml(source.story_media_id || '')}">Map Story</button>`;
+                if (status === 'EXPIRED') actions = '<span class="ig-media-muted">No longer active on Instagram. Evidence and any prior mapping are preserved here.</span>';
+                else if (status === 'UNMAPPED') actions = `<button class="btn-secondary" type="button" data-story-action="map" data-story-media-id="${escapeHtml(source.story_media_id || '')}">Map Story</button>`;
                 else if (status === 'MAPPED') actions = `<button class="btn-secondary" type="button" data-story-action="edit" data-story-media-id="${escapeHtml(source.story_media_id || '')}">Edit Mapping</button><button class="btn-secondary" type="button" data-story-action="disable" data-routing-id="${routeId}">Disable</button><button class="btn-danger" type="button" data-story-action="archive" data-routing-id="${routeId}">Archive</button>`;
                 else if (status === 'DISABLED') actions = `<button class="btn-secondary" type="button" data-story-action="edit" data-story-media-id="${escapeHtml(source.story_media_id || '')}">Edit Mapping</button><button class="btn-secondary" type="button" data-story-action="enable" data-routing-id="${routeId}">Enable</button><button class="btn-danger" type="button" data-story-action="archive" data-routing-id="${routeId}">Archive</button>`;
                 else actions = `<button class="btn-secondary" type="button" data-story-action="restore" data-routing-id="${routeId}">Restore</button>`;
                 const topic = source.routing_topic || 'Unmapped Story';
-                const details = `<details class="ig-media-details"><summary style="cursor:pointer;">View details</summary><div>Story media ID: ${escapeHtml(source.story_media_id || '—')}<br>Routing ID: ${escapeHtml(String(routeId || '—'))}<br>Preview metadata: <span class="ig-story-preview-meta">${escapeHtml(storyPreviewMetadata(source.temporary_url))}</span><br>Meta Story status: ${escapeHtml(source.story_status || 'Not supplied')}<br>First seen: ${escapeHtml(source.first_seen || '—')}<br>Last seen: ${escapeHtml(source.last_seen || '—')}</div></details>`;
+                const details = `<details class="ig-media-details"><summary style="cursor:pointer;">View details</summary><div>Story media ID: ${escapeHtml(source.story_media_id || '—')}<br>Routing ID: ${escapeHtml(String(routeId || '—'))}<br>Preview metadata: <span class="ig-story-preview-meta">${escapeHtml(storyPreviewMetadata(source.temporary_url))}</span><br>Meta Story status: ${escapeHtml(source.story_status || 'Not supplied')}<br>First seen: ${escapeHtml(source.first_seen || '—')}<br>Last seen: ${escapeHtml(source.last_seen || '—')}<br>Discovery source: ${escapeHtml(source.discovery_source || 'webhook')}</div></details>`;
                 return `<article class="ig-media-card ig-story-card"><div class="ig-media-preview"><div class="ig-media-placeholder"><span class="ig-media-placeholder-icon">📖</span><span>STORY</span></div><span class="ig-media-badge">STORY</span></div><div class="ig-media-main"><div class="ig-media-title"><b class="ig-media-topic">${escapeHtml(topic)}</b><span class="ig-media-status ${storyStatusClass(status)}">${escapeHtml(status)}</span></div><div class="ig-media-summary">Captured Story media ID: ${escapeHtml(source.story_media_id || '—')}</div><div class="ig-media-facts"><span><b>Last seen:</b> ${escapeHtml(source.last_seen || '—')}</span><span><b>Source status:</b> ${escapeHtml(source.story_status || 'Not supplied')}</span></div></div><div class="ig-media-actions">${actions}</div>${details}</article>`;
             }).join('');
             list.querySelectorAll('[data-story-action]').forEach(button => button.addEventListener('click', () => {
@@ -8156,6 +8203,24 @@ THIS WEEK'S BENGAL SPECIALS
             }
         }
 
+        // Automatic discovery: pulls current active Stories from Meta into
+        // instagram_story_sources before the list loads, so a Story appears
+        // here without any customer ever replying to it. Runs only on tab
+        // open and on an explicit Refresh press -- never on a timer. A sync
+        // failure (Meta outage, token/permission error) is swallowed here;
+        // loadInstagramStories() still runs and renders whatever the
+        // database already has, with its own independent failure handling
+        // for the list-loading requests themselves.
+        async function syncAndLoadInstagramStories() {
+            try {
+                await fetch('/admin/instagram-story-sources/sync', { method: 'POST', headers: getAuthHeaders() });
+            } catch (err) {
+                // Best-effort only -- loadInstagramStories() below reports
+                // its own state regardless of whether the sync succeeded.
+            }
+            await loadInstagramStories();
+        }
+
         // A refresh that fails must never take away Story data the client
         // was already looking at. The list is only ever replaced after a
         // successful response; a failed one leaves igStorySources (and
@@ -8176,7 +8241,7 @@ THIS WEEK'S BENGAL SPECIALS
 
             try {
                 const [sourcesResponse, activeResponse, archivedResponse] = await Promise.all([
-                    fetch('/admin/instagram-story-sources', { headers: getAuthHeaders() }),
+                    fetch('/admin/instagram-story-sources?include_expired=true', { headers: getAuthHeaders() }),
                     fetch('/admin/instagram-routes', { headers: getAuthHeaders() }),
                     fetch('/admin/instagram-routes?include_archived=true', { headers: getAuthHeaders() }),
                 ]);

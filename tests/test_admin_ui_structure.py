@@ -10,13 +10,11 @@ removal left an orphan `}`, the HTML still looked right, and `switchTab` and
 caught it without a browser.
 """
 import re
-import inspect
 
 import pytest
 from fastapi.testclient import TestClient
 
 import camellia.database as db_module
-from camellia import instagram_routing
 from camellia.app import app
 
 db_module.db.init_db()
@@ -202,7 +200,11 @@ def test_menu_tab_has_simple_ad_routing_controls(page):
 
 
 def test_stories_are_not_offered_or_shown_in_content_routing_tab(page):
-    """Stories are managed only in the dedicated Stories tab."""
+    """Architectural requirement: Stories are managed only in the dedicated
+    Instagram Stories tab. 📣 Instagram Content Routing must not offer
+    'story' as a source type, must not carry Story-specific mapping
+    controls, and must not render a duplicate Story listing -- Posts,
+    Reels and Ads stay fully functional there."""
     section = page[page.index('id="tab-ad-routing"'):page.index('id="tab-instagram-stories"')]
     source_select = section[section.index('id="igSourceType"'):section.index('</select>', section.index('id="igSourceType"'))]
     assert '<option value="post">' in source_select
@@ -212,17 +214,15 @@ def test_stories_are_not_offered_or_shown_in_content_routing_tab(page):
     assert 'igStoryMapForm' not in section
     assert 'igStoryMediaId' not in section
     assert 'igStorySourceList' not in section
+    # The registry list in this tab must never render a Story card even if
+    # a story-typed row somehow reaches it client-side.
     registry = page[page.index('function renderInstagramMediaRegistry'):page.index('async function loadAdRoutes')]
     assert "route.source_type !== 'story'" in registry
+    # The dead fallback that used to let this form silently switch itself
+    # into story mode (from a code path the dedicated tab has replaced)
+    # must be gone, not just unreachable.
     assert 'useCapturedStory' not in page
     assert "igSourceType').value = 'story'" not in page
-
-
-def test_failed_story_capability_probe_and_automatic_listing_are_removed(page):
-    assert not any(route.path == "/admin/instagram-story-capability" for route in app.routes)
-    source = inspect.getsource(instagram_routing)
-    assert "def probe_instagram_story_capability" not in source
-    assert "/stories" not in source
 
 
 def test_instagram_stories_has_a_dedicated_top_level_tab_and_panel(page):
@@ -230,8 +230,11 @@ def test_instagram_stories_has_a_dedicated_top_level_tab_and_panel(page):
     assert 'id="tab-instagram-stories"' in page
     assert 'data-group="instagram_stories"' in page
     assert "'tab-instagram-stories': 'instagram_stories'" in page
-    assert "if (group === 'instagram_stories') { loadInstagramStories(); }" in page
-    assert "fetch('/admin/instagram-story-sources'" in page
+    # Opening the tab must trigger the active Meta sync (automatic Story
+    # discovery), not just a passive reload of whatever the DB already has.
+    assert "if (group === 'instagram_stories') { syncAndLoadInstagramStories(); }" in page
+    assert "fetch('/admin/instagram-story-sources?include_expired=true'" in page
+    assert "fetch('/admin/instagram-story-sources/sync'" in page
 
 
 def test_instagram_stories_map_flow_uses_a_read_only_captured_id(page):
@@ -314,6 +317,18 @@ def test_instagram_stories_refreshes_from_source_and_mapping_endpoints(page):
     assert "instagram-routes?include_archived=true" in section
     assert "populateInstagramStoryPickers" in section
     assert "renderInstagramStories()" in section
+
+
+def test_instagram_story_tab_open_and_refresh_both_trigger_active_meta_sync(page):
+    """Automatic discovery: opening the tab or pressing Refresh must call
+    the active Meta sync endpoint, not just reload whatever is already in
+    the database -- a customer reply must never be required to discover a
+    Story that is currently live on the connected account."""
+    sync_fn = page[page.index('async function syncAndLoadInstagramStories'):page.index('async function loadInstagramStories')]
+    assert "/admin/instagram-story-sources/sync" in sync_fn
+    assert "method: 'POST'" in sync_fn
+    assert "await loadInstagramStories()" in sync_fn
+    assert "document.getElementById('igStoryRefreshButton')?.addEventListener('click', syncAndLoadInstagramStories)" in page
 
 
 def test_instagram_story_preview_metadata_never_exposes_temporary_url(page):

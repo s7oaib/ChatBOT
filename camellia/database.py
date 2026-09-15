@@ -662,6 +662,16 @@ class Database:
             """)
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_instagram_story_sources_seen ON instagram_story_sources(last_seen)")
 
+            # Lifecycle metadata for the active-Story Meta sync. Additive only
+            # — a row created by the existing webhook-reply capture path is a
+            # valid ACTIVE story with zero misses and no last_meta_seen_at
+            # until the first successful sync observes it.
+            self._ensure_column(cursor, "instagram_story_sources", "lifecycle_state", "TEXT NOT NULL DEFAULT 'ACTIVE'")
+            self._ensure_column(cursor, "instagram_story_sources", "consecutive_sync_misses", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(cursor, "instagram_story_sources", "last_meta_seen_at", "TIMESTAMP")
+            self._ensure_column(cursor, "instagram_story_sources", "discovery_source", "TEXT NOT NULL DEFAULT 'webhook'")
+            self._ensure_column(cursor, "instagram_story_sources", "expired_at", "TIMESTAMP")
+
             # A shared post carries no shortcode/URL Meta will put in a
             # webhook, and its messaging-attachment id has not been shown to
             # correspond to any id the Graph API will confirm — so a post
@@ -1264,12 +1274,125 @@ class Database:
             ).fetchone()
         return dict(row) if row else None
 
-    def list_instagram_story_sources(self) -> List[Dict[str, Any]]:
-        """Return captured Stories with exact mapping status for admin."""
+    def sync_upsert_story_source(
+        self,
+        story_media_id: str,
+        *,
+        media_type: Optional[str] = None,
+        meta_timestamp: Optional[str] = None,
+        seen_at: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Upsert a Story observed by an active Meta sync (not a webhook reply).
+
+        Identity is the exact Meta ``story_media_id`` only — the same row a
+        webhook reply would upsert via ``record_instagram_story_source``, so
+        a Story discovered both ways converges on one row, never a duplicate.
+        A sync sighting always resets ``consecutive_sync_misses`` to 0 and
+        reactivates a previously EXPIRED row deterministically: the same
+        media ID reappearing is treated as the same Story, not a new one.
+        """
+        media_id = str(story_media_id or "").strip()
+        if not media_id:
+            return None
+        now = seen_at or datetime.utcnow().isoformat()
+        metadata = json.dumps(
+            {k: v for k, v in {"media_type": media_type, "timestamp": meta_timestamp}.items() if v},
+            ensure_ascii=False, sort_keys=True,
+        )
         with self.get_connection() as conn:
-            rows = conn.execute(
-                "SELECT * FROM instagram_story_sources ORDER BY last_seen DESC, story_media_id"
+            conn.execute(
+                """
+                INSERT INTO instagram_story_sources
+                    (story_media_id, story_status, first_seen, last_seen,
+                     last_event_metadata, lifecycle_state, consecutive_sync_misses,
+                     last_meta_seen_at, discovery_source)
+                VALUES (?, ?, ?, ?, ?, 'ACTIVE', 0, ?, 'meta_sync')
+                ON CONFLICT(story_media_id) DO UPDATE SET
+                    last_seen=excluded.last_seen,
+                    last_meta_seen_at=excluded.last_meta_seen_at,
+                    lifecycle_state='ACTIVE',
+                    consecutive_sync_misses=0,
+                    expired_at=NULL,
+                    last_event_metadata=CASE WHEN excluded.last_event_metadata != '{}'
+                        THEN excluded.last_event_metadata ELSE instagram_story_sources.last_event_metadata END
+                """,
+                (media_id, media_type, now, now, metadata, now),
+            )
+            conn.commit()
+            row = conn.execute(
+                "SELECT * FROM instagram_story_sources WHERE story_media_id = ?", (media_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def mark_story_sync_misses(self, seen_media_ids: List[str]) -> List[str]:
+        """After a successful, complete Meta sync, advance the miss counter
+        for every currently ACTIVE story that sync did not observe.
+
+        Only called when the caller has confirmed the sync was a complete
+        success — a failed or partial sync must never call this, so a Story
+        never loses Active status because of a Meta outage. A Story reaches
+        EXPIRED only after two separate successful syncs both miss it.
+        Returns the media IDs that were expired by this call.
+        """
+        seen = {str(item).strip() for item in seen_media_ids if str(item).strip()}
+        expired: List[str] = []
+        now = datetime.utcnow().isoformat()
+        with self.get_connection() as conn:
+            active_rows = conn.execute(
+                "SELECT story_media_id, consecutive_sync_misses FROM instagram_story_sources WHERE lifecycle_state = 'ACTIVE'"
             ).fetchall()
+            for row in active_rows:
+                media_id = row["story_media_id"]
+                if media_id in seen:
+                    continue
+                misses = int(row["consecutive_sync_misses"] or 0) + 1
+                if misses >= 2:
+                    conn.execute(
+                        "UPDATE instagram_story_sources SET lifecycle_state='EXPIRED', "
+                        "consecutive_sync_misses=?, expired_at=? WHERE story_media_id=?",
+                        (misses, now, media_id),
+                    )
+                    expired.append(media_id)
+                else:
+                    conn.execute(
+                        "UPDATE instagram_story_sources SET consecutive_sync_misses=? WHERE story_media_id=?",
+                        (misses, media_id),
+                    )
+            conn.commit()
+            if expired:
+                placeholders = ",".join("?" for _ in expired)
+                routes = conn.execute(
+                    f"SELECT routing_id FROM instagram_source_routes "
+                    f"WHERE source_type='story' AND media_id IN ({placeholders}) AND archived_at IS NULL",
+                    tuple(expired),
+                ).fetchall()
+                if routes:
+                    conn.executemany(
+                        "UPDATE instagram_source_routes SET archived_at=?, updated_at=? WHERE routing_id=?",
+                        [(now, now, route["routing_id"]) for route in routes],
+                    )
+                    conn.commit()
+        return expired
+
+    def list_instagram_story_sources(self, include_expired: bool = False) -> List[Dict[str, Any]]:
+        """Return captured Stories with exact mapping status for admin.
+
+        Defaults to the Active view (``lifecycle_state = 'ACTIVE'``) so a
+        Story confirmed removed by two consecutive successful syncs drops
+        out of the normal admin list without losing its row — pass
+        ``include_expired=True`` for the History/Expired view, which must
+        keep showing it (and its mapping evidence) indefinitely.
+        """
+        with self.get_connection() as conn:
+            if include_expired:
+                rows = conn.execute(
+                    "SELECT * FROM instagram_story_sources ORDER BY last_seen DESC, story_media_id"
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM instagram_story_sources WHERE lifecycle_state != 'EXPIRED' "
+                    "ORDER BY last_seen DESC, story_media_id"
+                ).fetchall()
             output = []
             for row in rows:
                 item = dict(row)
@@ -1304,7 +1427,7 @@ class Database:
         if not media_id:
             return None
         return next(
-            (item for item in self.list_instagram_story_sources()
+            (item for item in self.list_instagram_story_sources(include_expired=True)
              if item.get("story_media_id") == media_id),
             None,
         )
