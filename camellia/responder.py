@@ -1733,6 +1733,10 @@ class DeterministicResponder:
             )
         )
         if explicit_subject_match and not is_relevant_slot_answer:
+            # The named product/topic is a deliberate subject switch. Keep
+            # the source route for audit/history, but stop it from answering
+            # the next vague message as though the old subject were current.
+            facts["source_context_superseded"] = True
             interrupted_flags = []
             for flow_flag in (
                 "awaiting_area_confirmation", "awaiting_product_price",
@@ -1869,7 +1873,14 @@ class DeterministicResponder:
             return clarification, True, "clarify_request", None
         # Keep the historical shorthand behavior, while allowing ordinary
         # human phrasing such as "this one please" or "price for this".
-        vague_opening = bool(source_intent or (legacy_vague_opening and not conversational_opener))
+        # A pack-size follow-up is still about the source product even after
+        # the first Story/Reel/Post answer established ``last_topic``.
+        source_size_followup = bool(re.search(r"\b(?:250|500|1000|1)\s*(?:g|kg)\b", lowered_text))
+        vague_opening = bool(
+            source_intent
+            or source_size_followup
+            or (legacy_vague_opening and not conversational_opener)
+        )
         source_topic = (
             db.get_instagram_topic(source_route["topic_id"])
             if source_route and source_route.get("topic_id") else None
@@ -1886,7 +1897,15 @@ class DeterministicResponder:
         route_menu_mode = str((source_route or {}).get("menu_mode") or "INHERIT").strip().upper()
         menu_attached = route_menu_mode != "NONE"
         what_else = bool(re.fullmatch(r"what else(?: do you have)?[?!,. ]*", lowered_text))
-        can_use_source = not active_flow and (not facts.get("last_topic") or what_else)
+        source_context_authoritative = bool(
+            source_route and not facts.get("source_context_superseded")
+        )
+        can_use_source = not active_flow and (
+            not facts.get("last_topic")
+            or what_else
+            or source_size_followup
+            or source_context_authoritative
+        )
         if channel == "instagram" and source_context_available and source_product and menu_attached and vague_opening and not explicit_product and can_use_source:
             cursor = int(facts.get("source_priority_cursor") or 0)
             if what_else and priorities:
@@ -1909,6 +1928,11 @@ class DeterministicResponder:
                     )
                 facts["source_context_used"] = True
                 facts["source_priority_cursor"] = min(cursor + 1, len(priorities)) if priorities else 1
+                # Keep the canonical product topic available for a later
+                # bare follow-up while the exact source route remains the
+                # authoritative context for referential questions.
+                facts["last_topic"] = TOPIC_MAP.get(template_id, source_product)
+                facts["active_product_context"] = source_product
                 session_memory.add_turn(user_id, channel, user_message, response_text)
                 return response_text, True, f"source_{source_product}_{template_id}", images
 
@@ -1949,6 +1973,9 @@ class DeterministicResponder:
                         else:
                             images = [linked_image]
                 facts["source_context_used"] = True
+                if source_product:
+                    facts["last_topic"] = TOPIC_MAP.get(route_template_id(source_product) or "", source_product)
+                    facts["active_product_context"] = source_product
                 session_memory.add_turn(user_id, channel, user_message, response_text)
                 return response_text, True, "source_topic_know_more", images
 
@@ -1962,6 +1989,9 @@ class DeterministicResponder:
                     "", description, "", "description_first", "NONE",
                 )
                 facts["source_context_used"] = True
+                if source_product:
+                    facts["last_topic"] = TOPIC_MAP.get(route_template_id(source_product) or "", source_product)
+                    facts["active_product_context"] = source_product
                 session_memory.add_turn(user_id, channel, user_message, response_text)
                 return response_text, True, "source_topic_description_only", None
 
@@ -2270,11 +2300,28 @@ class DeterministicResponder:
         # last product topic discussed this session, instead of letting a
         # message with no product words of its own fall through to a human
         # handover the customer didn't need.
+        active_product = facts.get("active_product_context")
+        followup_text = cleaned_business_text.strip() or user_message.strip()
+        if active_product and not explicit_product and re.search(
+            r"\b(?:250|500|1000)\s*(?:g|kg)\b|\b(?:price|cost|rate|how much)\b",
+            followup_text,
+        ):
+            wants_price = bool(re.search(r"price|cost|rate|how much", lowered_text))
+            active_template_id = route_template_id(str(active_product), price=wants_price)
+            active_template = self._template_by_id(active_template_id) if active_template_id else None
+            if active_template and active_template.get("response"):
+                response_text, images = self._format_dynamic_response(
+                    active_template_id, active_template["response"], user_id=user_id,
+                    channel=channel, user_message=user_message,
+                )
+                facts["source_context_used"] = False
+                session_memory.add_turn(user_id, channel, user_message, response_text)
+                return response_text, True, active_template_id, images
         last_topic = facts.get("last_topic")
         # The greeting-stripped text, so "Hi, what is the price?" is treated as
         # the same bare price question as "what is the price?" — a customer who
         # says hello first is not asking a different question.
-        stripped_for_bare_check = cleaned_business_text.strip() or user_message.strip()
+        stripped_for_bare_check = followup_text
         if last_topic and BARE_VEG_RE.match(stripped_for_bare_check):
             if last_topic == "savoury":
                 response_text = (
@@ -3000,6 +3047,8 @@ class DeterministicResponder:
 
             if tmpl_id in TOPIC_MAP:
                 facts["last_topic"] = TOPIC_MAP[tmpl_id]
+            if tmpl_id in {"jolbhora", "kanchagolla"}:
+                facts["active_product_context"] = tmpl_id
 
             # Last line of defence against sending the customer the identical
             # reply twice. Reached only when refinement did not already vary the

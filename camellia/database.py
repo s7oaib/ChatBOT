@@ -644,6 +644,24 @@ class Database:
             # A reel shared into a DM is matched by its normalized shortcode.
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_instagram_routes_shortcode ON instagram_source_routes(shortcode, active)")
 
+            # A Story reply is useful evidence even before an operator maps it
+            # to a Topic. Keep this registry separate from routes so an
+            # unmapped Story is visible in admin without becoming customer-
+            # servable context, and so temporary CDN URLs never become the
+            # identity of the Story.
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS instagram_story_sources (
+                story_media_id TEXT PRIMARY KEY,
+                temporary_url TEXT,
+                story_status TEXT,
+                first_seen TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                last_seen TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                last_sender_id TEXT,
+                last_event_metadata TEXT NOT NULL DEFAULT '{}'
+            );
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_instagram_story_sources_seen ON instagram_story_sources(last_seen)")
+
             # A shared post carries no shortcode/URL Meta will put in a
             # webhook, and its messaging-attachment id has not been shown to
             # correspond to any id the Graph API will confirm — so a post
@@ -690,6 +708,10 @@ class Database:
                 ("media_id", "TEXT"),
                 ("routing_topic", "TEXT"),
                 ("source_context_used", "INTEGER DEFAULT 0"),
+                ("source_context_available", "INTEGER DEFAULT 0"),
+                ("source_referential_intent", "TEXT"),
+                ("source_media_present", "INTEGER DEFAULT 0"),
+                ("customer_text_accompanied_media", "INTEGER DEFAULT 0"),
             ):
                 self._ensure_column(cursor, "conversations", column, declaration)
 
@@ -1178,19 +1200,114 @@ class Database:
             ).fetchone()
         return dict(row) if row else None
 
-    def find_instagram_source_route(self, field: str, value: str) -> Optional[Dict[str, Any]]:
+    def find_instagram_source_route(
+        self, field: str, value: str, source_type: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
         # The column name is interpolated, so the allowlist is the thing
         # keeping this query safe. Widening it is adding a name to the list,
         # never relaxing the check.
         if field not in ("ad_id", "media_id", "shortcode"):
             raise ValueError("Unsupported route identifier.")
         with self.get_connection() as conn:
+            where = (
+                f"{field} = ? AND active = 1 AND archived_at IS NULL"
+                + (" AND source_type = ?" if source_type else "")
+            )
+            params = (value, source_type) if source_type else (value,)
             row = conn.execute(
-                f"SELECT * FROM instagram_source_routes WHERE {field} = ? AND active = 1 "
-                "AND archived_at IS NULL ORDER BY updated_at DESC LIMIT 1",
-                (value,),
+                f"SELECT * FROM instagram_source_routes WHERE {where} "
+                "ORDER BY updated_at DESC LIMIT 1",
+                params,
             ).fetchone()
         return dict(row) if row else None
+
+    def record_instagram_story_source(
+        self,
+        story_media_id: str,
+        *,
+        temporary_url: Optional[str] = None,
+        story_status: Optional[str] = None,
+        sender_id: Optional[str] = None,
+        event_metadata: Optional[Dict[str, Any]] = None,
+        seen_at: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Record exact Story evidence without making it a route.
+
+        ``story_media_id`` is the only identity used for a later mapping.
+        A supplied URL is display/diagnostic metadata only and is never used
+        by ``find_instagram_source_route``.
+        """
+        media_id = str(story_media_id or "").strip()
+        if not media_id:
+            return None
+        now = seen_at or datetime.utcnow().isoformat()
+        metadata = json.dumps(event_metadata or {}, ensure_ascii=False, sort_keys=True)
+        with self.get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO instagram_story_sources
+                    (story_media_id, temporary_url, story_status, first_seen,
+                     last_seen, last_sender_id, last_event_metadata)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(story_media_id) DO UPDATE SET
+                    temporary_url=COALESCE(excluded.temporary_url, instagram_story_sources.temporary_url),
+                    story_status=COALESCE(excluded.story_status, instagram_story_sources.story_status),
+                    last_seen=excluded.last_seen,
+                    last_sender_id=COALESCE(excluded.last_sender_id, instagram_story_sources.last_sender_id),
+                    last_event_metadata=excluded.last_event_metadata
+                """,
+                (media_id, temporary_url, story_status, now, now, sender_id, metadata),
+            )
+            conn.commit()
+            row = conn.execute(
+                "SELECT * FROM instagram_story_sources WHERE story_media_id = ?", (media_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def list_instagram_story_sources(self) -> List[Dict[str, Any]]:
+        """Return captured Stories with exact mapping status for admin."""
+        with self.get_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM instagram_story_sources ORDER BY last_seen DESC, story_media_id"
+            ).fetchall()
+            output = []
+            for row in rows:
+                item = dict(row)
+                route = conn.execute(
+                    """
+                    SELECT routing_id, topic_id, routing_topic, active, archived_at
+                    FROM instagram_source_routes
+                    WHERE source_type = 'story' AND media_id = ?
+                    ORDER BY updated_at DESC, routing_id DESC LIMIT 1
+                    """,
+                    (item["story_media_id"],),
+                ).fetchone()
+                if route and route["archived_at"]:
+                    mapping_status = "ARCHIVED"
+                elif route and not route["active"]:
+                    mapping_status = "DISABLED"
+                elif route:
+                    mapping_status = "MAPPED"
+                else:
+                    mapping_status = "UNMAPPED"
+                item["media_id"] = item["story_media_id"]
+                item["mapping_status"] = mapping_status
+                item["status"] = mapping_status
+                item["routing_id"] = route["routing_id"] if route else None
+                item["topic_id"] = route["topic_id"] if route else None
+                item["routing_topic"] = route["routing_topic"] if route else None
+                output.append(item)
+        return output
+
+    def get_instagram_story_source(self, story_media_id: str) -> Optional[Dict[str, Any]]:
+        media_id = str(story_media_id or "").strip()
+        if not media_id:
+            return None
+        return next(
+            (item for item in self.list_instagram_story_sources()
+             if item.get("story_media_id") == media_id),
+            None,
+        )
 
     def set_instagram_source_route_active(self, routing_id: int, active: bool) -> bool:
         with self.get_connection() as conn:
@@ -1928,6 +2045,10 @@ class Database:
         media_id: Optional[str] = None,
         routing_topic: Optional[str] = None,
         source_context_used: bool = False,
+        source_context_available: bool = False,
+        source_referential_intent: Optional[str] = None,
+        source_media_present: bool = False,
+        customer_text_accompanied_media: bool = False,
     ):
         """Log message exchange and increment analytics counters."""
         with self.get_connection() as conn:
@@ -1936,13 +2057,17 @@ class Database:
             INSERT INTO conversations (
                 user_id, channel, user_message, bot_response, was_matched, template_id,
                 message_source, ad_id, ad_title, source_routing_id, source_match_method,
-                source_type, shortcode, media_id, routing_topic, source_context_used
+                source_type, shortcode, media_id, routing_topic, source_context_used,
+                source_context_available, source_referential_intent, source_media_present,
+                customer_text_accompanied_media
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 user_id, channel, user_message, bot_response, 1 if was_matched else 0, template_id,
                 message_source, ad_id, ad_title, source_routing_id, source_match_method,
                 source_type, shortcode, media_id, routing_topic, int(bool(source_context_used)),
+                int(bool(source_context_available)), source_referential_intent,
+                int(bool(source_media_present)), int(bool(customer_text_accompanied_media)),
             ))
             conversation_id = int(cursor.lastrowid)
             

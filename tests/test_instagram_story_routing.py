@@ -1,0 +1,338 @@
+"""Exact-ID Instagram Story routing and safe Story event handling."""
+
+import uuid
+from unittest.mock import patch
+
+import pytest
+
+import camellia.app as app_module
+import camellia.responder as responder_module
+from camellia.ad_gate import EntryPoint, describe_entry_point
+from camellia.config import config
+from camellia.database import Database
+from camellia.instagram_routing import route_for_inbound, validate_route_payload
+from camellia.responder import responder
+from camellia.session_memory import session_memory
+
+
+@pytest.fixture
+def story_db(tmp_path, monkeypatch):
+    database = Database(str(tmp_path / "instagram-story.db"))
+    monkeypatch.setattr("camellia.database.db", database)
+    monkeypatch.setattr(app_module, "db", database)
+    monkeypatch.setattr(responder_module, "db", database)
+    monkeypatch.setattr(config, "BYPASS_AD_GATE", True)
+    monkeypatch.setattr(config, "GROQ_ENABLED", False)
+    monkeypatch.setattr(config, "SEMANTIC_ROUTER_ENABLED", False)
+    monkeypatch.setattr(config, "STRUCTURED_NLU_ENABLED", False)
+    return database
+
+
+def _story_route(media_id="story-jolbhora"):
+    return {
+        "source_type": "story",
+        "canonical_url": None,
+        "shortcode": None,
+        "media_id": media_id,
+        "ad_id": None,
+        "campaign_id": None,
+        "routing_topic": "Jolbhora",
+        "knowledge_scope": ["products", "prices"],
+        "escalation_policy": "human_if_unsupported",
+        "priority_products": ["jolbhora"],
+        "active": True,
+        "topic_id": None,
+        "menu_id": None,
+        "menu_mode": "INHERIT",
+        "preview_url": None,
+        "media_type": None,
+    }
+
+
+def _mapped_media_route(source_type, *, shortcode=None, media_id=None):
+    """Build a deterministic Jolbhora route for each supported share type."""
+    return {
+        "source_type": source_type,
+        "canonical_url": (
+            f"https://www.instagram.com/reel/{shortcode}/"
+            if shortcode else None
+        ),
+        "shortcode": shortcode,
+        "media_id": media_id,
+        "ad_id": None,
+        "campaign_id": None,
+        "routing_topic": "Jolbhora",
+        "knowledge_scope": ["products", "prices"],
+        "escalation_policy": "human_if_unsupported",
+        "priority_products": ["jolbhora"],
+        "active": True,
+        "topic_id": None,
+        "menu_id": None,
+        "menu_mode": "INHERIT",
+        "preview_url": None,
+        "media_type": None,
+    }
+
+
+def _with_story_context(user_id, *, product="jolbhora"):
+    session_memory.clear_session(user_id, "instagram")
+    facts = session_memory.get_facts(user_id, "instagram")
+    facts["source_route"] = {
+        **_story_route(),
+        "routing_id": 41,
+        "priority_products": [product],
+    }
+    return facts
+
+
+def _reply(user_id, text):
+    return responder.match_and_respond(
+        text, user_id=user_id, channel="instagram", referral_source="ADS",
+    )
+
+
+def test_story_reply_detection_captures_exact_meta_id():
+    event = {
+        "sender": {"id": "customer-1"},
+        "message": {
+            "mid": "m-1",
+            "text": "price?",
+            "reply_to": {"story": {"id": "17890000000000123"}},
+        },
+    }
+    entry = describe_entry_point(event)
+    assert entry.source == "story_reply"
+    assert entry.media_id == "17890000000000123"
+
+
+def test_story_routes_require_exact_media_id_and_no_url(story_db):
+    route = validate_route_payload({
+        "source_type": "story", "media_id": "17890000000000123",
+        "routing_topic": "Jolbhora", "priority_products": ["jolbhora"],
+    })
+    assert route["source_type"] == "story"
+    assert route["media_id"] == "17890000000000123"
+    with pytest.raises(ValueError, match="Story media ID"):
+        validate_route_payload({"source_type": "story", "url": "https://instagram.com/p/not-authoritative/"})
+    with pytest.raises(ValueError, match="requires a Story media ID"):
+        validate_route_payload({"source_type": "story", "routing_topic": "Jolbhora"})
+
+
+def test_mapped_story_uses_canonical_jolbhora_price_and_logs_story_evidence(story_db):
+    saved = story_db.save_instagram_source_route(_story_route("story-price"))
+    uid = "story-price-" + uuid.uuid4().hex[:8]
+    with patch.object(app_module, "send_instagram_reply"), patch.object(app_module.escalator, "handle_escalation"):
+        app_module._process_instagram_event(
+            uid, "price?", None,
+            EntryPoint(source="story_reply", media_id="story-price"),
+        )
+    row = story_db.get_connection()
+    with row as conn:
+        logged = conn.execute(
+            "SELECT * FROM conversations WHERE user_id=? ORDER BY id DESC LIMIT 1", (uid,)
+        ).fetchone()
+    assert logged["template_id"].startswith("source_jolbhora_")
+    assert logged["source_type"] == "story"
+    assert logged["media_id"] == "story-price"
+    assert logged["source_routing_id"] == saved["routing_id"]
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("Where is your kitchen?", "GUARD_pickup_address_hours"),
+    ("Can I pay cash on delivery?", "GUARD_payment_method"),
+    ("How should I store the sondesh?", "GUARD_shelf_life_storage"),
+])
+def test_story_context_never_overrides_protected_guards(story_db, text, expected):
+    uid = "story-guard-result-" + uuid.uuid4().hex[:8]
+    _with_story_context(uid)
+    _response, matched, template_id, _images = _reply(uid, text)
+    assert matched is True
+    assert template_id == expected
+
+
+def test_explicit_product_beats_mapped_story_and_switches_followup(story_db):
+    uid = "story-switch-" + uuid.uuid4().hex[:8]
+    facts = _with_story_context(uid)
+    _response, matched, template_id, _ = _reply(uid, "tell me more")
+    assert matched is True and template_id.startswith("source_jolbhora_")
+    _response, matched, template_id, _ = _reply(uid, "Actually tell me about Kanchagolla")
+    assert matched is True and template_id == "kanchagolla"
+    _response, matched, template_id, _ = _reply(uid, "500g price?")
+    assert matched is True and template_id == "kanchagolla"
+    assert facts["active_product_context"] == "kanchagolla"
+
+
+def test_unmapped_story_is_recorded_but_does_not_guess(story_db):
+    story_db.record_instagram_story_source(
+        "unknown-story", temporary_url="https://cdn.example/temporary.jpg",
+    )
+    route, method = route_for_inbound(
+        ad_id=None, media_id="unknown-story", source_type="story_reply",
+    )
+    assert route is None and method is None
+    source = story_db.get_instagram_story_source("unknown-story")
+    assert source["status"] == "UNMAPPED"
+    assert source["temporary_url"] == "https://cdn.example/temporary.jpg"
+
+    uid = "story-unmapped-" + uuid.uuid4().hex[:8]
+    session_memory.clear_session(uid, "instagram")
+    _response, matched, template_id, _ = _reply(uid, "price?")
+    assert matched is True
+    assert template_id == "price_clarify_product"
+    assert "jolbhora" not in _response.lower()
+
+
+def test_caption_and_similar_story_ids_never_route(story_db):
+    story_db.save_instagram_source_route(_story_route("known-story"))
+    assert route_for_inbound(
+        ad_id=None, media_id="different-story", source_type="story_reply",
+    ) == (None, None)
+    assert route_for_inbound(
+        ad_id=None, media_id="Jolbhora", source_type="story_reply",
+    ) == (None, None)
+
+
+def test_story_mentions_and_reactions_are_observed_without_product_claims(story_db):
+    from starlette.background import BackgroundTasks
+
+    payload = {
+        "object": "instagram",
+        "entry": [{"messaging": [
+            {"sender": {"id": "mention-user"}, "message": {"story_mention": {"id": "their-story"}, "text": "hi"}},
+            {"sender": {"id": "reaction-user"}, "message": {"reply_to": {"story": {"id": "story-r"}}, "text": "🔥"}},
+        ]}],
+    }
+    result = app_module._dispatch_instagram_payload(payload, BackgroundTasks())
+    assert [item["action"] for item in result["results"]] == [
+        "ignored_story_mention", "ignored_story_reaction",
+    ]
+    assert story_db.get_instagram_story_source("story-r") is not None
+
+
+@pytest.mark.parametrize("source_type", ["reel", "post", "story"])
+def test_mapped_media_with_same_event_text_uses_the_source_route(story_db, source_type):
+    identifiers = {
+        "reel": {"shortcode": "reel-jolbhora"},
+        "post": {"media_id": "post-jolbhora"},
+        "story": {"media_id": "story-jolbhora-same-event"},
+    }[source_type]
+    route = story_db.save_instagram_source_route(
+        _mapped_media_route(source_type, **identifiers)
+    )
+    uid = f"same-event-{source_type}-" + uuid.uuid4().hex[:8]
+    entry = EntryPoint(
+        source="story_reply" if source_type == "story" else "shared_media",
+        media_id=identifiers.get("media_id"),
+    )
+    sent = []
+    with patch.object(app_module, "send_instagram_reply", lambda *args, **kwargs: sent.append((args, kwargs))):
+        app_module._process_instagram_event(
+            uid,
+            "Tell me more",
+            None,
+            entry,
+            {"shortcode": identifiers["shortcode"]} if source_type == "reel" else None,
+            identifiers.get("media_id") if source_type == "post" else None,
+            source_type if source_type != "story" else None,
+        )
+
+    assert len(sent) == 1
+    assert "can't open photos" not in sent[0][0][1].lower()
+    assert "voice notes" not in sent[0][0][1].lower()
+    with story_db.get_connection() as conn:
+        logged = conn.execute(
+            "SELECT * FROM conversations WHERE user_id=? ORDER BY id DESC LIMIT 1", (uid,)
+        ).fetchone()
+    assert logged["source_type"] == source_type
+    assert logged["source_routing_id"] == route["routing_id"]
+    assert logged["source_context_available"] == 1
+    assert logged["source_context_used"] == 1
+    assert logged["customer_text_accompanied_media"] == 1
+
+
+@pytest.mark.parametrize("source_type", ["reel", "post", "story"])
+def test_mapped_media_without_text_uses_one_configured_source_response(story_db, source_type):
+    identifiers = {
+        "reel": {"shortcode": "reel-jolbhora-no-text"},
+        "post": {"media_id": "post-jolbhora-no-text"},
+        "story": {"media_id": "story-jolbhora-no-text"},
+    }[source_type]
+    story_db.save_instagram_source_route(
+        _mapped_media_route(source_type, **identifiers)
+    )
+    uid = f"no-text-{source_type}-" + uuid.uuid4().hex[:8]
+    entry = EntryPoint(
+        source="story_reply" if source_type == "story" else "shared_media",
+        media_id=identifiers.get("media_id"),
+    )
+    sent = []
+    with patch.object(app_module, "send_instagram_reply", lambda *args, **kwargs: sent.append((args, kwargs))):
+        app_module._process_instagram_event(
+            uid,
+            "",
+            None,
+            entry,
+            {"shortcode": identifiers["shortcode"]} if source_type == "reel" else None,
+            identifiers.get("media_id") if source_type == "post" else None,
+            source_type if source_type != "story" else None,
+        )
+
+    assert len(sent) == 1
+    response = sent[0][0][1].lower()
+    assert "can't open photos" not in response
+    assert "voice notes" not in response
+    assert "could you type your question instead" not in response
+
+
+def test_mapped_media_explicit_product_and_guard_override_the_source(story_db):
+    story_db.save_instagram_source_route(
+        _mapped_media_route("reel", shortcode="reel-jolbhora-override")
+    )
+    uid = "source-overrides-" + uuid.uuid4().hex[:8]
+    sent = []
+    with patch.object(app_module, "send_instagram_reply", lambda *args, **kwargs: sent.append(args[1])):
+        app_module._process_instagram_event(
+            uid, "What is the Kanchagolla price?", None,
+            EntryPoint(source="shared_media"),
+            {"shortcode": "reel-jolbhora-override"}, None, "reel",
+        )
+        app_module._process_instagram_event(
+            uid, "Where is your kitchen?", None,
+            EntryPoint(source="shared_media"),
+        )
+    assert len(sent) == 2
+    assert "kanchagolla" in sent[0].lower()
+    assert "pickup" in sent[1].lower() or "kitchen" in sent[1].lower()
+
+
+def test_unknown_media_does_not_block_explicit_product_but_vague_text_clarifies(story_db):
+    explicit_uid = "unknown-explicit-" + uuid.uuid4().hex[:8]
+    vague_uid = "unknown-vague-" + uuid.uuid4().hex[:8]
+    sent = []
+    with patch.object(app_module, "send_instagram_reply", lambda *args, **kwargs: sent.append(args[1])):
+        app_module._process_instagram_event(
+            explicit_uid, "Kanchagolla price?", None,
+            EntryPoint(source="shared_media"),
+            {"shortcode": "unmapped-reel"}, None, "reel",
+        )
+        app_module._process_instagram_event(
+            vague_uid, "Tell me more", None,
+            EntryPoint(source="shared_media"),
+            {"shortcode": "another-unmapped-reel"}, None, "reel",
+        )
+    assert "kanchagolla" in sent[0].lower()
+    assert "which item" in sent[1].lower()
+    assert "jolbhora" not in sent[1].lower()
+
+
+def test_standalone_tell_me_more_and_unsupported_attachment_keep_safe_fallbacks(story_db):
+    uid = "no-source-" + uuid.uuid4().hex[:8]
+    response = responder.match_and_respond(
+        "Tell me more", user_id=uid, channel="instagram",
+    )
+    assert response[2] == "clarify_request"
+
+    fallback = []
+    with patch.object(app_module, "_reply_to_unreadable_attachment", lambda sender: fallback.append(sender)):
+        app_module._handle_shared_attachment("unsupported-attachment", None, None)
+    assert fallback == ["unsupported-attachment"]

@@ -476,6 +476,9 @@ def _process_instagram_event(
     message_text: str,
     ad_id: Optional[str],
     entry_point: Optional[EntryPoint] = None,
+    shared_reel: Optional[Dict[str, str]] = None,
+    shared_post_id: Optional[str] = None,
+    shared_source_type: Optional[str] = None,
 ) -> None:
     """
     Matches, logs, escalates and replies for one Instagram DM.
@@ -492,6 +495,13 @@ def _process_instagram_event(
     """
     try:
         facts = session_memory.get_facts(sender_id, "instagram")
+        shared_source_type = shared_source_type or (
+            "reel" if shared_reel else "post" if shared_post_id else None
+        )
+        source_media_present = bool(
+            shared_reel or shared_post_id or (entry_point and entry_point.media_id)
+        )
+        customer_text_accompanied_media = bool(source_media_present and str(message_text or "").strip())
 
         # How this message was composed, and which ad it came from, recorded on
         # every row this function writes. Phase 1 of the router rollout: until
@@ -513,22 +523,69 @@ def _process_instagram_event(
             facts["ad_product"] = ad_product
         source_route, source_match_method = route_for_inbound(
             ad_id=trace["ad_id"], media_id=trace["media_id"],
+            shortcode=(shared_reel or {}).get("shortcode"),
+            post_media_id=shared_post_id,
+            source_type="story_reply" if entry.source == "story_reply" else shared_source_type,
         )
+        if not source_route and shared_post_id:
+            # Preserve the existing admin-open pairing window for Posts. Once
+            # bound, the exact attachment ID follows the same source flow as
+            # a Reel shortcode or Story media ID.
+            if _establish_shared_post_context(sender_id, shared_post_id):
+                source_route = facts.get("source_route")
+                source_match_method = facts.get("source_match_method") or "shared_post_media_id"
         if source_route:
             facts["source_route"] = source_route
+            if source_media_present:
+                # A newly identified exact source is a fresh subject. Do not
+                # let an older conversational topic prevent the mapped
+                # Post/Reel/Story from answering "price?".
+                facts["last_topic"] = None
+                facts["source_context_superseded"] = False
+                facts["source_priority_cursor"] = 0
+                facts["active_product_context"] = None
         elif isinstance(facts.get("source_route"), dict):
-            source_route = facts["source_route"]
-            # A reel shared a moment ago is why this route is in the session
-            # at all, so the follow-up message is attributed to the share
-            # rather than to the vaguer "it was already here".
-            source_match_method = facts.get("source_match_method") or "session"
+            if source_media_present:
+                # An unmapped source must not borrow a previous route. Its
+                # written question still goes through canonical intent
+                # handling, but an ambiguous follow-up must clarify.
+                facts["source_route"] = None
+                facts["source_match_method"] = (
+                    "story_media_id_unmapped" if entry.source == "story_reply"
+                    else "shared_media_unmapped"
+                )
+                facts["source_context_superseded"] = True
+                facts["source_priority_cursor"] = 0
+                facts["last_topic"] = None
+                facts["active_product_context"] = None
+            else:
+                source_route = facts["source_route"]
+                # A reel shared a moment ago is why this route is in the
+                # session at all, so the follow-up message is attributed to
+                # the share rather than to the vaguer "it was already here".
+                source_match_method = facts.get("source_match_method") or "session"
         facts["source_context_used"] = False
+        if source_media_present and not source_route and not str(message_text or "").strip():
+            # An unconfigured/unsupported share remains a genuinely unreadable
+            # attachment. This branch is never reached for an identified route.
+            _reply_to_unreadable_attachment(sender_id)
+            return
+        customer_message = str(message_text or "").strip() or "[shared media]"
+        response_input = str(message_text or "").strip() or "Tell me more"
         trace.update({
             "source_routing_id": (source_route or {}).get("routing_id"),
-            "source_match_method": source_match_method,
-            "source_type": (source_route or {}).get("source_type"),
+            "source_match_method": source_match_method or (
+                "story_media_id_unmapped" if entry.source == "story_reply" else (
+                    "shared_media_unmapped" if source_media_present else None
+                )
+            ),
+            "source_type": (source_route or {}).get("source_type") or (
+                "story" if entry.source == "story_reply" else shared_source_type
+            ),
             "shortcode": (source_route or {}).get("shortcode"),
             "routing_topic": (source_route or {}).get("routing_topic"),
+            "source_media_present": source_media_present,
+            "customer_text_accompanied_media": customer_text_accompanied_media,
         })
         log.info(
             "Instagram inbound from %s: source=%s ad_id=%s ad_title=%r payload=%r",
@@ -536,7 +593,7 @@ def _process_instagram_event(
         )
 
         response_text, was_matched, template_id, image_url = responder.match_and_respond(
-            message_text, user_id=sender_id, channel="instagram",
+            response_input, user_id=sender_id, channel="instagram",
             referral_source="ADS", referral_ad_id=trace["ad_id"], referral_ad_title=trace["ad_title"],
         )
 
@@ -545,7 +602,7 @@ def _process_instagram_event(
         protected_flow = bool(facts.get("cart") or facts.get("order_draft")) or template_id in ("order_draft_receipt", "order_next_steps")
         if (config.LLM_ASSISTED_RESOLUTION_ENABLED or config.LLM_AUTO_RESOLVE_SIMULATION_ENABLED) and not was_matched and not protected_flow and not source_route:
             assisted_suggestion = create_suggestion(
-                user_id=sender_id, channel="instagram", customer_message=message_text,
+                user_id=sender_id, channel="instagram", customer_message=customer_message,
                 deterministic_resolved=False, active_protected_flow=protected_flow,
                 source_routed=bool(source_route), source_routing_id=trace.get("source_routing_id"),
             )
@@ -590,7 +647,7 @@ def _process_instagram_event(
             is_order_handoff = template_id in ("order_draft_receipt", "order_next_steps")
             handoff = get_or_create_handoff(
                 user_id=sender_id, channel="instagram", reason=reason,
-                user_message=message_text, facts=facts,
+                user_message=customer_message, facts=facts,
                 include_order=is_order_handoff,
             )
             # A repeated "human"/"can someone help" against an already-active
@@ -600,7 +657,7 @@ def _process_instagram_event(
                 escalator.handle_escalation(
                     user_id=sender_id,
                     channel="instagram",
-                    user_message=message_text,
+                    user_message=customer_message,
                     reason=reason,
                     context_data={
                         "ad_id": ad_id, "sender_id": sender_id, "template_id": template_id,
@@ -624,11 +681,15 @@ def _process_instagram_event(
             image_url = None
 
         trace["source_context_used"] = bool(facts.get("source_context_used"))
+        trace["source_context_available"] = bool(
+            source_route and source_route.get("active", True)
+        )
+        trace["source_referential_intent"] = facts.get("source_referential_intent")
         logged_response = response_text
         if needs_escalation:
             logged_response = f"{response_text}\n\n{link_message}"
         conversation_id = db.log_conversation(
-            sender_id, "instagram", message_text, logged_response, was_matched,
+            sender_id, "instagram", customer_message, logged_response, was_matched,
             template_id, **trace,
         )
 
@@ -821,21 +882,100 @@ def _handle_shared_attachment(
     Establishes source context where there is any, then answers the
     attachment.
 
-    A recognized post — already paired, or bound just now against an open
-    pairing window — skips the "I can't open photos" reply: the system did
-    understand what was shared, and sending that message would misstate what
-    just happened. A reel keeps its existing reply exactly as before; that
-    path is proven in production and this change does not touch it.
+    A recognized Post/Reel — already paired or matched by its deterministic
+    identifier — skips the "I can't open photos" reply: the system did
+    understand what was shared, and the source-aware responder can answer it.
+    An unconfigured or unsupported attachment keeps the existing fallback.
     """
-    if reel_identity:
-        _establish_shared_reel_context(sender_id, reel_identity)
-        _reply_to_unreadable_attachment(sender_id)
+    if reel_identity or post_media_id:
+        # Use the same route/responder path as a share with accompanying text.
+        # A mapped source gets its approved default response; only an
+        # unconfigured/unsupported attachment receives the unreadable notice.
+        try:
+            route, _ = route_for_inbound(
+                ad_id=None,
+                media_id=None,
+                shortcode=(reel_identity or {}).get("shortcode"),
+                post_media_id=post_media_id,
+                source_type="reel" if reel_identity else "post",
+            )
+            if not route and post_media_id:
+                _establish_shared_post_context(sender_id, post_media_id)
+                route = session_memory.get_facts(sender_id, "instagram").get("source_route")
+            if not route:
+                _reply_to_unreadable_attachment(sender_id)
+                return
+            _process_instagram_event(
+                sender_id, "", None,
+                EntryPoint(source="shared_media"),
+                shared_reel=reel_identity,
+                shared_post_id=post_media_id,
+                shared_source_type="reel" if reel_identity else "post",
+            )
+        except Exception:
+            log.exception("Could not resolve shared media for %s.", sender_id)
+            _reply_to_unreadable_attachment(sender_id)
         return
-    if post_media_id:
-        recognized = _establish_shared_post_context(sender_id, post_media_id)
-        if recognized:
-            return
     _reply_to_unreadable_attachment(sender_id)
+
+
+def _story_reply_payload(messaging_event: dict) -> Optional[Dict[str, Any]]:
+    """Return the raw Story reply object only when Meta supplied one."""
+    message = messaging_event.get("message") or {}
+    reply_to = message.get("reply_to")
+    story = reply_to.get("story") if isinstance(reply_to, dict) else None
+    return story if isinstance(story, dict) else None
+
+
+def _record_story_reply(messaging_event: dict, sender_id: Optional[str], media_id: str) -> None:
+    """Capture exact Story evidence; failures never affect the reply path."""
+    try:
+        story = _story_reply_payload(messaging_event) or {}
+        supplied_url = next(
+            (story.get(key) for key in ("url", "media_url", "thumbnail_url")
+             if isinstance(story.get(key), str) and story.get(key).startswith(("http://", "https://"))),
+            None,
+        )
+        db.record_instagram_story_source(
+            media_id,
+            temporary_url=supplied_url,
+            story_status=str(story.get("status") or story.get("story_status") or "").strip() or None,
+            sender_id=str(sender_id) if sender_id else None,
+            event_metadata={
+                "event_id": messaging_event.get("id"),
+                "timestamp": messaging_event.get("timestamp"),
+                "message_id": (messaging_event.get("message") or {}).get("mid"),
+                "source": "story_reply",
+            },
+        )
+    except Exception:
+        log.exception("Could not capture Instagram Story reply %s.", media_id)
+
+
+def _shared_source_type(message: Dict[str, Any]) -> Optional[str]:
+    """Identify a supported Meta share wrapper without reading its caption."""
+    attachments = (message or {}).get("attachments")
+    if not isinstance(attachments, list):
+        return None
+    for attachment in attachments:
+        if not isinstance(attachment, dict):
+            continue
+        if attachment.get("type") == "ig_reel":
+            return "reel"
+        if attachment.get("type") == "ig_post":
+            return "post"
+    return None
+
+
+def _story_reaction_only(messaging_event: dict, entry_point: EntryPoint) -> bool:
+    """Recognize reaction-only Story replies without treating them as facts."""
+    if entry_point.source != "story_reply":
+        return False
+    message = messaging_event.get("message") or {}
+    if isinstance(message.get("reaction"), dict) or message.get("reaction"):
+        return True
+    text = str(message.get("text") or "").strip().replace("\ufe0f", "")
+    return text in {"❤", "😍", "🔥", "👍", "👏", "😂", "😮", "😢", "😡", "🥰"}
 
 
 def _classify_unanswered_event(messaging_event: dict) -> Optional[str]:
@@ -1054,10 +1194,36 @@ def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks
             entry_point = describe_entry_point(messaging_event)
             message = messaging_event.get("message") or {}
 
+            # Story IDs are durable routing evidence even when the operator
+            # has not mapped them yet. Capture before sender/ad-gate handling
+            # so the admin can see every Story that reached the webhook.
+            if entry_point.source == "story_reply" and entry_point.media_id:
+                _record_story_reply(messaging_event, sender_id, entry_point.media_id)
+
+            # Mentions are not replies to our Story and carry no approved
+            # product context. Keep them observable, but never turn them into
+            # an automatic product/business answer.
+            if entry_point.source == "story_mention":
+                _record_dropped_webhook_event("story_mention", messaging_event, sender_id)
+                results.append({"sender_id": sender_id, "action": "ignored_story_mention"})
+                continue
+
+            # A reaction-only Story response is not a product question. It is
+            # safer to leave it handled without a generated claim than to
+            # route an emoji through the canonical matcher or RAG.
+            if _story_reaction_only(messaging_event, entry_point):
+                _record_dropped_webhook_event("story_reaction_only", messaging_event, sender_id)
+                results.append({"sender_id": sender_id, "action": "ignored_story_reaction"})
+                continue
+
             if not sender_id:
                 log.info("Ignored Instagram event without sender ID (keys: %s).", list(messaging_event.keys()))
                 results.append({"action": "ignored_no_sender"})
                 continue
+
+            shared_reel = shared_reel_identity(message)
+            shared_post_id = shared_post_media_id(message) if not shared_reel else None
+            shared_source_type = _shared_source_type(message)
 
             # A contact-card attachment used to be read as a WhatsApp number
             # the customer was asked to share. Channel policy retired that
@@ -1086,30 +1252,39 @@ def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks
                 # Parsed here because it is pure string work, but resolved and
                 # stored in the background task below — the webhook must keep
                 # returning 200 before Meta decides it timed out and redelivers.
-                shared_reel = (
-                    shared_reel_identity(messaging_event.get("message") or {})
-                    if reason == "attachment_only" else None
-                )
-                shared_post_id = (
-                    shared_post_media_id(messaging_event.get("message") or {})
-                    if reason == "attachment_only" and not shared_reel else None
-                )
-
                 # A photo, voice note or sticker is a real person saying
                 # something we cannot read. Silence is the worst available
                 # answer — they cannot tell whether anyone is there. Asking
                 # them to type costs one message and keeps the conversation
                 # alive; it was found by the drop log within a minute of that
                 # log existing.
+                if (shared_source_type or (entry_point.source == "story_reply" and entry_point.media_id)) and is_ad_qualified:
+                    if shared_source_type:
+                        background_fn = _handle_shared_attachment
+                        background_args = (sender_id, shared_reel, shared_post_id)
+                    else:
+                        background_fn = _process_instagram_event
+                        background_args = (sender_id, "", ad_id, entry_point)
+                    background_tasks.add_task(
+                        background_fn, *background_args,
+                    )
+                    results.append({
+                        "sender_id": sender_id,
+                        "action": "queued_shared_media" if not shared_source_type else "queued_attachment_reply",
+                        "shared_reel_shortcode": (shared_reel or {}).get("shortcode"),
+                        "shared_post_media_id": shared_post_id,
+                    })
+                    continue
+
                 if reason == "attachment_only" and is_ad_qualified:
                     background_tasks.add_task(
-                        _handle_shared_attachment, sender_id, shared_reel, shared_post_id,
+                        _handle_shared_attachment, sender_id, None, None,
                     )
                     results.append({
                         "sender_id": sender_id,
                         "action": "queued_attachment_reply",
-                        "shared_reel_shortcode": (shared_reel or {}).get("shortcode"),
-                        "shared_post_media_id": shared_post_id,
+                        "shared_reel_shortcode": None,
+                        "shared_post_media_id": None,
                     })
                     continue
 
@@ -1131,6 +1306,19 @@ def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks
 
             # Accepted. The reply itself is built and sent off the request path
             # so Meta gets its 200 immediately and does not retry this delivery.
+            if shared_source_type:
+                background_tasks.add_task(
+                    _process_instagram_event, sender_id, message_text, ad_id, entry_point,
+                    shared_reel, shared_post_id, shared_source_type,
+                )
+                results.append({
+                    "sender_id": sender_id,
+                    "action": "queued_shared_media",
+                    "ad_id": ad_id,
+                    "message_source": entry_point.source,
+                    "ad_title": entry_point.ad_title,
+                })
+                continue
             background_tasks.add_task(
                 _process_instagram_event, sender_id, message_text, ad_id, entry_point
             )
@@ -2447,11 +2635,22 @@ def list_instagram_routes(
     return {
         "status": "success",
         "routes": routes,
+        "story_sources": db.list_instagram_story_sources(),
         "legacy_ad_routes": db.list_ad_product_routes(),
         "product_catalogue": product_catalogue(),
         "knowledge_scopes": sorted(SOURCE_MAP),
         "inbound_identifiers": ["ad_id", "story_media_id"],
     }
+
+
+@app.get("/admin/instagram-story-sources")
+def list_instagram_story_sources(
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """Lists captured Story IDs, including unmapped IDs, for admin routing."""
+    require_admin(x_admin_key, x_admin_pin)
+    return {"status": "success", "story_sources": db.list_instagram_story_sources()}
 
 
 @app.post("/admin/instagram-routes/{routing_id}/metadata/refresh")
@@ -5664,10 +5863,16 @@ def get_admin_dashboard():
         <div id="tab-ad-routing" class="panel-card" data-group="menu" style="display: none;">
             <div class="panel-header">
                 <h2>📣 Instagram Content Routing</h2>
-                <p>Connect an Instagram post or reel to a Topic.</p>
+                <p>Connect an Instagram post, reel, ad, or Story to a Topic. Story routing uses the Meta Story media ID only.</p>
             </div>
             <div class="ad-routing-form">
                 <div>
+                    <label class="field-label" for="igSourceType">Source</label>
+                    <select class="field-control" id="igSourceType" onchange="onInstagramSourceTypeChange()">
+                        <option value="post">Post</option><option value="reel">Reel</option><option value="ad">Ad</option><option value="story">Story</option>
+                    </select>
+                </div>
+                <div id="igRouteUrlWrap">
                     <label class="field-label" for="igRouteUrl">Instagram Link</label>
                     <input class="field-control" id="igRouteUrl" autocomplete="off" placeholder="https://www.instagram.com/reel/DdAnO6MTok1/" onblur="identifyInstagramRoute()" onchange="identifyInstagramRoute()">
                 </div>
@@ -5737,8 +5942,14 @@ def get_admin_dashboard():
                 <button class="ig-media-filter" type="button" data-media-filter="post" onclick="setInstagramMediaFilter('post')">Posts</button>
                 <button class="ig-media-filter" type="button" data-media-filter="reel" onclick="setInstagramMediaFilter('reel')">Reels</button>
                 <button class="ig-media-filter" type="button" data-media-filter="ad" onclick="setInstagramMediaFilter('ad')">Ads</button>
+                <button class="ig-media-filter" type="button" data-media-filter="story" onclick="setInstagramMediaFilter('story')">Stories</button>
             </div>
             <div id="adRouteList" class="ad-route-list"><p style="color:var(--text-muted);font-size:0.84rem;">Loading saved routes...</p></div>
+            <section id="igStorySources" aria-label="Instagram Stories" style="margin-top:20px;">
+                <h3 style="margin:0 0 6px;">Instagram Stories</h3>
+                <p style="font-size:0.8rem;color:var(--text-muted);">Captured Story IDs remain visible after expiry. Unmapped IDs never supply product context.</p>
+                <div id="igStorySourceList"><p style="color:var(--text-muted);font-size:0.84rem;">Loading captured Stories...</p></div>
+            </section>
         </div>
 
         <!-- MENU tab, panel 3 of 4: same job again, from a shared sheet -->
@@ -7054,6 +7265,8 @@ THIS WEEK'S BENGAL SPECIALS
             igEditingId = null; igPriority = [];
             igMediaMetadata = { preview_url: null, media_type: null };
             ['igRouteUrl','igMediaId','igAdId','igCampaignId'].forEach(id => { const el=document.getElementById(id); if(el)el.value=''; });
+            document.getElementById('igSourceType').value = 'post';
+            onInstagramSourceTypeChange();
             document.getElementById('igTopicPicker').value = '';
             igResponseOrder = 'description_first';
             document.getElementById('igMenuPicker').value = '';
@@ -7072,7 +7285,20 @@ THIS WEEK'S BENGAL SPECIALS
             renderIgPriorityProducts();
         }
 
+        function onInstagramSourceTypeChange() {
+            const type = document.getElementById('igSourceType')?.value || 'post';
+            const urlWrap = document.getElementById('igRouteUrlWrap');
+            const url = document.getElementById('igRouteUrl');
+            const media = document.getElementById('igMediaId');
+            if (urlWrap) urlWrap.style.display = type === 'story' ? 'none' : '';
+            if (url) url.required = type !== 'story';
+            if (media) media.placeholder = type === 'story' ? 'Meta Story media ID (authoritative)' : 'Verified Media / Story ID';
+            const identity = document.getElementById('igRouteIdentity');
+            if (type === 'story' && identity) identity.innerHTML = '<span style="color:var(--text-muted);">Story routes use the exact Meta Story media ID. Captured IDs appear below.</span>';
+        }
+
         async function identifyInstagramRoute() {
+            if ((document.getElementById('igSourceType')?.value || '') === 'story') return;
             const url=document.getElementById('igRouteUrl').value.trim();
             const box=document.getElementById('igRouteIdentity');
             if (!url) { box.innerHTML=''; return; }
@@ -7089,6 +7315,8 @@ THIS WEEK'S BENGAL SPECIALS
         function editInstagramRoute(id) {
             const route=(window.igRoutes||[]).find(item=>item.routing_id===id); if(!route)return;
             igEditingId=id; igPriority=[...(route.priority_products||[])];
+            document.getElementById('igSourceType').value=route.source_type||'post';
+            onInstagramSourceTypeChange();
             document.getElementById('igRouteUrl').value=route.canonical_url||'';
             document.getElementById('igTopicPicker').value=route.topic_id||'';
             document.getElementById('igMenuPicker').value=route.menu_id||'';
@@ -7109,18 +7337,19 @@ THIS WEEK'S BENGAL SPECIALS
         async function saveInstagramRoute() {
             const result=document.getElementById('adRouteResult');
             const selectedMenuId=document.getElementById('igMenuPicker').value;
-            const payload={routing_id:igEditingId,url:document.getElementById('igRouteUrl').value.trim(),topic_id:document.getElementById('igTopicPicker').value,menu_id:selectedMenuId,menu_mode:selectedMenuId?'SELECTED':'NONE',media_id:document.getElementById('igMediaId').value.trim(),ad_id:document.getElementById('igAdId').value.trim(),campaign_id:document.getElementById('igCampaignId').value.trim(),preview_url:igMediaMetadata.preview_url,media_type:igMediaMetadata.media_type,escalation_policy:document.getElementById('igEscalationPolicy').value,priority_products:igPriority,knowledge_scope:Array.from(document.getElementById('igKnowledgeScope').selectedOptions).map(o=>o.value),active:true};
+            const sourceType=document.getElementById('igSourceType').value;
+            const payload={routing_id:igEditingId,source_type:sourceType,url:sourceType==='story'?'':document.getElementById('igRouteUrl').value.trim(),topic_id:document.getElementById('igTopicPicker').value,menu_id:selectedMenuId,menu_mode:selectedMenuId?'SELECTED':'NONE',media_id:document.getElementById('igMediaId').value.trim(),ad_id:document.getElementById('igAdId').value.trim(),campaign_id:document.getElementById('igCampaignId').value.trim(),preview_url:igMediaMetadata.preview_url,media_type:igMediaMetadata.media_type,escalation_policy:document.getElementById('igEscalationPolicy').value,priority_products:igPriority,knowledge_scope:Array.from(document.getElementById('igKnowledgeScope').selectedOptions).map(o=>o.value),active:true};
             const resp=await fetch('/admin/instagram-routes',{method:'POST',headers:{...getAuthHeaders(),'Content-Type':'application/json'},body:JSON.stringify(payload)});
             const data=await resp.json().catch(()=>({})); result.style.display='block';
             if(!resp.ok){result.className='result-box error';result.innerText=data.detail||'Could not save route.';return;}
             const saved = data.route || {};
             const topic = igTopics.find(item => item.topic_id === saved.topic_id) || {};
             const menu = igMenus.find(item => item.menu_id === (saved.menu_id || payload.menu_id)) || {};
-            const content = saved.source_type === 'reel' ? 'Reel' : saved.source_type === 'post' ? 'Post' : 'Instagram content';
+            const content = saved.source_type === 'reel' ? 'Reel' : saved.source_type === 'post' ? 'Post' : saved.source_type === 'story' ? 'Story' : 'Instagram Ad';
             const label = saved.shortcode ? `${content} ${saved.shortcode}` : content;
             resetInstagramRouteForm();
             result.style.display='block'; result.className='result-box success';
-            result.innerHTML=`<b>✓ Instagram content connected successfully</b><br><small>Instagram content: ${escapeHtml(label)}<br>Topic: ${escapeHtml(topic.name || saved.routing_topic || '—')}<br>Menu: ${escapeHtml(menu.name || saved.menu_id || '—')}</small>`;
+            result.innerHTML=`<b>✓ Instagram ${escapeHtml(content)} routing saved</b><br><small>Source: ${escapeHtml(label || saved.media_id || '—')}<br>Topic: ${escapeHtml(topic.name || saved.routing_topic || '—')}<br>Menu: ${escapeHtml(menu.name || saved.menu_id || '—')}</small>`;
             loadAdRoutes();
         }
 
@@ -7335,8 +7564,8 @@ THIS WEEK'S BENGAL SPECIALS
         }
 
         let igMediaFilter = 'all';
-        function instagramMediaLabel(route) { return route.source_type === 'reel' ? 'REEL' : route.source_type === 'post' ? 'POST' : 'AD'; }
-        function instagramMediaName(route) { return route.source_type === 'reel' ? 'Instagram Reel' : route.source_type === 'post' ? 'Instagram Post' : 'Instagram Ad'; }
+        function instagramMediaLabel(route) { return route.source_type === 'reel' ? 'REEL' : route.source_type === 'post' ? 'POST' : route.source_type === 'story' ? 'STORY' : 'AD'; }
+        function instagramMediaName(route) { return route.source_type === 'reel' ? 'Instagram Reel' : route.source_type === 'post' ? 'Instagram Post' : route.source_type === 'story' ? 'Instagram Story' : 'Instagram Ad'; }
         function instagramMenuLabel(route) {
             if (route.menu_mode === 'NONE') return 'NONE';
             if (route.menu_mode === 'INHERIT') return 'INHERIT';
@@ -7355,6 +7584,7 @@ THIS WEEK'S BENGAL SPECIALS
         function instagramMediaStatus(route) {
             if (route.archived_at) return { label: 'Archived', className: 'disabled' };
             if (!route.active) return { label: 'Disabled', className: 'disabled' };
+            if (route.source_type === 'story') return { label: 'Mapped', className: '' };
             if (route.source_type !== 'post' || route.media_id) return { label: 'Connected', className: '' };
             if (route.pairing_status === 'pending') return { label: `Waiting for shared post — expires ${route.pairing_expires_at || 'soon'}`, className: 'waiting' };
             return { label: 'Waiting for Post', className: 'waiting' };
@@ -7494,7 +7724,7 @@ THIS WEEK'S BENGAL SPECIALS
             const menu = instagramMenuLabel(route);
             const description = (route.topic_description || '').trim();
             const priority = (route.priority_products || []).map(id => ((igProducts.find(p => p.id === id) || {}).label || id)).join(' → ') || 'Normal conversation routing';
-            const link = route.canonical_url ? `<a class="ig-media-link" href="${escapeHtml(route.canonical_url)}" target="_blank" rel="noopener noreferrer">Open Instagram · ${escapeHtml(instagramShortUrl(route.canonical_url))}</a>` : '<span class="ig-media-muted">Instagram link unavailable</span>';
+            const link = route.canonical_url ? `<a class="ig-media-link" href="${escapeHtml(route.canonical_url)}" target="_blank" rel="noopener noreferrer">Open Instagram · ${escapeHtml(instagramShortUrl(route.canonical_url))}</a>` : route.source_type === 'story' ? `<span class="ig-media-muted">Story media ID: ${escapeHtml(route.media_id || '—')}</span>` : '<span class="ig-media-muted">Instagram link unavailable</span>';
             const pairingNote = route.source_type === 'post' && route.media_id && route.pairing_status === 'bound' ? '<span class="ig-media-muted">Connected via Post Pairing</span>' : '';
             const detailsImage = (route.preview_url || route.admin_preview_url) ? instagramPreview(route, true) : '<span class="ig-media-muted">Preview unavailable; route remains active.</span>';
             const previewSource = route.preview_url ? 'Meta-provided preview' : route.admin_preview_url ? 'Admin preview fallback' : 'Placeholder';
@@ -7512,6 +7742,23 @@ THIS WEEK'S BENGAL SPECIALS
             const hasCover = Boolean(route.preview_url || route.admin_preview_url);
             const coverControls = coverManaged ? `<div class="ig-cover-controls"><button class="btn-secondary" type="button" onclick="openInstagramCoverModal(${route.routing_id})">${hasCover ? 'Change Cover' : 'Add Cover'}</button>${route.admin_preview_url ? `<button class="btn-danger" type="button" onclick="removeInstagramAdminPreview(${route.routing_id})">Remove Cover</button>` : ''}</div><div class="ig-cover-label">Admin-only visual metadata</div>` : '';
             return `<article class="ig-media-card"><div>${instagramPreview(route)}${coverControls}</div><div class="ig-media-main"><div class="ig-media-title"><b class="ig-media-topic">${escapeHtml(route.routing_topic || 'Instagram content')}</b><span class="ig-media-status ${status.className}">${escapeHtml(status.label)}</span></div><div>${link}</div><div class="ig-media-summary">${escapeHtml(description || 'No description configured.')}</div><div class="ig-media-facts"><span><b>Menu:</b> ${escapeHtml(menu)}</span><span><b>Status:</b> ${escapeHtml(status.label)}</span><span><b>Updated:</b> ${escapeHtml(route.updated_at || route.created_at || '—')}</span>${pairingNote}</div></div><div class="ig-media-actions">${actions}</div>${details}</article>`;
+        }
+
+        function renderInstagramStorySources(sources) {
+            const box = document.getElementById('igStorySourceList');
+            if (!box) return;
+            if (!sources || !sources.length) { box.innerHTML = '<p style="color:var(--text-muted);font-size:0.84rem;">No Story replies captured yet.</p>'; return; }
+            box.innerHTML = sources.map(source => {
+                const action = source.routing_id ? `<button class="btn-secondary" type="button" onclick="editInstagramRoute(${source.routing_id})">Edit mapping</button>` : `<button class="btn-secondary" type="button" onclick="useCapturedStory(${JSON.stringify(source.story_media_id)})">Map Story</button>`;
+                const status = source.mapping_status || source.status || 'UNMAPPED';
+                return `<article class="ig-media-card"><div class="ig-media-main"><div class="ig-media-title"><b class="ig-media-topic">${escapeHtml(source.story_media_id)}</b><span class="ig-media-status ${status === 'UNMAPPED' || status === 'DISABLED' ? 'disabled' : ''}">${escapeHtml(status)}</span></div><div class="ig-media-facts"><span><b>First seen:</b> ${escapeHtml(source.first_seen || '—')}</span><span><b>Last seen:</b> ${escapeHtml(source.last_seen || '—')}</span><span><b>Story status:</b> ${escapeHtml(source.story_status || 'Unknown')}</span></div></div><div class="ig-media-actions">${action}</div></article>`;
+            }).join('');
+        }
+        function useCapturedStory(mediaId) {
+            document.getElementById('igSourceType').value = 'story';
+            onInstagramSourceTypeChange();
+            document.getElementById('igMediaId').value = mediaId || '';
+            document.getElementById('igRouteUrl').scrollIntoView({behavior:'smooth'});
         }
         function renderInstagramMediaRegistry() {
             const list = document.getElementById('adRouteList');
@@ -7531,6 +7778,7 @@ THIS WEEK'S BENGAL SPECIALS
                 const data = await resp.json();
                 if (!resp.ok) throw new Error(data.detail || 'Could not load saved routes.');
                 window.igRoutes = data.routes || []; window.igLegacyAds = data.legacy_ad_routes || []; igProducts = data.product_catalogue || [];
+                renderInstagramStorySources(data.story_sources || []);
                 document.getElementById('igProductPicker').innerHTML='<option value="">Choose an approved product…</option>'+igProducts.map(item=>`<option value="${escapeHtml(item.id)}">${escapeHtml(item.label)}</option>`).join('');
                 document.getElementById('topicProductPicker') && (document.getElementById('topicProductPicker').innerHTML=document.getElementById('igProductPicker').innerHTML);
                 document.getElementById('igKnowledgeScope').innerHTML=(data.knowledge_scopes||[]).map(id=>`<option value="${escapeHtml(id)}">${escapeHtml(id)}</option>`).join('');

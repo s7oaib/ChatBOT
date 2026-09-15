@@ -79,6 +79,7 @@ def describe_entry_point(messaging_event: Dict[str, Any]) -> EntryPoint:
     reply_to = message_obj.get("reply_to") or {}
     story = reply_to.get("story") if isinstance(reply_to, dict) else None
     media_id = str(story.get("id")) if isinstance(story, dict) and story.get("id") else None
+    story_mention = message_obj.get("story_mention") or messaging_event.get("story_mention")
 
     payload = postback_obj.get("payload")
     if postback_obj:
@@ -87,6 +88,11 @@ def describe_entry_point(messaging_event: Dict[str, Any]) -> EntryPoint:
         source = "ice_breaker" if payload and _ICE_BREAKER_PAYLOAD_RE.search(str(payload)) else "postback"
     elif isinstance(message_obj.get("reply_to"), dict) and message_obj["reply_to"].get("story"):
         source = "story_reply"
+    elif story_mention:
+        # A customer mentioning the business in their own Story is a
+        # different event from replying to our Story. It carries no product
+        # context and is intentionally left out of customer routing.
+        source = "story_mention"
     elif message_obj.get("text") or (messaging_event.get("message_edit") or {}).get("text"):
         source = "typed"
     else:
