@@ -6042,6 +6042,7 @@ def get_admin_dashboard():
                 </div>
             </div>
             <div id="igStoryResult" class="result-box" role="status" aria-live="polite"></div>
+            <div id="igStoryRefreshStatus" class="result-box" role="status" aria-live="polite" style="display:none;"></div>
             <div class="ig-media-toolbar" aria-label="Instagram Story filters">
                 <input class="field-control ig-media-search" id="igStorySearch" type="search" placeholder="Search Story ID or Topic" autocomplete="off">
                 <button class="ig-media-filter active ig-story-filter" type="button" data-story-filter="all">All</button>
@@ -6069,8 +6070,16 @@ def get_admin_dashboard():
                         <select class="field-control" id="igStoryTopicPicker"><option value="">Select Topic</option></select>
                     </div>
                     <div>
+                        <label class="field-label" for="igStoryMenuMode">Menu behavior</label>
+                        <select class="field-control" id="igStoryMenuMode">
+                            <option value="INHERIT">Inherit Topic Menu</option>
+                            <option value="NONE">No Menu</option>
+                            <option value="SELECTED">Select Menu</option>
+                        </select>
+                    </div>
+                    <div id="igStoryMenuPickerWrap" style="display:none;">
                         <label class="field-label" for="igStoryMenuPicker">Menu</label>
-                        <select class="field-control" id="igStoryMenuPicker"><option value="">Inherit Topic Menu</option></select>
+                        <select class="field-control" id="igStoryMenuPicker"><option value="">Select a menu…</option></select>
                     </div>
                     <div>
                         <label class="field-label" for="igStoryEscalationPolicy">Escalation policy</label>
@@ -6964,6 +6973,7 @@ THIS WEEK'S BENGAL SPECIALS
                 button.addEventListener('click', () => setInstagramStoryFilter(button.dataset.storyFilter || 'all'));
             });
             document.getElementById('igStoryTopicPicker')?.addEventListener('change', onInstagramStoryTopicChange);
+            document.getElementById('igStoryMenuMode')?.addEventListener('change', onInstagramStoryMenuModeChange);
             document.getElementById('igStoryAddPriorityButton')?.addEventListener('click', addInstagramStoryPriorityProduct);
             document.getElementById('igStorySaveButton')?.addEventListener('click', saveInstagramStoryMapping);
             document.getElementById('igStoryCancelButton')?.addEventListener('click', cancelInstagramStoryMapping);
@@ -7906,6 +7916,7 @@ THIS WEEK'S BENGAL SPECIALS
         }
 
         let igStorySources = [];
+        let igStoriesEverLoaded = false;
         let igStoryFilter = 'all';
         let igStoryEditingRoutingId = null;
         let igStoryPriority = [];
@@ -7947,7 +7958,7 @@ THIS WEEK'S BENGAL SPECIALS
             const products = document.getElementById('igStoryPriorityPicker');
             const scopes = document.getElementById('igStoryKnowledgeScope');
             if (topics) topics.innerHTML = '<option value="">Select Topic</option>' + igTopics.map(topic => `<option value="${escapeHtml(topic.topic_id)}">${escapeHtml(topic.name)}</option>`).join('');
-            if (menus) menus.innerHTML = '<option value="">Inherit Topic Menu</option>' + igMenus.map(menu => `<option value="${escapeHtml(menu.menu_id)}">${escapeHtml(menu.name)}</option>`).join('');
+            if (menus) menus.innerHTML = '<option value="">Select a menu…</option>' + igMenus.map(menu => `<option value="${escapeHtml(menu.menu_id)}">${escapeHtml(menu.name)}</option>`).join('');
             if (products) products.innerHTML = '<option value="">Choose an approved product…</option>' + igProducts.map(product => `<option value="${escapeHtml(product.id)}">${escapeHtml(product.label)}</option>`).join('');
             if (scopes) scopes.innerHTML = igStoryKnowledgeScopes.map(scope => `<option value="${escapeHtml(scope)}">${escapeHtml(scope)}</option>`).join('');
         }
@@ -7957,6 +7968,20 @@ THIS WEEK'S BENGAL SPECIALS
             const topic = igTopics.find(item => item.topic_id === topicId);
             if (!igStoryEditingRoutingId && topic) igStoryPriority = [...(topic.priority_products || [])];
             renderInstagramStoryPriorityProducts();
+        }
+
+        // Three explicit, persisted menu states -- INHERIT / NONE / SELECTED
+        // -- rather than inferring one from whether a menu happens to be
+        // picked. An empty picker used to be indistinguishable from "no
+        // menu"; it is now only ever read when the mode is SELECTED.
+        function onInstagramStoryMenuModeChange() {
+            const mode = document.getElementById('igStoryMenuMode')?.value || 'INHERIT';
+            const wrap = document.getElementById('igStoryMenuPickerWrap');
+            if (wrap) wrap.style.display = mode === 'SELECTED' ? 'block' : 'none';
+            if (mode !== 'SELECTED') {
+                const picker = document.getElementById('igStoryMenuPicker');
+                if (picker) picker.value = '';
+            }
         }
 
         function renderInstagramStoryPriorityProducts() {
@@ -7989,7 +8014,14 @@ THIS WEEK'S BENGAL SPECIALS
             igStoryPriority = [...(source.priority_products || [])];
             document.getElementById('igStoryMediaId').value = source.story_media_id || '';
             document.getElementById('igStoryTopicPicker').value = source.topic_id || '';
-            document.getElementById('igStoryMenuPicker').value = source.menu_id || '';
+            // Load the persisted menu_mode as-is -- never inferred from
+            // whether menu_id happens to be set, and never silently
+            // coerced into a different mode (INHERIT stays INHERIT even
+            // though menu_id is empty for it, same as for NONE).
+            const persistedMenuMode = String(source.menu_mode || 'INHERIT').toUpperCase();
+            document.getElementById('igStoryMenuMode').value = ['INHERIT', 'NONE', 'SELECTED'].includes(persistedMenuMode) ? persistedMenuMode : 'INHERIT';
+            document.getElementById('igStoryMenuPicker').value = persistedMenuMode === 'SELECTED' ? (source.menu_id || '') : '';
+            onInstagramStoryMenuModeChange();
             document.getElementById('igStoryEscalationPolicy').value = source.escalation_policy || 'human_if_unsupported';
             document.getElementById('igStoryActive').checked = source.active !== false && status !== 'DISABLED';
             Array.from(document.getElementById('igStoryKnowledgeScope').options).forEach(option => option.selected = (source.knowledge_scope || []).includes(option.value));
@@ -8003,6 +8035,9 @@ THIS WEEK'S BENGAL SPECIALS
         function cancelInstagramStoryMapping() {
             igStoryEditingRoutingId = null;
             igStoryPriority = [];
+            const menuMode = document.getElementById('igStoryMenuMode');
+            if (menuMode) menuMode.value = 'INHERIT';
+            onInstagramStoryMenuModeChange();
             const form = document.getElementById('igStoryMapForm');
             if (form) form.style.display = 'none';
         }
@@ -8020,12 +8055,14 @@ THIS WEEK'S BENGAL SPECIALS
             const topicId = document.getElementById('igStoryTopicPicker')?.value || '';
             if (!mediaId) return showInstagramStoryResult('error', 'Choose a captured Story before mapping it.');
             if (!topicId) return showInstagramStoryResult('error', 'Select a Topic before saving the Story mapping.');
+            const menuMode = document.getElementById('igStoryMenuMode')?.value || 'INHERIT';
             const menuId = document.getElementById('igStoryMenuPicker').value;
+            if (menuMode === 'SELECTED' && !menuId) return showInstagramStoryResult('error', 'Choose a menu, or switch Menu behavior to Inherit Topic Menu / No Menu.');
             const payload = {
                 routing_id: igStoryEditingRoutingId,
                 source_type: 'story', url: '', media_id: mediaId, ad_id: '', campaign_id: '',
                 preview_url: null, media_type: 'story', topic_id: topicId,
-                menu_id: menuId, menu_mode: menuId ? 'SELECTED' : 'NONE',
+                menu_id: menuMode === 'SELECTED' ? menuId : null, menu_mode: menuMode,
                 escalation_policy: document.getElementById('igStoryEscalationPolicy').value,
                 priority_products: igStoryPriority,
                 knowledge_scope: Array.from(document.getElementById('igStoryKnowledgeScope').selectedOptions).map(option => option.value),
@@ -8106,10 +8143,43 @@ THIS WEEK'S BENGAL SPECIALS
             }));
         }
 
+        function setInstagramStoryRefreshStatus(kind, message) {
+            const status = document.getElementById('igStoryRefreshStatus');
+            if (!status) return;
+            if (!message) { status.style.display = 'none'; status.innerHTML = ''; return; }
+            status.style.display = 'block';
+            status.className = `result-box ${kind}`;
+            status.innerHTML = '';
+            status.appendChild(document.createTextNode(message));
+            if (kind === 'error') {
+                const retry = document.createElement('button');
+                retry.className = 'btn-secondary';
+                retry.type = 'button';
+                retry.style.marginLeft = '10px';
+                retry.textContent = 'Retry';
+                retry.addEventListener('click', () => loadInstagramStories());
+                status.appendChild(retry);
+            }
+        }
+
+        // A refresh that fails must never take away Story data the client
+        // was already looking at. The list is only ever replaced after a
+        // successful response; a failed one leaves igStorySources (and
+        // everything rendered from it) exactly as it was, and reports the
+        // failure in its own banner instead of overwriting the list.
         async function loadInstagramStories() {
             const list = document.getElementById('igStoryList');
             if (!list || !adminAuthenticated) return;
-            list.innerHTML = '<p style="color:var(--text-muted);font-size:0.84rem;">Loading captured Stories…</p>';
+            const isFirstLoad = !igStoriesEverLoaded;
+            const refreshButton = document.getElementById('igStoryRefreshButton');
+
+            if (isFirstLoad) {
+                list.innerHTML = '<p style="color:var(--text-muted);font-size:0.84rem;">Loading captured Stories…</p>';
+            } else {
+                setInstagramStoryRefreshStatus('info', 'Refreshing Stories…');
+            }
+            if (refreshButton) { refreshButton.disabled = true; refreshButton.textContent = '🔄 Refreshing…'; }
+
             try {
                 const [sourcesResponse, activeResponse, archivedResponse] = await Promise.all([
                     fetch('/admin/instagram-story-sources', { headers: getAuthHeaders() }),
@@ -8120,6 +8190,7 @@ THIS WEEK'S BENGAL SPECIALS
                 if (!sourcesResponse.ok) throw new Error(sourcesData.detail || 'Could not load captured Stories.');
                 if (!activeResponse.ok) throw new Error(activeData.detail || 'Could not load Story mappings.');
                 if (!archivedResponse.ok) throw new Error(archivedData.detail || 'Could not load archived Story mappings.');
+
                 const routes = [...(activeData.routes || []), ...(archivedData.routes || [])].filter(route => route.source_type === 'story');
                 const routesById = new Map(routes.filter(route => route.routing_id).map(route => [String(route.routing_id), route]));
                 igStorySources = (sourcesData.story_sources || []).map(source => ({ ...(routesById.get(String(source.routing_id)) || {}), ...source }));
@@ -8129,8 +8200,19 @@ THIS WEEK'S BENGAL SPECIALS
                 if (!igTopics.length && !igMenus.length) await loadTopicsAndMenus();
                 populateInstagramStoryPickers();
                 renderInstagramStories();
+                igStoriesEverLoaded = true;
+                setInstagramStoryRefreshStatus(null, null);
             } catch (err) {
-                list.innerHTML = `<p style="color:var(--danger);font-size:0.84rem;">${escapeHtml(err.message || err)}</p>`;
+                if (isFirstLoad) {
+                    list.innerHTML = `<p style="color:var(--danger);font-size:0.84rem;">${escapeHtml(err.message || err)}</p>`;
+                } else {
+                    // Previously loaded Story cards, search text, and the
+                    // active status filter are all untouched -- only the
+                    // banner communicates that this particular refresh failed.
+                    setInstagramStoryRefreshStatus('error', 'Could not refresh Stories. Showing last loaded data.');
+                }
+            } finally {
+                if (refreshButton) { refreshButton.disabled = false; refreshButton.textContent = '🔄 Refresh Stories'; }
             }
         }
 

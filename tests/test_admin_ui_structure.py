@@ -212,10 +212,61 @@ def test_instagram_stories_map_flow_uses_a_read_only_captured_id(page):
     section = page[page.index('id="tab-instagram-stories"'):page.index('<!-- MENU tab, panel 3 of 4')]
     assert 'id="igStoryMapForm"' in section
     assert 'id="igStoryMediaId"' in section and 'readonly' in section
-    for field in ("igStoryTopicPicker", "igStoryPriorityPicker", "igStoryKnowledgeScope", "igStoryMenuPicker", "igStoryEscalationPolicy", "igStoryActive"):
+    for field in ("igStoryTopicPicker", "igStoryPriorityPicker", "igStoryKnowledgeScope", "igStoryMenuMode", "igStoryMenuPicker", "igStoryEscalationPolicy", "igStoryActive"):
         assert f'id="{field}"' in section
     assert "media_id: mediaId" in page
     assert 'onclick="editInstagramRoute(' not in section
+
+
+def test_instagram_story_menu_mode_offers_inherit_none_and_selected(page):
+    """
+    Defect 1 (P1): the picker's empty option used to be labelled "Inherit
+    Topic Menu" but always submitted menu_mode='NONE' -- INHERIT was
+    unreachable. A dedicated menu-mode select now carries all three states
+    explicitly; tests/test_instagram_story_runtime.py proves the actual
+    submit/edit-reload behavior by executing the real JS.
+    """
+    section = page[page.index('id="tab-instagram-stories"'):page.index('<!-- MENU tab, panel 3 of 4')]
+    mode_select = section[section.index('id="igStoryMenuMode"'):section.index('</select>', section.index('id="igStoryMenuMode"'))]
+    assert '<option value="INHERIT">Inherit Topic Menu</option>' in mode_select
+    assert '<option value="NONE">No Menu</option>' in mode_select
+    assert '<option value="SELECTED">Select Menu</option>' in mode_select
+    assert 'id="igStoryMenuPickerWrap"' in section
+
+    script = page[page.index('function onInstagramStoryMenuModeChange'):page.index('function renderInstagramStoryPriorityProducts')]
+    assert "igStoryMenuMode" in script
+
+    save = page[page.index('async function saveInstagramStoryMapping'):page.index('async function setInstagramStoryActive')]
+    assert "menu_mode: menuMode" in save
+    assert "menuMode === 'SELECTED' ? menuId : null" in save
+    assert "menuMode === 'SELECTED' && !menuId" in save, "SELECTED without a chosen menu must be blocked before submit"
+
+    edit = page[page.index('function openInstagramStoryMapping'):page.index('function cancelInstagramStoryMapping')]
+    assert "source.menu_mode" in edit
+    assert "onInstagramStoryMenuModeChange()" in edit
+
+
+def test_instagram_story_refresh_does_not_clear_the_list_before_it_settles(page):
+    """
+    Defect 2 (P2): loadInstagramStories() used to overwrite the visible
+    Story list with "Loading..." immediately, so a failed refresh replaced
+    good data with an error. tests/test_instagram_story_runtime.py executes
+    the real function against mocked fetch failures; this only locks the
+    structural shape (a separate status element, list only replaced on
+    success) that makes that behavior possible.
+    """
+    assert 'id="igStoryRefreshStatus"' in page
+    load = page[page.index('async function loadInstagramStories'):page.index('function renderInstagramStorySources')]
+    assert "igStoriesEverLoaded" in load
+    assert "setInstagramStoryRefreshStatus" in load
+    assert "igStoryList" in load
+    # The list must only be blanked to "Loading..." on the very first load
+    # (gated by isFirstLoad), never unconditionally at the top of every
+    # call the way the original defect did it.
+    assert load.index("isFirstLoad") < load.index("Loading captured Stories")
+    before_gate = load[:load.index("if (isFirstLoad)")]
+    assert "list.innerHTML" not in before_gate
+    assert "Could not refresh Stories. Showing last loaded data." in load
 
 
 def test_instagram_stories_exposes_status_filters_and_safe_actions(page):
