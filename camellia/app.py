@@ -565,28 +565,41 @@ def _process_instagram_event(
                 # the share rather than to the vaguer "it was already here".
                 source_match_method = facts.get("source_match_method") or "session"
         facts["source_context_used"] = False
-        if source_media_present and not source_route and not str(message_text or "").strip():
-            # An unconfigured/unsupported share remains a genuinely unreadable
-            # attachment. This branch is never reached for an identified route.
-            _reply_to_unreadable_attachment(sender_id)
-            return
-        customer_message = str(message_text or "").strip() or "[shared media]"
-        response_input = str(message_text or "").strip() or "Tell me more"
+        source_trace_type = (source_route or {}).get("source_type") or (
+            "story" if entry.source == "story_reply" else shared_source_type
+        )
+        source_trace_media_id = trace["media_id"] or shared_post_id
+        source_trace_match_method = source_match_method or (
+            "story_media_id_unmapped" if entry.source == "story_reply" else (
+                "shared_media_unmapped" if source_media_present else None
+            )
+        )
+        source_trace_shortcode = (source_route or {}).get("shortcode") or (
+            (shared_reel or {}).get("shortcode") if shared_source_type == "reel" else None
+        )
         trace.update({
             "source_routing_id": (source_route or {}).get("routing_id"),
-            "source_match_method": source_match_method or (
-                "story_media_id_unmapped" if entry.source == "story_reply" else (
-                    "shared_media_unmapped" if source_media_present else None
-                )
-            ),
-            "source_type": (source_route or {}).get("source_type") or (
-                "story" if entry.source == "story_reply" else shared_source_type
-            ),
-            "shortcode": (source_route or {}).get("shortcode"),
+            "source_match_method": source_trace_match_method,
+            "source_type": source_trace_type,
+            "shortcode": source_trace_shortcode,
+            "media_id": source_trace_media_id,
             "routing_topic": (source_route or {}).get("routing_topic"),
             "source_media_present": source_media_present,
             "customer_text_accompanied_media": customer_text_accompanied_media,
         })
+        if source_media_present and not source_route and not str(message_text or "").strip():
+            # An unconfigured/unsupported share remains a genuinely unreadable
+            # attachment. This branch is never reached for an identified route.
+            _reply_to_unreadable_attachment(
+                sender_id,
+                source_type=trace["source_type"], media_id=trace["media_id"],
+                shortcode=trace["shortcode"],
+                source_match_method=trace["source_match_method"],
+                source_media_present=True,
+            )
+            return
+        customer_message = str(message_text or "").strip() or "[shared media]"
+        response_input = str(message_text or "").strip() or "Tell me more"
         log.info(
             "Instagram inbound from %s: source=%s ad_id=%s ad_title=%r payload=%r",
             sender_id, entry.source, trace["ad_id"], trace["ad_title"], entry.raw_payload,
@@ -724,7 +737,37 @@ _UNREADABLE_ATTACHMENT_REPLY = (
 )
 
 
-def _reply_to_unreadable_attachment(sender_id: str) -> None:
+def _log_unreadable_attachment_audit(
+    sender_id: str,
+    *,
+    source_type: Optional[str] = None,
+    media_id: Optional[str] = None,
+    shortcode: Optional[str] = None,
+    source_match_method: Optional[str] = None,
+    source_media_present: bool = False,
+) -> int:
+    """Persist the observed source even when the customer notice is deduped."""
+    return db.log_conversation(
+        sender_id, "instagram", "[attachment]", _UNREADABLE_ATTACHMENT_REPLY,
+        True, "unreadable_attachment", message_source="attachment",
+        source_type=source_type, media_id=media_id, shortcode=shortcode,
+        source_match_method=source_match_method,
+        source_context_available=False, source_context_used=False,
+        source_referential_intent=None,
+        source_media_present=bool(source_media_present),
+        customer_text_accompanied_media=False,
+    )
+
+
+def _reply_to_unreadable_attachment(
+    sender_id: str,
+    *,
+    source_type: Optional[str] = None,
+    media_id: Optional[str] = None,
+    shortcode: Optional[str] = None,
+    source_match_method: Optional[str] = None,
+    source_media_present: bool = False,
+) -> None:
     """
     Answers a photo, sticker or voice note we cannot read.
 
@@ -737,13 +780,20 @@ def _reply_to_unreadable_attachment(sender_id: str) -> None:
         facts = session_memory.get_facts(sender_id, "instagram")
         if facts.get("attachment_notice_sent"):
             log.info("Attachment from %s; the type-instead notice was already sent.", sender_id)
+            if source_media_present:
+                _log_unreadable_attachment_audit(
+                    sender_id, source_type=source_type, media_id=media_id,
+                    shortcode=shortcode, source_match_method=source_match_method,
+                    source_media_present=True,
+                )
             return
         facts["attachment_notice_sent"] = True
 
         session_memory.add_turn(sender_id, "instagram", "[attachment]", _UNREADABLE_ATTACHMENT_REPLY)
-        conversation_id = db.log_conversation(
-            sender_id, "instagram", "[attachment]", _UNREADABLE_ATTACHMENT_REPLY,
-            True, "unreadable_attachment", message_source="attachment",
+        conversation_id = _log_unreadable_attachment_audit(
+            sender_id, source_type=source_type, media_id=media_id,
+            shortcode=shortcode, source_match_method=source_match_method,
+            source_media_present=source_media_present,
         )
         send_instagram_reply(
             sender_id, _UNREADABLE_ATTACHMENT_REPLY,
@@ -903,7 +953,14 @@ def _handle_shared_attachment(
                 _establish_shared_post_context(sender_id, post_media_id)
                 route = session_memory.get_facts(sender_id, "instagram").get("source_route")
             if not route:
-                _reply_to_unreadable_attachment(sender_id)
+                _reply_to_unreadable_attachment(
+                    sender_id,
+                    source_type="reel" if reel_identity else "post",
+                    media_id=post_media_id,
+                    shortcode=(reel_identity or {}).get("shortcode"),
+                    source_match_method="shared_media_unmapped",
+                    source_media_present=True,
+                )
                 return
             _process_instagram_event(
                 sender_id, "", None,
@@ -914,7 +971,14 @@ def _handle_shared_attachment(
             )
         except Exception:
             log.exception("Could not resolve shared media for %s.", sender_id)
-            _reply_to_unreadable_attachment(sender_id)
+            _reply_to_unreadable_attachment(
+                sender_id,
+                source_type="reel" if reel_identity else "post",
+                media_id=post_media_id,
+                shortcode=(reel_identity or {}).get("shortcode"),
+                source_match_method="shared_media_resolution_error",
+                source_media_present=True,
+            )
         return
     _reply_to_unreadable_attachment(sender_id)
 
@@ -927,6 +991,19 @@ def _story_reply_payload(messaging_event: dict) -> Optional[Dict[str, Any]]:
     return story if isinstance(story, dict) else None
 
 
+def _sanitize_story_temporary_url(value: Any) -> Optional[str]:
+    """Keep only a non-sensitive Story URL shape for diagnostics/admin."""
+    try:
+        parsed = urlsplit(str(value or "").strip())
+        if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+            return None
+        # Rebuild from scheme/hostname/path only: this drops userinfo, port,
+        # query credentials, expiry/signature parameters and fragments.
+        return f"{parsed.scheme.lower()}://{parsed.hostname}{parsed.path}"[:2000]
+    except (TypeError, ValueError):
+        return None
+
+
 def _record_story_reply(messaging_event: dict, sender_id: Optional[str], media_id: str) -> None:
     """Capture exact Story evidence; failures never affect the reply path."""
     try:
@@ -936,6 +1013,7 @@ def _record_story_reply(messaging_event: dict, sender_id: Optional[str], media_i
              if isinstance(story.get(key), str) and story.get(key).startswith(("http://", "https://"))),
             None,
         )
+        supplied_url = _sanitize_story_temporary_url(supplied_url)
         db.record_instagram_story_source(
             media_id,
             temporary_url=supplied_url,
@@ -7749,10 +7827,13 @@ THIS WEEK'S BENGAL SPECIALS
             if (!box) return;
             if (!sources || !sources.length) { box.innerHTML = '<p style="color:var(--text-muted);font-size:0.84rem;">No Story replies captured yet.</p>'; return; }
             box.innerHTML = sources.map(source => {
-                const action = source.routing_id ? `<button class="btn-secondary" type="button" onclick="editInstagramRoute(${source.routing_id})">Edit mapping</button>` : `<button class="btn-secondary" type="button" onclick="useCapturedStory(${JSON.stringify(source.story_media_id)})">Map Story</button>`;
+                const action = source.routing_id ? `<button class="btn-secondary" type="button" onclick="editInstagramRoute(${source.routing_id})">Edit mapping</button>` : `<button class="btn-secondary ig-map-story" type="button" data-story-media-id="${escapeHtml(source.story_media_id || '')}">Map Story</button>`;
                 const status = source.mapping_status || source.status || 'UNMAPPED';
                 return `<article class="ig-media-card"><div class="ig-media-main"><div class="ig-media-title"><b class="ig-media-topic">${escapeHtml(source.story_media_id)}</b><span class="ig-media-status ${status === 'UNMAPPED' || status === 'DISABLED' ? 'disabled' : ''}">${escapeHtml(status)}</span></div><div class="ig-media-facts"><span><b>First seen:</b> ${escapeHtml(source.first_seen || '—')}</span><span><b>Last seen:</b> ${escapeHtml(source.last_seen || '—')}</span><span><b>Story status:</b> ${escapeHtml(source.story_status || 'Unknown')}</span></div></div><div class="ig-media-actions">${action}</div></article>`;
             }).join('');
+            box.querySelectorAll('.ig-map-story').forEach(button => {
+                button.addEventListener('click', () => useCapturedStory(button.dataset.storyMediaId || ''));
+            });
         }
         function useCapturedStory(mediaId) {
             document.getElementById('igSourceType').value = 'story';

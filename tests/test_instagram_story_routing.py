@@ -333,6 +333,118 @@ def test_standalone_tell_me_more_and_unsupported_attachment_keep_safe_fallbacks(
     assert response[2] == "clarify_request"
 
     fallback = []
-    with patch.object(app_module, "_reply_to_unreadable_attachment", lambda sender: fallback.append(sender)):
+    with patch.object(app_module, "_reply_to_unreadable_attachment", lambda sender, **_kwargs: fallback.append(sender)):
         app_module._handle_shared_attachment("unsupported-attachment", None, None)
     assert fallback == ["unsupported-attachment"]
+
+
+def test_story_temporary_url_is_sanitized_and_not_exposed_by_admin(story_db):
+    event = {
+        "id": "event-story-secret",
+        "timestamp": 123,
+        "message": {
+            "mid": "message-story-secret",
+            "reply_to": {"story": {
+                "id": "story-secret",
+                "url": "https://cdn.example/story.jpg?token=SECRET&access_token=ABC&sig=XYZ&expires=123&arbitrary=value#fragment",
+            }},
+        },
+    }
+    app_module._record_story_reply(event, "story-customer", "story-secret")
+    saved = story_db.get_instagram_story_source("story-secret")
+    assert saved["temporary_url"] == "https://cdn.example/story.jpg"
+    assert all(secret not in saved["temporary_url"] for secret in ("SECRET", "ABC", "XYZ", "123", "value"))
+
+    story_db.save_instagram_source_route(_story_route("story-secret"))
+    route, method = route_for_inbound(
+        ad_id=None, media_id="story-secret", source_type="story_reply",
+    )
+    assert route["routing_topic"] == "Jolbhora"
+    assert method == "story_media_id"
+    with patch.object(app_module, "require_admin", return_value=None):
+        admin_payload = app_module.list_instagram_story_sources()
+    assert "SECRET" not in str(admin_payload)
+    assert "access_token" not in str(admin_payload)
+    assert "fragment" not in str(admin_payload)
+
+
+def test_story_id_rendering_uses_data_not_inline_executable_id(monkeypatch, story_db):
+    hostile_ids = ['"', "'", "<", ">", "&", '123" onclick="alert(1)']
+    for index, media_id in enumerate(hostile_ids):
+        story_db.record_instagram_story_source(media_id, seen_at=f"2026-01-01T00:00:0{index}")
+
+    with patch.object(app_module, "require_admin", return_value=None):
+        admin_payload = app_module.list_instagram_story_sources()
+    assert {item["story_media_id"] for item in admin_payload["story_sources"]} >= set(hostile_ids)
+
+    html = app_module.get_admin_dashboard().body.decode()
+    assert 'useCapturedStory(${JSON.stringify(source.story_media_id)})' not in html
+    assert 'data-story-media-id="${escapeHtml(source.story_media_id || \'\')}"' in html
+    assert "button.addEventListener('click'" in html
+
+
+def test_mapped_shared_post_audit_retains_exact_source_media_id(story_db):
+    route = story_db.save_instagram_source_route(
+        _mapped_media_route("post", media_id="post-audit-id")
+    )
+    uid = "post-audit-" + uuid.uuid4().hex[:8]
+    with patch.object(app_module, "send_instagram_reply"):
+        app_module._process_instagram_event(
+            uid, "Tell me more", None, EntryPoint(source="shared_media"),
+            None, "post-audit-id", "post",
+        )
+    with story_db.get_connection() as conn:
+        logged = conn.execute(
+            "SELECT * FROM conversations WHERE user_id=? ORDER BY id DESC LIMIT 1", (uid,)
+        ).fetchone()
+    assert logged["source_type"] == "post"
+    assert logged["source_routing_id"] == route["routing_id"]
+    assert logged["source_match_method"] == "shared_post_media_id"
+    assert logged["media_id"] == "post-audit-id"
+
+
+@pytest.mark.parametrize("source_type", ["reel", "post", "story"])
+def test_unknown_media_without_text_logs_source_evidence_before_fallback(story_db, source_type):
+    identifiers = {
+        "reel": {"shortcode": "unknown-audit-reel"},
+        "post": {"media_id": "unknown-audit-post"},
+        "story": {"media_id": "unknown-audit-story"},
+    }[source_type]
+    uid = f"unknown-audit-{source_type}-" + uuid.uuid4().hex[:8]
+    sent = []
+
+    def observe_send(*args, **kwargs):
+        with story_db.get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM conversations WHERE user_id=? ORDER BY id DESC LIMIT 1", (uid,)
+            ).fetchone()
+        sent.append((args, row))
+
+    with patch.object(app_module, "send_instagram_reply", side_effect=observe_send):
+        if source_type == "reel":
+            app_module._handle_shared_attachment(uid, identifiers, None)
+        elif source_type == "post":
+            app_module._handle_shared_attachment(uid, None, identifiers["media_id"])
+        else:
+            app_module._process_instagram_event(
+                uid, "", None,
+                EntryPoint(source="story_reply", media_id=identifiers["media_id"]),
+            )
+
+    assert len(sent) == 1
+    row = sent[0][1]
+    assert row is not None
+    assert row["source_type"] == source_type
+    assert row["source_routing_id"] is None
+    assert row["source_context_available"] == 0
+    assert row["source_context_used"] == 0
+    assert row["source_media_present"] == 1
+    assert row["customer_text_accompanied_media"] == 0
+    if source_type == "reel":
+        assert row["shortcode"] == identifiers["shortcode"]
+        assert row["source_match_method"] == "shared_media_unmapped"
+    else:
+        assert row["media_id"] == identifiers["media_id"]
+        assert row["source_match_method"] == (
+            "story_media_id_unmapped" if source_type == "story" else "shared_media_unmapped"
+        )

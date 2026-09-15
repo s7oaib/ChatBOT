@@ -233,7 +233,7 @@ def test_unconfigured_reel_leaves_the_session_untouched(routed_db, monkeypatch):
 
 def test_context_failure_never_breaks_the_attachment_reply(monkeypatch):
     replied = []
-    monkeypatch.setattr(app_module, "_reply_to_unreadable_attachment", lambda uid: replied.append(uid))
+    monkeypatch.setattr(app_module, "_reply_to_unreadable_attachment", lambda uid, **_kwargs: replied.append(uid))
     monkeypatch.setattr(
         app_module, "route_for_inbound",
         lambda **kwargs: (_ for _ in ()).throw(RuntimeError("database down")),
