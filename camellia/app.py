@@ -7948,9 +7948,16 @@ THIS WEEK'S BENGAL SPECIALS
         let igStoryKnowledgeScopes = [];
         let igStoryRefreshTimer = null;
         let igStoryRefreshInFlight = false;
+        let igStoryRestoreInFlight = new Set();
 
         function storyStatusClass(status) {
             return status === 'UNMAPPED' || status === 'DISABLED' || status === 'ARCHIVED' ? 'disabled' : '';
+        }
+
+        // deleted_at is retained as historical audit evidence after Restore;
+        // only admin_deleted represents the current local tombstone state.
+        function storyIsAdminDeleted(source) {
+            return Number(source?.admin_deleted || 0) === 1;
         }
 
         function storyPreviewMetadata(value) {
@@ -7965,7 +7972,7 @@ THIS WEEK'S BENGAL SPECIALS
         }
 
         function storyMatches(source) {
-            const deleted = Boolean(source.admin_deleted || source.deleted_at);
+            const deleted = storyIsAdminDeleted(source);
             if (igStoryFilter !== 'DELETED' && deleted) return false;
             const status = deleted
                 ? 'DELETED'
@@ -8156,14 +8163,28 @@ THIS WEEK'S BENGAL SPECIALS
             } catch (err) { showInstagramStoryResult('error', err.message || String(err)); }
         }
 
-        async function restoreInstagramStorySource(mediaId) {
+        async function restoreInstagramStorySource(mediaId, button = null) {
+            const normalizedMediaId = String(mediaId || '');
+            if (!normalizedMediaId || igStoryRestoreInFlight.has(normalizedMediaId)) return;
+            igStoryRestoreInFlight.add(normalizedMediaId);
+            if (button) {
+                button.disabled = true;
+                button.textContent = 'Restoring…';
+            }
             try {
-                const response = await fetch(`/admin/instagram-story-sources/${encodeURIComponent(mediaId)}/restore`, { method: 'POST', headers: getAuthHeaders() });
+                const response = await fetch(`/admin/instagram-story-sources/${encodeURIComponent(normalizedMediaId)}/restore`, { method: 'POST', headers: getAuthHeaders() });
                 const data = await response.json().catch(() => ({}));
                 if (!response.ok) throw new Error(data.detail || 'Could not restore Story in Camellia Admin.');
                 showInstagramStoryResult('success', 'Story restored in Camellia Admin. Its archived route remains inactive until explicitly restored and enabled.');
                 await loadInstagramStories(true);
             } catch (err) { showInstagramStoryResult('error', err.message || String(err)); }
+            finally {
+                igStoryRestoreInFlight.delete(normalizedMediaId);
+                if (button) {
+                    button.disabled = false;
+                    button.textContent = 'Restore';
+                }
+            }
         }
 
         function renderInstagramStories() {
@@ -8177,7 +8198,7 @@ THIS WEEK'S BENGAL SPECIALS
             const sources = [...igStorySources].filter(storyMatches).sort((left, right) => storyTimestamp(right) - storyTimestamp(left));
             if (!sources.length) { list.innerHTML = '<p style="color:var(--text-muted);font-size:0.84rem;">No captured Stories match this filter.</p>'; return; }
             list.innerHTML = sources.map(source => {
-                const status = source.admin_deleted || source.deleted_at
+                const status = storyIsAdminDeleted(source)
                     ? 'DELETED'
                     : String(source.mapping_status || source.status || 'UNMAPPED').toUpperCase();
                 const routeId = source.routing_id ? Number(source.routing_id) : null;
@@ -8200,7 +8221,7 @@ THIS WEEK'S BENGAL SPECIALS
                 else if (action === 'archive') archiveInstagramStory(routingId);
                 else if (action === 'restore') restoreInstagramStory(routingId);
                 else if (action === 'delete') deleteInstagramStory(button.dataset.storyMediaId || '');
-                else if (action === 'restore-source') restoreInstagramStorySource(button.dataset.storyMediaId || '');
+                else if (action === 'restore-source') restoreInstagramStorySource(button.dataset.storyMediaId || '', button);
             }));
         }
 

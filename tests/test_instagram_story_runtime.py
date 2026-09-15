@@ -17,6 +17,10 @@ Node.js), not a reimplementation of it, so a regression in the real script
 fails here the same way it would in a browser. DOM/fetch are stubbed with a
 generic proxy-backed fake element and a URL+method-matched fetch mock; no
 other page behavior is exercised.
+
+The Restore regression cases below also protect the distinction between the
+current admin tombstone (`admin_deleted`) and retained historical audit
+metadata (`deleted_at`).
 """
 import json
 import re
@@ -505,6 +509,82 @@ class TestStoryDeleteActions:
         assert result["operationalHideDeleted"] is True
         assert result["operationalShowExpected"] == [True, True, True, True]
         assert result["historyOnlyDeleted"] is True
+
+    def test_restored_story_with_audit_timestamp_is_not_deleted(self):
+        result = _run_node(_seed_common_pickers() + textwrap.dedent("""
+            igStorySources = [{
+                story_media_id: 'restored', admin_deleted: 0, deleted_at: '2026-01-02',
+                restored_at: '2026-01-03', mapping_status: 'UNMAPPED', last_seen: '2026-01-04',
+            }];
+            const operational = ['all', 'UNMAPPED', 'MAPPED', 'DISABLED'].map(filter => {
+                igStoryFilter = filter;
+                renderInstagramStories();
+                return document.getElementById('igStoryList').innerHTML;
+            });
+            igStoryFilter = 'DELETED';
+            renderInstagramStories();
+            console.log('RESULT::' + JSON.stringify({
+                operationalShowsRestored: operational[0].includes('restored') && operational[1].includes('restored'),
+                deletedFilterHidesRestored: !document.getElementById('igStoryList').innerHTML.includes('restored'),
+                statusNotDeleted: !operational[0].includes('DELETED'),
+            }));
+        """))
+        assert result["operationalShowsRestored"] is True
+        assert result["deletedFilterHidesRestored"] is True
+        assert result["statusNotDeleted"] is True
+
+    def test_restore_first_click_preserves_audit_and_removes_restore_action(self):
+        result = _run_node(_seed_common_pickers() + textwrap.dedent("""
+            (async () => {
+                adminAuthenticated = true;
+                igStoryFilter = 'DELETED';
+                igStorySources = [{ story_media_id: 'story-restore', admin_deleted: 1, deleted_at: '2026-01-02', mapping_status: 'DELETED' }];
+                renderInstagramStories();
+                const button = document.createElement('button');
+                button.disabled = false;
+                const d = deferred();
+                queueFetch('/admin/instagram-story-sources/story-restore/restore', 'POST', () => d.promise);
+                queueFetch('/admin/instagram-story-sources?include_deleted=true', 'GET', () => okResponse({ story_sources: [{
+                    story_media_id: 'story-restore', admin_deleted: 0, deleted_at: '2026-01-02',
+                    restored_at: '2026-01-03', mapping_status: 'UNMAPPED', last_seen: '2026-01-04',
+                }] }));
+                queueFetch('/admin/instagram-routes?include_archived=true', 'GET', () => okResponse({ routes: [{
+                    routing_id: 7, source_type: 'story', active: false, archived_at: '2026-01-02',
+                }] }));
+                queueFetch('/admin/instagram-routes', 'GET', () => okResponse({ routes: [] }));
+
+                const first = restoreInstagramStorySource('story-restore', button);
+                const second = restoreInstagramStorySource('story-restore', button);
+                await new Promise(r => setTimeout(r, 10));
+                const during = { fetchCount: fetchLog.length, disabled: button.disabled, label: button.textContent };
+                d.resolve({ ok: true, status: 200, json: async () => ({ restored: true }) });
+                await first;
+                await second;
+                const after = document.getElementById('igStoryList').innerHTML;
+                console.log('RESULT::' + JSON.stringify({
+                    during,
+                    restoreRequests: fetchLog.filter(item => item.method === 'POST').length,
+                    fetchCount: fetchLog.length,
+                    buttonReenabled: button.disabled === false,
+                    storyGoneFromDeleted: !after.includes('story-restore'),
+                    restoreButtonGone: !after.includes('restore-source'),
+                    auditPreserved: igStorySources[0].deleted_at === '2026-01-02',
+                    restoredAtPreserved: igStorySources[0].restored_at === '2026-01-03',
+                    sourceCurrentState: Number(igStorySources[0].admin_deleted) === 0,
+                }));
+            })();
+        """))
+        assert result["during"]["fetchCount"] == 1
+        assert result["during"]["disabled"] is True
+        assert result["during"]["label"] == "Restoring…"
+        assert result["restoreRequests"] == 1
+        assert result["fetchCount"] == 4
+        assert result["buttonReenabled"] is True
+        assert result["storyGoneFromDeleted"] is True
+        assert result["restoreButtonGone"] is True
+        assert result["auditPreserved"] is True
+        assert result["restoredAtPreserved"] is True
+        assert result["sourceCurrentState"] is True
 
     def test_delete_removes_visible_card_without_reload_and_keeps_success_notice(self):
         result = _run_node(_seed_common_pickers() + textwrap.dedent("""
