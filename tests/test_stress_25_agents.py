@@ -286,8 +286,9 @@ class Test25AgentStressScenarios(unittest.TestCase):
         resp = self.responder.respond("Can I pay via UPI QR code or COD?", user_id=user_id, channel=channel)
         self.assertTrue(resp.was_matched)
         self.assertEqual(resp.template_id, "GUARD_payment_method")
-        self.assertIn("UPI / bank transfer only", resp.text)
-        self.assertIn("No COD", resp.text)
+        self.assertIn("UPI: 9625083171", resp.text)
+        self.assertIn("Yummraj Culinary Expeditions Pvt Ltd", resp.text)
+        self.assertIn("Razorpay: https://razorpay.me/@camelliaartisanal", resp.text)
 
     def test_agent_18_shelf_life_and_storage(self):
         """Agent 18: Inquiring how long Sondesh lasts and storage guidelines (Confirmed: 1 week refrigerated)."""

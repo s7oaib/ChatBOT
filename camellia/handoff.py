@@ -262,8 +262,14 @@ def customer_facing_message(
     return f"{body}\n\nPlease quote reference {handoff_ref} when you message us."
 
 
-def customer_facing_notice(*, order_receipt: bool = False) -> str:
+def customer_facing_notice(*, order_receipt: bool = False, finalized_order: bool = False) -> str:
     """First Instagram message: the CTA copy, with no URL embedded in it."""
+    if finalized_order:
+        return (
+            "Our Manager of Kitchens, Mr. Guru Dayal Singh, will help you finalise "
+            "your order at +91 87965 51990. Please continue on WhatsApp using the "
+            "link below."
+        )
     if order_receipt:
         return "Continue on WhatsApp to send this order draft to our team."
     # Keep the customer promise deterministic even if an older deployment

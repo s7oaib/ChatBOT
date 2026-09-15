@@ -2101,15 +2101,16 @@ class TestCamelliaBot(unittest.TestCase):
         self.assertIn("mutton is halal", resp3)
         self.assertIn("mustard oil", resp3)
 
-        # Scenario 4: Payment methods and COD clarification (Confirmed: UPI/bank transfer only, No COD)
+        # Scenario 4: Payment methods and COD clarification (current approved facts)
         uid4 = "sim_user_payment_4"
         session_memory.clear_session(uid4, "whatsapp")
         msg4 = "What payment methods do you accept, do you take COD?"
         resp4, matched4, tmpl4, imgs4 = responder.match_and_respond(msg4, user_id=uid4, channel="whatsapp")
         self.assertTrue(matched4)
         self.assertEqual(tmpl4, "GUARD_payment_method")
-        self.assertIn("UPI / bank transfer only", resp4)
-        self.assertIn("No COD", resp4)
+        self.assertIn("UPI: 9625083171", resp4)
+        self.assertIn("Yummraj Culinary Expeditions Pvt Ltd", resp4)
+        self.assertIn("Razorpay: https://razorpay.me/@camelliaartisanal", resp4)
 
         # Scenario 5: Transaction failure escalation
         uid5 = "sim_user_failed_tx_5"
@@ -2175,12 +2176,11 @@ class TestCamelliaBot(unittest.TestCase):
         self.assertTrue(matched1)
         self.assertEqual(tmpl1, "subscription_details")
         self.assertIn("Gurgaon only", resp1)
-        self.assertIn("Sushant Lok Gurgaon kitchen", resp1)
-        self.assertIn("₹1,500", resp1)
-        self.assertIn("₹1,750", resp1)
-        self.assertIn("₹2,000", resp1)
-        self.assertIn("luchi or polao", resp1)
-        self.assertIn("gift you the 11th", resp1)
+        self.assertIn("Everyday Meal Subscription rate chart", resp1)
+        self.assertNotIn("₹1,750", resp1)
+        self.assertNotIn("₹2,000", resp1)
+        self.assertNotIn("luchi or polao", resp1)
+        self.assertNotIn("gift you the 11th", resp1)
         # Verify state flag set
         facts1 = session_memory.get_facts(uid, "whatsapp")
         self.assertTrue(facts1.get("awaiting_subscription_booking"))

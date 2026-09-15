@@ -55,11 +55,14 @@ class TestTheReplyToWouldYouLikeToBook:
 
     def test_asking_what_an_option_contains_stays_on_the_meal_plans(self):
         user_id = start_a_subscription_conversation()
-        text, _matched, template_id, _images = follow_up(user_id, "what is included in option 2")
+        text, _matched, template_id, images = follow_up(user_id, "what is included in option 2")
 
         assert template_id == "subscription_details"
-        assert "Veg + Chicken" in text
-        assert "Signature collection" not in text
+        assert "Everyday Meal Subscription rate chart" in text
+        assert "/images/Everyday%20Meal%20Subscription%20Rate%20Chart.jpeg" in images
+        assert "₹1,750" not in text
+        assert "luchi" not in text.lower()
+        assert "11th" not in text
 
     def test_how_do_i_pay_keeps_its_own_approved_answer(self):
         """Step 2 only says "Pay" — the payment question has a real answer elsewhere."""

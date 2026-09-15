@@ -255,9 +255,22 @@
         "confirm my order",
         "confirm order",
         "place the order",
-        "here is my address"
+        "here is my address",
+        "i want to order",
+        "want to order",
+        "i'm ready to place the order",
+        "im ready to place the order",
+        "ready to place the order",
+        "let's confirm",
+        "lets confirm",
+        "finalise it",
+        "finalize it",
+        "book this",
+        "i want two boxes",
+        "yes place my order",
+        "place my order"
       ],
-      "response": "Our team can assist you personally on WhatsApp. Please continue your enquiry using the link below.",
+      "response": "Our Manager of Kitchens, Mr. Guru Dayal Singh, will help you finalise your order. Please continue on WhatsApp using the link below or call +91 87965 51990.",
       "escalate": true,
       "source_ref": "client Q&A script > QUESTION",
       "router_hint": "The customer is ready to place an order and needs to know what to share."
@@ -844,7 +857,7 @@
         "credit card",
         "debit card"
       ],
-      "response": "UPI / bank transfer only (shared when order is confirmed — No COD on delivery). If you are picking up your order directly from our Sushant Lok kitchen, cash on pickup is accepted.",
+      "response": "Payment is accepted by UPI, bank transfer, or Razorpay.\n\nUPI: 9625083171\n\nBank transfer:\nAccount name: Yummraj Culinary Expeditions Pvt Ltd\nAccount number: 50200077136337\nIFSC: HDFC0000572\nAccount type: Current account\n\nRazorpay: https://razorpay.me/@camelliaartisanal\n\nPayment is required in full to confirm your order. A GST invoice will be issued after confirmation.",
       "escalate": false,
       "source_ref": "client confirmation (Somdeb Ji) > payment methods & COD"
     },
@@ -1393,7 +1406,7 @@
         "what dishes do you have",
         "whats on the menu this week"
       ],
-      "response": "Hi! Thank you for reaching out to Camellia.artisanal.\n\nWe cook freshly prepared Bengali food in small batches, with three ways to order:\n\n1. À LA CARTE | Across Delhi NCR\nChoose any dish from this week's menu, in any quantity. No minimum order.\n\n2. BENGALI BENTO | Across Delhi NCR\nA compact, complete Bengali meal, available in Vegetarian, Chicken and Mutton options.\n\n3. EVERYDAY MEAL SUBSCRIPTION | Gurgaon only\nFlexible 5 or 10 meal packages starting from ₹1,500 for 5 meals.\n\nAll prices mentioned in the menu include GST. Delivery charges are at actuals, with no other additional charges.\n\nEverything is cooked fresh and quantities are limited, so pre-ordering is recommended.\n\nThe weekly menu, including the BENGALI BENTO options, is attached below. If this is your first Camellia meal and the menu feels unfamiliar, I'll be happy to help you choose.",
+      "response": "Hi! Thank you for reaching out to Camellia.artisanal.\n\nWe cook freshly prepared Bengali food in small batches, with three ways to order:\n\n1. À LA CARTE | Across Delhi NCR\nChoose any dish from this week's menu, in any quantity. No minimum order.\n\n2. BENGALI BENTO | Across Delhi NCR\nA compact, complete Bengali meal, available in Vegetarian, Chicken and Mutton options.\n\n3. EVERYDAY MEAL SUBSCRIPTION | Gurgaon only\nFlexible 5 or 10 meal packages. Please see the attached rate chart for current subscription pricing.\n\nAll prices mentioned in the menu include GST. Delivery charges are at actuals, with no other additional charges.\n\nEverything is cooked fresh and quantities are limited, so pre-ordering is recommended.\n\nThe weekly menu, including the BENGALI BENTO options, is attached below. If this is your first Camellia meal and the menu feels unfamiliar, I'll be happy to help you choose.",
       "escalate": false,
       "source_ref": "client confirmation 2026-09-08 (Somdeb Ji)"
     },
@@ -1478,7 +1491,7 @@
         "what subscriptions",
         "meal subscriptions"
       ],
-      "response": "*SUBSCRIPTION - HOME FOOD AWAY FROM HOME*\n\nHi! Thank you for asking about our Everyday Meal Subscription.\n\nThe Everyday Meal Subscription is available in Gurgaon only.\n\nFreshly cooked, home-style balanced food, using good-quality ingredients, home recipes and no shortcuts.\n\nPrice of 5 MEALS (including GST). Porter delivery charges at actuals, depending on fare from our Sushant Lok Gurgaon kitchen to your location\n\n• Option 1 Vegetarian — ₹1,500 for 5 meals\n(Rice/roti + 2 sabzis + chatni/mishti)\n• Option 2 Veg + Chicken — ₹1,750 (vegetarian on 3 days, chicken on 2 days) for 5 meals\n• Option 3 Chicken — ₹2,000 for 5 meals\n(Rice/roti + 1 sabzi + chicken + chatni/mishti)\n\nOnce during the package, you can opt for luchi or polao\n• No fixed schedule — have your meals over 5 days, 10 days or at your own pace\n• For every 10 meals, we gift you the 11th\n\nSimple, varied everyday food — as close as we can make it to a meal from a home kitchen.\n\nAttached below is our à la carte menu that changes every week. In case you don't want a subscription, you can just order a dish any day from here.\n\nWould you like to book?",
+      "response": "*SUBSCRIPTION - HOME FOOD AWAY FROM HOME*\n\nHi! Thank you for asking about our Everyday Meal Subscription.\n\nThe Everyday Meal Subscription is available in Gurgaon only.\n\nFreshly cooked everyday, home-style balanced food, using branded ingredients and good quality raw ingredients.\n\nTried & tested home recipes, with no cooking shortcuts to ensure the best taste, texture & flavours.\n\nPlease see the attached Everyday Meal Subscription rate chart for the available meal plans.\n\nPorter shipping charges on actuals from Sushant Arcade Gurgaon.\n\nWould you like to book?",
       "escalate": false,
       "source_ref": "client confirmation 2026-09-08 (Somdeb Ji)"
     },
@@ -1509,6 +1522,57 @@
       "response": "NEXT STEPS\n\nThe Everyday Meal Subscription is available in Gurgaon only.\n\n1. Choose Option 1, 2 or 3 from the message above.\n2. Pay for your subscription.\n3. Let us know the dates you'd like your meals.\n4. That's it — we'll deliver on those dates without you having to follow up.\n\nIf you need to change a delivery date, please let us know at least 5 hours in advance.",
       "escalate": false,
       "source_ref": "client confirmation 2026-09-08 (Somdeb Ji)"
+    },
+    {
+      "id": "bengali_home_table_details",
+      "client_confirmed_date": "2026-09-08",
+      "triggers": [
+        "bengali home table",
+        "bengali home tables",
+        "kolkata home table",
+        "home table kolkata",
+        "tell me more about bengali home table",
+        "tell me about bengali home table",
+        "tell me more about this home table",
+        "home table event",
+        "bengali home lunch table"
+      ],
+      "response": "*BENGALI HOME TABLE — KOLKATA*\n\nThank you for your interest in the Camellia.artisanal Bengali Home Table in Kolkata. Please contact our team for the current dates, timing, venue, themes, experience details and booking availability.",
+      "escalate": false,
+      "media_status": "BLOCKED_PENDING_CLIENT_ASSETS",
+      "source_ref": "client Golden Response Matrix > Bengali Home Table introduction"
+    },
+    {
+      "id": "bengali_home_table_pricing",
+      "client_confirmed_date": "2026-09-08",
+      "triggers": [
+        "pricing of bengali home lunch tables kolkata",
+        "bengali home table pricing",
+        "bengali home table price",
+        "kolkata home table pricing",
+        "home table detailed pricing",
+        "home table price per person",
+        "how much is bengali home table"
+      ],
+      "response": "*BENGALI HOME TABLE — KOLKATA*\n\nDetailed pricing:\n\n• Vegetarian — ₹1,500 per person (8 dishes)\n• Non-Vegetarian — ₹2,500 per person (9 dishes)\n\nGST included.",
+      "escalate": false,
+      "media_status": "BLOCKED_PENDING_CLIENT_ASSETS",
+      "source_ref": "client Golden Response Matrix > Bengali Home Table detailed pricing"
+    },
+    {
+      "id": "bengali_home_table_payment",
+      "client_confirmed_date": "2026-09-08",
+      "triggers": [
+        "bengali home table how to pay",
+        "how to pay for bengali home table",
+        "bengali home table payment",
+        "kolkata home table payment",
+        "payment for home table"
+      ],
+      "response": "*BENGALI HOME TABLE — KOLKATA*\n\nFull payment is required to confirm your booking. A GST invoice will be issued after payment confirmation.",
+      "escalate": false,
+      "media_status": "BLOCKED_PENDING_CLIENT_ASSETS",
+      "source_ref": "client Golden Response Matrix > Bengali Home Table payment"
     },
     {
       "id": "alacarte_prebooking_steps",

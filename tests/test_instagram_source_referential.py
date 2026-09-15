@@ -271,7 +271,7 @@ def test_composite_explicit_product_and_topic_precedence(deterministic_responder
         uid, "What is the Kolkata Home Table event?",
     )
     assert matched is True
-    assert template_id == "kolkata_expansion_info"
+    assert template_id == "bengali_home_table_details"
     assert "kolkata" in reply.lower()
 
 
@@ -344,18 +344,17 @@ def test_explicit_home_table_precedes_generic_detail_nlu(deterministic_responder
         uid, "can you tell me more about the Kolkata Home Table event",
     )
     assert matched is True
-    assert template_id == "kolkata_expansion_info"
+    assert template_id == "bengali_home_table_details"
     assert "kolkata" in reply.lower()
     assert facts["source_context_used"] is False
 
 
-def test_retired_home_table_event_is_neutral_even_with_stale_source(deterministic_responder):
+def test_home_table_campaign_remains_available_even_with_stale_source(deterministic_responder):
     uid = "retired_home_table_guard"
     facts = _set_source(uid)
     facts["source_route"]["routing_topic"] = "Bengali Home Table"
     reply, matched, template_id, _images = _reply(uid, "Tell me about Bengali Home Table")
     assert matched is True
-    assert template_id == "retired_home_table_event"
-    assert "no longer current" in reply.lower()
-    assert "4th & 11th October 2026" not in reply
+    assert template_id == "bengali_home_table_details"
+    assert "bengali home table" in reply.lower()
     assert facts["source_context_used"] is False

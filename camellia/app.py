@@ -682,7 +682,9 @@ def _process_instagram_event(
             if template_id == "order_draft_receipt":
                 response_text = response_text.rstrip()
             else:
-                response_text = customer_facing_notice()
+                response_text = customer_facing_notice(
+                    finalized_order=template_id == "order_next_steps"
+                )
             link_message = customer_facing_link_message(handoff["handoff_ref"], order_summary)
             mark_referred(handoff["handoff_ref"])
             if is_order_handoff and order_summary:
