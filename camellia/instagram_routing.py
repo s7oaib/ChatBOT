@@ -15,7 +15,7 @@ what a customer meant.
 import json
 import re
 from typing import Any, Dict, List, Optional
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit
 
 import httpx
 
@@ -28,6 +28,277 @@ _SHORTCODE_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _SOURCE_TYPES = {"post", "reel", "ad", "story"}
 _ESCALATION_POLICIES = {"canonical", "human_if_unsupported", "always_human"}
 _MENU_MODES = {"NONE", "SELECTED", "INHERIT"}
+_STORY_PROBE_MAX_PAGES = 3
+_STORY_PROBE_FIELDS = "id,media_type,media_product_type,timestamp"
+_STORY_ID_RE = re.compile(r"^\d{1,64}$")
+
+
+def _story_probe_message_class(response: httpx.Response) -> str:
+    """Return a safe reason class without returning Meta's message body."""
+    try:
+        error = response.json().get("error") or {}
+    except (ValueError, TypeError, AttributeError):
+        error = {}
+    code = error.get("code")
+    try:
+        code = int(code) if code is not None else None
+    except (TypeError, ValueError):
+        code = None
+    message = str(error.get("message") or "").lower()
+    if response.status_code >= 500:
+        return "PROVIDER_FAILURE"
+    if response.status_code == 401 or code == 190 or "invalid oauth" in message:
+        return "TOKEN_OR_ACCOUNT_ERROR"
+    if code == 100:
+        return "WRONG_ACCOUNT_OR_TOKEN_CONTEXT"
+    if response.status_code in {404, 405} or "unsupported" in message or "does not exist" in message:
+        return "UNSUPPORTED_ENDPOINT"
+    if response.status_code == 403 or code in {10, 200, 294} or "permission" in message or "access denied" in message:
+        return "PERMISSION_OR_ENDPOINT_ERROR"
+    return "OTHER_META_ERROR"
+
+
+def _story_probe_error(response: httpx.Response, *, stage: str) -> Dict[str, Any]:
+    """Build an error payload from only stable, non-sensitive Meta fields."""
+    try:
+        error = response.json().get("error") or {}
+    except (ValueError, TypeError, AttributeError):
+        error = {}
+    result: Dict[str, Any] = {
+        "status": "error",
+        "story_listing_supported": False,
+        "stage": stage,
+        "meta_http_status": response.status_code,
+        "message_class": _story_probe_message_class(response),
+    }
+    for output_key, input_key in (("meta_code", "code"), ("meta_subcode", "error_subcode")):
+        value = error.get(input_key)
+        if isinstance(value, bool) or value is None:
+            continue
+        try:
+            result[output_key] = int(value)
+        except (TypeError, ValueError):
+            # Meta error codes are numeric in the documented response. Do not
+            # echo an unexpected provider value into the diagnostic response.
+            continue
+    error_data = error.get("error_data") if isinstance(error, dict) else None
+    required_permission = error_data.get("required_permission") if isinstance(error_data, dict) else None
+    if required_permission in {
+        "instagram_business_basic",
+        "instagram_business_manage_messages",
+        "instagram_basic",
+    }:
+        result["required_permission"] = required_permission
+    return result
+
+
+def _safe_story_record(media: Any) -> Optional[Dict[str, str]]:
+    """Select only identifier metadata; never return media or signed URLs."""
+    if not isinstance(media, dict):
+        return None
+    media_id = str(media.get("id") or "").strip()
+    if not _STORY_ID_RE.fullmatch(media_id):
+        return None
+    record: Dict[str, str] = {"id": media_id}
+    for key, limit in (("media_type", 32), ("media_product_type", 32), ("timestamp", 80)):
+        value = media.get(key)
+        if isinstance(value, str) and value.strip():
+            record[key] = value.strip()[:limit]
+    return record
+
+
+def _story_probe_next_page(url: str, payload: Dict[str, Any], version: str) -> tuple[Optional[str], Optional[Dict[str, str]], bool]:
+    """Rebuild a Meta paging URL without carrying an access token forward."""
+    next_url = (payload.get("paging") or {}).get("next")
+    if not next_url:
+        return None, None, False
+    try:
+        parsed = urlsplit(str(next_url))
+    except ValueError:
+        return None, None, True
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname != "graph.instagram.com"
+        or not parsed.path.startswith(f"/{version}/")
+    ):
+        return None, None, True
+    params = {
+        key: value
+        for key, value in parse_qsl(parsed.query, keep_blank_values=False)
+        if key.lower() not in {"access_token", "token"}
+    }
+    return f"https://graph.instagram.com{parsed.path}", params, True
+
+
+def _fetch_story_probe_pages(
+    client: httpx.Client,
+    url: str,
+    headers: Dict[str, str],
+    params: Dict[str, Any],
+    *,
+    stage: str,
+    version: str,
+) -> tuple[List[Dict[str, Any]], Optional[Dict[str, Any]], Dict[str, Any]]:
+    """Fetch a bounded number of pages while keeping paging URLs private."""
+    records: List[Dict[str, Any]] = []
+    pages_checked = 0
+    pagination_required = False
+    current_url: Optional[str] = url
+    current_params: Optional[Dict[str, Any]] = params
+    while current_url and pages_checked < _STORY_PROBE_MAX_PAGES:
+        response = client.get(current_url, headers=headers, params=current_params)
+        pages_checked += 1
+        if response.status_code != 200:
+            return records, _story_probe_error(response, stage=stage), {
+                "pagination_required": pagination_required,
+                "pages_checked": pages_checked,
+            }
+        try:
+            payload = response.json()
+        except (ValueError, TypeError):
+            return records, {
+                "status": "error",
+                "story_listing_supported": False,
+                "stage": stage,
+                "message_class": "INVALID_API_RESPONSE",
+            }, {"pagination_required": pagination_required, "pages_checked": pages_checked}
+        if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+            return records, {
+                "status": "error",
+                "story_listing_supported": False,
+                "stage": stage,
+                "message_class": "INVALID_API_RESPONSE",
+            }, {"pagination_required": pagination_required, "pages_checked": pages_checked}
+        records.extend(item for item in payload["data"] if isinstance(item, dict))
+        next_url, next_params, has_next = _story_probe_next_page(current_url, payload, version)
+        pagination_required = pagination_required or has_next
+        if not has_next:
+            current_url = None
+        elif next_url and next_params is not None:
+            current_url, current_params = next_url, next_params
+        else:
+            current_url = None
+    return records, None, {
+        "pagination_required": pagination_required,
+        "pages_checked": pages_checked,
+        "pagination_truncated": bool(current_url),
+    }
+
+
+def probe_instagram_story_capability() -> Dict[str, Any]:
+    """Read-only, sanitized capability probe for the connected IG Login account."""
+    token = (config.INSTAGRAM_ACCESS_TOKEN or "").strip()
+    if not token:
+        return {
+            "status": "not_configured",
+            "story_listing_supported": False,
+            "message_class": "TOKEN_NOT_CONFIGURED",
+        }
+    if not token.startswith("IGAA"):
+        return {
+            "status": "error",
+            "story_listing_supported": False,
+            "message_class": "UNSUPPORTED_TOKEN_MODE",
+        }
+
+    version = config.WHATSAPP_API_VERSION
+    base = f"https://graph.instagram.com/{version}"
+    headers = {"Authorization": f"Bearer {token}"}
+    try:
+        with httpx.Client(timeout=8.0) as client:
+            identity_response = client.get(
+                f"{base}/me",
+                headers=headers,
+                params={"fields": "id"},
+            )
+            if identity_response.status_code != 200:
+                return _story_probe_error(identity_response, stage="account_identity")
+            try:
+                identity = identity_response.json()
+            except (ValueError, TypeError):
+                identity = {}
+            account_id = str(identity.get("id") or "").strip() if isinstance(identity, dict) else ""
+            if not _STORY_ID_RE.fullmatch(account_id):
+                return {
+                    "status": "error",
+                    "story_listing_supported": False,
+                    "stage": "account_identity",
+                    "message_class": "INVALID_API_RESPONSE",
+                }
+
+            media_records, media_error, media_pagination = _fetch_story_probe_pages(
+                client,
+                f"{base}/me/media",
+                headers,
+                {"fields": _STORY_PROBE_FIELDS, "limit": 100},
+                stage="owned_media",
+                version=version,
+            )
+            if media_error:
+                media_error.update({
+                    "owned_media_listing_supported": False,
+                    "pagination": media_pagination,
+                })
+                return media_error
+
+            media_stories = [
+                record for record in media_records
+                if str(record.get("media_product_type") or "").upper() == "STORY"
+                or str(record.get("media_type") or "").upper() == "STORY"
+            ]
+            story_records, story_error, story_pagination = _fetch_story_probe_pages(
+                client,
+                f"{base}/{account_id}/stories",
+                headers,
+                {"fields": _STORY_PROBE_FIELDS, "limit": 100},
+                stage="story_listing",
+                version=version,
+            )
+            if story_error:
+                # A successful owned-media response may itself expose Story
+                # media. Preserve that documented capability if the optional
+                # Story edge is absent, without disguising the edge failure.
+                if media_stories and story_error.get("message_class") == "UNSUPPORTED_ENDPOINT":
+                    return {
+                        "status": "success",
+                        "story_listing_supported": True,
+                        "discovery_method": "instagram_login_owned_media",
+                        "owned_media_listing_supported": True,
+                        "story_edge_supported": False,
+                        "count": len(media_stories),
+                        "stories": [item for media in media_stories if (item := _safe_story_record(media))],
+                        "pagination": media_pagination,
+                        "story_edge_message_class": story_error["message_class"],
+                    }
+                story_error.update({
+                    "owned_media_listing_supported": True,
+                    "story_edge_supported": False,
+                    "active_stories_in_owned_media": bool(media_stories),
+                    "pagination": story_pagination,
+                })
+                return story_error
+
+            safe_stories = [item for media in story_records if (item := _safe_story_record(media))]
+            return {
+                "status": "success",
+                "story_listing_supported": True,
+                "discovery_method": "instagram_login_story_edge",
+                "owned_media_listing_supported": True,
+                "story_edge_supported": True,
+                "count": len(safe_stories),
+                "stories": safe_stories,
+                "pagination": story_pagination,
+                "story_id_format_matches_reply_to": (
+                    all(bool(_STORY_ID_RE.fullmatch(item["id"])) for item in safe_stories)
+                    if safe_stories else None
+                ),
+            }
+    except (httpx.HTTPError, OSError):
+        return {
+            "status": "error",
+            "story_listing_supported": False,
+            "message_class": "PROVIDER_FAILURE",
+        }
 
 
 def _graph_failure_category(response: httpx.Response, *, media_lookup: bool = False) -> str:

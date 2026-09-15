@@ -66,6 +66,7 @@ from camellia.instagram_routing import (
     update_topic,
     validate_route_payload,
     verify_media_by_id,
+    probe_instagram_story_capability,
 )
 from camellia.sheet_sync import sheet_sync
 from camellia.menu_parser import menu_parser
@@ -1253,6 +1254,16 @@ def get_instagram_media_verification(
     """
     require_admin(x_admin_key, x_admin_pin)
     return verify_media_by_id(media_id)
+
+
+@app.get("/admin/instagram-story-capability")
+def get_instagram_story_capability(
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """Read-only Meta capability check; never changes routing or customer state."""
+    require_admin(x_admin_key, x_admin_pin)
+    return probe_instagram_story_capability()
 
 
 def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks) -> dict:
