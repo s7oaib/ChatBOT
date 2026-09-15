@@ -5648,6 +5648,11 @@ def get_admin_dashboard():
         .ig-cover-modal-actions button:disabled { opacity:.55; cursor:not-allowed; }
         .ig-media-details { grid-column:2 / -1; color:var(--text-muted); font-size:0.76rem; line-height:1.55; }
         .ig-media-large { max-width:240px; max-height:240px; border-radius:10px; display:block; margin:8px 0; object-fit:cover; }
+        .ig-story-form-card { margin-top:16px; padding:16px; background:#FCFBF9; border:1px solid var(--border); border-radius:12px; }
+        .ig-story-form-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:10px; margin-top:10px; }
+        .ig-story-readonly { background:#F1EEEA; font-family:ui-monospace, SFMono-Regular, Consolas, monospace; overflow-wrap:anywhere; }
+        .ig-story-preview-meta { color:var(--text-muted); font-size:0.76rem; overflow-wrap:anywhere; }
+        .ig-story-card .ig-media-preview { background:#EDE8E3; }
         @media (max-width: 660px) { .ig-media-card { grid-template-columns:76px minmax(0,1fr); } .ig-media-preview { width:76px; height:76px; } .ig-media-actions { grid-column:1 / -1; justify-content:flex-start; } .ig-media-details { grid-column:1 / -1; } }
         .ad-route-row {
             display: grid; grid-template-columns: 1fr auto auto; align-items: center; gap: 12px;
@@ -5879,6 +5884,7 @@ def get_admin_dashboard():
         <div class="tabs-nav">
             <button class="tab-btn active" onclick="switchTab('tab-image', this)">🍱 Menu</button>
             <button class="tab-btn" onclick="switchTab('tab-menu-manager', this)">📋 Menu Manager</button>
+            <button class="tab-btn" onclick="switchTab('tab-instagram-stories', this)">📖 Instagram Stories</button>
             <button class="tab-btn" onclick="switchTab('tab-ai-resolution', this)">🤖 AI Resolution &amp; Answers <span id="aiResolutionBadge" style="display:none; background: var(--danger); color: #fff; border-radius: 10px; padding: 1px 7px; font-size: 0.72rem; margin-left: 4px;"></span></button>
             <button class="tab-btn" onclick="switchTab('tab-custom-qa', this)">🗂️ Custom Q&amp;A</button>
         </div>
@@ -6020,14 +6026,80 @@ def get_admin_dashboard():
                 <button class="ig-media-filter" type="button" data-media-filter="post" onclick="setInstagramMediaFilter('post')">Posts</button>
                 <button class="ig-media-filter" type="button" data-media-filter="reel" onclick="setInstagramMediaFilter('reel')">Reels</button>
                 <button class="ig-media-filter" type="button" data-media-filter="ad" onclick="setInstagramMediaFilter('ad')">Ads</button>
-                <button class="ig-media-filter" type="button" data-media-filter="story" onclick="setInstagramMediaFilter('story')">Stories</button>
             </div>
             <div id="adRouteList" class="ad-route-list"><p style="color:var(--text-muted);font-size:0.84rem;">Loading saved routes...</p></div>
-            <section id="igStorySources" aria-label="Instagram Stories" style="margin-top:20px;">
-                <h3 style="margin:0 0 6px;">Instagram Stories</h3>
-                <p style="font-size:0.8rem;color:var(--text-muted);">Captured Story IDs remain visible after expiry. Unmapped IDs never supply product context.</p>
-                <div id="igStorySourceList"><p style="color:var(--text-muted);font-size:0.84rem;">Loading captured Stories...</p></div>
-            </section>
+            <p style="margin-top:18px;font-size:0.8rem;color:var(--text-muted);">Captured Story sources and Story-only actions are managed in the dedicated <button class="btn-secondary" type="button" onclick="switchTab('tab-instagram-stories', null)" style="padding:5px 9px;font-size:0.76rem;">Instagram Stories</button> tab.</p>
+        </div>
+
+        <div id="tab-instagram-stories" class="panel-card" data-group="instagram_stories" style="display: none;">
+            <div class="panel-header">
+                <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px; flex-wrap:wrap;">
+                    <div>
+                        <h2>📖 Instagram Stories</h2>
+                        <p>Every Story a customer replies to appears here, newest first. Map a Story ID to a Topic without exposing temporary media URLs.</p>
+                    </div>
+                    <button class="btn-secondary" id="igStoryRefreshButton" type="button">🔄 Refresh Stories</button>
+                </div>
+            </div>
+            <div id="igStoryResult" class="result-box" role="status" aria-live="polite"></div>
+            <div class="ig-media-toolbar" aria-label="Instagram Story filters">
+                <input class="field-control ig-media-search" id="igStorySearch" type="search" placeholder="Search Story ID or Topic" autocomplete="off">
+                <button class="ig-media-filter active ig-story-filter" type="button" data-story-filter="all">All</button>
+                <button class="ig-media-filter ig-story-filter" type="button" data-story-filter="UNMAPPED">Unmapped</button>
+                <button class="ig-media-filter ig-story-filter" type="button" data-story-filter="MAPPED">Mapped</button>
+                <button class="ig-media-filter ig-story-filter" type="button" data-story-filter="DISABLED">Disabled</button>
+                <button class="ig-media-filter ig-story-filter" type="button" data-story-filter="ARCHIVED">Archived</button>
+            </div>
+
+            <div id="igStoryMapForm" class="ig-story-form-card" style="display:none;">
+                <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap;">
+                    <div>
+                        <h3 style="margin:0; color:var(--primary);">Map Instagram Story</h3>
+                        <p style="margin:3px 0 0; font-size:0.8rem; color:var(--text-muted);">The Story media ID is captured from Meta and cannot be edited here.</p>
+                    </div>
+                    <span id="igStoryEditingLabel" class="ig-media-muted"></span>
+                </div>
+                <div class="ig-story-form-grid">
+                    <div style="grid-column:1/-1;">
+                        <label class="field-label" for="igStoryMediaId">Story media ID</label>
+                        <input class="field-control ig-story-readonly" id="igStoryMediaId" readonly aria-readonly="true" autocomplete="off">
+                    </div>
+                    <div>
+                        <label class="field-label" for="igStoryTopicPicker">Topic</label>
+                        <select class="field-control" id="igStoryTopicPicker"><option value="">Select Topic</option></select>
+                    </div>
+                    <div>
+                        <label class="field-label" for="igStoryMenuPicker">Menu</label>
+                        <select class="field-control" id="igStoryMenuPicker"><option value="">Inherit Topic Menu</option></select>
+                    </div>
+                    <div>
+                        <label class="field-label" for="igStoryEscalationPolicy">Escalation policy</label>
+                        <select class="field-control" id="igStoryEscalationPolicy"><option value="human_if_unsupported">Human if unsupported</option><option value="canonical">Normal canonical rules</option><option value="always_human">Always offer human help</option></select>
+                    </div>
+                    <div>
+                        <label class="field-label" for="igStoryKnowledgeScope">Knowledge scope</label>
+                        <select class="field-control" id="igStoryKnowledgeScope" multiple title="Optional canonical knowledge scope" size="3"></select>
+                    </div>
+                    <div style="grid-column:1/-1;">
+                        <label class="field-label" for="igStoryPriorityPicker">Priority products</label>
+                        <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                            <select class="field-control" id="igStoryPriorityPicker" style="flex:1; min-width:220px;"><option value="">Choose an approved product…</option></select>
+                            <button class="btn-secondary" id="igStoryAddPriorityButton" type="button">+ Add Product</button>
+                        </div>
+                        <div id="igStoryPriorityProducts" class="ad-route-list" style="margin-top:8px;"></div>
+                    </div>
+                </div>
+                <label style="display:flex; align-items:center; gap:8px; margin-top:12px; font-size:0.84rem; font-weight:700;">
+                    <input type="checkbox" id="igStoryActive" checked> Active
+                </label>
+                <div class="action-bar">
+                    <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                        <button class="btn-primary" id="igStorySaveButton" type="button">Save Story Mapping</button>
+                        <button class="btn-secondary" id="igStoryCancelButton" type="button">Cancel</button>
+                    </div>
+                </div>
+            </div>
+            <div id="igStoryList" class="ad-route-list"><p style="color:var(--text-muted);font-size:0.84rem;">Open this tab to load captured Stories.</p></div>
         </div>
 
         <!-- MENU tab, panel 3 of 4: same job again, from a shared sheet -->
@@ -6886,6 +6958,15 @@ THIS WEEK'S BENGAL SPECIALS
             refreshReaderStatus();
             checkAdminSession();
             setupDragAndDrop();
+            document.getElementById('igStoryRefreshButton')?.addEventListener('click', loadInstagramStories);
+            document.getElementById('igStorySearch')?.addEventListener('input', renderInstagramStories);
+            document.querySelectorAll('.ig-story-filter').forEach(button => {
+                button.addEventListener('click', () => setInstagramStoryFilter(button.dataset.storyFilter || 'all'));
+            });
+            document.getElementById('igStoryTopicPicker')?.addEventListener('change', onInstagramStoryTopicChange);
+            document.getElementById('igStoryAddPriorityButton')?.addEventListener('click', addInstagramStoryPriorityProduct);
+            document.getElementById('igStorySaveButton')?.addEventListener('click', saveInstagramStoryMapping);
+            document.getElementById('igStoryCancelButton')?.addEventListener('click', cancelInstagramStoryMapping);
         });
 
         async function loginAdmin() {
@@ -6966,6 +7047,7 @@ THIS WEEK'S BENGAL SPECIALS
         const TAB_GROUPS = {
             'tab-image': 'menu',
             'tab-menu-manager': 'menu_manager',
+            'tab-instagram-stories': 'instagram_stories',
             'tab-stats': 'customers',
             'tab-candidates': 'answers',
             'tab-ai-resolution': 'ai_resolution',
@@ -6993,6 +7075,7 @@ THIS WEEK'S BENGAL SPECIALS
             if (group === 'answers') { loadCandidates(); loadKnowledge(); }
             if (group === 'ai_resolution') { loadAiResolution(); loadTriageShadow(); }
             if (group === 'custom_qa') { loadCustomQa(); loadAssistedEvaluation(); }
+            if (group === 'instagram_stories') { loadInstagramStories(); }
         }
 
         // MENU MANAGER tab: every menu is edited as a draft (server-side, in
@@ -7822,6 +7905,235 @@ THIS WEEK'S BENGAL SPECIALS
             return `<article class="ig-media-card"><div>${instagramPreview(route)}${coverControls}</div><div class="ig-media-main"><div class="ig-media-title"><b class="ig-media-topic">${escapeHtml(route.routing_topic || 'Instagram content')}</b><span class="ig-media-status ${status.className}">${escapeHtml(status.label)}</span></div><div>${link}</div><div class="ig-media-summary">${escapeHtml(description || 'No description configured.')}</div><div class="ig-media-facts"><span><b>Menu:</b> ${escapeHtml(menu)}</span><span><b>Status:</b> ${escapeHtml(status.label)}</span><span><b>Updated:</b> ${escapeHtml(route.updated_at || route.created_at || '—')}</span>${pairingNote}</div></div><div class="ig-media-actions">${actions}</div>${details}</article>`;
         }
 
+        let igStorySources = [];
+        let igStoryFilter = 'all';
+        let igStoryEditingRoutingId = null;
+        let igStoryPriority = [];
+        let igStoryKnowledgeScopes = [];
+
+        function storyStatusClass(status) {
+            return status === 'UNMAPPED' || status === 'DISABLED' || status === 'ARCHIVED' ? 'disabled' : '';
+        }
+
+        function storyPreviewMetadata(value) {
+            if (!value) return 'Not available';
+            try {
+                const parsed = new URL(String(value), window.location.origin);
+                if (!['http:', 'https:'].includes(parsed.protocol)) return 'Available';
+                return `${parsed.hostname}${parsed.pathname || '/'}`;
+            } catch (err) {
+                return 'Available';
+            }
+        }
+
+        function storyMatches(source) {
+            const status = String(source.mapping_status || source.status || 'UNMAPPED').toUpperCase();
+            if (igStoryFilter !== 'all' && status !== igStoryFilter) return false;
+            const query = (document.getElementById('igStorySearch')?.value || '').trim().toLowerCase();
+            if (!query) return true;
+            return [source.story_media_id, source.routing_topic, source.topic_description, source.story_status, status]
+                .some(value => String(value || '').toLowerCase().includes(query));
+        }
+
+        function setInstagramStoryFilter(filter) {
+            igStoryFilter = filter || 'all';
+            document.querySelectorAll('.ig-story-filter').forEach(button => button.classList.toggle('active', (button.dataset.storyFilter || 'all') === igStoryFilter));
+            renderInstagramStories();
+        }
+
+        function populateInstagramStoryPickers() {
+            const topics = document.getElementById('igStoryTopicPicker');
+            const menus = document.getElementById('igStoryMenuPicker');
+            const products = document.getElementById('igStoryPriorityPicker');
+            const scopes = document.getElementById('igStoryKnowledgeScope');
+            if (topics) topics.innerHTML = '<option value="">Select Topic</option>' + igTopics.map(topic => `<option value="${escapeHtml(topic.topic_id)}">${escapeHtml(topic.name)}</option>`).join('');
+            if (menus) menus.innerHTML = '<option value="">Inherit Topic Menu</option>' + igMenus.map(menu => `<option value="${escapeHtml(menu.menu_id)}">${escapeHtml(menu.name)}</option>`).join('');
+            if (products) products.innerHTML = '<option value="">Choose an approved product…</option>' + igProducts.map(product => `<option value="${escapeHtml(product.id)}">${escapeHtml(product.label)}</option>`).join('');
+            if (scopes) scopes.innerHTML = igStoryKnowledgeScopes.map(scope => `<option value="${escapeHtml(scope)}">${escapeHtml(scope)}</option>`).join('');
+        }
+
+        function onInstagramStoryTopicChange() {
+            const topicId = document.getElementById('igStoryTopicPicker')?.value || '';
+            const topic = igTopics.find(item => item.topic_id === topicId);
+            if (!igStoryEditingRoutingId && topic) igStoryPriority = [...(topic.priority_products || [])];
+            renderInstagramStoryPriorityProducts();
+        }
+
+        function renderInstagramStoryPriorityProducts() {
+            const box = document.getElementById('igStoryPriorityProducts');
+            if (!box) return;
+            if (!igStoryPriority.length) { box.innerHTML = '<small>No priority products. Normal conversation routing will apply.</small>'; return; }
+            box.innerHTML = igStoryPriority.map((id, index) => {
+                const product = igProducts.find(item => item.id === id);
+                return `<div class="ad-route-row"><span><b>${index + 1}.</b> ${escapeHtml(product ? product.label : `${id} (currently unavailable)`)}</span><button class="btn-danger" type="button" data-story-remove-priority="${index}">Remove</button></div>`;
+            }).join('');
+            box.querySelectorAll('[data-story-remove-priority]').forEach(button => button.addEventListener('click', () => {
+                igStoryPriority.splice(Number(button.dataset.storyRemovePriority), 1);
+                renderInstagramStoryPriorityProducts();
+            }));
+        }
+
+        function addInstagramStoryPriorityProduct() {
+            const id = document.getElementById('igStoryPriorityPicker')?.value || '';
+            if (!id || igStoryPriority.includes(id)) return;
+            igStoryPriority.push(id);
+            renderInstagramStoryPriorityProducts();
+        }
+
+        function openInstagramStoryMapping(mediaId) {
+            const source = igStorySources.find(item => String(item.story_media_id || '') === String(mediaId || '')) || { story_media_id: mediaId || '' };
+            const status = String(source.mapping_status || source.status || 'UNMAPPED').toUpperCase();
+            if (status === 'ARCHIVED') return;
+            const routeId = source.routing_id ? Number(source.routing_id) : null;
+            igStoryEditingRoutingId = routeId;
+            igStoryPriority = [...(source.priority_products || [])];
+            document.getElementById('igStoryMediaId').value = source.story_media_id || '';
+            document.getElementById('igStoryTopicPicker').value = source.topic_id || '';
+            document.getElementById('igStoryMenuPicker').value = source.menu_id || '';
+            document.getElementById('igStoryEscalationPolicy').value = source.escalation_policy || 'human_if_unsupported';
+            document.getElementById('igStoryActive').checked = source.active !== false && status !== 'DISABLED';
+            Array.from(document.getElementById('igStoryKnowledgeScope').options).forEach(option => option.selected = (source.knowledge_scope || []).includes(option.value));
+            document.getElementById('igStoryEditingLabel').innerText = routeId ? `Editing routing #${routeId}` : 'New mapping';
+            renderInstagramStoryPriorityProducts();
+            const form = document.getElementById('igStoryMapForm');
+            form.style.display = 'block';
+            form.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+
+        function cancelInstagramStoryMapping() {
+            igStoryEditingRoutingId = null;
+            igStoryPriority = [];
+            const form = document.getElementById('igStoryMapForm');
+            if (form) form.style.display = 'none';
+        }
+
+        function showInstagramStoryResult(kind, message) {
+            const result = document.getElementById('igStoryResult');
+            if (!result) return;
+            result.style.display = 'block';
+            result.className = `result-box ${kind}`;
+            result.innerText = message;
+        }
+
+        async function saveInstagramStoryMapping() {
+            const mediaId = document.getElementById('igStoryMediaId')?.value.trim() || '';
+            const topicId = document.getElementById('igStoryTopicPicker')?.value || '';
+            if (!mediaId) return showInstagramStoryResult('error', 'Choose a captured Story before mapping it.');
+            if (!topicId) return showInstagramStoryResult('error', 'Select a Topic before saving the Story mapping.');
+            const menuId = document.getElementById('igStoryMenuPicker').value;
+            const payload = {
+                routing_id: igStoryEditingRoutingId,
+                source_type: 'story', url: '', media_id: mediaId, ad_id: '', campaign_id: '',
+                preview_url: null, media_type: 'story', topic_id: topicId,
+                menu_id: menuId, menu_mode: menuId ? 'SELECTED' : 'NONE',
+                escalation_policy: document.getElementById('igStoryEscalationPolicy').value,
+                priority_products: igStoryPriority,
+                knowledge_scope: Array.from(document.getElementById('igStoryKnowledgeScope').selectedOptions).map(option => option.value),
+                active: document.getElementById('igStoryActive').checked,
+            };
+            try {
+                const response = await fetch('/admin/instagram-routes', {
+                    method: 'POST', headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+                });
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok) throw new Error(data.detail || 'Could not save Story mapping.');
+                cancelInstagramStoryMapping();
+                showInstagramStoryResult('success', 'Story mapping saved.');
+                await loadInstagramStories();
+            } catch (err) {
+                showInstagramStoryResult('error', err.message || String(err));
+            }
+        }
+
+        async function setInstagramStoryActive(routingId, active) {
+            try {
+                const response = await fetch(`/admin/instagram-routes/${routingId}/active`, { method: 'PATCH', headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ active }) });
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok) throw new Error(data.detail || 'Could not update Story status.');
+                await loadInstagramStories();
+            } catch (err) { showInstagramStoryResult('error', err.message || String(err)); }
+        }
+
+        async function archiveInstagramStory(routingId) {
+            if (!confirm('Archive this Story mapping? It will stop matching traffic but remain recoverable.')) return;
+            try {
+                const response = await fetch(`/admin/instagram-routes/${routingId}`, { method: 'DELETE', headers: getAuthHeaders() });
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok) throw new Error(data.detail || 'Could not archive Story mapping.');
+                await loadInstagramStories();
+            } catch (err) { showInstagramStoryResult('error', err.message || String(err)); }
+        }
+
+        async function restoreInstagramStory(routingId) {
+            try {
+                const response = await fetch(`/admin/instagram-routes/${routingId}/restore`, { method: 'POST', headers: getAuthHeaders() });
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok) throw new Error(data.detail || 'Could not restore Story mapping.');
+                await loadInstagramStories();
+            } catch (err) { showInstagramStoryResult('error', err.message || String(err)); }
+        }
+
+        function renderInstagramStories() {
+            const list = document.getElementById('igStoryList');
+            if (!list) return;
+            const storyTimestamp = source => {
+                const value = source.last_seen || source.first_seen || '';
+                const timestamp = Date.parse(value);
+                return Number.isNaN(timestamp) ? 0 : timestamp;
+            };
+            const sources = [...igStorySources].filter(storyMatches).sort((left, right) => storyTimestamp(right) - storyTimestamp(left));
+            if (!sources.length) { list.innerHTML = '<p style="color:var(--text-muted);font-size:0.84rem;">No captured Stories match this filter.</p>'; return; }
+            list.innerHTML = sources.map(source => {
+                const status = String(source.mapping_status || source.status || 'UNMAPPED').toUpperCase();
+                const routeId = source.routing_id ? Number(source.routing_id) : null;
+                let actions = '';
+                if (status === 'UNMAPPED') actions = `<button class="btn-secondary" type="button" data-story-action="map" data-story-media-id="${escapeHtml(source.story_media_id || '')}">Map Story</button>`;
+                else if (status === 'MAPPED') actions = `<button class="btn-secondary" type="button" data-story-action="edit" data-story-media-id="${escapeHtml(source.story_media_id || '')}">Edit Mapping</button><button class="btn-secondary" type="button" data-story-action="disable" data-routing-id="${routeId}">Disable</button><button class="btn-danger" type="button" data-story-action="archive" data-routing-id="${routeId}">Archive</button>`;
+                else if (status === 'DISABLED') actions = `<button class="btn-secondary" type="button" data-story-action="edit" data-story-media-id="${escapeHtml(source.story_media_id || '')}">Edit Mapping</button><button class="btn-secondary" type="button" data-story-action="enable" data-routing-id="${routeId}">Enable</button><button class="btn-danger" type="button" data-story-action="archive" data-routing-id="${routeId}">Archive</button>`;
+                else actions = `<button class="btn-secondary" type="button" data-story-action="restore" data-routing-id="${routeId}">Restore</button>`;
+                const topic = source.routing_topic || 'Unmapped Story';
+                const details = `<details class="ig-media-details"><summary style="cursor:pointer;">View details</summary><div>Story media ID: ${escapeHtml(source.story_media_id || '—')}<br>Routing ID: ${escapeHtml(String(routeId || '—'))}<br>Preview metadata: <span class="ig-story-preview-meta">${escapeHtml(storyPreviewMetadata(source.temporary_url))}</span><br>Meta Story status: ${escapeHtml(source.story_status || 'Not supplied')}<br>First seen: ${escapeHtml(source.first_seen || '—')}<br>Last seen: ${escapeHtml(source.last_seen || '—')}</div></details>`;
+                return `<article class="ig-media-card ig-story-card"><div class="ig-media-preview"><div class="ig-media-placeholder"><span class="ig-media-placeholder-icon">📖</span><span>STORY</span></div><span class="ig-media-badge">STORY</span></div><div class="ig-media-main"><div class="ig-media-title"><b class="ig-media-topic">${escapeHtml(topic)}</b><span class="ig-media-status ${storyStatusClass(status)}">${escapeHtml(status)}</span></div><div class="ig-media-summary">Captured Story media ID: ${escapeHtml(source.story_media_id || '—')}</div><div class="ig-media-facts"><span><b>Last seen:</b> ${escapeHtml(source.last_seen || '—')}</span><span><b>Source status:</b> ${escapeHtml(source.story_status || 'Not supplied')}</span></div></div><div class="ig-media-actions">${actions}</div>${details}</article>`;
+            }).join('');
+            list.querySelectorAll('[data-story-action]').forEach(button => button.addEventListener('click', () => {
+                const action = button.dataset.storyAction;
+                const routingId = Number(button.dataset.routingId || 0);
+                if (action === 'map' || action === 'edit') openInstagramStoryMapping(button.dataset.storyMediaId || '');
+                else if (action === 'disable') setInstagramStoryActive(routingId, false);
+                else if (action === 'enable') setInstagramStoryActive(routingId, true);
+                else if (action === 'archive') archiveInstagramStory(routingId);
+                else if (action === 'restore') restoreInstagramStory(routingId);
+            }));
+        }
+
+        async function loadInstagramStories() {
+            const list = document.getElementById('igStoryList');
+            if (!list || !adminAuthenticated) return;
+            list.innerHTML = '<p style="color:var(--text-muted);font-size:0.84rem;">Loading captured Stories…</p>';
+            try {
+                const [sourcesResponse, activeResponse, archivedResponse] = await Promise.all([
+                    fetch('/admin/instagram-story-sources', { headers: getAuthHeaders() }),
+                    fetch('/admin/instagram-routes', { headers: getAuthHeaders() }),
+                    fetch('/admin/instagram-routes?include_archived=true', { headers: getAuthHeaders() }),
+                ]);
+                const [sourcesData, activeData, archivedData] = await Promise.all([sourcesResponse.json(), activeResponse.json(), archivedResponse.json()]);
+                if (!sourcesResponse.ok) throw new Error(sourcesData.detail || 'Could not load captured Stories.');
+                if (!activeResponse.ok) throw new Error(activeData.detail || 'Could not load Story mappings.');
+                if (!archivedResponse.ok) throw new Error(archivedData.detail || 'Could not load archived Story mappings.');
+                const routes = [...(activeData.routes || []), ...(archivedData.routes || [])].filter(route => route.source_type === 'story');
+                const routesById = new Map(routes.filter(route => route.routing_id).map(route => [String(route.routing_id), route]));
+                igStorySources = (sourcesData.story_sources || []).map(source => ({ ...(routesById.get(String(source.routing_id)) || {}), ...source }));
+                window.igStorySources = igStorySources;
+                igProducts = activeData.product_catalogue || archivedData.product_catalogue || [];
+                igStoryKnowledgeScopes = activeData.knowledge_scopes || archivedData.knowledge_scopes || [];
+                if (!igTopics.length && !igMenus.length) await loadTopicsAndMenus();
+                populateInstagramStoryPickers();
+                renderInstagramStories();
+            } catch (err) {
+                list.innerHTML = `<p style="color:var(--danger);font-size:0.84rem;">${escapeHtml(err.message || err)}</p>`;
+            }
+        }
+
         function renderInstagramStorySources(sources) {
             const box = document.getElementById('igStorySourceList');
             if (!box) return;
@@ -7836,6 +8148,11 @@ THIS WEEK'S BENGAL SPECIALS
             });
         }
         function useCapturedStory(mediaId) {
+            if (document.getElementById('igStoryMapForm')) {
+                showGroup('instagram_stories');
+                openInstagramStoryMapping(mediaId);
+                return;
+            }
             document.getElementById('igSourceType').value = 'story';
             onInstagramSourceTypeChange();
             document.getElementById('igMediaId').value = mediaId || '';
@@ -7844,7 +8161,7 @@ THIS WEEK'S BENGAL SPECIALS
         function renderInstagramMediaRegistry() {
             const list = document.getElementById('adRouteList');
             if (!list) return;
-            const all = [...(window.igRoutes || [])];
+            const all = [...(window.igRoutes || [])].filter(route => route.source_type !== 'story');
             if (igRouteTab === 'active') all.push(...(window.igLegacyAds || []));
             const filtered = all.filter(instagramRouteMatches);
             if (!filtered.length) { list.innerHTML=`<p style="color:var(--text-muted);font-size:0.84rem;">${all.length ? 'No connected media matches this search or filter.' : igRouteTab === 'archived' ? 'No archived routes.' : 'No Instagram routes added yet.'}</p>`; return; }
@@ -7859,7 +8176,6 @@ THIS WEEK'S BENGAL SPECIALS
                 const data = await resp.json();
                 if (!resp.ok) throw new Error(data.detail || 'Could not load saved routes.');
                 window.igRoutes = data.routes || []; window.igLegacyAds = data.legacy_ad_routes || []; igProducts = data.product_catalogue || [];
-                renderInstagramStorySources(data.story_sources || []);
                 document.getElementById('igProductPicker').innerHTML='<option value="">Choose an approved product…</option>'+igProducts.map(item=>`<option value="${escapeHtml(item.id)}">${escapeHtml(item.label)}</option>`).join('');
                 document.getElementById('topicProductPicker') && (document.getElementById('topicProductPicker').innerHTML=document.getElementById('igProductPicker').innerHTML);
                 document.getElementById('igKnowledgeScope').innerHTML=(data.knowledge_scopes||[]).map(id=>`<option value="${escapeHtml(id)}">${escapeHtml(id)}</option>`).join('');

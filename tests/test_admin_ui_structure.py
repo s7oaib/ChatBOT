@@ -64,7 +64,7 @@ def test_dashboard_javascript_brackets_balance(script, opener, closer):
     )
 
 
-def test_the_dashboard_has_four_client_facing_tabs(page):
+def test_the_dashboard_has_five_client_facing_tabs(page):
     """
     Eight tabs needed 1655px of nav on a 347px phone, so most of the portal was
     unreachable on the handset the kitchen actually uses. Menu Manager is its
@@ -76,12 +76,12 @@ def test_the_dashboard_has_four_client_facing_tabs(page):
     there — see test_ai_resolution_tab_exists_and_reuses_existing_endpoints
     and the candidate/escalation/knowledge-gap regression tests below. Their
     old panels stay in the DOM behind the Advanced/Legacy disclosure, not in
-    this main nav bar. Custom Q&A is the fourth: the client-managed reusable
+    this main nav bar. Custom Q&A is the fifth: the client-managed reusable
     knowledge library, on the same learned_knowledge table.
     """
     nav = page[page.index('<div class="tabs-nav">'):page.index('</div>', page.index('<div class="tabs-nav">'))]
     buttons = re.findall(r'<button class="tab-btn[^"]*" onclick="switchTab\(', nav)
-    assert len(buttons) == 4, f"expected 4 client-facing tabs, found {len(buttons)}"
+    assert len(buttons) == 5, f"expected 5 client-facing tabs, found {len(buttons)}"
     assert "Custom Q&amp;A" in nav
 
 
@@ -197,6 +197,55 @@ def test_menu_tab_has_simple_ad_routing_controls(page):
     assert "loadAdRoutes()" in page
     assert "product_catalogue" in page
     assert "igProducts.map" in page
+
+
+def test_instagram_stories_has_a_dedicated_top_level_tab_and_panel(page):
+    assert "switchTab('tab-instagram-stories', this)" in page
+    assert 'id="tab-instagram-stories"' in page
+    assert 'data-group="instagram_stories"' in page
+    assert "'tab-instagram-stories': 'instagram_stories'" in page
+    assert "if (group === 'instagram_stories') { loadInstagramStories(); }" in page
+    assert "fetch('/admin/instagram-story-sources'" in page
+
+
+def test_instagram_stories_map_flow_uses_a_read_only_captured_id(page):
+    section = page[page.index('id="tab-instagram-stories"'):page.index('<!-- MENU tab, panel 3 of 4')]
+    assert 'id="igStoryMapForm"' in section
+    assert 'id="igStoryMediaId"' in section and 'readonly' in section
+    for field in ("igStoryTopicPicker", "igStoryPriorityPicker", "igStoryKnowledgeScope", "igStoryMenuPicker", "igStoryEscalationPolicy", "igStoryActive"):
+        assert f'id="{field}"' in section
+    assert "media_id: mediaId" in page
+    assert 'onclick="editInstagramRoute(' not in section
+
+
+def test_instagram_stories_exposes_status_filters_and_safe_actions(page):
+    section = page[page.index('id="tab-instagram-stories"'):page.index('<!-- MENU tab, panel 3 of 4')]
+    render = page[page.index('function renderInstagramStories'):page.index('async function loadInstagramStories')]
+    for label in ("All", "Unmapped", "Mapped", "Disabled", "Archived", "Map Story", "Edit Mapping", "Disable", "Enable", "Archive", "Restore"):
+        assert label in section or label in render
+    assert 'data-story-action="delete"' not in render
+    assert "/permanent" not in render
+    assert "setInstagramStoryActive" in render
+    assert "archiveInstagramStory" in render
+    assert "restoreInstagramStory" in render
+
+
+def test_instagram_stories_refreshes_from_source_and_mapping_endpoints(page):
+    section = page[page.index('async function loadInstagramStories'):page.index('function renderInstagramStorySources')]
+    assert "igStoryRefreshButton" in page
+    assert "instagram-story-sources" in section
+    assert "instagram-routes?include_archived=true" in section
+    assert "populateInstagramStoryPickers" in section
+    assert "renderInstagramStories()" in section
+
+
+def test_instagram_story_preview_metadata_never_exposes_temporary_url(page):
+    section = page[page.index('function storyPreviewMetadata'):page.index('function storyMatches')]
+    assert "new URL(String(value), window.location.origin)" in section
+    assert "parsed.hostname" in section and "parsed.pathname" in section
+    story_render = page[page.index('function renderInstagramStories'):page.index('async function loadInstagramStories')]
+    assert "storyPreviewMetadata(source.temporary_url)" in story_render
+    assert "temporary_url}" not in story_render
 
 
 def test_the_fake_flyer_test_button_is_gone(page):
