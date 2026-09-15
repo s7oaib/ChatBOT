@@ -850,6 +850,41 @@ class Database:
             """)
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_menu_image_versions_key ON menu_image_versions(menu_key, version DESC)")
 
+            # Phase 4A: durable Instagram-only Subscription follow-ups. The
+            # row is the source of truth for scheduling and retry state; no
+            # customer-facing copy is stored here because the approved
+            # template is resolved at send time.
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS subscription_followups (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                customer_id TEXT NOT NULL,
+                channel TEXT NOT NULL,
+                followup_type TEXT NOT NULL,
+                scheduled_for TIMESTAMP NOT NULL,
+                status TEXT NOT NULL DEFAULT 'PENDING',
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                sent_at TIMESTAMP,
+                cancelled_at TIMESTAMP,
+                failure_count INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT,
+                idempotency_key TEXT NOT NULL UNIQUE,
+                source_conversation_id INTEGER,
+                source_event_id TEXT,
+                claimed_at TIMESTAMP,
+                claim_token TEXT,
+                send_started_at TIMESTAMP,
+                next_attempt_at TIMESTAMP
+            );
+            """)
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_subscription_followups_due "
+                "ON subscription_followups(status, scheduled_for, next_attempt_at)"
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_subscription_followups_customer "
+                "ON subscription_followups(customer_id, channel, followup_type)"
+            )
+
             # Seed counters if empty
             cursor.execute("INSERT OR IGNORE INTO analytics (key, value) VALUES ('total_messages', 0);")
             cursor.execute("INSERT OR IGNORE INTO analytics (key, value) VALUES ('matched_responses', 0);")
@@ -2358,6 +2393,234 @@ class Database:
             "last_failure": last_failure["created_at"] if last_failure else None,
             "failures_last_24h": int(failures_24h or 0),
         }
+
+    # --- Durable Subscription follow-ups -----------------------------------
+
+    def schedule_subscription_followup(
+        self,
+        *,
+        customer_id: str,
+        channel: str,
+        followup_type: str,
+        scheduled_for: str,
+        idempotency_key: str,
+        source_conversation_id: Optional[int] = None,
+        source_event_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Create one durable follow-up, returning the existing row on replay."""
+        with self.get_connection() as conn:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO subscription_followups (
+                    customer_id, channel, followup_type, scheduled_for,
+                    idempotency_key, source_conversation_id, source_event_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(customer_id), str(channel), str(followup_type),
+                    str(scheduled_for), str(idempotency_key),
+                    source_conversation_id, str(source_event_id or "")[:256] or None,
+                ),
+            )
+            row = conn.execute(
+                "SELECT * FROM subscription_followups WHERE idempotency_key = ?",
+                (str(idempotency_key),),
+            ).fetchone()
+            conn.commit()
+        if not row:
+            raise RuntimeError("Could not persist Subscription follow-up")
+        return dict(row)
+
+    def claim_due_subscription_followup(
+        self,
+        *,
+        now: str,
+        claim_token: str,
+        stale_before: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Atomically claim one due task for a worker instance.
+
+        A task that had not started an outbound call may be reclaimed after a
+        worker crash. Once ``send_started_at`` is set, it remains PROCESSING
+        until an explicit retry decision, avoiding a second external send when
+        the process died after handing the request to Meta.
+        """
+        with self.get_connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if stale_before:
+                conn.execute(
+                    """
+                    UPDATE subscription_followups
+                    SET status='PENDING', claimed_at=NULL, claim_token=NULL
+                    WHERE status='PROCESSING' AND send_started_at IS NULL
+                      AND claimed_at IS NOT NULL AND claimed_at < ?
+                    """,
+                    (str(stale_before),),
+                )
+            row = conn.execute(
+                """
+                SELECT * FROM subscription_followups
+                WHERE status='PENDING'
+                  AND scheduled_for <= ?
+                  AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+                ORDER BY scheduled_for, id
+                LIMIT 1
+                """,
+                (str(now), str(now)),
+            ).fetchone()
+            if not row:
+                conn.commit()
+                return None
+            updated = conn.execute(
+                """
+                UPDATE subscription_followups
+                SET status='PROCESSING', claimed_at=?, claim_token=?
+                WHERE id=? AND status='PENDING'
+                """,
+                (str(now), str(claim_token), int(row["id"])),
+            )
+            if updated.rowcount != 1:
+                conn.commit()
+                return None
+            claimed = conn.execute(
+                "SELECT * FROM subscription_followups WHERE id = ?",
+                (int(row["id"]),),
+            ).fetchone()
+            conn.commit()
+        return dict(claimed) if claimed else None
+
+    def mark_subscription_followup_send_started(
+        self, task_id: int, claim_token: str, started_at: str,
+    ) -> bool:
+        with self.get_connection() as conn:
+            result = conn.execute(
+                """
+                UPDATE subscription_followups
+                SET send_started_at=?
+                WHERE id=? AND status='PROCESSING' AND claim_token=?
+                """,
+                (str(started_at), int(task_id), str(claim_token)),
+            )
+            conn.commit()
+            return result.rowcount == 1
+
+    def mark_subscription_followup_sent(
+        self, task_id: int, claim_token: str, sent_at: str,
+    ) -> bool:
+        with self.get_connection() as conn:
+            result = conn.execute(
+                """
+                UPDATE subscription_followups
+                SET status='SENT', sent_at=?, claimed_at=NULL, claim_token=NULL,
+                    send_started_at=NULL, next_attempt_at=NULL, last_error=NULL
+                WHERE id=? AND status='PROCESSING' AND claim_token=?
+                """,
+                (str(sent_at), int(task_id), str(claim_token)),
+            )
+            conn.commit()
+            return result.rowcount == 1
+
+    def mark_subscription_followup_failed(
+        self, task_id: int, claim_token: str, error: str,
+    ) -> bool:
+        with self.get_connection() as conn:
+            result = conn.execute(
+                """
+                UPDATE subscription_followups
+                SET status='FAILED', failure_count=failure_count + 1,
+                    last_error=?, claimed_at=NULL, claim_token=NULL,
+                    send_started_at=NULL
+                WHERE id=? AND status='PROCESSING' AND claim_token=?
+                """,
+                (str(error or "send failed")[:500], int(task_id), str(claim_token)),
+            )
+            conn.commit()
+            return result.rowcount == 1
+
+    def defer_subscription_followup(
+        self,
+        task_id: int,
+        claim_token: str,
+        error: str,
+        next_attempt_at: str,
+    ) -> bool:
+        """Leave an unresolved-template task pending without a customer send."""
+        with self.get_connection() as conn:
+            result = conn.execute(
+                """
+                UPDATE subscription_followups
+                SET status='PENDING', last_error=?, next_attempt_at=?,
+                    claimed_at=NULL, claim_token=NULL, send_started_at=NULL
+                WHERE id=? AND status='PROCESSING' AND claim_token=?
+                """,
+                (
+                    str(error or "deferred")[:500], str(next_attempt_at),
+                    int(task_id), str(claim_token),
+                ),
+            )
+            conn.commit()
+            return result.rowcount == 1
+
+    def retry_subscription_followup(self, task_id: int) -> bool:
+        """Explicitly requeue a preserved FAILED task for a later worker run."""
+        with self.get_connection() as conn:
+            result = conn.execute(
+                """
+                UPDATE subscription_followups
+                SET status='PENDING', next_attempt_at=NULL, claimed_at=NULL,
+                    claim_token=NULL, send_started_at=NULL
+                WHERE id=? AND status='FAILED'
+                """,
+                (int(task_id),),
+            )
+            conn.commit()
+            return result.rowcount == 1
+
+    def cancel_subscription_followup(self, task_id: int, reason: str) -> bool:
+        """Suppress a task without deleting its audit history."""
+        with self.get_connection() as conn:
+            result = conn.execute(
+                """
+                UPDATE subscription_followups
+                SET status='CANCELLED', cancelled_at=CURRENT_TIMESTAMP,
+                    last_error=?, claimed_at=NULL, claim_token=NULL
+                WHERE id=? AND status IN ('PENDING', 'PROCESSING', 'FAILED')
+                """,
+                (str(reason or "cancelled")[:500], int(task_id)),
+            )
+            conn.commit()
+            return result.rowcount == 1
+
+    def list_subscription_followups(
+        self, *, status: Optional[str] = None, limit: int = 100,
+    ) -> List[Dict[str, Any]]:
+        clauses = []
+        params: List[Any] = []
+        if status:
+            clauses.append("status = ?")
+            params.append(str(status).upper())
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(max(1, min(int(limit or 100), 500)))
+        with self.get_connection() as conn:
+            rows = conn.execute(
+                "SELECT id, channel, followup_type, scheduled_for, status, "
+                "created_at, sent_at, cancelled_at, failure_count, last_error, "
+                "source_conversation_id, source_event_id, next_attempt_at "
+                f"FROM subscription_followups {where} ORDER BY scheduled_for, id LIMIT ?",
+                tuple(params),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def count_subscription_followups(self, *, status: Optional[str] = None) -> int:
+        with self.get_connection() as conn:
+            if status:
+                row = conn.execute(
+                    "SELECT COUNT(*) AS count FROM subscription_followups WHERE status = ?",
+                    (str(status).upper(),),
+                ).fetchone()
+            else:
+                row = conn.execute("SELECT COUNT(*) AS count FROM subscription_followups").fetchone()
+        return int(row["count"] if row else 0)
 
     def record_escalation(self, user_id: str, channel: str, user_message: str, reason: str, context_data: Optional[Dict[str, Any]] = None) -> int:
         """Record escalation for human review."""

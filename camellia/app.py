@@ -92,6 +92,11 @@ from camellia.candidate_safety import candidate_eligibility, detect_business_com
 from camellia.assisted_resolution import create_suggestion
 from camellia.auto_resolve import simulate_auto_resolve
 from camellia.content_integrity import apply_confirmed_menu_facts, apply_safe_content_remediations
+from camellia.subscription_followups import (
+    FOLLOWUP_TYPE as SUBSCRIPTION_FOLLOWUP_TYPE,
+    run_due_subscription_followups as _run_due_subscription_followups,
+    schedule_subscription_followup,
+)
 
 log = get_logger("camellia.app")
 
@@ -117,6 +122,33 @@ def _admin_scopes(username: str, ip: str) -> List[str]:
     # single account lockout permanent or allowing username rotation to evade
     # the network controls.
     return [f"account:{username_key}", f"ip:{ip_key}", "endpoint:admin-login"]
+
+
+def _resolve_subscription_followup_payload(template_id: str) -> Optional[Dict[str, Any]]:
+    """Resolve only the later client-approved follow-up template.
+
+    Phase 4A deliberately ships no customer-facing copy. Until the named
+    template is installed in the approved Response Library, this returns
+    ``None`` and the worker defers the task instead of sending a placeholder.
+    """
+    if template_id != SUBSCRIPTION_FOLLOWUP_TYPE:
+        return None
+    if not responder._template_by_id(template_id):
+        return None
+    text, media = responder.render_approved_template(template_id, channel="instagram")
+    return {"text": text, "media": media}
+
+
+def process_due_subscription_followups(
+    *, now: Optional[datetime] = None, limit: int = 20,
+) -> Dict[str, int]:
+    """Run the durable worker through the existing Instagram sender only."""
+    return _run_due_subscription_followups(
+        sender=send_instagram_reply,
+        template_resolver=_resolve_subscription_followup_payload,
+        now=now,
+        limit=limit,
+    )
 
 
 def _audit_admin_event(event_type: str, username: str, request: Request) -> None:
@@ -471,6 +503,15 @@ def verify_instagram_webhook(
     log.warning("Instagram webhook verification failed (mode=%s).", hub_mode)
     return Response(content="Forbidden", media_type="text/plain", status_code=403)
 
+
+def _instagram_send_succeeded(result: Any) -> bool:
+    """Treat only a non-error sender result as a successful initial send."""
+    return (
+        isinstance(result, dict)
+        and not result.get("error")
+        and str(result.get("status") or "").lower() not in {"failed", "error"}
+    )
+
 def _process_instagram_event(
     sender_id: str,
     message_text: str,
@@ -479,6 +520,7 @@ def _process_instagram_event(
     shared_reel: Optional[Dict[str, str]] = None,
     shared_post_id: Optional[str] = None,
     shared_source_type: Optional[str] = None,
+    inbound_event_id: Optional[str] = None,
 ) -> None:
     """
     Matches, logs, escalates and replies for one Instagram DM.
@@ -706,10 +748,19 @@ def _process_instagram_event(
             template_id, **trace,
         )
 
-        send_instagram_reply(
+        send_result = send_instagram_reply(
             sender_id, response_text, image_url=image_url,
             inbound_message_id=conversation_id, response_type="reply",
         )
+        if template_id == "subscription_details" and _instagram_send_succeeded(send_result):
+            try:
+                schedule_subscription_followup(
+                    customer_id=sender_id,
+                    source_conversation_id=conversation_id,
+                    source_event_id=inbound_event_id,
+                )
+            except Exception:
+                log.exception("Could not schedule Subscription follow-up for conversation %s", conversation_id)
         if needs_escalation:
             send_instagram_reply(
                 sender_id, link_message,
@@ -1271,6 +1322,10 @@ def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks
             is_ad_qualified, sender_id, message_text, ad_id = ad_gate.inspect_and_gate_message(messaging_event)
             entry_point = describe_entry_point(messaging_event)
             message = messaging_event.get("message") or {}
+            inbound_event_id = str(
+                message.get("mid") or messaging_event.get("message_id")
+                or messaging_event.get("id") or ""
+            ).strip() or None
 
             # Story IDs are durable routing evidence even when the operator
             # has not mapped them yet. Capture before sender/ad-gate handling
@@ -1342,7 +1397,7 @@ def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks
                         background_args = (sender_id, shared_reel, shared_post_id)
                     else:
                         background_fn = _process_instagram_event
-                        background_args = (sender_id, "", ad_id, entry_point)
+                        background_args = (sender_id, "", ad_id, entry_point, None, None, None, inbound_event_id)
                     background_tasks.add_task(
                         background_fn, *background_args,
                     )
@@ -1387,7 +1442,7 @@ def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks
             if shared_source_type:
                 background_tasks.add_task(
                     _process_instagram_event, sender_id, message_text, ad_id, entry_point,
-                    shared_reel, shared_post_id, shared_source_type,
+                    shared_reel, shared_post_id, shared_source_type, inbound_event_id,
                 )
                 results.append({
                     "sender_id": sender_id,
@@ -1398,7 +1453,8 @@ def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks
                 })
                 continue
             background_tasks.add_task(
-                _process_instagram_event, sender_id, message_text, ad_id, entry_point
+                _process_instagram_event, sender_id, message_text, ad_id, entry_point,
+                None, None, None, inbound_event_id,
             )
             results.append({
                 "sender_id": sender_id,
@@ -3690,6 +3746,34 @@ def get_instagram_outbound_audit(
         since=since,
     )
     return {"count": len(audits), "audits": audits}
+
+
+@app.get("/admin/subscription-followups")
+def get_subscription_followups(
+    status: Optional[str] = None,
+    limit: int = 100,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """Authenticated, read-only scheduler diagnostics without customer IDs."""
+    require_admin(x_admin_key, x_admin_pin)
+    rows = db.list_subscription_followups(status=status, limit=limit)
+    public_rows = [
+        {
+            key: row.get(key)
+            for key in (
+                "id", "followup_type", "scheduled_for", "status", "created_at",
+                "sent_at", "cancelled_at", "failure_count", "last_error",
+                "next_attempt_at",
+            )
+        }
+        for row in rows
+    ]
+    return {
+        "count": len(public_rows),
+        "pending_count": db.count_subscription_followups(status="PENDING"),
+        "followups": public_rows,
+    }
 
 @app.get("/admin/sessions")
 def get_sessions_list(
