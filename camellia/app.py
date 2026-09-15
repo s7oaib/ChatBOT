@@ -6064,6 +6064,7 @@ def get_admin_dashboard():
                     <div>
                         <h2>📖 Instagram Stories</h2>
                         <p>Every Story a customer replies to appears here, newest first. Map a Story ID to a Topic without exposing temporary media URLs.</p>
+                        <p class="ig-media-muted">New Stories appear here after Instagram sends a Story interaction/reply event.</p>
                     </div>
                     <button class="btn-secondary" id="igStoryRefreshButton" type="button">🔄 Refresh Stories</button>
                 </div>
@@ -6995,6 +6996,7 @@ THIS WEEK'S BENGAL SPECIALS
             refreshReaderStatus();
             checkAdminSession();
             setupDragAndDrop();
+            document.addEventListener('visibilitychange', syncInstagramStoryAutoRefresh);
             document.getElementById('igStoryRefreshButton')?.addEventListener('click', loadInstagramStories);
             document.getElementById('igStorySearch')?.addEventListener('input', renderInstagramStories);
             document.querySelectorAll('.ig-story-filter').forEach(button => {
@@ -7096,6 +7098,7 @@ THIS WEEK'S BENGAL SPECIALS
             document.querySelectorAll('.panel-card').forEach(panel => {
                 panel.style.display = (panel.dataset.group === group) ? 'block' : 'none';
             });
+            syncInstagramStoryAutoRefresh();
         }
 
         function switchTab(tabId, el) {
@@ -7943,6 +7946,8 @@ THIS WEEK'S BENGAL SPECIALS
         let igStoryEditingRoutingId = null;
         let igStoryPriority = [];
         let igStoryKnowledgeScopes = [];
+        let igStoryRefreshTimer = null;
+        let igStoryRefreshInFlight = false;
 
         function storyStatusClass(status) {
             return status === 'UNMAPPED' || status === 'DISABLED' || status === 'ARCHIVED' ? 'disabled' : '';
@@ -7960,7 +7965,9 @@ THIS WEEK'S BENGAL SPECIALS
         }
 
         function storyMatches(source) {
-            const status = source.admin_deleted || source.deleted_at
+            const deleted = Boolean(source.admin_deleted || source.deleted_at);
+            if (igStoryFilter !== 'DELETED' && deleted) return false;
+            const status = deleted
                 ? 'DELETED'
                 : String(source.mapping_status || source.status || 'UNMAPPED').toUpperCase();
             if (igStoryFilter !== 'all' && status !== igStoryFilter) return false;
@@ -8141,8 +8148,11 @@ THIS WEEK'S BENGAL SPECIALS
                 const response = await fetch(`/admin/instagram-story-sources/${encodeURIComponent(mediaId)}`, { method: 'DELETE', headers: getAuthHeaders() });
                 const data = await response.json().catch(() => ({}));
                 if (!response.ok) throw new Error(data.detail || 'Could not delete Story from Camellia Admin.');
+                const normalizedMediaId = String(mediaId || '');
+                igStorySources = igStorySources.filter(source => String(source.story_media_id || '') !== normalizedMediaId);
+                window.igStorySources = igStorySources;
+                renderInstagramStories();
                 showInstagramStoryResult('success', 'Story removed from Camellia Admin. The Instagram Story itself was not deleted.');
-                await loadInstagramStories();
             } catch (err) { showInstagramStoryResult('error', err.message || String(err)); }
         }
 
@@ -8220,7 +8230,8 @@ THIS WEEK'S BENGAL SPECIALS
         // failure in its own banner instead of overwriting the list.
         async function loadInstagramStories(includeDeleted = igStoryFilter === 'DELETED') {
             const list = document.getElementById('igStoryList');
-            if (!list || !adminAuthenticated) return;
+            if (!list || !adminAuthenticated || igStoryRefreshInFlight) return;
+            igStoryRefreshInFlight = true;
             const isFirstLoad = !igStoriesEverLoaded;
             const refreshButton = document.getElementById('igStoryRefreshButton');
 
@@ -8263,8 +8274,38 @@ THIS WEEK'S BENGAL SPECIALS
                     setInstagramStoryRefreshStatus('error', 'Could not refresh Stories. Showing last loaded data.');
                 }
             } finally {
+                igStoryRefreshInFlight = false;
                 if (refreshButton) { refreshButton.disabled = false; refreshButton.textContent = '🔄 Refresh Stories'; }
             }
+        }
+
+        function instagramStoriesTabIsVisible() {
+            const panel = document.getElementById('tab-instagram-stories');
+            return Boolean(panel && panel.style.display === 'block' && document.visibilityState !== 'hidden');
+        }
+
+        function stopInstagramStoryAutoRefresh() {
+            if (igStoryRefreshTimer !== null) {
+                clearInterval(igStoryRefreshTimer);
+                igStoryRefreshTimer = null;
+            }
+        }
+
+        function startInstagramStoryAutoRefresh() {
+            stopInstagramStoryAutoRefresh();
+            if (!instagramStoriesTabIsVisible()) return;
+            igStoryRefreshTimer = setInterval(() => {
+                if (!instagramStoriesTabIsVisible()) {
+                    stopInstagramStoryAutoRefresh();
+                    return;
+                }
+                loadInstagramStories();
+            }, 15000);
+        }
+
+        function syncInstagramStoryAutoRefresh() {
+            if (instagramStoriesTabIsVisible()) startInstagramStoryAutoRefresh();
+            else stopInstagramStoryAutoRefresh();
         }
 
         function renderInstagramMediaRegistry() {

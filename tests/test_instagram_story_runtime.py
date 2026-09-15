@@ -484,3 +484,88 @@ class TestStoryDeleteActions:
         """))
         assert "include_deleted=true" in result["historyUrl"]
         assert "story-deleted" in result["listHtml"]
+
+    def test_deleted_story_is_excluded_from_every_operational_filter_and_all(self):
+        result = _run_node(_seed_common_pickers() + textwrap.dedent("""
+            igStorySources = [
+                { story_media_id: 'deleted', admin_deleted: 1, mapping_status: 'DELETED', last_seen: '2026-01-04' },
+                { story_media_id: 'unmapped', mapping_status: 'UNMAPPED', last_seen: '2026-01-03' },
+                { story_media_id: 'mapped', mapping_status: 'MAPPED', last_seen: '2026-01-02' },
+                { story_media_id: 'disabled', mapping_status: 'DISABLED', last_seen: '2026-01-01' },
+            ];
+            const htmlFor = filter => { igStoryFilter = filter; renderInstagramStories(); return document.getElementById('igStoryList').innerHTML; };
+            const operational = ['all', 'UNMAPPED', 'MAPPED', 'DISABLED'].map(htmlFor);
+            const history = htmlFor('DELETED');
+            console.log('RESULT::' + JSON.stringify({
+                operationalHideDeleted: operational.every(html => !html.includes('deleted')),
+                operationalShowExpected: operational.map((html, index) => html.includes(['unmapped', 'unmapped', 'mapped', 'disabled'][index])),
+                historyOnlyDeleted: history.includes('deleted') && !history.includes('unmapped'),
+            }));
+        """))
+        assert result["operationalHideDeleted"] is True
+        assert result["operationalShowExpected"] == [True, True, True, True]
+        assert result["historyOnlyDeleted"] is True
+
+    def test_delete_removes_visible_card_without_reload_and_keeps_success_notice(self):
+        result = _run_node(_seed_common_pickers() + textwrap.dedent("""
+            adminAuthenticated = true;
+            igStorySources = [
+                { story_media_id: 'story-delete', mapping_status: 'UNMAPPED', last_seen: '2026-01-02' },
+                { story_media_id: 'story-keep', mapping_status: 'UNMAPPED', last_seen: '2026-01-01' },
+            ];
+            igStoryFilter = 'all';
+            renderInstagramStories();
+            const before = document.getElementById('igStoryList').innerHTML;
+            queueFetch('/admin/instagram-story-sources/story-delete', 'DELETE', () => okResponse({ deleted: true }));
+            deleteInstagramStory('story-delete').then(() => {
+                const after = document.getElementById('igStoryList').innerHTML;
+                console.log('RESULT::' + JSON.stringify({
+                    beforeHasDeleted: before.includes('story-delete'),
+                    afterHasDeleted: after.includes('story-delete'),
+                    keepsOtherCard: after.includes('story-keep'),
+                    sourceRemoved: !igStorySources.some(item => item.story_media_id === 'story-delete'),
+                    fetchCount: fetchLog.length,
+                    successText: document.getElementById('igStoryResult').innerText,
+                }));
+            });
+        """))
+        assert result["beforeHasDeleted"] is True
+        assert result["afterHasDeleted"] is False
+        assert result["keepsOtherCard"] is True
+        assert result["sourceRemoved"] is True
+        assert result["fetchCount"] == 1
+        assert "not deleted" in result["successText"]
+
+    def test_story_auto_refresh_is_visible_tab_scoped_authenticated_backend_only(self):
+        result = _run_node(_seed_common_pickers() + textwrap.dedent("""
+            global.document.visibilityState = 'visible';
+            document.getElementById('tab-instagram-stories').style.display = 'block';
+            const timers = []; const cleared = [];
+            global.setInterval = (callback, delay) => { timers.push({ callback, delay }); return timers.length; };
+            global.clearInterval = id => { cleared.push(id); };
+            queueFetch('/admin/instagram-story-sources', 'GET', () => okResponse({ story_sources: [{ story_media_id: 'webhook-story', last_seen: '2026-01-04' }] }));
+            queueFetch('/admin/instagram-routes?include_archived=true', 'GET', () => okResponse({ routes: [] }));
+            queueFetch('/admin/instagram-routes', 'GET', () => okResponse({ routes: [] }));
+            startInstagramStoryAutoRefresh();
+            const started = timers.length === 1 && timers[0].delay >= 10000 && timers[0].delay <= 15000;
+            timers[0].callback();
+            setTimeout(() => {
+                const urls = fetchLog.map(item => item.url);
+                document.getElementById('tab-instagram-stories').style.display = 'none';
+                timers[0].callback();
+                console.log('RESULT::' + JSON.stringify({
+                    started,
+                    onlyAdminEndpoints: urls.every(url => url.startsWith('/admin/')),
+                    noMetaCall: urls.every(url => !url.includes('graph.instagram.com') && !url.includes('graph.facebook.com')),
+                    noCredentialQuery: urls.every(url => !url.includes('access_token')),
+                    stoppedWhenHidden: cleared.includes(1),
+                    sourceVisible: igStorySources[0] && igStorySources[0].story_media_id,
+                }));
+            }, 10);
+        """))
+        assert result["started"] is True
+        assert result["onlyAdminEndpoints"] is True
+        assert result["noMetaCall"] is True
+        assert result["noCredentialQuery"] is True
+        assert result["stoppedWhenHidden"] is True
+        assert result["sourceVisible"] == "webhook-story"

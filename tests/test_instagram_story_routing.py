@@ -401,6 +401,9 @@ def test_story_restore_preserves_tombstone_and_does_not_reactivate_route(story_d
     assert source["admin_deleted"] == 0
     assert source["deleted_at"]
     assert source["restored_at"]
+    restored_sources = story_db.list_instagram_story_sources()
+    assert any(item["story_media_id"] == "story-restore" for item in restored_sources)
+    assert next(item for item in restored_sources if item["story_media_id"] == "story-restore")["mapping_status"] == "ARCHIVED"
     restored_route = story_db.get_instagram_source_route(route["routing_id"])
     assert restored_route["active"] == 0
     assert restored_route["archived_at"]

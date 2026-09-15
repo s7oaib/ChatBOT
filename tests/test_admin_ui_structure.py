@@ -232,6 +232,7 @@ def test_instagram_stories_has_a_dedicated_top_level_tab_and_panel(page):
     assert "'tab-instagram-stories': 'instagram_stories'" in page
     assert "if (group === 'instagram_stories') { loadInstagramStories(); }" in page
     assert "fetch('/admin/instagram-story-sources'" in page
+    assert "New Stories appear here after Instagram sends a Story interaction/reply event." in page
 
 
 def test_instagram_stories_map_flow_uses_a_read_only_captured_id(page):
@@ -318,6 +319,26 @@ def test_instagram_story_delete_is_local_and_history_is_explicit(page):
     assert "Story itself was not deleted" in page
     assert "does not delete the Story from Instagram" in page
     assert "admin_deleted" in page
+    delete_fn = page[page.index('async function deleteInstagramStory'):page.index('async function restoreInstagramStorySource')]
+    assert "igStorySources = igStorySources.filter" in delete_fn
+    assert "renderInstagramStories()" in delete_fn
+    assert "await loadInstagramStories()" not in delete_fn
+
+
+def test_instagram_story_operational_filters_exclude_deleted_and_auto_refresh_is_safe(page):
+    story_matches = page[page.index('function storyMatches'):page.index('function setInstagramStoryFilter')]
+    assert "igStoryFilter !== 'DELETED' && deleted" in story_matches
+    assert "igStoryFilter === 'all'" not in story_matches or "deleted" in story_matches
+
+    refresh = page[page.index('function instagramStoriesTabIsVisible'):page.index('function renderInstagramMediaRegistry')]
+    assert "document.visibilityState !== 'hidden'" in refresh
+    assert "setInterval" in refresh
+    assert "15000" in refresh
+    assert "loadInstagramStories()" in refresh
+    assert "graph.instagram.com" not in refresh
+    assert "graph.facebook.com" not in refresh
+    assert "access_token" not in refresh
+    assert "document.addEventListener('visibilitychange', syncInstagramStoryAutoRefresh)" in page
 
 
 def test_instagram_stories_refreshes_from_source_and_mapping_endpoints(page):
