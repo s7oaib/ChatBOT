@@ -2108,9 +2108,9 @@ class TestCamelliaBot(unittest.TestCase):
         resp4, matched4, tmpl4, imgs4 = responder.match_and_respond(msg4, user_id=uid4, channel="whatsapp")
         self.assertTrue(matched4)
         self.assertEqual(tmpl4, "GUARD_payment_method")
-        self.assertIn("UPI: 9625083171", resp4)
+        self.assertIn("UPI at 9625083171", resp4)
         self.assertIn("Yummraj Culinary Expeditions Pvt Ltd", resp4)
-        self.assertIn("Razorpay: https://razorpay.me/@camelliaartisanal", resp4)
+        self.assertIn("credit card at https://razorpay.me/@camelliaartisanal", resp4)
 
         # Scenario 5: Transaction failure escalation
         uid5 = "sim_user_failed_tx_5"
@@ -2175,8 +2175,8 @@ class TestCamelliaBot(unittest.TestCase):
         resp1, matched1, tmpl1, _ = responder.match_and_respond(msg1, user_id=uid, channel="whatsapp")
         self.assertTrue(matched1)
         self.assertEqual(tmpl1, "subscription_details")
-        self.assertIn("Gurgaon only", resp1)
-        self.assertIn("Everyday Meal Subscription rate chart", resp1)
+        self.assertIn("Price of 5 / 10 / 30 MEALS", resp1)
+        self.assertIn("Sushant Lok Gurgaon kitchen", resp1)
         self.assertNotIn("₹1,750", resp1)
         self.assertNotIn("₹2,000", resp1)
         self.assertNotIn("luchi or polao", resp1)
@@ -2346,19 +2346,15 @@ class TestCamelliaBot(unittest.TestCase):
         self.assertIn("+91 87965 51990", resp)
 
     def test_phase_c_subscription_booking_nudge(self):
-        """Phase C: Test subscription_details response explicitly ends with 'Would you like to book?'."""
+        """Phase C: Test subscription_details response includes the approved booking contact."""
         from camellia.session_memory import session_memory
         session_memory.clear_session("test_sub_nudge_user", "whatsapp")
         msg = "Tell me about your everyday meal subscription"
         resp, matched, tmpl, _ = responder.match_and_respond(msg, user_id="test_sub_nudge_user", channel="whatsapp")
         self.assertTrue(matched)
         self.assertEqual(tmpl, "subscription_details")
-        self.assertIn("Would you like to book?", resp)
-        # Verify it's at the end of the subscription response body
-        self.assertTrue(
-            resp.strip().endswith("Would you like to book?")
-            or "We also make & send Bengali mishti" in resp
-        )
+        self.assertIn("Our Manager of Kitchens", resp)
+        self.assertIn("share your invoice", resp)
 
     def test_phase_c_first_time_vs_returning_customer_detection(self):
         """Phase C: Test first-time vs returning customer detection on savoury_food_intro."""

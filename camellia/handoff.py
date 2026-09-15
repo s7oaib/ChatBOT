@@ -266,9 +266,10 @@ def customer_facing_notice(*, order_receipt: bool = False, finalized_order: bool
     """First Instagram message: the CTA copy, with no URL embedded in it."""
     if finalized_order:
         return (
-            "Our Manager of Kitchens, Mr. Guru Dayal Singh, will help you finalise "
-            "your order at +91 87965 51990. Please continue on WhatsApp using the "
-            "link below."
+            "Our Manager of Kitchens, Mr. Guru Dayal Singh (+918796551990), will "
+            "connect with you shortly and share your invoice. He will be your "
+            "single point of contact for this order and will be happy to assist "
+            "you with any queries."
         )
     if order_receipt:
         return "Continue on WhatsApp to send this order draft to our team."

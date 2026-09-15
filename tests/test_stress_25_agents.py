@@ -286,9 +286,9 @@ class Test25AgentStressScenarios(unittest.TestCase):
         resp = self.responder.respond("Can I pay via UPI QR code or COD?", user_id=user_id, channel=channel)
         self.assertTrue(resp.was_matched)
         self.assertEqual(resp.template_id, "GUARD_payment_method")
-        self.assertIn("UPI: 9625083171", resp.text)
+        self.assertIn("UPI at 9625083171", resp.text)
         self.assertIn("Yummraj Culinary Expeditions Pvt Ltd", resp.text)
-        self.assertIn("Razorpay: https://razorpay.me/@camelliaartisanal", resp.text)
+        self.assertIn("credit card at https://razorpay.me/@camelliaartisanal", resp.text)
 
     def test_agent_18_shelf_life_and_storage(self):
         """Agent 18: Inquiring how long Sondesh lasts and storage guidelines (Confirmed: 1 week refrigerated)."""
@@ -408,7 +408,7 @@ class Test25AgentStressScenarios(unittest.TestCase):
         resp1 = self.responder.respond("Tell me about your everyday meal subscription", user_id=user_id, channel=channel)
         self.assertTrue(resp1.was_matched)
         self.assertEqual(resp1.template_id, "subscription_details")
-        self.assertIn("Would you like to book?", resp1.text)
+        self.assertIn("Price of 5 / 10 / 30 MEALS", resp1.text)
 
         # Turn 2: Follow up with booking steps
         resp2 = self.responder.respond("How do I book the subscription plan?", user_id=user_id, channel=channel)

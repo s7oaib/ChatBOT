@@ -270,7 +270,7 @@
         "yes place my order",
         "place my order"
       ],
-      "response": "Our Manager of Kitchens, Mr. Guru Dayal Singh, will help you finalise your order. Please continue on WhatsApp using the link below or call +91 87965 51990.",
+      "response": "Our Manager of Kitchens, Mr. Guru Dayal Singh (+918796551990), will connect with you shortly and share your invoice. He will be your single point of contact for this order and will be happy to assist you with any queries.",
       "escalate": true,
       "source_ref": "client Q&A script > QUESTION",
       "router_hint": "The customer is ready to place an order and needs to know what to share."
@@ -857,7 +857,7 @@
         "credit card",
         "debit card"
       ],
-      "response": "Payment is accepted by UPI, bank transfer, or Razorpay.\n\nUPI: 9625083171\n\nBank transfer:\nAccount name: Yummraj Culinary Expeditions Pvt Ltd\nAccount number: 50200077136337\nIFSC: HDFC0000572\nAccount type: Current account\n\nRazorpay: https://razorpay.me/@camelliaartisanal\n\nPayment is required in full to confirm your order. A GST invoice will be issued after confirmation.",
+      "response": "You may please pay through UPI at 9625083171 OR bank transfer to Yummraj Culinary Expeditions Pvt Ltd Account number- 50200077136337 IFSC - HDFC0000572 Account type - Current OR credit card at https://razorpay.me/@camelliaartisanal",
       "escalate": false,
       "source_ref": "client confirmation (Somdeb Ji) > payment methods & COD"
     },
@@ -1491,7 +1491,7 @@
         "what subscriptions",
         "meal subscriptions"
       ],
-      "response": "*SUBSCRIPTION - HOME FOOD AWAY FROM HOME*\n\nHi! Thank you for asking about our Everyday Meal Subscription.\n\nThe Everyday Meal Subscription is available in Gurgaon only.\n\nFreshly cooked everyday, home-style balanced food, using branded ingredients and good quality raw ingredients.\n\nTried & tested home recipes, with no cooking shortcuts to ensure the best taste, texture & flavours.\n\nPlease see the attached Everyday Meal Subscription rate chart for the available meal plans.\n\nPorter shipping charges on actuals from Sushant Arcade Gurgaon.\n\nWould you like to book?",
+      "response": "Hi! Thank you for asking about our Everyday Meal Subscription. Here is the new subscription pricing Freshly cooked, home-style balanced food, using good-quality ingredients, home recipes and no shortcuts. Option 1 Vegetarian (Rice/roti + 2 sabzis) • Option 2 Veg + Chicken — (vegetarian on 3 days, chicken on 2 days) • Option 3 Chicken — (Rice/roti + 1 sabzi + chicken) Price of 5 / 10 / 30 MEALS (including GST) is attached in the chart below. Porter delivery charges at actuals, depending on fare from our Sushant Lok Gurgaon kitchen to your location Simple, varied everyday food — as close as we can make it to a meal from a home kitchen. You may also connect directly with Our Manager of Kitchens, Mr. Guru Dayal Singh (8796551990), on a call or WhatsApp . He will help you in the purchase process also and share your invoice. He will be your single point of contact for this order and will be happy to assist you with any queries.",
       "escalate": false,
       "source_ref": "client confirmation 2026-09-08 (Somdeb Ji)"
     },
@@ -1537,7 +1537,7 @@
         "home table event",
         "bengali home lunch table"
       ],
-      "response": "*BENGALI HOME TABLE — KOLKATA*\n\nThank you for your interest in the Camellia.artisanal Bengali Home Table in Kolkata. Please contact our team for the current dates, timing, venue, themes, experience details and booking availability.",
+      "response": "Hi! Thank you for connecting. Sharing details of the Camellia.artisanal Bengali Home Table, Kolkata. 4th & 11th October 2026 | 1–6 pm Diamond Park, Joka, Kolkata Think of the lunch as a Bengali omakase — you don't choose the menu; the season does. An elaborate vegetarian & non-vegetarian Bengali home lunch, slow-cooked using traditional methods, followed by several kinds of mishti made by us, a Darjeeling tea ceremony and a sit-down storytelling session. Story & lunch theme 4th October — MALE FOLK DEITIES OF BENGAL 11th October — DURGA PUJO Next steps to book a seat Please let me know how many guests Which of the two dates would you prefer Sharing 4 videos for you to take a look at details & also a bit of videos from the 100 Bengali home tables we did at gurgaon. If this interests you, please let me know. I will share the pricing & other details.",
       "escalate": false,
       "media_status": "BLOCKED_PENDING_CLIENT_ASSETS",
       "source_ref": "client Golden Response Matrix > Bengali Home Table introduction"
@@ -1554,7 +1554,7 @@
         "home table price per person",
         "how much is bengali home table"
       ],
-      "response": "*BENGALI HOME TABLE — KOLKATA*\n\nDetailed pricing:\n\n• Vegetarian — ₹1,500 per person (8 dishes)\n• Non-Vegetarian — ₹2,500 per person (9 dishes)\n\nGST included.",
+      "response": "This is a meal that unfolds slowly, one course and one story at a time. It is a leisurely Bengali experience where each dish has its own place in the sequence—allowing you to experience Bengal through its flavours, histories, rituals and memories. The Vegetarian Experience includes 8 individually served dishes. The Non-Vegetarian Experience includes 9 individually served dishes. Both conclude with a seasonal pre-dessert, followed by three distinct desserts made entirely in our kitchen—including our signature norom-pak Jolbhora Sondesh. Vegetarian Experience — ₹1,500 per person Non-Vegetarian Experience — ₹2,500 per person Prices include GST. Please let me know if you decide to book. I will share the payment details.",
       "escalate": false,
       "media_status": "BLOCKED_PENDING_CLIENT_ASSETS",
       "source_ref": "client Golden Response Matrix > Bengali Home Table detailed pricing"
@@ -1569,7 +1569,7 @@
         "kolkata home table payment",
         "payment for home table"
       ],
-      "response": "*BENGALI HOME TABLE — KOLKATA*\n\nFull payment is required to confirm your booking. A GST invoice will be issued after payment confirmation.",
+      "response": "A seat is booked on full payment of the total amount. You can transfer by UPI to 9625083171 Or bank transfer to Yummraj Culinary Expeditions Pvt Ltd Account number- 50200077136337 IFSC - HDFC0000572 Account type - Current OR credit card at https://razorpay.me/@camelliaartisanal We will send a GST invoice as proof of payment & confirmation of your seat",
       "escalate": false,
       "media_status": "BLOCKED_PENDING_CLIENT_ASSETS",
       "source_ref": "client Golden Response Matrix > Bengali Home Table payment"

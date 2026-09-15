@@ -1,6 +1,6 @@
 """
-The subscription message ends with "Would you like to book?", so the customer's
-next line is usually a bare "yes", "sign me up", or "I'll take option 2". None
+The subscription message is followed by a chart and manager contact, so the
+customer's next line is usually a bare "yes", "sign me up", or "I'll take option 2". None
 of those carry a subscription word, so trigger scoring answered them with:
 
   "what is included in option 2"     -> the Sondesh Signature Collection,
@@ -58,7 +58,7 @@ class TestTheReplyToWouldYouLikeToBook:
         text, _matched, template_id, images = follow_up(user_id, "what is included in option 2")
 
         assert template_id == "subscription_details"
-        assert "Everyday Meal Subscription rate chart" in text
+        assert "Price of 5 / 10 / 30 MEALS" in text
         assert "/images/Everyday%20Meal%20Subscription%20Rate%20Chart.jpeg" in images
         assert "₹1,750" not in text
         assert "luchi" not in text.lower()

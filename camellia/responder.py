@@ -294,7 +294,8 @@ ORDER_INTENT_RE = re.compile(
 ORDER_READY_RE = re.compile(
     r"^\s*(?:i\s+want\s+to\s+order|want\s+to\s+order|"
     r"i'?m\s+ready\s+to\s+place\s+the\s+order|ready\s+to\s+place\s+the\s+order|"
-    r"let'?s\s+confirm|finali[sz]e\s+it|book\s+this|i\s+want\s+two\s+boxes|"
+    r"let'?s\s+confirm|finali[sz]e\s+it|book\s+this|can\s+we\s+lock\s+this\s+in|"
+    r"go\s+ahead\s+and\s+book\s+it|order\s+now|i\s+wnt\s+2\s+ordr\s+pls|i\s+want\s+two\s+boxes|"
     r"yes\s+place\s+my\s+order|final\s+selection|confirm\s+my\s+order|"
     r"place\s+the\s+order)\s*[?.!]*$",
     re.IGNORECASE,
@@ -581,7 +582,10 @@ SONDESH_CONTEXT_WORDS = (
 # would wrongly pull in the Kolkata answer instead of their own template.
 KOLKATA_UNAMBIGUOUS_RE = re.compile(r'\b(kolkata|relocat\w*|shutting down|shut down)\b', re.IGNORECASE)
 HOME_TABLE_RE = re.compile(
-    r'\b(?:bengali\s+home\s+(?:lunch\s+)?tables?|kolkata\s+home\s+tables?|home\s+table)\b',
+    r'\b(?:bengal(?:i)?\s+home\s+(?:lunch\s+)?tables?|'
+    r'bengal(?:i)?\s+home\s+lunch|bengal(?:i)?\s+home\s+tabel(?:\s+kolkatta?)?|'
+    r'kolkata\s+home\s+tables?|'
+    r'home\s+table|home\s+tabel\s+pris(?:e|s)\s+kolkatta)\b',
     re.IGNORECASE,
 )
 HOME_TABLE_PAYMENT_RE = re.compile(
@@ -633,6 +637,13 @@ SUBSCRIPTION_AREA_QUERY_RE = re.compile(
     r"(?=.*\b(?:delhi|new delhi|gurgaon|noida|greater noida|ghaziabad|faridabad|"
     r"dwarka|ncr|mumbai|pune|bangalore|bengaluru|kolkata|hyderabad|chennai|"
     r"jaipur|ahmedabad|chandigarh|lucknow)\b)",
+    re.IGNORECASE,
+)
+SUBSCRIPTION_CANONICAL_QUERY_RE = re.compile(
+    r"(?=.*\b(?:subscr(?:iption|ption)|meal\s+plan|meal\s+package|everyday\s+meal|"
+    r"meal\s+subscription|daily\s+meals|monthly\s+meal)\b)"
+    r"(?=.*\b(?:price|pricing|pric|cost|rate|more|about|details?|options?|"
+    r"what\s+subscriptions?)\b)",
     re.IGNORECASE,
 )
 PICKUP_CONTACT_QUERY_RE = re.compile(
@@ -721,6 +732,7 @@ TOPIC_MAP = {
     "know_more": "sondesh_general",
     "sugar_free_options": "sondesh_general",
     "combo_bento": "savoury",
+    "bento_details": "bento",
     "weekly_menu_veg": "savoury",
     "weekly_menu_nonveg": "savoury",
     "savoury_food_intro": "savoury",
@@ -2211,11 +2223,24 @@ class DeterministicResponder:
         # Keep the client-confirmed subscription area, pickup contact, and
         # savoury pre-order answers deterministic when the wording is explicit.
         # These are approved template replies, not new facts or model guesses.
+        if SUBSCRIPTION_CANONICAL_QUERY_RE.search(lowered_text):
+            template = self._template_by_id("subscription_details") or {}
+            response_text, images = self._format_dynamic_response(
+                "subscription_details", template.get("response") or self._generic_fallback(),
+                user_id=user_id, channel=channel, user_message=user_message,
+            )
+            facts["awaiting_subscription_booking"] = True
+            facts["subscription_context"] = True
+            facts["last_topic"] = "subscription"
+            session_memory.add_turn(user_id, channel, user_message, response_text)
+            return response_text, True, "subscription_details", images
+
         if SUBSCRIPTION_AREA_QUERY_RE.search(lowered_text):
             template = self._template_by_id("subscription_details") or {}
             response_text = template.get("response") or self._generic_fallback()
             facts["awaiting_subscription_booking"] = True
             facts["subscription_context"] = True
+            facts["last_topic"] = "subscription"
             session_memory.add_turn(user_id, channel, user_message, response_text)
             return response_text, True, "subscription_details", None
 
@@ -2425,6 +2450,15 @@ class DeterministicResponder:
             facts["awaiting_menu_choice"] = True
             session_memory.add_turn(user_id, channel, user_message, response_text)
             return response_text, True, "context_meal_price_followup", None
+
+        if last_topic == "bento" and BARE_PRICE_RE.match(stripped_for_bare_check):
+            template = self._template_by_id("bento_details") or {}
+            response_text, images = self._format_dynamic_response(
+                "bento_details", template.get("response") or self._generic_fallback(),
+                user_id=user_id, channel=channel, user_message=user_message,
+            )
+            session_memory.add_turn(user_id, channel, user_message, response_text)
+            return response_text, True, "bento_details", images
 
         # A bare "what's the price?" with no product topic established yet is
         # genuinely ambiguous — Sondesh and Bengali meals are priced and sold
