@@ -66,7 +66,6 @@ from camellia.instagram_routing import (
     update_topic,
     validate_route_payload,
     verify_media_by_id,
-    probe_instagram_story_capability,
 )
 from camellia.sheet_sync import sheet_sync
 from camellia.menu_parser import menu_parser
@@ -1254,16 +1253,6 @@ def get_instagram_media_verification(
     """
     require_admin(x_admin_key, x_admin_pin)
     return verify_media_by_id(media_id)
-
-
-@app.get("/admin/instagram-story-capability")
-def get_instagram_story_capability(
-    x_admin_key: Optional[str] = Header(None),
-    x_admin_pin: Optional[str] = Header(None),
-):
-    """Read-only Meta capability check; never changes routing or customer state."""
-    require_admin(x_admin_key, x_admin_pin)
-    return probe_instagram_story_capability()
 
 
 def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks) -> dict:
@@ -5958,13 +5947,13 @@ def get_admin_dashboard():
         <div id="tab-ad-routing" class="panel-card" data-group="menu" style="display: none;">
             <div class="panel-header">
                 <h2>📣 Instagram Content Routing</h2>
-                <p>Connect an Instagram post, reel, ad, or Story to a Topic. Story routing uses the Meta Story media ID only.</p>
+                <p>Connect an Instagram post, reel, or ad to a Topic. Story routing is managed separately in the dedicated Instagram Stories tab.</p>
             </div>
             <div class="ad-routing-form">
                 <div>
                     <label class="field-label" for="igSourceType">Source</label>
                     <select class="field-control" id="igSourceType" onchange="onInstagramSourceTypeChange()">
-                        <option value="post">Post</option><option value="reel">Reel</option><option value="ad">Ad</option><option value="story">Story</option>
+                        <option value="post">Post</option><option value="reel">Reel</option><option value="ad">Ad</option>
                     </select>
                 </div>
                 <div id="igRouteUrlWrap">
@@ -6013,7 +6002,7 @@ def get_admin_dashboard():
 
             <details id="igAdvancedSettings" style="margin-top:12px;"><summary style="cursor:pointer;"><b>Advanced Settings</b></summary>
                 <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:10px; margin-top:10px;">
-                    <input class="field-control" id="igMediaId" placeholder="Verified Media / Story ID">
+                    <input class="field-control" id="igMediaId" placeholder="Verified Media ID">
                     <input class="field-control" id="igAdId" placeholder="Meta Ad ID">
                     <input class="field-control" id="igCampaignId" placeholder="Campaign ID (reference only)">
                     <select class="field-control" id="igEscalationPolicy"><option value="human_if_unsupported">Human if unsupported</option><option value="canonical">Normal canonical rules</option><option value="always_human">Always offer human help</option></select>
@@ -7468,19 +7457,13 @@ THIS WEEK'S BENGAL SPECIALS
         }
 
         function onInstagramSourceTypeChange() {
-            const type = document.getElementById('igSourceType')?.value || 'post';
-            const urlWrap = document.getElementById('igRouteUrlWrap');
+            // Story capture, mapping, and lifecycle live only in the dedicated
+            // Instagram Stories tab. This form handles post/reel/ad URLs.
             const url = document.getElementById('igRouteUrl');
-            const media = document.getElementById('igMediaId');
-            if (urlWrap) urlWrap.style.display = type === 'story' ? 'none' : '';
-            if (url) url.required = type !== 'story';
-            if (media) media.placeholder = type === 'story' ? 'Meta Story media ID (authoritative)' : 'Verified Media / Story ID';
-            const identity = document.getElementById('igRouteIdentity');
-            if (type === 'story' && identity) identity.innerHTML = '<span style="color:var(--text-muted);">Story routes use the exact Meta Story media ID. Captured IDs appear below.</span>';
+            if (url) url.required = true;
         }
 
         async function identifyInstagramRoute() {
-            if ((document.getElementById('igSourceType')?.value || '') === 'story') return;
             const url=document.getElementById('igRouteUrl').value.trim();
             const box=document.getElementById('igRouteIdentity');
             if (!url) { box.innerHTML=''; return; }
@@ -8227,30 +8210,6 @@ THIS WEEK'S BENGAL SPECIALS
             }
         }
 
-        function renderInstagramStorySources(sources) {
-            const box = document.getElementById('igStorySourceList');
-            if (!box) return;
-            if (!sources || !sources.length) { box.innerHTML = '<p style="color:var(--text-muted);font-size:0.84rem;">No Story replies captured yet.</p>'; return; }
-            box.innerHTML = sources.map(source => {
-                const action = source.routing_id ? `<button class="btn-secondary" type="button" onclick="editInstagramRoute(${source.routing_id})">Edit mapping</button>` : `<button class="btn-secondary ig-map-story" type="button" data-story-media-id="${escapeHtml(source.story_media_id || '')}">Map Story</button>`;
-                const status = source.mapping_status || source.status || 'UNMAPPED';
-                return `<article class="ig-media-card"><div class="ig-media-main"><div class="ig-media-title"><b class="ig-media-topic">${escapeHtml(source.story_media_id)}</b><span class="ig-media-status ${status === 'UNMAPPED' || status === 'DISABLED' ? 'disabled' : ''}">${escapeHtml(status)}</span></div><div class="ig-media-facts"><span><b>First seen:</b> ${escapeHtml(source.first_seen || '—')}</span><span><b>Last seen:</b> ${escapeHtml(source.last_seen || '—')}</span><span><b>Story status:</b> ${escapeHtml(source.story_status || 'Unknown')}</span></div></div><div class="ig-media-actions">${action}</div></article>`;
-            }).join('');
-            box.querySelectorAll('.ig-map-story').forEach(button => {
-                button.addEventListener('click', () => useCapturedStory(button.dataset.storyMediaId || ''));
-            });
-        }
-        function useCapturedStory(mediaId) {
-            if (document.getElementById('igStoryMapForm')) {
-                showGroup('instagram_stories');
-                openInstagramStoryMapping(mediaId);
-                return;
-            }
-            document.getElementById('igSourceType').value = 'story';
-            onInstagramSourceTypeChange();
-            document.getElementById('igMediaId').value = mediaId || '';
-            document.getElementById('igRouteUrl').scrollIntoView({behavior:'smooth'});
-        }
         function renderInstagramMediaRegistry() {
             const list = document.getElementById('adRouteList');
             if (!list) return;

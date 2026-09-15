@@ -10,11 +10,13 @@ removal left an orphan `}`, the HTML still looked right, and `switchTab` and
 caught it without a browser.
 """
 import re
+import inspect
 
 import pytest
 from fastapi.testclient import TestClient
 
 import camellia.database as db_module
+from camellia import instagram_routing
 from camellia.app import app
 
 db_module.db.init_db()
@@ -199,6 +201,30 @@ def test_menu_tab_has_simple_ad_routing_controls(page):
     assert "igProducts.map" in page
 
 
+def test_stories_are_not_offered_or_shown_in_content_routing_tab(page):
+    """Stories are managed only in the dedicated Stories tab."""
+    section = page[page.index('id="tab-ad-routing"'):page.index('id="tab-instagram-stories"')]
+    source_select = section[section.index('id="igSourceType"'):section.index('</select>', section.index('id="igSourceType"'))]
+    assert '<option value="post">' in source_select
+    assert '<option value="reel">' in source_select
+    assert '<option value="ad">' in source_select
+    assert 'value="story"' not in source_select
+    assert 'igStoryMapForm' not in section
+    assert 'igStoryMediaId' not in section
+    assert 'igStorySourceList' not in section
+    registry = page[page.index('function renderInstagramMediaRegistry'):page.index('async function loadAdRoutes')]
+    assert "route.source_type !== 'story'" in registry
+    assert 'useCapturedStory' not in page
+    assert "igSourceType').value = 'story'" not in page
+
+
+def test_failed_story_capability_probe_and_automatic_listing_are_removed(page):
+    assert not any(route.path == "/admin/instagram-story-capability" for route in app.routes)
+    source = inspect.getsource(instagram_routing)
+    assert "def probe_instagram_story_capability" not in source
+    assert "/stories" not in source
+
+
 def test_instagram_stories_has_a_dedicated_top_level_tab_and_panel(page):
     assert "switchTab('tab-instagram-stories', this)" in page
     assert 'id="tab-instagram-stories"' in page
@@ -256,7 +282,7 @@ def test_instagram_story_refresh_does_not_clear_the_list_before_it_settles(page)
     success) that makes that behavior possible.
     """
     assert 'id="igStoryRefreshStatus"' in page
-    load = page[page.index('async function loadInstagramStories'):page.index('function renderInstagramStorySources')]
+    load = page[page.index('async function loadInstagramStories'):page.index('function renderInstagramMediaRegistry')]
     assert "igStoriesEverLoaded" in load
     assert "setInstagramStoryRefreshStatus" in load
     assert "igStoryList" in load
@@ -282,7 +308,7 @@ def test_instagram_stories_exposes_status_filters_and_safe_actions(page):
 
 
 def test_instagram_stories_refreshes_from_source_and_mapping_endpoints(page):
-    section = page[page.index('async function loadInstagramStories'):page.index('function renderInstagramStorySources')]
+    section = page[page.index('async function loadInstagramStories'):page.index('function renderInstagramMediaRegistry')]
     assert "igStoryRefreshButton" in page
     assert "instagram-story-sources" in section
     assert "instagram-routes?include_archived=true" in section
