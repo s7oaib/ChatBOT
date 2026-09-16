@@ -579,6 +579,11 @@ GENERIC_SAVOURY_DELIVERY_TIME_RE = re.compile(
     r'how soon can you deliver)\b',
     re.IGNORECASE,
 )
+SUBSCRIPTION_DELIVERY_TIME_RE = re.compile(
+    r'(?:\bsubscription\b.*\b(?:delivery|deliver|arrive|time)\b|'
+    r'\b(?:delivery|deliver|arrive|time)\b.*\bsubscription\b)',
+    re.IGNORECASE,
+)
 
 # A food-context word anywhere in a time question means the client's 45-minute
 # meals figure applies, not the 15/30/60-minute Sondesh dispatch numbers.
@@ -2299,6 +2304,25 @@ class DeterministicResponder:
             )
             session_memory.add_turn(user_id, channel, user_message, response_text)
             return response_text, True, "alacarte_prebooking_steps", images
+
+        # The approved subscription answer gives the current plan and delivery
+        # charge policy, but does not promise a delivery duration. Keep an
+        # explicit subscription-delivery question on that canonical route
+        # instead of borrowing the savoury 45-minute answer.
+        if (
+            not active_conversation_flow
+            and SUBSCRIPTION_DELIVERY_TIME_RE.search(lowered_text)
+        ):
+            template = self._template_by_id("subscription_details") or {}
+            response_text, images = self._format_dynamic_response(
+                "subscription_details", template.get("response") or self._generic_fallback(),
+                user_id=user_id, channel=channel, user_message=user_message,
+            )
+            facts["awaiting_subscription_booking"] = True
+            facts["subscription_context"] = True
+            facts["last_topic"] = "subscription"
+            session_memory.add_turn(user_id, channel, user_message, response_text)
+            return response_text, True, "subscription_details", images
 
         # Context-free booking advice has a complete approved answer of its
         # own. Keep subscription/Home Table/event flows above or outside this

@@ -134,6 +134,14 @@ def test_subscription_context_remains_separate_from_savoury_booking_time():
     assert template_id == "subscription_booking_steps"
 
 
+def test_subscription_delivery_time_does_not_borrow_savoury_duration():
+    text, matched, template_id, _images = _ask("subscription delivery time")
+    assert matched is True
+    assert template_id == "subscription_details"
+    assert "45 minutes" not in text
+    assert "Price of 5 / 10 / 30 MEALS" in text
+
+
 def test_out_of_area_response_is_verbatim_client_copy():
     text, matched, template_id, images = _ask("do you deliver to Bangalore")
     assert matched is True
