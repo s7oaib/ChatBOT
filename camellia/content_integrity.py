@@ -120,10 +120,10 @@ QUARANTINE_TEMPLATE_FALLBACKS = {
     ),
 }
 
-# These are the client-confirmed Phase 3B responses.  This is an exact-copy
-# allowlist, not a template-ID bypass: a later edit to one of these templates
-# remains subject to the normal quarantine unless the edited text is approved
-# separately.
+# These are the client-confirmed Phase 3B responses.  The template ID is not a
+# blanket bypass: a later edit remains subject to the last-mile guard.  When a
+# trusted resolver selects one of these IDs, the safe result of that guard is
+# always this exact versioned copy, never an older fallback or edited wording.
 CLIENT_CONFIRMED_EXACT_RESPONSES = {
     "sondesh_crosssell_savoury": (
         "We also prepare and deliver freshly cooked Bengali meals across Delhi NCR. "
@@ -259,19 +259,16 @@ def quarantine_unconfirmed_claims(text: str) -> str:
 
 def quarantine_template_response(template_id: str, text: str) -> str:
     """Apply a whole-template safe fallback where every claim is unverified."""
-    if is_client_confirmed_exact_response(template_id, text):
-        return str(text)
     approved = CLIENT_CONFIRMED_EXACT_RESPONSES.get(str(template_id or ""))
-    if approved and str(text or "").strip().startswith(approved.strip()):
-        # Deterministic routing can append a secondary nudge or card caption to
-        # a canonical answer.  Keep the approved answer and drop the appended
-        # material at the last-mile guard; never treat arbitrary suffixes as
-        # approved content.
+    if approved:
+        # Deterministic routing can append a secondary nudge or card caption,
+        # and a stale durable override can contain an older or edited copy.
+        # Keep only the approved versioned response.  This is quarantine, not
+        # an approval of the edited text.
         return approved
     fallback = QUARANTINE_TEMPLATE_FALLBACKS.get(str(template_id or ""))
-    # The exact allowlist above is the only Phase 3B bypass.  A non-exact copy
-    # remains behind the existing whole-template fallback, preserving the
-    # safety behavior for a later edited response even if its new wording does
+    # Non-allowlisted templates remain behind the existing whole-template
+    # fallback, preserving the safety behavior even when edited wording does
     # not happen to match today's claim-pattern list.
     if fallback and text:
         return fallback

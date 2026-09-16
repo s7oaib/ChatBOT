@@ -37,7 +37,7 @@ def test_wholly_unconfirmed_domains_use_safe_fallbacks():
     ).startswith("Please tell us the exact dietary requirement")
     assert quarantine_template_response(
         "delivery_out_of_area", "We use a cold chain outside Delhi NCR."
-    ).startswith("Please share your city and area")
+    ) == CLIENT_CONFIRMED_EXACT_RESPONSES["delivery_out_of_area"]
 
 
 def test_confirmed_copy_is_not_quarantined():

@@ -647,7 +647,7 @@ def _process_instagram_event(
             "bengali_home_table_payment",
             "GUARD_staff_names_manager_contact",
         }
-        informational_answer = bool(was_matched and template_id in informational_templates)
+        informational_answer = template_id in informational_templates
         needs_escalation = (
             (not was_matched and not informational_answer)
             or (
@@ -659,6 +659,15 @@ def _process_instagram_event(
                 "order_draft_receipt",
                 "order_next_steps",
             )
+        )
+        log.info(
+            "INSTAGRAM_OUTPUT_POLICY template=%s matched=%s informational=%s "
+            "source_policy=%s escalate=%s",
+            template_id,
+            bool(was_matched),
+            bool(informational_answer),
+            (source_route or {}).get("escalation_policy"),
+            bool(needs_escalation),
         )
         if needs_escalation:
             reason = (

@@ -585,6 +585,14 @@ SUBSCRIPTION_DELIVERY_TIME_RE = re.compile(
     re.IGNORECASE,
 )
 
+MANAGER_CONTACT_QUERY_RE = re.compile(
+    r"(?:\bwho\s+can\s+i\s+speak\s+to\s+directly\b|"
+    r"\bhow\s+can\s+i\s+contact\s+(?:your|the)\s+manager\b|"
+    r"\bwho\s+(?:do|should)\s+i\s+contact\b|"
+    r"\bmanager(?:'s)?\s+(?:contact|email|details?)\b)",
+    re.IGNORECASE,
+)
+
 # A food-context word anywhere in a time question means the client's 45-minute
 # meals figure applies, not the 15/30/60-minute Sondesh dispatch numbers.
 FOOD_CONTEXT_WORDS = (
@@ -1770,6 +1778,16 @@ class DeterministicResponder:
         explicit_subject_match = EXPLICIT_SUBJECT_RE.search(
             semantic_remainder or user_message
         )
+        explicit_context_switch = bool(
+            SUBSCRIPTION_DELIVERY_TIME_RE.search(lowered_text)
+            or SUBSCRIPTION_CANONICAL_QUERY_RE.search(lowered_text)
+            or SUBSCRIPTION_AREA_QUERY_RE.search(lowered_text)
+            or MANAGER_CONTACT_QUERY_RE.search(lowered_text)
+            or (
+                TIME_INTENT_RE.search(lowered_text)
+                and any(word in lowered_text for word in SONDESH_CONTEXT_WORDS)
+            )
+        )
         normalized_slot_answer = re.sub(
             r"[?!.,]+$", "", " ".join((semantic_remainder or user_message).lower().split())
         ).strip()
@@ -1803,7 +1821,7 @@ class DeterministicResponder:
                 )
             )
         )
-        if explicit_subject_match and not is_relevant_slot_answer:
+        if (explicit_subject_match or explicit_context_switch) and not is_relevant_slot_answer:
             # The named product/topic is a deliberate subject switch. Keep
             # the source route for audit/history, but stop it from answering
             # the next vague message as though the old subject were current.
@@ -1826,7 +1844,8 @@ class DeterministicResponder:
                 facts["last_flow_interrupted"] = interrupted_flags
                 log.info(
                     "INTENT_INTERRUPT subject=%r flags=%s",
-                    explicit_subject_match.group(0), interrupted_flags,
+                    explicit_subject_match.group(0) if explicit_subject_match else "canonical_context",
+                    interrupted_flags,
                 )
 
         ad_product = product_for_ad(referral_ad_id, referral_ad_title) or facts.get("ad_product")
@@ -1873,6 +1892,7 @@ class DeterministicResponder:
             channel == "instagram"
             and semantic_fallback._ESCALATION_INTENT_RE.search(lowered_text)
             and not semantic_fallback._IDENTITY_QUESTION_RE.search(lowered_text)
+            and not MANAGER_CONTACT_QUERY_RE.search(lowered_text)
         ):
             fallback, _intent = self.build_handover_response(user_message)
             facts["last_route_source"] = "explicit_rule"
