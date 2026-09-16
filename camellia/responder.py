@@ -624,6 +624,10 @@ HOME_TABLE_BARE_PRICE_RE = re.compile(
     r'^\s*(?:what(?:\s+is|\'s)?\s+the\s+price|price|prices|cost|rate|how\s+much)\s*[?.!]*\s*$',
     re.IGNORECASE,
 )
+HOME_TABLE_BOOKING_RE = re.compile(
+    r"\b(?:book|booking|reserve|reservation)\b",
+    re.IGNORECASE,
+)
 PAYMENT_QUERY_RE = re.compile(
     r'\b(?:how\s+to\s+pay|how\s+do\s+i\s+pay|how\s+can\s+i\s+pay|'
     r'payment(?:\s+details?|\s+method(?:s)?|\s+options?)?|pay(?:ment)?\s+details?|'
@@ -1837,6 +1841,13 @@ class DeterministicResponder:
         has_home_table_context = bool(facts.get("home_table_context"))
         has_home_table_subject = bool(HOME_TABLE_RE.search(lowered_text))
         if has_home_table_subject or has_home_table_context:
+            if HOME_TABLE_BOOKING_RE.search(lowered_text):
+                order_template = self._template_by_id("order_next_steps") or {}
+                order_response = order_template.get("response") or self._generic_fallback()
+                facts["last_route_source"] = "canonical_order_handoff"
+                facts["last_topic"] = "order"
+                session_memory.add_turn(user_id, channel, user_message, order_response)
+                return order_response, False, "order_next_steps", None
             if HOME_TABLE_PAYMENT_RE.search(lowered_text):
                 home_table_template_id = "bengali_home_table_payment"
             elif has_home_table_context and HOME_TABLE_BARE_PRICE_RE.fullmatch(lowered_text):
@@ -1957,7 +1968,6 @@ class DeterministicResponder:
             )
             and not source_context_available
             and not explicit_product
-            and not facts.get("clarify_sent")
             # "now THAT you're moving to Kolkata" is a conjunction, not a
             # reference to a post/reel/product — has_explicit_source_reference
             # matches the bare word "that" with no grammatical awareness.

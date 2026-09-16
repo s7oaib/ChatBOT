@@ -73,7 +73,7 @@ def test_all_managed_quarantine_copies_are_free_of_unconfirmed_claims():
             assert not contains_unconfirmed_claim(text)
 
 
-def test_dispatch_template_never_emits_exact_timing(monkeypatch):
+def test_client_confirmed_dispatch_template_emits_exact_timing(monkeypatch):
     monkeypatch.setenv("CONTENT_INTEGRITY_REMEDIATION", "true")
     responder = DeterministicResponder()
     user_id = "quarantine-dispatch"
@@ -81,7 +81,8 @@ def test_dispatch_template_never_emits_exact_timing(monkeypatch):
     text, _matched, _template_id, _images = responder.match_and_respond(
         "how long to deliver sondesh", user_id=user_id, channel="whatsapp"
     )
-    lowered = text.lower()
-    assert "15 minutes" not in lowered
-    assert "30 minutes" not in lowered
-    assert "an hour" not in lowered
+    assert text == CLIENT_CONFIRMED_EXACT_RESPONSES["sondesh_dispatch_time"]
+    modified = text + " Trusted dairies."
+    safe = quarantine_template_response("sondesh_dispatch_time", modified)
+    assert safe == text
+    assert "Trusted dairies" not in safe

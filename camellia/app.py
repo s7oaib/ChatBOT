@@ -635,14 +635,25 @@ def _process_instagram_event(
         # template) is also a handoff, not just an unmatched question: the
         # client wants a clickable WhatsApp continuation here, not a phone
         # number quoted as plain Instagram text.
+        # These routes are complete, approved informational answers.  They
+        # must remain the primary Instagram payload even when a prior state
+        # flag or a future route adapter reports an escalation-shaped result.
+        # Order completion remains deliberately outside this allowlist.
+        informational_templates = {
+            "subscription_details",
+            "sondesh_dispatch_time",
+            "bengali_home_table_details",
+            "bengali_home_table_pricing",
+            "bengali_home_table_payment",
+            "GUARD_staff_names_manager_contact",
+        }
         needs_escalation = (
-            not was_matched
+            (not was_matched and template_id not in informational_templates)
             or (source_route or {}).get("escalation_policy") == "always_human"
             or template_id in (
                 "explicit_escalation",
                 "order_draft_receipt",
                 "order_next_steps",
-                "GUARD_staff_names_manager_contact",
             )
         )
         if needs_escalation:

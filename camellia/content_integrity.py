@@ -181,6 +181,17 @@ CLIENT_CONFIRMED_EXACT_RESPONSES = {
         "same ingredients, and the same goal of trying to be at uncompromising standards "
         "will continue — exactly as they do today."
     ),
+    "sondesh_dispatch_time": (
+        "Hi! Thank you for getting in touch.\n\n"
+        "Once your sondesh order is confirmed, we usually dispatch it from our kitchen "
+        "in Sushant Lok, Gurgaon within 15 minutes. Kanchagolla takes about 30 minutes. "
+        "Jolbhora takes about an hour.\n\n"
+        "Delivery time after that depends on the Porter rider's travel time, which varies "
+        "based on traffic and the time of day.\n\n"
+        "Our kitchen is open 10:00 AM – 7:30 PM every day. We always request a pre order "
+        "to ensure we are able to make & send exactly what you want. Else sometimes we "
+        "might run out of stock that we make in small batches."
+    ),
     "GUARD_staff_names_manager_contact": (
         "Our Manager of Kitchens, Mr. Guru Dayal Singh, is the point of contact for kitchen "
         "enquiries. You can reach the kitchen at +91 87965 51990 or "
