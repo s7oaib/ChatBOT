@@ -1,4 +1,5 @@
 from camellia.content_integrity import (
+    CLIENT_CONFIRMED_EXACT_RESPONSES,
     canonical_override_responses,
     contains_unconfirmed_claim,
     quarantine_template_response,
@@ -65,7 +66,11 @@ def test_all_managed_quarantine_copies_are_free_of_unconfirmed_claims():
         templates = json.load(handle)["templates"]
     managed = canonical_override_responses(menu, templates)
     assert managed
-    assert all(not contains_unconfirmed_claim(text) for text in managed.values())
+    for template_id, text in managed.items():
+        if template_id in CLIENT_CONFIRMED_EXACT_RESPONSES:
+            assert text == CLIENT_CONFIRMED_EXACT_RESPONSES[template_id]
+        else:
+            assert not contains_unconfirmed_claim(text)
 
 
 def test_dispatch_template_never_emits_exact_timing(monkeypatch):

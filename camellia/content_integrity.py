@@ -120,6 +120,83 @@ QUARANTINE_TEMPLATE_FALLBACKS = {
     ),
 }
 
+# These are the client-confirmed Phase 3B responses.  This is an exact-copy
+# allowlist, not a template-ID bypass: a later edit to one of these templates
+# remains subject to the normal quarantine unless the edited text is approved
+# separately.
+CLIENT_CONFIRMED_EXACT_RESPONSES = {
+    "sondesh_crosssell_savoury": (
+        "We also prepare and deliver freshly cooked Bengali meals across Delhi NCR. "
+        "I've attached this week's menu in case you'd like to have a look. Everything "
+        "is cooked fresh in small batches, and some dishes are available only in limited "
+        "quantities. If you'd like a recommendation based on whether you prefer "
+        "vegetarian, fish or meat, just let me know — I'd be happy to help."
+    ),
+    "delivery_out_of_area": (
+        "Hi, thank you for getting in touch.\n\n"
+        "I would have loved to. However, the Norom Pak Sondesh that we make can be "
+        "transported from one city to another only through a reliable cold-chain courier "
+        "service. Unfortunately, we haven't yet found a partner who can offer this at a "
+        "reasonable cost.\n\n"
+        "So for now, we're unable to ship our sondesh outside Delhi NCR — we do not "
+        "deliver to Bangalore or other cities at this time. We'd love to, though, and "
+        "will certainly start as soon as we find a dependable cold-chain delivery option.\n\n"
+        "That said, many of our regular customers who live in different parts of India "
+        "and the world do buy our sondesh by asking friends or family travelling from "
+        "Delhi NCR to carry a few boxes for them. We're happy to deliver the order to "
+        "their home, office, hotel, or any other convenient location before they travel.\n\n"
+        "Thank you for thinking of camellia.artisanal!"
+    ),
+    "savoury_best_time_to_book": (
+        "We always recommend pre-ordering. It helps us ensure that the dishes you want "
+        "are available, exactly as you'd like them. Since we cook everything in small "
+        "batches, some dishes may sell out if you order at the last minute. Pre-ordering "
+        "is the best way to avoid disappointment."
+    ),
+    "savoury_delivery_time": (
+        "Hi! Thank you for getting in touch.\n\n"
+        "We request you to always pre order. So that way the delivery time can be at your "
+        "convenience subject to our kitchen timings. If you are unable to pre order, once "
+        "your order is confirmed, we usually dispatch it from our kitchen in Sushant Lok, "
+        "Gurgaon within 45 minutes.\n\n"
+        "Delivery time after that depends on the Porter rider's travel time, which varies "
+        "based on traffic and the time of day.\n\n"
+        "Our kitchen is open 10:00 AM – 7:30 PM every day. You may also call +91 87965 "
+        "51990 or DM to pre order."
+    ),
+    "kolkata_expansion_info": (
+        "Over the past two months, we have personally run our Gurgaon kitchen to ensure "
+        "every aspect of the operation met the standards we had envisioned.\n\n"
+        "Today, we have a professional team in place, led by our Kitchen Manager, Guru "
+        "Dayal Singh (camellia.artisanal.gurgaon@gmail.com). Our women kitchen team has "
+        "been with us for the past four years and has been extensively trained by us. "
+        "Together, they now run the kitchen through well-established systems, processes, "
+        "quality checks and balances.\n\n"
+        "Over the last few weeks, we have deliberately reduced our physical presence in "
+        "the kitchen and have been monitoring operations remotely. The transition has gone "
+        "exactly as planned, and the kitchen is now operating independently while "
+        "consistently maintaining our standards.\n\n"
+        "This gives us the confidence to move to Kolkata, knowing that nothing changes for "
+        "our guests in Delhi NCR. The same kitchen, the same team, the same recipes, the "
+        "same ingredients, and the same goal of trying to be at uncompromising standards "
+        "will continue — exactly as they do today."
+    ),
+    "GUARD_staff_names_manager_contact": (
+        "Our Manager of Kitchens, Mr. Guru Dayal Singh, is the point of contact for kitchen "
+        "enquiries. You can reach the kitchen at +91 87965 51990 or "
+        "camellia.artisanal.gurgaon@gmail.com."
+    ),
+}
+
+PHASE3B_REMEDIATION_ACTOR = "phase3b_client_confirmed_content"
+PHASE3B_REMEDIATION_REASON = "phase3b_client_confirmed_content_upgrade"
+
+
+def is_client_confirmed_exact_response(template_id: str, text: Any) -> bool:
+    """Return true only for an exact, versioned Phase 3B approved response."""
+    approved = CLIENT_CONFIRMED_EXACT_RESPONSES.get(str(template_id or ""))
+    return approved is not None and str(text or "").strip() == approved.strip()
+
 
 def contains_unconfirmed_claim(text: Any) -> bool:
     """Return whether customer-visible copy contains an unaudited claim."""
@@ -171,7 +248,20 @@ def quarantine_unconfirmed_claims(text: str) -> str:
 
 def quarantine_template_response(template_id: str, text: str) -> str:
     """Apply a whole-template safe fallback where every claim is unverified."""
+    if is_client_confirmed_exact_response(template_id, text):
+        return str(text)
+    approved = CLIENT_CONFIRMED_EXACT_RESPONSES.get(str(template_id or ""))
+    if approved and str(text or "").strip().startswith(approved.strip()):
+        # Deterministic routing can append a secondary nudge or card caption to
+        # a canonical answer.  Keep the approved answer and drop the appended
+        # material at the last-mile guard; never treat arbitrary suffixes as
+        # approved content.
+        return approved
     fallback = QUARANTINE_TEMPLATE_FALLBACKS.get(str(template_id or ""))
+    # The exact allowlist above is the only Phase 3B bypass.  A non-exact copy
+    # remains behind the existing whole-template fallback, preserving the
+    # safety behavior for a later edited response even if its new wording does
+    # not happen to match today's claim-pattern list.
     if fallback and text:
         return fallback
     return quarantine_unconfirmed_claims(text)
@@ -270,7 +360,13 @@ def canonical_override_responses(
     if templates is not None:
         for template in templates:
             template_id = str(template.get("id") or "")
-            if template_id in CONFIRMED_COPY_TEMPLATES:
+            if template_id in CLIENT_CONFIRMED_EXACT_RESPONSES:
+                source_copy = template.get("response") or ((template.get("responses") or [""])[0])
+                if is_client_confirmed_exact_response(template_id, source_copy):
+                    result[template_id] = source_copy
+                elif contains_unconfirmed_claim(source_copy):
+                    result[template_id] = quarantine_template_response(template_id, source_copy)
+            elif template_id in CONFIRMED_COPY_TEMPLATES:
                 source_copy = template.get("response") or ((template.get("responses") or [""])[0])
                 result[template_id] = (
                     quarantine_template_response(template_id, source_copy)
@@ -310,6 +406,29 @@ def apply_safe_content_remediations(
     for template_id, response in desired.items():
         current = database.get_response_template_override(template_id)
         default = defaults.get(template_id, "")
+
+        # Only the exact legacy fallback generated by this subsystem is
+        # eligible for automatic Phase 3B upgrade.  A distinct operator/client
+        # response remains intact and auditable.
+        approved = CLIENT_CONFIRMED_EXACT_RESPONSES.get(template_id)
+        if approved is not None:
+            if current and str(current.get("status") or "ACTIVE").upper() == "ACTIVE":
+                current_copy = (current.get("response") or "").strip()
+                if current_copy == approved.strip():
+                    actions[template_id] = "unchanged"
+                    continue
+                if current_copy != QUARANTINE_TEMPLATE_FALLBACKS.get(template_id, "").strip():
+                    actions[template_id] = "skipped"
+                    continue
+                ok = database.save_response_template_override(
+                    template_id, approved, PHASE3B_REMEDIATION_ACTOR,
+                    change_reason=PHASE3B_REMEDIATION_REASON,
+                )
+                actions[template_id] = "updated" if ok else "failed"
+                continue
+            if current:
+                actions[template_id] = "skipped"
+                continue
         if current and str(current.get("status") or "ACTIVE").upper() == "ACTIVE":
             if (current.get("response") or "").strip() == response.strip():
                 actions[template_id] = "unchanged"
