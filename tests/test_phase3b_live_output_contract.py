@@ -106,6 +106,31 @@ def test_home_table_routes_reach_instagram_without_handoff(tmp_path, monkeypatch
     assert sent[0]["image_url"] is None
 
 
+def test_stale_always_human_source_policy_cannot_replace_new_informational_answer(
+    tmp_path, monkeypatch
+):
+    stale_source = {
+        "routing_id": 19,
+        "source_type": "story",
+        "active": True,
+        "escalation_policy": "always_human",
+    }
+    for message in (
+        "subscription delivery time",
+        "how long to deliver sondesh",
+        "Tell me about the Bengali Home Table",
+        "How much per person for the Bengali home lunch?",
+        "How do I pay for the Home Table?",
+        "How can I contact your manager?",
+    ):
+        sent, escalated = _run_instagram(
+            monkeypatch, _fixtures(tmp_path), message, facts={"source_route": stale_source}
+        )
+        assert len(sent) == 1, message
+        assert not escalated.called, message
+        assert "wa.me" not in sent[0]["text"], message
+
+
 @pytest.mark.parametrize("message", [
     "who can i speak to directly",
     "How can I contact your manager?",

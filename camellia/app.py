@@ -647,9 +647,13 @@ def _process_instagram_event(
             "bengali_home_table_payment",
             "GUARD_staff_names_manager_contact",
         }
+        informational_answer = bool(was_matched and template_id in informational_templates)
         needs_escalation = (
-            (not was_matched and template_id not in informational_templates)
-            or (source_route or {}).get("escalation_policy") == "always_human"
+            (not was_matched and not informational_answer)
+            or (
+                not informational_answer
+                and (source_route or {}).get("escalation_policy") == "always_human"
+            )
             or template_id in (
                 "explicit_escalation",
                 "order_draft_receipt",
