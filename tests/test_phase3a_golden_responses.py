@@ -4,6 +4,7 @@ import uuid
 
 import pytest
 
+from camellia.config import config
 from camellia.responder import responder
 from camellia.session_memory import session_memory
 
@@ -267,14 +268,30 @@ def test_explicit_bento_switch_preserves_bento_context_for_bare_price():
 
 @pytest.mark.parametrize("message", [
     "bengal home tabel kolkata",
-    "How much per person for the Bengali home lunch?",
-    "home tabel prise kolkatta",
 ])
 def test_home_table_typo_and_short_forms_use_exact_introduction(message):
     text, matched, template_id, images = _ask(message)
     assert matched is True
     assert template_id == "bengali_home_table_details"
     assert _normalize(text) == _normalize(HOME_TABLE_DETAILS_CANONICAL)
+    assert images is None
+
+
+@pytest.mark.parametrize("message", [
+    "How much per person for the Bengali home lunch?",
+    "home tabel prise kolkatta",
+    "home table price",
+    "cost per head for home table",
+])
+def test_home_table_pricing_natural_language_and_typo_variants_use_exact_pricing(message):
+    """A clear price/cost/per-person/per-head question inside the confirmed
+    Home Table domain must win over the general introduction — these used to
+    fall back to the intro template even though they are unambiguously
+    asking for the numbers."""
+    text, matched, template_id, images = _ask(message)
+    assert matched is True
+    assert template_id == "bengali_home_table_pricing"
+    assert _normalize(text) == _normalize(HOME_TABLE_PRICING_CANONICAL)
     assert images is None
 
 
@@ -308,4 +325,99 @@ def test_ready_to_order_variants_use_manager_handoff(message):
     assert matched is False
     assert template_id == "order_next_steps"
     assert _normalize(text) == _normalize(HANDOFF_CANONICAL)
+    assert images is None
+
+
+# The tests below use channel="instagram" deliberately. Every other test in
+# this file uses "whatsapp" (via `_ask`), which never exercises the
+# this/it source-reference clarify gate at all -- that gate only runs when
+# channel == "instagram" (see camellia/responder.py). Instagram is also the
+# only channel any of these golden responses are ever actually served on
+# (WhatsApp is human-only). A prior remediation round added "book this" /
+# "finalise it" to ORDER_READY_RE and still failed in production, because
+# the clarify gate intercepted those exact phrases (their bare "this"/"it")
+# before ORDER_READY_RE ever ran -- a whatsapp-channel test could not have
+# caught that. These tests exercise the real channel so the same regression
+# cannot resurface unnoticed.
+def _ask_instagram(message, user_id=None):
+    user_id = user_id or _user("instagram")
+    session_memory.clear_session(user_id, "instagram")
+    return responder.match_and_respond(message, user_id=user_id, channel="instagram")
+
+
+@pytest.mark.parametrize("message", [
+    "I want to order",
+    "I'm ready to place the order",
+    "Let's confirm",
+    "finalise it",
+    "book this",
+    "Can we lock this in?",
+    "Go ahead and book it",
+    "order now",
+    "i wnt 2 ordr pls",
+    "I want two boxes",
+    "yes place my order",
+    "final selection",
+    "confirm my order",
+    "place the order",
+])
+def test_ready_to_order_variants_use_manager_handoff_on_instagram(message, monkeypatch):
+    monkeypatch.setattr(config, "BYPASS_AD_GATE", True)
+    text, matched, template_id, images = _ask_instagram(message)
+    assert matched is False
+    assert template_id == "order_next_steps"
+    assert _normalize(text) == _normalize(HANDOFF_CANONICAL)
+    assert images is None
+
+
+@pytest.mark.parametrize("message", [
+    "what is this?",
+    "tell me about this",
+    "is this available?",
+    "what does it contain?",
+])
+def test_bare_this_or_it_questions_do_not_trigger_order_handoff_on_instagram(message, monkeypatch):
+    """A pronoun alone must not become a ready-to-order match merely because
+    it contains "this"/"it" -- these are genuinely ambiguous references and
+    must still get the disambiguation prompt, not the Manager handoff."""
+    monkeypatch.setattr(config, "BYPASS_AD_GATE", True)
+    _text, _matched, template_id, _images = _ask_instagram(message)
+    assert template_id != "order_next_steps"
+
+
+@pytest.mark.parametrize("message", [
+    "What's the best time to book?",
+    "WHAT ARE THE NEXT STEPS TO PRE BOOK?",
+])
+def test_booking_related_questions_are_not_hijacked_by_ready_to_order_on_instagram(message, monkeypatch):
+    """Moving the ready-to-order check earlier must not make it swallow
+    unrelated questions that happen to contain "book"."""
+    monkeypatch.setattr(config, "BYPASS_AD_GATE", True)
+    _text, _matched, template_id, _images = _ask_instagram(message)
+    assert template_id != "order_next_steps"
+
+
+@pytest.mark.parametrize("message", [
+    "who runs the kitchen now that you're moving to kolkata",
+    "Are you moving to Kolkata?",
+    "What happens to the Gurgaon kitchen if you expand to Kolkata?",
+    "Who runs the kitchen now that you're moving to Kolkata?",
+])
+def test_kolkata_expansion_questions_are_not_hijacked_by_reference_clarify_on_instagram(message, monkeypatch):
+    """"now THAT you're moving" contains the bare word "that", which the
+    this/it source-reference clarify gate matched with no grammatical
+    awareness -- diverting a legitimate Kolkata-expansion question into a
+    false "which item?" prompt. The response must be exactly the existing
+    approved kolkata_expansion_info template — proving no fact (dates,
+    ownership, staffing, kitchen-transfer details) is invented along the
+    way, only the already-approved canonical answer is returned."""
+    monkeypatch.setattr(config, "BYPASS_AD_GATE", True)
+    canonical = next(
+        item["response"] for item in responder.qa_data["templates"]
+        if item["id"] == "kolkata_expansion_info"
+    )
+    text, matched, template_id, images = _ask_instagram(message)
+    assert matched is True
+    assert template_id == "kolkata_expansion_info"
+    assert _normalize(text) == _normalize(canonical)
     assert images is None

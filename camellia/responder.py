@@ -592,7 +592,8 @@ HOME_TABLE_PAYMENT_RE = re.compile(
     r'\b(?:how\s+to\s+pay|how\s+do\s+i\s+pay|payment|pay)\b', re.IGNORECASE,
 )
 HOME_TABLE_DETAILED_PRICING_RE = re.compile(
-    r'\b(?:detailed\s+pricing|price\s+per\s+person|pricing|prices|price|cost|rate|'
+    r'\b(?:detailed\s+pricing|price\s+per\s+person|pricing|prices|price|pris[es]|cost|rate|'
+    r'how\s+much|per\s+person|per\s+head|'
     r'veg(?:etarian)?|non[ -]?veg(?:etarian)?)\b', re.IGNORECASE,
 )
 HOME_TABLE_BARE_PRICE_RE = re.compile(
@@ -1849,6 +1850,21 @@ class DeterministicResponder:
             session_memory.add_turn(user_id, channel, user_message, fallback)
             return fallback, False, "explicit_escalation", None
 
+        # Ready-to-order is a deterministic, fully-anchored intent (see
+        # ORDER_READY_RE) and must be recognized here, before the generic
+        # this/it source-reference clarify gate below. That gate's bare word
+        # match on "this"/"it"/"that" would otherwise swallow phrases like
+        # "book this" or "finalise it" into a false "which item?" prompt,
+        # since ORDER_READY_RE would never get a chance to run. Checked
+        # after safety/escalation, ahead of everything else.
+        if ORDER_READY_RE.fullmatch(lowered_text):
+            order_template = self._template_by_id("order_next_steps") or {}
+            order_response = order_template.get("response") or self._generic_fallback()
+            facts["last_route_source"] = "canonical_order_handoff"
+            facts["last_topic"] = "order"
+            session_memory.add_turn(user_id, channel, user_message, order_response)
+            return order_response, False, "order_next_steps", None
+
         # A referral is a preference only for genuinely vague openings. It
         # runs before conversational shorthand (such as a bare "price"), so
         # a meal-ad click never receives the sweet-product price prompt.
@@ -1918,6 +1934,12 @@ class DeterministicResponder:
             and not source_context_available
             and not explicit_product
             and not facts.get("clarify_sent")
+            # "now THAT you're moving to Kolkata" is a conjunction, not a
+            # reference to a post/reel/product — has_explicit_source_reference
+            # matches the bare word "that" with no grammatical awareness.
+            # An unambiguous Kolkata-expansion question has its own approved
+            # canonical answer further below and must never be diverted here.
+            and not KOLKATA_UNAMBIGUOUS_RE.search(lowered_text)
         ):
             facts["clarify_sent"] = True
             clarification = (
@@ -2368,18 +2390,10 @@ class DeterministicResponder:
                 session_memory.add_turn(user_id, channel, user_message, response_text)
                 return response_text, True, "order_draft_receipt", None
 
-        # These short, explicit confirmations mean the customer is ready for
-        # the manager handoff. Resolve them before semantic NLU can select the
-        # generic order-instructions answer; item-bearing order messages have
-        # already had a chance to produce their verified draft receipt above.
-        if ORDER_READY_RE.fullmatch(lowered_text):
-            order_template = self._template_by_id("order_next_steps") or {}
-            order_response = order_template.get("response") or self._generic_fallback()
-            facts["last_route_source"] = "canonical_order_handoff"
-            facts["last_topic"] = "order"
-            session_memory.add_turn(user_id, channel, user_message, order_response)
-            return order_response, False, "order_next_steps", None
-        
+        # Ready-to-order phrases are resolved earlier now (right after the
+        # escalation guard), before the this/it source-reference clarify
+        # gate gets a chance to hijack them.
+
         # 3. Clean Conversational Preamble to isolate Business Intent
         cleaned_business_text = re.sub(
             r'^(hi|hello|hey|good morning|good afternoon|good evening|namaste|nomoshkar|greetings|hie|hii+)[,\s!.-]*', '', lowered_text
