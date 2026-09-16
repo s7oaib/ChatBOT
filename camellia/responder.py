@@ -561,6 +561,25 @@ TIME_INTENT_RE = re.compile(
     re.IGNORECASE
 )
 
+# These two intent shapes are deliberately handled before the typed/semantic
+# router. They are complete questions, but carry no product noun for the
+# router to use: ``when should I book?`` is booking advice, not the generic
+# order-steps template, and ``how long will delivery take?`` is the approved
+# savoury delivery answer, not the broader Sondesh delivery template.
+SAVOURY_BOOKING_TIME_RE = re.compile(
+    r'\b(?:best time to book|when should i book|when to book|best time to order|'
+    r'when should i order|how early (?:should i )?(?:book|order)|'
+    r'how far in advance(?: should i (?:book|order))?|when to place order|'
+    r'best time to place order|advance booking)\b',
+    re.IGNORECASE,
+)
+GENERIC_SAVOURY_DELIVERY_TIME_RE = re.compile(
+    r'\b(?:how long(?: will| does)? (?:the )?delivery take|'
+    r'what(?: is|\'s)? (?:the )?delivery time|'
+    r'how soon can you deliver)\b',
+    re.IGNORECASE,
+)
+
 # A food-context word anywhere in a time question means the client's 45-minute
 # meals figure applies, not the 15/30/60-minute Sondesh dispatch numbers.
 FOOD_CONTEXT_WORDS = (
@@ -2280,6 +2299,54 @@ class DeterministicResponder:
             )
             session_memory.add_turn(user_id, channel, user_message, response_text)
             return response_text, True, "alacarte_prebooking_steps", images
+
+        # Context-free booking advice has a complete approved answer of its
+        # own. Keep subscription/Home Table/event flows above or outside this
+        # shortcut, and leave explicit product questions to their own routes.
+        if (
+            not active_conversation_flow
+            and not facts.get("subscription_context")
+            and SAVOURY_BOOKING_TIME_RE.search(lowered_text)
+            and not re.search(r"\b(?:subscription|home table|event|wedding|corporate)\b", lowered_text)
+        ):
+            template = self._template_by_id("savoury_best_time_to_book") or {}
+            response_text, images = self._format_dynamic_response(
+                "savoury_best_time_to_book", template.get("response") or self._generic_fallback(),
+                user_id=user_id, channel=channel, user_message=user_message,
+            )
+            response_text, images = self._apply_crosssell_nudges(
+                "savoury_best_time_to_book", response_text, images, facts,
+            )
+            if intro_greeting_prefix:
+                response_text = intro_greeting_prefix + response_text
+            session_memory.add_turn(user_id, channel, user_message, response_text)
+            return response_text, True, "savoury_best_time_to_book", images
+
+        # A generic delivery-time question has no product noun for the normal
+        # scorer to distinguish. Treat it as savoury only when it is not
+        # explicitly about Sondesh, a subscription, or an event.
+        if (
+            not active_conversation_flow
+            and not facts.get("subscription_context")
+            and (GENERIC_SAVOURY_DELIVERY_TIME_RE.search(lowered_text) or (
+                TIME_INTENT_RE.search(lowered_text)
+                and re.search(r"\b(?:delivery|deliver|arrive)\b", lowered_text)
+            ))
+            and not any(word in lowered_text for word in SONDESH_CONTEXT_WORDS)
+            and not re.search(r"\b(?:subscription|home table|event|wedding|corporate)\b", lowered_text)
+        ):
+            template = self._template_by_id("savoury_delivery_time") or {}
+            response_text, images = self._format_dynamic_response(
+                "savoury_delivery_time", template.get("response") or self._generic_fallback(),
+                user_id=user_id, channel=channel, user_message=user_message,
+            )
+            response_text, images = self._apply_crosssell_nudges(
+                "savoury_delivery_time", response_text, images, facts,
+            )
+            if intro_greeting_prefix:
+                response_text = intro_greeting_prefix + response_text
+            session_memory.add_turn(user_id, channel, user_message, response_text)
+            return response_text, True, "savoury_delivery_time", images
 
         if (
             not active_conversation_flow
