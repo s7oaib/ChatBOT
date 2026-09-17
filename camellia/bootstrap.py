@@ -27,7 +27,9 @@ import hashlib
 import json
 import os
 import shutil
+import tempfile
 import time
+from copy import deepcopy
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -41,6 +43,16 @@ _SEEDED_FILES = (
 
 # Written by SQLite itself, so it needs a directory rather than a seed file.
 _CREATED_DIRS = ("DB_PATH",)
+
+# These are the only seed objects that may be structurally reconciled after a
+# durable QA file already exists.  Everything else remains operator-owned.
+REQUIRED_QA_TEMPLATE_IDS = (
+    "bengali_home_table_details",
+    "bengali_home_table_pricing",
+    "bengali_home_table_payment",
+)
+
+_HOME_TABLE_BACKUP_SUFFIX = ".home-table-backfill"
 
 
 def seed_fingerprint(path: Path) -> str | None:
@@ -88,6 +100,102 @@ def _stamp(target: Path, seed: Path) -> None:
             json.dump(data, f, indent=2, ensure_ascii=False)
     except Exception:
         pass
+
+
+def missing_required_template_ids(
+    path: Path | str,
+    required_ids: tuple[str, ...] = REQUIRED_QA_TEMPLATE_IDS,
+) -> tuple[str, ...]:
+    """Return required QA template IDs absent from a JSON template file.
+
+    A malformed or incomplete file is treated as missing every required ID;
+    callers can then fail closed without making a destructive replacement.
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        templates = data.get("templates")
+        if not isinstance(templates, list):
+            return tuple(required_ids)
+        present = {str(item.get("id")) for item in templates if isinstance(item, dict)}
+    except Exception:
+        return tuple(required_ids)
+    return tuple(template_id for template_id in required_ids if template_id not in present)
+
+
+def required_template_ids_present(
+    path: Path | str,
+    required_ids: tuple[str, ...] = REQUIRED_QA_TEMPLATE_IDS,
+) -> bool:
+    """Whether every required QA template ID exists in the active file."""
+    return not missing_required_template_ids(path, required_ids)
+
+
+def _atomic_json_write(target: Path, data: dict) -> None:
+    """Write a JSON file beside its target, then replace the target atomically."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary_name = tempfile.mkstemp(
+        prefix=f".{target.name}.", suffix=".tmp", dir=str(target.parent)
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temporary_name, target)
+    except Exception:
+        try:
+            os.unlink(temporary_name)
+        except OSError:
+            pass
+        raise
+
+
+def _backfill_required_qa_templates(target: Path, seed: Path) -> str:
+    """Append only missing required objects, returning a startup audit result."""
+    try:
+        with open(seed, "r", encoding="utf-8") as f:
+            seed_data = json.load(f)
+        with open(target, "r", encoding="utf-8") as f:
+            live_data = json.load(f)
+        seed_templates = seed_data.get("templates")
+        live_templates = live_data.get("templates")
+        if not isinstance(seed_templates, list) or not isinstance(live_templates, list):
+            return "error: template list is not a JSON array"
+        seed_by_id = {
+            str(item.get("id")): item
+            for item in seed_templates
+            if isinstance(item, dict) and item.get("id")
+        }
+        live_ids = {
+            str(item.get("id"))
+            for item in live_templates
+            if isinstance(item, dict) and item.get("id")
+        }
+        missing_from_seed = tuple(
+            template_id for template_id in REQUIRED_QA_TEMPLATE_IDS
+            if template_id not in seed_by_id
+        )
+        if missing_from_seed:
+            return "seed-missing:" + ", ".join(missing_from_seed)
+        missing = tuple(
+            template_id for template_id in REQUIRED_QA_TEMPLATE_IDS
+            if template_id not in live_ids
+        )
+        if not missing:
+            return "unchanged"
+
+        backup = target.with_name(target.stem + _HOME_TABLE_BACKUP_SUFFIX + target.suffix)
+        if not backup.exists():
+            shutil.copyfile(target, backup)
+
+        live_data["templates"] = list(live_templates)
+        live_data["templates"].extend(deepcopy(seed_by_id[template_id]) for template_id in missing)
+        _atomic_json_write(target, live_data)
+        return "backfilled:" + ", ".join(missing)
+    except Exception as exc:
+        return f"error: {exc}"
 
 
 def _configured(env_var: str) -> Path | None:
@@ -139,11 +247,35 @@ def prepare_writable_storage() -> list[str]:
                 # menu.json is one of them, and must stay that way: it is
                 # rewritten at runtime by menu uploads, so reconciling it would
                 # throw away the week the kitchen just posted.
+                # A valid QA seed is required before any existing-file
+                # replacement or structural repair.  This keeps an incomplete
+                # seed from causing a destructive whole-file update.
+                if env_var == "QA_TEMPLATES_PATH":
+                    missing_seed = missing_required_template_ids(seed)
+                    if missing_seed:
+                        actions.append(
+                            f"could not reconcile {env_var}; seed missing required templates: "
+                            + ", ".join(missing_seed)
+                        )
+                        continue
+
                 seed_v = _seed_version(seed)
                 if seed_v is None:
                     continue
                 live_v = _seed_version(target)
                 if live_v is not None and live_v >= seed_v:
+                    if env_var != "QA_TEMPLATES_PATH":
+                        continue
+                    result = _backfill_required_qa_templates(target, seed)
+                    if result == "unchanged":
+                        continue
+                    if result.startswith("backfilled:"):
+                        actions.append(
+                            f"backfilled {env_var} with required templates: "
+                            + result.removeprefix("backfilled:")
+                        )
+                    else:
+                        actions.append(f"could not reconcile {env_var}: {result}")
                     continue
                 backup = target.with_name(f"{target.stem}.superseded-{int(time.time())}{target.suffix}")
                 try:

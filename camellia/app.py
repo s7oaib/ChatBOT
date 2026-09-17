@@ -2093,6 +2093,7 @@ def _answering_capability() -> dict:
     if not collections and not weekly:
         problems.append(f"no menu content loaded from {config.MENU_JSON_PATH}")
 
+    template_seed = _template_seed_state()
     return {
         "ready": not problems,
         "templates_loaded": len(templates),
@@ -2100,7 +2101,10 @@ def _answering_capability() -> dict:
         "weekly_menus": len(weekly),
         "qa_templates_path": config.QA_TEMPLATES_PATH,
         "menu_json_path": config.MENU_JSON_PATH,
-        "template_seed": _template_seed_state(),
+        "template_seed": template_seed,
+        "home_table_required_templates": (
+            "PASS" if template_seed["home_table_required_templates_present"] else "FAIL"
+        ),
         "problems": problems,
     }
 
@@ -2125,6 +2129,8 @@ def _template_seed_state() -> dict:
         "seed_version": None,
         "live_seed_version": None,
         "undelivered_seed_changes": False,
+        "home_table_required_templates_present": False,
+        "home_table_required_templates_missing": [],
     }
     try:
         seed_hash = bootstrap.seed_fingerprint(seed_path)
@@ -2133,10 +2139,22 @@ def _template_seed_state() -> dict:
         live_path = Path(config.QA_TEMPLATES_PATH)
         if live_path.resolve() == seed_path.resolve():
             # No volume in play; the bot is reading the seed itself.
+            state["home_table_required_templates_missing"] = list(
+                bootstrap.missing_required_template_ids(seed_path)
+            )
+            state["home_table_required_templates_present"] = not state[
+                "home_table_required_templates_missing"
+            ]
             return state
 
         with open(live_path, "r", encoding="utf-8") as f:
             live = json.load(f)
+        state["home_table_required_templates_missing"] = list(
+            bootstrap.missing_required_template_ids(live_path)
+        )
+        state["home_table_required_templates_present"] = not state[
+            "home_table_required_templates_missing"
+        ]
         state["live_seed_version"] = live.get("seed_version")
         recorded = live.get("seeded_from_hash")
         if seed_hash and recorded and seed_hash != recorded:

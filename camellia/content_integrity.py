@@ -519,8 +519,18 @@ def apply_safe_content_remediations(
             )
             actions[template_id] = "updated" if ok else "failed"
             continue
+        actor = (
+            HOME_TABLE_REMEDIATION_ACTOR
+            if template_id in HOME_TABLE_TEMPLATE_IDS
+            else ACTOR
+        )
+        reason = (
+            HOME_TABLE_REMEDIATION_REASON
+            if template_id in HOME_TABLE_TEMPLATE_IDS
+            else REASON
+        )
         ok = database.save_response_template_override(
-            template_id, response, ACTOR, change_reason=REASON,
+            template_id, response, actor, change_reason=reason,
             previous_response=LEGACY_RESPONSES.get(template_id, default),
         )
         actions[template_id] = "created" if ok else "failed"
