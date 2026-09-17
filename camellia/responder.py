@@ -6,6 +6,7 @@ import re
 import time
 import unicodedata
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, Any, Tuple, Optional, List
 from camellia.config import config
 from camellia.ad_routing import product_for_ad
@@ -813,6 +814,11 @@ class DeterministicResponder:
         self.qa_path = qa_path or config.QA_TEMPLATES_PATH
         self.menu_path = menu_path or config.MENU_JSON_PATH
         self.qa_data = self._load_json(self.qa_path)
+        # Keep the trust source separate from the writable/admin-managed QA
+        # file.  Durable content may be preserved for operators, but it can
+        # never make itself an approved canonical response.
+        canonical_path = Path(__file__).resolve().parent.parent / "data" / "qa_templates.json"
+        self._canonical_qa_data = self._load_json(str(canonical_path))
         self.menu_data = self._load_json(self.menu_path)
 
     def _load_json(self, path: str) -> Dict[str, Any]:
@@ -3573,9 +3579,9 @@ class DeterministicResponder:
         return result
 
     def _canonical_template_response(self, template_id: str) -> str:
-        """Return the repository seed copy, excluding any Response Library edit."""
+        """Return the immutable repository seed copy, excluding durable edits."""
         template = next(
-            (t for t in self.qa_data.get("templates", []) if t.get("id") == template_id),
+            (t for t in self._canonical_qa_data.get("templates", []) if t.get("id") == template_id),
             {},
         )
         return str(template.get("response") or ((template.get("responses") or [""])[0]))

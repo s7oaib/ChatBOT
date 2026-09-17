@@ -32,6 +32,8 @@ import time
 from copy import deepcopy
 from pathlib import Path
 
+from camellia.content_integrity import is_known_legacy_subscription_response
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
 
@@ -55,19 +57,6 @@ REQUIRED_QA_TEMPLATE_IDS = (
 _HOME_TABLE_BACKUP_SUFFIX = ".home-table-backfill"
 _SUBSCRIPTION_TEMPLATE_ID = "subscription_details"
 _SUBSCRIPTION_BACKUP_SUFFIX = ".subscription-template-backfill"
-
-# This is deliberately a complete fingerprint of the rejected legacy copy,
-# rather than a single price marker.  A partial match could overwrite a
-# deliberate operator edit made after the old template was installed.
-_KNOWN_LEGACY_SUBSCRIPTION_MARKERS = (
-    "₹1,500 for 5 meals",
-    "₹1,750",
-    "₹2,000 for 5 meals",
-    "luchi or polao",
-    "gift you the 11th",
-    "à la carte",
-)
-
 
 def seed_fingerprint(path: Path) -> str | None:
     """
@@ -166,15 +155,6 @@ def _atomic_json_write(target: Path, data: dict) -> None:
         raise
 
 
-def _is_known_legacy_subscription_template(template: object) -> bool:
-    """Identify only the exact legacy subscription family safe to replace."""
-    if not isinstance(template, dict) or template.get("id") != _SUBSCRIPTION_TEMPLATE_ID:
-        return False
-    response = str(template.get("response") or "")
-    lowered = response.casefold()
-    return all(marker.casefold() in lowered for marker in _KNOWN_LEGACY_SUBSCRIPTION_MARKERS)
-
-
 def _backfill_required_qa_templates(target: Path, seed: Path) -> str:
     """Reconcile only approved structural/template drift in the QA file."""
     try:
@@ -227,7 +207,7 @@ def _backfill_required_qa_templates(target: Path, seed: Path) -> str:
                     continue
                 if template == seed_subscription:
                     continue
-                if _is_known_legacy_subscription_template(template):
+                if is_known_legacy_subscription_response(template.get("response")):
                     reconciled_templates[index] = deepcopy(seed_subscription)
                     subscription_replaced = True
                 else:

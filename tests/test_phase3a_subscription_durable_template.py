@@ -5,23 +5,18 @@ import json
 
 from camellia import bootstrap
 from camellia.content_integrity import (
+    LEGACY_SUBSCRIPTION_RESPONSE,
     SUBSCRIPTION_REMEDIATION_ACTOR,
     SUBSCRIPTION_REMEDIATION_REASON,
     apply_safe_content_remediations,
+    is_known_legacy_subscription_response,
+    quarantine_template_response,
 )
 from camellia.database import Database
 from camellia.responder import DeterministicResponder
 
 
 SUBSCRIPTION_ID = "subscription_details"
-LEGACY_SUBSCRIPTION_RESPONSE = """Hi! Thank you for asking about our Everyday Meal Subscription.
-Price of 5 MEALS (including GST) is attached in the chart below.
-Option 1 Vegetarian — ₹1,500 for 5 meals
-Option 2 Veg + Chicken — ₹1,750 for 5 meals
-Option 3 Chicken — ₹2,000 for 5 meals
-Once during the package, you can opt for luchi or polao.
-For every 10 meals, we gift you the 11th.
-Attached below is our à la carte menu for additional choices."""
 
 
 def _seed_data():
@@ -61,6 +56,7 @@ def test_same_version_replaces_only_known_legacy_subscription_once(monkeypatch, 
     live_templates = deepcopy(seed["templates"])
     live_subscription = _subscription(live_templates)
     live_subscription["response"] = LEGACY_SUBSCRIPTION_RESPONSE
+    assert is_known_legacy_subscription_response(LEGACY_SUBSCRIPTION_RESPONSE.replace("\n", "\r\n") + "  ")
     before = deepcopy(live_templates)
     _seed, target = _bootstrap_fixture(monkeypatch, tmp_path, live_templates)
 
@@ -95,6 +91,33 @@ def test_custom_subscription_copy_is_preserved_and_reported(monkeypatch, tmp_pat
     assert any("preserved QA_TEMPLATES_PATH operator override: subscription_details" in action for action in actions)
     assert _subscription(after["templates"])["response"] == custom
     assert not list(target.parent.glob("qa_templates.subscription-template-backfill.json"))
+
+
+def test_legacy_subscription_plus_operator_note_is_not_replaced(monkeypatch, tmp_path):
+    seed = _seed_data()
+    live_templates = deepcopy(seed["templates"])
+    custom = LEGACY_SUBSCRIPTION_RESPONSE + "\nCUSTOM OPERATOR NOTE"
+    _subscription(live_templates)["response"] = custom
+    _seed, target = _bootstrap_fixture(monkeypatch, tmp_path, live_templates)
+
+    actions = bootstrap.prepare_writable_storage()
+    after = json.loads(target.read_text(encoding="utf-8"))
+
+    assert any("preserved QA_TEMPLATES_PATH operator override: subscription_details" in action for action in actions)
+    assert _subscription(after["templates"])["response"] == custom
+
+
+def test_one_edited_legacy_subscription_field_is_not_replaced(monkeypatch, tmp_path):
+    seed = _seed_data()
+    live_templates = deepcopy(seed["templates"])
+    custom = LEGACY_SUBSCRIPTION_RESPONSE.replace("Vegetarian", "Vegetarian Custom", 1)
+    _subscription(live_templates)["response"] = custom
+    _seed, target = _bootstrap_fixture(monkeypatch, tmp_path, live_templates)
+
+    bootstrap.prepare_writable_storage()
+    after = json.loads(target.read_text(encoding="utf-8"))
+
+    assert _subscription(after["templates"])["response"] == custom
 
 
 def test_missing_subscription_is_backfilled_from_seed(monkeypatch, tmp_path):
@@ -145,6 +168,54 @@ def test_distinct_response_library_subscription_copy_is_preserved(tmp_path):
 
     assert actions[SUBSCRIPTION_ID] == "skipped_operator_override"
     assert database.get_response_template_override(SUBSCRIPTION_ID)["response"] == custom
+
+
+def test_modified_legacy_response_library_copy_is_preserved(tmp_path):
+    menu = json.loads((bootstrap.DATA_DIR / "menu.json").read_text(encoding="utf-8"))
+    templates = _seed_data()["templates"]
+    database = Database(str(tmp_path / "operator-legacy.db"))
+    custom = LEGACY_SUBSCRIPTION_RESPONSE + "\nCUSTOM OPERATOR NOTE"
+    database.save_response_template_override(SUBSCRIPTION_ID, custom, "operator")
+
+    actions = apply_safe_content_remediations(database, menu, templates)
+
+    assert actions[SUBSCRIPTION_ID] == "skipped_operator_override"
+    assert database.get_response_template_override(SUBSCRIPTION_ID)["response"] == custom
+
+
+def test_canonical_response_comes_from_repository_seed_not_durable_qa(tmp_path):
+    seed = _seed_data()
+    durable = deepcopy(seed)
+    _subscription(durable["templates"])["response"] = "CUSTOM DURABLE SUBSCRIPTION COPY"
+    durable_path = tmp_path / "durable-qa.json"
+    _write(durable_path, durable)
+    menu_path = bootstrap.DATA_DIR / "menu.json"
+
+    responder = DeterministicResponder(qa_path=str(durable_path), menu_path=str(menu_path))
+
+    assert responder._canonical_template_response(SUBSCRIPTION_ID) == _subscription(seed["templates"])["response"]
+    assert responder._canonical_template_response(SUBSCRIPTION_ID) != "CUSTOM DURABLE SUBSCRIPTION COPY"
+
+
+def test_unapproved_durable_subscription_copy_cannot_bypass_quarantine(tmp_path):
+    seed = _seed_data()
+    durable = deepcopy(seed)
+    custom = "CUSTOM DURABLE SUBSCRIPTION COPY. Trusted dairies guarantee every meal."
+    _subscription(durable["templates"])["response"] = custom
+    durable_path = tmp_path / "unsafe-durable-qa.json"
+    _write(durable_path, durable)
+    responder = DeterministicResponder(
+        qa_path=str(durable_path), menu_path=str(bootstrap.DATA_DIR / "menu.json")
+    )
+
+    safe = quarantine_template_response(
+        SUBSCRIPTION_ID,
+        custom,
+        canonical_text=responder._canonical_template_response(SUBSCRIPTION_ID),
+    )
+
+    assert safe != custom
+    assert "trusted dairies" not in safe.casefold()
 
 
 def test_subscription_runtime_uses_canonical_copy_and_only_rate_chart(monkeypatch, tmp_path):

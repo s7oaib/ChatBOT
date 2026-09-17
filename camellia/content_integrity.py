@@ -7,6 +7,7 @@ operator's existing edit is never overwritten silently.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -262,12 +263,42 @@ KNOWN_LEGACY_SUBSCRIPTION_MARKERS = (
     "gift you the 11th",
     "à la carte",
 )
+LEGACY_SUBSCRIPTION_RESPONSE = (
+    "*SUBSCRIPTION - HOME FOOD AWAY FROM HOME*\n\n"
+    "Hi! Thank you for asking about our Everyday Meal Subscription.\n\n"
+    "The Everyday Meal Subscription is available in Gurgaon only.\n\n"
+    "Freshly cooked, home-style balanced food, using good-quality ingredients, home recipes and no shortcuts.\n\n"
+    "Price of 5 MEALS (including GST). Porter delivery charges at actuals, depending on fare from our Sushant Lok Gurgaon kitchen to your location\n\n"
+    "• Option 1 Vegetarian — ₹1,500 for 5 meals\n"
+    "(Rice/roti + 2 sabzis + chatni/mishti)\n"
+    "• Option 2 Veg + Chicken — ₹1,750 (vegetarian on 3 days, chicken on 2 days) for 5 meals\n"
+    "• Option 3 Chicken — ₹2,000 for 5 meals\n"
+    "(Rice/roti + 1 sabzi + chicken + chatni/mishti)\n\n"
+    "Once during the package, you can opt for luchi or polao\n"
+    "• No fixed schedule — have your meals over 5 days, 10 days or at your own pace\n"
+    "• For every 10 meals, we gift you the 11th\n\n"
+    "Simple, varied everyday food — as close as we can make it to a meal from a home kitchen.\n\n"
+    "Attached below is our à la carte menu that changes every week. In case you don't want a subscription, you can just order a dish any day from here.\n\n"
+    "Would you like to book?"
+)
+KNOWN_LEGACY_SUBSCRIPTION_SHA256 = "1c1254cc608774fa65675d6f29aad9014e7c936bd251757f47addd6c35437940"
+
+
+def normalize_legacy_subscription_response(text: Any) -> str:
+    """Normalize only line endings and trailing whitespace for fingerprinting."""
+    normalized = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+    return "\n".join(line.rstrip() for line in normalized.split("\n")).rstrip()
+
+
+def legacy_subscription_response_fingerprint(text: Any) -> str:
+    return hashlib.sha256(
+        normalize_legacy_subscription_response(text).encode("utf-8")
+    ).hexdigest()
 
 
 def is_known_legacy_subscription_response(text: Any) -> bool:
-    """Return true only for the complete legacy subscription copy."""
-    lowered = str(text or "").casefold()
-    return bool(lowered) and all(marker.casefold() in lowered for marker in KNOWN_LEGACY_SUBSCRIPTION_MARKERS)
+    """Return true only for the exact historical legacy subscription copy."""
+    return legacy_subscription_response_fingerprint(text) == KNOWN_LEGACY_SUBSCRIPTION_SHA256
 
 
 def is_client_confirmed_exact_response(template_id: str, text: Any) -> bool:
