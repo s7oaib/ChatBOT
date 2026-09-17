@@ -1,4 +1,4 @@
-# Camellia Artisanal — Meta Instagram & WhatsApp Auto-Response Bot
+# Camellia Artisanal — Meta Instagram Auto-Response Bot
 
 ![Python Version](https://img.shields.io/badge/Python-3.11%2B-blue.svg)
 ![Framework](https://img.shields.io/badge/FastAPI-0.110.0-green.svg)
