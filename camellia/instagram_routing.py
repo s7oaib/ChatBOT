@@ -25,7 +25,7 @@ from camellia.knowledge import CATALOGUE, SOURCE_MAP
 
 
 _SHORTCODE_RE = re.compile(r"^[A-Za-z0-9_-]+$")
-_SOURCE_TYPES = {"post", "reel", "ad"}
+_SOURCE_TYPES = {"post", "reel", "ad", "story"}
 _ESCALATION_POLICIES = {"canonical", "human_if_unsupported", "always_human"}
 _MENU_MODES = {"NONE", "SELECTED", "INHERIT"}
 
@@ -346,10 +346,13 @@ def validate_route_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     from camellia.database import db
 
     raw_url = str(payload.get("canonical_url") or payload.get("url") or "").strip()
+    requested_source_type = str(payload.get("source_type") or "").strip().lower()
+    if requested_source_type == "story" and raw_url:
+        raise ValueError("Story routes use the Meta Story media ID, not an Instagram URL.")
     normalized = normalize_instagram_url(raw_url) if raw_url else {}
     source_type = normalized.get("source_type") or str(payload.get("source_type") or "ad").strip().lower()
     if source_type not in _SOURCE_TYPES:
-        raise ValueError("source_type must be post, reel, or ad.")
+        raise ValueError("source_type must be post, reel, ad, or story.")
 
     topic_id = str(payload.get("topic_id") or "").strip() or None
     topic = db.get_instagram_topic(topic_id) if topic_id else None
@@ -433,11 +436,17 @@ def validate_route_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     if media_type and len(media_type) > 80:
         raise ValueError("media_type is too long.")
 
+    media_id = str(payload.get("story_media_id") or payload.get("media_id") or "").strip() or None
+    if source_type == "story":
+        if normalized:
+            raise ValueError("Story routes use the Meta Story media ID, not an Instagram URL.")
+        if not media_id:
+            raise ValueError("A Story route requires a Story media ID.")
     clean = {
         "source_type": source_type,
         "canonical_url": normalized.get("canonical_url"),
         "shortcode": normalized.get("shortcode"),
-        "media_id": str(payload.get("media_id") or "").strip() or None,
+        "media_id": media_id,
         "ad_id": str(payload.get("ad_id") or "").strip() or None,
         "campaign_id": str(payload.get("campaign_id") or "").strip() or None,
         "topic_id": topic_id,
@@ -495,17 +504,31 @@ def decode_topic(row: Dict[str, Any]) -> Dict[str, Any]:
 
 def route_for_inbound(
     *, ad_id: Optional[str], media_id: Optional[str], shortcode: Optional[str] = None,
-    post_media_id: Optional[str] = None,
+    post_media_id: Optional[str] = None, source_type: Optional[str] = None,
 ) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
     """
-    Precedence, strongest claim first: ad ID, then a story reply's verified
-    media ID, then a shared reel's shortcode, then a shared post's media ID —
-    which is admin-paired rather than Meta-verified, so it is tried last of
-    all four and only after route_for_inbound is called with a genuine
-    ``post_media_id``, never guessed from one of the other fields.
+    For explicitly typed source events, the deterministic source identifier is
+    checked first (Story media ID, Reel shortcode, or paired Post media ID).
+    Legacy callers retain the historical ad-first precedence.
     """
     from camellia.database import db
 
+    # A Story reply carries the strongest source evidence: the exact Meta
+    # Story media id.  Keep ad referral matching unchanged for all other
+    # events, but do not let an accompanying ad referral steal a configured
+    # Story mapping.
+    if media_id and source_type == "story_reply":
+        route = db.find_instagram_source_route("media_id", str(media_id), source_type="story")
+        if route:
+            return decode_route(route), "story_media_id"
+    if source_type == "reel" and shortcode:
+        route = db.find_instagram_source_route("shortcode", str(shortcode), source_type="reel")
+        if route:
+            return decode_route(route), "shared_media_url"
+    if source_type == "post" and post_media_id:
+        route = db.find_instagram_source_route("media_id", str(post_media_id), source_type="post")
+        if route:
+            return decode_route(route), "shared_post_media_id"
     if ad_id:
         route = db.find_instagram_source_route("ad_id", str(ad_id))
         if route:
@@ -526,18 +549,24 @@ def route_for_inbound(
                 "media_id": None,
             }, "legacy_ad_id"
     if media_id:
-        route = db.find_instagram_source_route("media_id", str(media_id))
+        route = db.find_instagram_source_route(
+            "media_id", str(media_id), source_type="story" if source_type == "story_reply" else None,
+        )
         if route:
             return decode_route(route), "media_id"
     if shortcode:
-        route = db.find_instagram_source_route("shortcode", str(shortcode))
+        route = db.find_instagram_source_route(
+            "shortcode", str(shortcode), source_type="reel" if source_type == "reel" else None,
+        )
         if route:
             return decode_route(route), "shared_media_url"
     if post_media_id:
         # A paired post's id lives in the same media_id column a story reply
         # would occupy — it is still an exact Meta identifier once bound, just
         # one an admin verified rather than one Meta labelled as a reply.
-        route = db.find_instagram_source_route("media_id", str(post_media_id))
+        route = db.find_instagram_source_route(
+            "media_id", str(post_media_id), source_type="post" if source_type == "post" else None,
+        )
         if route:
             return decode_route(route), "shared_post_media_id"
     return None, None

@@ -483,6 +483,19 @@ def test_blocked_browser_storage_cannot_prevent_login():
     assert "X-Admin-Key': currentAdminKey" not in page
 
 
+def test_dashboard_waits_for_session_restore_and_guards_against_stale_checks():
+    """A valid server session must not be obscured by the login overlay on refresh."""
+    page = client.get("/admin").text
+
+    assert 'id="authRestoring"' in page
+    assert 'id="authCard" style="display:none"' in page
+    assert "let authRequestGeneration = 0" in page
+    assert "const requestGeneration = ++authRequestGeneration" in page
+    assert "if (requestGeneration !== authRequestGeneration) return;" in page
+    assert "function showAuthChecking" in page
+    assert "function hideAuthOverlay" in page
+
+
 def test_password_login_fields_do_not_expose_or_truncate_credentials():
     """
     The login box must not cap what can be typed into it.

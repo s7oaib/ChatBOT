@@ -1,6 +1,12 @@
 import json
 
-from camellia.content_integrity import apply_confirmed_menu_facts, apply_safe_content_remediations, canonical_override_responses
+from camellia.content_integrity import (
+    HOME_TABLE_REMEDIATION_ACTOR,
+    HOME_TABLE_TEMPLATE_IDS,
+    apply_confirmed_menu_facts,
+    apply_safe_content_remediations,
+    canonical_override_responses,
+)
 from camellia.database import Database
 from camellia.responder import DeterministicResponder
 
@@ -60,6 +66,19 @@ def test_safe_remediation_creates_versioned_overrides_from_canonical_menu(tmp_pa
     for template_id, values in expected_pack_values.items():
         copy = database.get_response_template_override(template_id)["response"]
         assert all(value in copy for value in values)
+
+
+def test_home_table_creation_uses_home_table_audit_metadata(tmp_path):
+    database, menu, templates = _fixtures(tmp_path)
+    actions = apply_safe_content_remediations(database, menu, templates)
+
+    for template_id in HOME_TABLE_TEMPLATE_IDS:
+        assert actions[template_id] == "created"
+        override = database.get_response_template_override(template_id)
+        assert override["updated_by"] == HOME_TABLE_REMEDIATION_ACTOR
+        versions = database.get_response_template_override_versions(template_id)
+        assert versions[0]["changed_by"] == HOME_TABLE_REMEDIATION_ACTOR
+        assert versions[0]["change_reason"] == "initial_override_default"
 
 
 def test_remediation_does_not_overwrite_client_authored_copy(tmp_path):

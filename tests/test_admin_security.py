@@ -69,6 +69,26 @@ def test_valid_password_login_creates_secure_server_session(security_client):
     assert client.get("/admin/menu/active").status_code == 200
 
 
+def test_authenticated_session_survives_dashboard_refresh_and_protected_navigation(security_client):
+    """Browser refresh/navigation must reuse the persisted server session."""
+    client, _database = security_client
+    assert _login(client).status_code == 200
+
+    for path in (
+        "/admin",
+        "/admin/dashboard",
+        "/admin/session",
+        "/admin/menu/active",
+        "/admin/analytics",
+        "/admin/conversations?limit=1",
+    ):
+        assert client.get(path).status_code == 200, path
+
+    # A separate browser without the session cookie remains unauthenticated.
+    unauthenticated = TestClient(app, base_url="https://testserver")
+    assert unauthenticated.get("/admin/session").status_code == 403
+
+
 def test_wrong_and_unknown_credentials_are_generic(security_client):
     client, _database = security_client
     wrong_password = _login(client, password="wrong password")

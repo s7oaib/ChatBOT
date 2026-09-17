@@ -65,11 +65,13 @@ class TestSavouryVsSondeshDeliveryTime:
         assert "15 minutes" in text
 
     def test_a_context_free_time_question_is_unaffected(self):
-        # No food or sondesh word at all — the disambiguator must not fire,
-        # leaving the generic delivery_time template to answer as before.
+        # The Phase 3B client-confirmed rule treats a context-free delivery
+        # question as savoury delivery timing rather than the broader
+        # Sondesh/general delivery template.
         text, matched, template_id, _ = reply_to("how long does delivery take")
         assert matched is True
-        assert template_id == "delivery_time"
+        assert template_id == "savoury_delivery_time"
+        assert "45 minutes" in text
 
 
 class TestKolkataDisambiguation:

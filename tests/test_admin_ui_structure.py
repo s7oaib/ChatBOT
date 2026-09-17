@@ -10,11 +10,13 @@ removal left an orphan `}`, the HTML still looked right, and `switchTab` and
 caught it without a browser.
 """
 import re
+import inspect
 
 import pytest
 from fastapi.testclient import TestClient
 
 import camellia.database as db_module
+from camellia import instagram_routing
 from camellia.app import app
 
 db_module.db.init_db()
@@ -64,7 +66,7 @@ def test_dashboard_javascript_brackets_balance(script, opener, closer):
     )
 
 
-def test_the_dashboard_has_four_client_facing_tabs(page):
+def test_the_dashboard_has_five_client_facing_tabs(page):
     """
     Eight tabs needed 1655px of nav on a 347px phone, so most of the portal was
     unreachable on the handset the kitchen actually uses. Menu Manager is its
@@ -76,12 +78,12 @@ def test_the_dashboard_has_four_client_facing_tabs(page):
     there — see test_ai_resolution_tab_exists_and_reuses_existing_endpoints
     and the candidate/escalation/knowledge-gap regression tests below. Their
     old panels stay in the DOM behind the Advanced/Legacy disclosure, not in
-    this main nav bar. Custom Q&A is the fourth: the client-managed reusable
+    this main nav bar. Custom Q&A is the fifth: the client-managed reusable
     knowledge library, on the same learned_knowledge table.
     """
     nav = page[page.index('<div class="tabs-nav">'):page.index('</div>', page.index('<div class="tabs-nav">'))]
     buttons = re.findall(r'<button class="tab-btn[^"]*" onclick="switchTab\(', nav)
-    assert len(buttons) == 4, f"expected 4 client-facing tabs, found {len(buttons)}"
+    assert len(buttons) == 5, f"expected 5 client-facing tabs, found {len(buttons)}"
     assert "Custom Q&amp;A" in nav
 
 
@@ -197,6 +199,164 @@ def test_menu_tab_has_simple_ad_routing_controls(page):
     assert "loadAdRoutes()" in page
     assert "product_catalogue" in page
     assert "igProducts.map" in page
+
+
+def test_stories_are_not_offered_or_shown_in_content_routing_tab(page):
+    """Stories are managed only in the dedicated Stories tab."""
+    section = page[page.index('id="tab-ad-routing"'):page.index('id="tab-instagram-stories"')]
+    source_select = section[section.index('id="igSourceType"'):section.index('</select>', section.index('id="igSourceType"'))]
+    assert '<option value="post">' in source_select
+    assert '<option value="reel">' in source_select
+    assert '<option value="ad">' in source_select
+    assert 'value="story"' not in source_select
+    assert 'igStoryMapForm' not in section
+    assert 'igStoryMediaId' not in section
+    assert 'igStorySourceList' not in section
+    registry = page[page.index('function renderInstagramMediaRegistry'):page.index('async function loadAdRoutes')]
+    assert "route.source_type !== 'story'" in registry
+    assert 'useCapturedStory' not in page
+    assert "igSourceType').value = 'story'" not in page
+
+
+def test_failed_story_capability_probe_and_automatic_listing_are_removed(page):
+    assert not any(route.path == "/admin/instagram-story-capability" for route in app.routes)
+    source = inspect.getsource(instagram_routing)
+    assert "def probe_instagram_story_capability" not in source
+    assert "/stories" not in source
+
+
+def test_instagram_stories_has_a_dedicated_top_level_tab_and_panel(page):
+    assert "switchTab('tab-instagram-stories', this)" in page
+    assert 'id="tab-instagram-stories"' in page
+    assert 'data-group="instagram_stories"' in page
+    assert "'tab-instagram-stories': 'instagram_stories'" in page
+    assert "if (group === 'instagram_stories') { loadInstagramStories(); }" in page
+    assert "fetch('/admin/instagram-story-sources'" in page
+    assert "New Stories appear here after Instagram sends a Story interaction/reply event." in page
+
+
+def test_instagram_stories_map_flow_uses_a_read_only_captured_id(page):
+    section = page[page.index('id="tab-instagram-stories"'):page.index('<!-- MENU tab, panel 3 of 4')]
+    assert 'id="igStoryMapForm"' in section
+    assert 'id="igStoryMediaId"' in section and 'readonly' in section
+    for field in ("igStoryTopicPicker", "igStoryPriorityPicker", "igStoryKnowledgeScope", "igStoryMenuMode", "igStoryMenuPicker", "igStoryEscalationPolicy", "igStoryActive"):
+        assert f'id="{field}"' in section
+    assert "media_id: mediaId" in page
+    assert 'onclick="editInstagramRoute(' not in section
+
+
+def test_instagram_story_menu_mode_offers_inherit_none_and_selected(page):
+    """
+    Defect 1 (P1): the picker's empty option used to be labelled "Inherit
+    Topic Menu" but always submitted menu_mode='NONE' -- INHERIT was
+    unreachable. A dedicated menu-mode select now carries all three states
+    explicitly; tests/test_instagram_story_runtime.py proves the actual
+    submit/edit-reload behavior by executing the real JS.
+    """
+    section = page[page.index('id="tab-instagram-stories"'):page.index('<!-- MENU tab, panel 3 of 4')]
+    mode_select = section[section.index('id="igStoryMenuMode"'):section.index('</select>', section.index('id="igStoryMenuMode"'))]
+    assert '<option value="INHERIT">Inherit Topic Menu</option>' in mode_select
+    assert '<option value="NONE">No Menu</option>' in mode_select
+    assert '<option value="SELECTED">Select Menu</option>' in mode_select
+    assert 'id="igStoryMenuPickerWrap"' in section
+
+    script = page[page.index('function onInstagramStoryMenuModeChange'):page.index('function renderInstagramStoryPriorityProducts')]
+    assert "igStoryMenuMode" in script
+
+    save = page[page.index('async function saveInstagramStoryMapping'):page.index('async function setInstagramStoryActive')]
+    assert "menu_mode: menuMode" in save
+    assert "menuMode === 'SELECTED' ? menuId : null" in save
+    assert "menuMode === 'SELECTED' && !menuId" in save, "SELECTED without a chosen menu must be blocked before submit"
+
+    edit = page[page.index('function openInstagramStoryMapping'):page.index('function cancelInstagramStoryMapping')]
+    assert "source.menu_mode" in edit
+    assert "onInstagramStoryMenuModeChange()" in edit
+
+
+def test_instagram_story_refresh_does_not_clear_the_list_before_it_settles(page):
+    """
+    Defect 2 (P2): loadInstagramStories() used to overwrite the visible
+    Story list with "Loading..." immediately, so a failed refresh replaced
+    good data with an error. tests/test_instagram_story_runtime.py executes
+    the real function against mocked fetch failures; this only locks the
+    structural shape (a separate status element, list only replaced on
+    success) that makes that behavior possible.
+    """
+    assert 'id="igStoryRefreshStatus"' in page
+    load = page[page.index('async function loadInstagramStories'):page.index('function renderInstagramMediaRegistry')]
+    assert "igStoriesEverLoaded" in load
+    assert "setInstagramStoryRefreshStatus" in load
+    assert "igStoryList" in load
+    # The list must only be blanked to "Loading..." on the very first load
+    # (gated by isFirstLoad), never unconditionally at the top of every
+    # call the way the original defect did it.
+    assert load.index("isFirstLoad") < load.index("Loading captured Stories")
+    before_gate = load[:load.index("if (isFirstLoad)")]
+    assert "list.innerHTML" not in before_gate
+    assert "Could not refresh Stories. Showing last loaded data." in load
+
+
+def test_instagram_stories_exposes_status_filters_and_safe_actions(page):
+    section = page[page.index('id="tab-instagram-stories"'):page.index('<!-- MENU tab, panel 3 of 4')]
+    render = page[page.index('function renderInstagramStories'):page.index('async function loadInstagramStories')]
+    for label in ("All", "Unmapped", "Mapped", "Disabled", "Archived", "Deleted", "Map Story", "Edit Mapping", "Disable", "Enable", "Archive", "Restore", "Delete"):
+        assert label in section or label in render
+    assert 'data-story-action="delete"' in render
+    assert 'data-story-action="restore-source"' in render
+    assert 'Delete this Story from Camellia Admin?' in page
+    assert 'This removes the Story from the Admin dashboard and disables its Story routing.' in page
+    assert '/admin/instagram-story-sources/${encodeURIComponent(mediaId)}' in page
+    assert '/permanent' not in render
+    assert "setInstagramStoryActive" in render
+    assert "archiveInstagramStory" in render
+    assert "restoreInstagramStory" in render
+
+
+def test_instagram_story_delete_is_local_and_history_is_explicit(page):
+    section = page[page.index('id="tab-instagram-stories"'):page.index('<!-- MENU tab, panel 3 of 4')]
+    assert 'data-story-filter="DELETED"' in section
+    assert "loadInstagramStories(true)" in page
+    assert "Story itself was not deleted" in page
+    assert "does not delete the Story from Instagram" in page
+    assert "admin_deleted" in page
+    delete_fn = page[page.index('async function deleteInstagramStory'):page.index('async function restoreInstagramStorySource')]
+    assert "igStorySources = igStorySources.filter" in delete_fn
+    assert "renderInstagramStories()" in delete_fn
+    assert "await loadInstagramStories()" not in delete_fn
+
+
+def test_instagram_story_operational_filters_exclude_deleted_and_auto_refresh_is_safe(page):
+    story_matches = page[page.index('function storyMatches'):page.index('function setInstagramStoryFilter')]
+    assert "igStoryFilter !== 'DELETED' && deleted" in story_matches
+    assert "igStoryFilter === 'all'" not in story_matches or "deleted" in story_matches
+
+    refresh = page[page.index('function instagramStoriesTabIsVisible'):page.index('function renderInstagramMediaRegistry')]
+    assert "document.visibilityState !== 'hidden'" in refresh
+    assert "setInterval" in refresh
+    assert "15000" in refresh
+    assert "loadInstagramStories()" in refresh
+    assert "graph.instagram.com" not in refresh
+    assert "graph.facebook.com" not in refresh
+    assert "access_token" not in refresh
+    assert "document.addEventListener('visibilitychange', syncInstagramStoryAutoRefresh)" in page
+
+
+def test_instagram_stories_refreshes_from_source_and_mapping_endpoints(page):
+    section = page[page.index('async function loadInstagramStories'):page.index('function renderInstagramMediaRegistry')]
+    assert "igStoryRefreshButton" in page
+    assert "instagram-story-sources" in section
+    assert "instagram-routes?include_archived=true" in section
+    assert "populateInstagramStoryPickers" in section
+    assert "renderInstagramStories()" in section
+
+
+def test_instagram_story_preview_metadata_never_exposes_temporary_url(page):
+    section = page[page.index('function storyPreviewMetadata'):page.index('function storyMatches')]
+    assert "new URL(String(value), window.location.origin)" in section
+    assert "parsed.hostname" in section and "parsed.pathname" in section
+    story_render = page[page.index('function renderInstagramStories'):page.index('async function loadInstagramStories')]
+    assert "storyPreviewMetadata(source.temporary_url)" in story_render
+    assert "temporary_url}" not in story_render
 
 
 def test_the_fake_flyer_test_button_is_gone(page):

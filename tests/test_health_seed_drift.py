@@ -52,6 +52,29 @@ def test_an_in_sync_deployment_raises_no_drift_warning(live_file):
     assert _drift_warnings(body) == []
 
 
+def test_health_reports_required_home_table_templates(live_file):
+    body = _health()
+    assert body["answering"]["home_table_required_templates"] == "PASS"
+    assert body["answering"]["template_seed"]["home_table_required_templates_present"] is True
+
+
+def test_health_reports_structurally_missing_home_table_templates(live_file):
+    data = json.loads(live_file.read_text(encoding="utf-8"))
+    data["templates"] = [
+        template for template in data["templates"]
+        if template.get("id") not in bootstrap.REQUIRED_QA_TEMPLATE_IDS
+    ]
+    live_file.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    body = _health()
+    seed_state = body["answering"]["template_seed"]
+    assert body["answering"]["home_table_required_templates"] == "FAIL"
+    assert seed_state["home_table_required_templates_present"] is False
+    assert seed_state["home_table_required_templates_missing"] == list(
+        bootstrap.REQUIRED_QA_TEMPLATE_IDS
+    )
+
+
 def test_forced_drift_is_flagged(live_file):
     """
     The scenario this exists for, forced by hand: the repository's templates

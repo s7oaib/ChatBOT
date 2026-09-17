@@ -551,6 +551,9 @@ def _process_instagram_event(
     message_text: str,
     ad_id: Optional[str],
     entry_point: Optional[EntryPoint] = None,
+    shared_reel: Optional[Dict[str, str]] = None,
+    shared_post_id: Optional[str] = None,
+    shared_source_type: Optional[str] = None,
 ) -> None:
     """
     Matches, logs, escalates and replies for one Instagram DM.
@@ -567,6 +570,13 @@ def _process_instagram_event(
     """
     try:
         facts = session_memory.get_facts(sender_id, "instagram")
+        shared_source_type = shared_source_type or (
+            "reel" if shared_reel else "post" if shared_post_id else None
+        )
+        source_media_present = bool(
+            shared_reel or shared_post_id or (entry_point and entry_point.media_id)
+        )
+        customer_text_accompanied_media = bool(source_media_present and str(message_text or "").strip())
 
         # How this message was composed, and which ad it came from, recorded on
         # every row this function writes. Phase 1 of the router rollout: until
@@ -588,30 +598,90 @@ def _process_instagram_event(
             facts["ad_product"] = ad_product
         source_route, source_match_method = route_for_inbound(
             ad_id=trace["ad_id"], media_id=trace["media_id"],
+            shortcode=(shared_reel or {}).get("shortcode"),
+            post_media_id=shared_post_id,
+            source_type="story_reply" if entry.source == "story_reply" else shared_source_type,
         )
+        if not source_route and shared_post_id:
+            # Preserve the existing admin-open pairing window for Posts. Once
+            # bound, the exact attachment ID follows the same source flow as
+            # a Reel shortcode or Story media ID.
+            if _establish_shared_post_context(sender_id, shared_post_id):
+                source_route = facts.get("source_route")
+                source_match_method = facts.get("source_match_method") or "shared_post_media_id"
         if source_route:
             facts["source_route"] = source_route
+            if source_media_present:
+                # A newly identified exact source is a fresh subject. Do not
+                # let an older conversational topic prevent the mapped
+                # Post/Reel/Story from answering "price?".
+                facts["last_topic"] = None
+                facts["source_context_superseded"] = False
+                facts["source_priority_cursor"] = 0
+                facts["active_product_context"] = None
         elif isinstance(facts.get("source_route"), dict):
-            source_route = facts["source_route"]
-            # A reel shared a moment ago is why this route is in the session
-            # at all, so the follow-up message is attributed to the share
-            # rather than to the vaguer "it was already here".
-            source_match_method = facts.get("source_match_method") or "session"
+            if source_media_present:
+                # An unmapped source must not borrow a previous route. Its
+                # written question still goes through canonical intent
+                # handling, but an ambiguous follow-up must clarify.
+                facts["source_route"] = None
+                facts["source_match_method"] = (
+                    "story_media_id_unmapped" if entry.source == "story_reply"
+                    else "shared_media_unmapped"
+                )
+                facts["source_context_superseded"] = True
+                facts["source_priority_cursor"] = 0
+                facts["last_topic"] = None
+                facts["active_product_context"] = None
+            else:
+                source_route = facts["source_route"]
+                # A reel shared a moment ago is why this route is in the
+                # session at all, so the follow-up message is attributed to
+                # the share rather than to the vaguer "it was already here".
+                source_match_method = facts.get("source_match_method") or "session"
         facts["source_context_used"] = False
+        source_trace_type = (source_route or {}).get("source_type") or (
+            "story" if entry.source == "story_reply" else shared_source_type
+        )
+        source_trace_media_id = trace["media_id"] or shared_post_id
+        source_trace_match_method = source_match_method or (
+            "story_media_id_unmapped" if entry.source == "story_reply" else (
+                "shared_media_unmapped" if source_media_present else None
+            )
+        )
+        source_trace_shortcode = (source_route or {}).get("shortcode") or (
+            (shared_reel or {}).get("shortcode") if shared_source_type == "reel" else None
+        )
         trace.update({
             "source_routing_id": (source_route or {}).get("routing_id"),
-            "source_match_method": source_match_method,
-            "source_type": (source_route or {}).get("source_type"),
-            "shortcode": (source_route or {}).get("shortcode"),
+            "source_match_method": source_trace_match_method,
+            "source_type": source_trace_type,
+            "shortcode": source_trace_shortcode,
+            "media_id": source_trace_media_id,
             "routing_topic": (source_route or {}).get("routing_topic"),
+            "source_media_present": source_media_present,
+            "customer_text_accompanied_media": customer_text_accompanied_media,
         })
+        if source_media_present and not source_route and not str(message_text or "").strip():
+            # An unconfigured/unsupported share remains a genuinely unreadable
+            # attachment. This branch is never reached for an identified route.
+            _reply_to_unreadable_attachment(
+                sender_id,
+                source_type=trace["source_type"], media_id=trace["media_id"],
+                shortcode=trace["shortcode"],
+                source_match_method=trace["source_match_method"],
+                source_media_present=True,
+            )
+            return
+        customer_message = str(message_text or "").strip() or "[shared media]"
+        response_input = str(message_text or "").strip() or "Tell me more"
         log.info(
             "Instagram inbound from %s: source=%s ad_id=%s ad_title=%r payload=%r",
             sender_id, entry.source, trace["ad_id"], trace["ad_title"], entry.raw_payload,
         )
 
         response_text, was_matched, template_id, image_url = responder.match_and_respond(
-            message_text, user_id=sender_id, channel="instagram",
+            response_input, user_id=sender_id, channel="instagram",
             referral_source="ADS", referral_ad_id=trace["ad_id"], referral_ad_title=trace["ad_title"],
         )
 
@@ -620,7 +690,7 @@ def _process_instagram_event(
         protected_flow = bool(facts.get("cart") or facts.get("order_draft")) or template_id in ("order_draft_receipt", "order_next_steps")
         if (config.LLM_ASSISTED_RESOLUTION_ENABLED or config.LLM_AUTO_RESOLVE_SIMULATION_ENABLED) and not was_matched and not protected_flow and not source_route:
             assisted_suggestion = create_suggestion(
-                user_id=sender_id, channel="instagram", customer_message=message_text,
+                user_id=sender_id, channel="instagram", customer_message=customer_message,
                 deterministic_resolved=False, active_protected_flow=protected_flow,
                 source_routed=bool(source_route), source_routing_id=trace.get("source_routing_id"),
             )
@@ -640,15 +710,39 @@ def _process_instagram_event(
         # template) is also a handoff, not just an unmatched question: the
         # client wants a clickable WhatsApp continuation here, not a phone
         # number quoted as plain Instagram text.
+        # These routes are complete, approved informational answers.  They
+        # must remain the primary Instagram payload even when a prior state
+        # flag or a future route adapter reports an escalation-shaped result.
+        # Order completion remains deliberately outside this allowlist.
+        informational_templates = {
+            "subscription_details",
+            "sondesh_dispatch_time",
+            "bengali_home_table_details",
+            "bengali_home_table_pricing",
+            "bengali_home_table_payment",
+            "GUARD_staff_names_manager_contact",
+        }
+        informational_answer = template_id in informational_templates
         needs_escalation = (
-            not was_matched
-            or (source_route or {}).get("escalation_policy") == "always_human"
+            (not was_matched and not informational_answer)
+            or (
+                not informational_answer
+                and (source_route or {}).get("escalation_policy") == "always_human"
+            )
             or template_id in (
                 "explicit_escalation",
                 "order_draft_receipt",
                 "order_next_steps",
-                "GUARD_staff_names_manager_contact",
             )
+        )
+        log.info(
+            "INSTAGRAM_OUTPUT_POLICY template=%s matched=%s informational=%s "
+            "source_policy=%s escalate=%s",
+            template_id,
+            bool(was_matched),
+            bool(informational_answer),
+            (source_route or {}).get("escalation_policy"),
+            bool(needs_escalation),
         )
         if needs_escalation:
             reason = (
@@ -665,7 +759,7 @@ def _process_instagram_event(
             is_order_handoff = template_id in ("order_draft_receipt", "order_next_steps")
             handoff = get_or_create_handoff(
                 user_id=sender_id, channel="instagram", reason=reason,
-                user_message=message_text, facts=facts,
+                user_message=customer_message, facts=facts,
                 include_order=is_order_handoff,
             )
             # A repeated "human"/"can someone help" against an already-active
@@ -675,7 +769,7 @@ def _process_instagram_event(
                 escalator.handle_escalation(
                     user_id=sender_id,
                     channel="instagram",
-                    user_message=message_text,
+                    user_message=customer_message,
                     reason=reason,
                     context_data={
                         "ad_id": ad_id, "sender_id": sender_id, "template_id": template_id,
@@ -687,7 +781,9 @@ def _process_instagram_event(
             if template_id == "order_draft_receipt":
                 response_text = response_text.rstrip()
             else:
-                response_text = customer_facing_notice()
+                response_text = customer_facing_notice(
+                    finalized_order=template_id == "order_next_steps"
+                )
             link_message = customer_facing_link_message(handoff["handoff_ref"], order_summary)
             mark_referred(handoff["handoff_ref"])
             if is_order_handoff and order_summary:
@@ -699,11 +795,15 @@ def _process_instagram_event(
             image_url = None
 
         trace["source_context_used"] = bool(facts.get("source_context_used"))
+        trace["source_context_available"] = bool(
+            source_route and source_route.get("active", True)
+        )
+        trace["source_referential_intent"] = facts.get("source_referential_intent")
         logged_response = response_text
         if needs_escalation:
             logged_response = f"{response_text}\n\n{link_message}"
         conversation_id = db.log_conversation(
-            sender_id, "instagram", message_text, logged_response, was_matched,
+            sender_id, "instagram", customer_message, logged_response, was_matched,
             template_id, **trace,
         )
 
@@ -738,7 +838,37 @@ _UNREADABLE_ATTACHMENT_REPLY = (
 )
 
 
-def _reply_to_unreadable_attachment(sender_id: str) -> None:
+def _log_unreadable_attachment_audit(
+    sender_id: str,
+    *,
+    source_type: Optional[str] = None,
+    media_id: Optional[str] = None,
+    shortcode: Optional[str] = None,
+    source_match_method: Optional[str] = None,
+    source_media_present: bool = False,
+) -> int:
+    """Persist the observed source even when the customer notice is deduped."""
+    return db.log_conversation(
+        sender_id, "instagram", "[attachment]", _UNREADABLE_ATTACHMENT_REPLY,
+        True, "unreadable_attachment", message_source="attachment",
+        source_type=source_type, media_id=media_id, shortcode=shortcode,
+        source_match_method=source_match_method,
+        source_context_available=False, source_context_used=False,
+        source_referential_intent=None,
+        source_media_present=bool(source_media_present),
+        customer_text_accompanied_media=False,
+    )
+
+
+def _reply_to_unreadable_attachment(
+    sender_id: str,
+    *,
+    source_type: Optional[str] = None,
+    media_id: Optional[str] = None,
+    shortcode: Optional[str] = None,
+    source_match_method: Optional[str] = None,
+    source_media_present: bool = False,
+) -> None:
     """
     Answers a photo, sticker or voice note we cannot read.
 
@@ -751,13 +881,20 @@ def _reply_to_unreadable_attachment(sender_id: str) -> None:
         facts = session_memory.get_facts(sender_id, "instagram")
         if facts.get("attachment_notice_sent"):
             log.info("Attachment from %s; the type-instead notice was already sent.", sender_id)
+            if source_media_present:
+                _log_unreadable_attachment_audit(
+                    sender_id, source_type=source_type, media_id=media_id,
+                    shortcode=shortcode, source_match_method=source_match_method,
+                    source_media_present=True,
+                )
             return
         facts["attachment_notice_sent"] = True
 
         session_memory.add_turn(sender_id, "instagram", "[attachment]", _UNREADABLE_ATTACHMENT_REPLY)
-        conversation_id = db.log_conversation(
-            sender_id, "instagram", "[attachment]", _UNREADABLE_ATTACHMENT_REPLY,
-            True, "unreadable_attachment", message_source="attachment",
+        conversation_id = _log_unreadable_attachment_audit(
+            sender_id, source_type=source_type, media_id=media_id,
+            shortcode=shortcode, source_match_method=source_match_method,
+            source_media_present=source_media_present,
         )
         send_instagram_reply(
             sender_id, _UNREADABLE_ATTACHMENT_REPLY,
@@ -896,21 +1033,128 @@ def _handle_shared_attachment(
     Establishes source context where there is any, then answers the
     attachment.
 
-    A recognized post — already paired, or bound just now against an open
-    pairing window — skips the "I can't open photos" reply: the system did
-    understand what was shared, and sending that message would misstate what
-    just happened. A reel keeps its existing reply exactly as before; that
-    path is proven in production and this change does not touch it.
+    A recognized Post/Reel — already paired or matched by its deterministic
+    identifier — skips the "I can't open photos" reply: the system did
+    understand what was shared, and the source-aware responder can answer it.
+    An unconfigured or unsupported attachment keeps the existing fallback.
     """
-    if reel_identity:
-        _establish_shared_reel_context(sender_id, reel_identity)
-        _reply_to_unreadable_attachment(sender_id)
+    if reel_identity or post_media_id:
+        # Use the same route/responder path as a share with accompanying text.
+        # A mapped source gets its approved default response; only an
+        # unconfigured/unsupported attachment receives the unreadable notice.
+        try:
+            route, _ = route_for_inbound(
+                ad_id=None,
+                media_id=None,
+                shortcode=(reel_identity or {}).get("shortcode"),
+                post_media_id=post_media_id,
+                source_type="reel" if reel_identity else "post",
+            )
+            if not route and post_media_id:
+                _establish_shared_post_context(sender_id, post_media_id)
+                route = session_memory.get_facts(sender_id, "instagram").get("source_route")
+            if not route:
+                _reply_to_unreadable_attachment(
+                    sender_id,
+                    source_type="reel" if reel_identity else "post",
+                    media_id=post_media_id,
+                    shortcode=(reel_identity or {}).get("shortcode"),
+                    source_match_method="shared_media_unmapped",
+                    source_media_present=True,
+                )
+                return
+            _process_instagram_event(
+                sender_id, "", None,
+                EntryPoint(source="shared_media"),
+                shared_reel=reel_identity,
+                shared_post_id=post_media_id,
+                shared_source_type="reel" if reel_identity else "post",
+            )
+        except Exception:
+            log.exception("Could not resolve shared media for %s.", sender_id)
+            _reply_to_unreadable_attachment(
+                sender_id,
+                source_type="reel" if reel_identity else "post",
+                media_id=post_media_id,
+                shortcode=(reel_identity or {}).get("shortcode"),
+                source_match_method="shared_media_resolution_error",
+                source_media_present=True,
+            )
         return
-    if post_media_id:
-        recognized = _establish_shared_post_context(sender_id, post_media_id)
-        if recognized:
-            return
     _reply_to_unreadable_attachment(sender_id)
+
+
+def _story_reply_payload(messaging_event: dict) -> Optional[Dict[str, Any]]:
+    """Return the raw Story reply object only when Meta supplied one."""
+    message = messaging_event.get("message") or {}
+    reply_to = message.get("reply_to")
+    story = reply_to.get("story") if isinstance(reply_to, dict) else None
+    return story if isinstance(story, dict) else None
+
+
+def _sanitize_story_temporary_url(value: Any) -> Optional[str]:
+    """Keep only a non-sensitive Story URL shape for diagnostics/admin."""
+    try:
+        parsed = urlsplit(str(value or "").strip())
+        if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+            return None
+        # Rebuild from scheme/hostname/path only: this drops userinfo, port,
+        # query credentials, expiry/signature parameters and fragments.
+        return f"{parsed.scheme.lower()}://{parsed.hostname}{parsed.path}"[:2000]
+    except (TypeError, ValueError):
+        return None
+
+
+def _record_story_reply(messaging_event: dict, sender_id: Optional[str], media_id: str) -> None:
+    """Capture exact Story evidence; failures never affect the reply path."""
+    try:
+        story = _story_reply_payload(messaging_event) or {}
+        supplied_url = next(
+            (story.get(key) for key in ("url", "media_url", "thumbnail_url")
+             if isinstance(story.get(key), str) and story.get(key).startswith(("http://", "https://"))),
+            None,
+        )
+        supplied_url = _sanitize_story_temporary_url(supplied_url)
+        db.record_instagram_story_source(
+            media_id,
+            temporary_url=supplied_url,
+            story_status=str(story.get("status") or story.get("story_status") or "").strip() or None,
+            sender_id=str(sender_id) if sender_id else None,
+            event_metadata={
+                "event_id": messaging_event.get("id"),
+                "timestamp": messaging_event.get("timestamp"),
+                "message_id": (messaging_event.get("message") or {}).get("mid"),
+                "source": "story_reply",
+            },
+        )
+    except Exception:
+        log.exception("Could not capture Instagram Story reply %s.", media_id)
+
+
+def _shared_source_type(message: Dict[str, Any]) -> Optional[str]:
+    """Identify a supported Meta share wrapper without reading its caption."""
+    attachments = (message or {}).get("attachments")
+    if not isinstance(attachments, list):
+        return None
+    for attachment in attachments:
+        if not isinstance(attachment, dict):
+            continue
+        if attachment.get("type") == "ig_reel":
+            return "reel"
+        if attachment.get("type") == "ig_post":
+            return "post"
+    return None
+
+
+def _story_reaction_only(messaging_event: dict, entry_point: EntryPoint) -> bool:
+    """Recognize reaction-only Story replies without treating them as facts."""
+    if entry_point.source != "story_reply":
+        return False
+    message = messaging_event.get("message") or {}
+    if isinstance(message.get("reaction"), dict) or message.get("reaction"):
+        return True
+    text = str(message.get("text") or "").strip().replace("\ufe0f", "")
+    return text in {"❤", "😍", "🔥", "👍", "👏", "😂", "😮", "😢", "😡", "🥰"}
 
 
 def _classify_unanswered_event(messaging_event: dict) -> Optional[str]:
@@ -1129,10 +1373,36 @@ def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks
             entry_point = describe_entry_point(messaging_event)
             message = messaging_event.get("message") or {}
 
+            # Story IDs are durable routing evidence even when the operator
+            # has not mapped them yet. Capture before sender/ad-gate handling
+            # so the admin can see every Story that reached the webhook.
+            if entry_point.source == "story_reply" and entry_point.media_id:
+                _record_story_reply(messaging_event, sender_id, entry_point.media_id)
+
+            # Mentions are not replies to our Story and carry no approved
+            # product context. Keep them observable, but never turn them into
+            # an automatic product/business answer.
+            if entry_point.source == "story_mention":
+                _record_dropped_webhook_event("story_mention", messaging_event, sender_id)
+                results.append({"sender_id": sender_id, "action": "ignored_story_mention"})
+                continue
+
+            # A reaction-only Story response is not a product question. It is
+            # safer to leave it handled without a generated claim than to
+            # route an emoji through the canonical matcher or RAG.
+            if _story_reaction_only(messaging_event, entry_point):
+                _record_dropped_webhook_event("story_reaction_only", messaging_event, sender_id)
+                results.append({"sender_id": sender_id, "action": "ignored_story_reaction"})
+                continue
+
             if not sender_id:
                 log.info("Ignored Instagram event without sender ID (keys: %s).", list(messaging_event.keys()))
                 results.append({"action": "ignored_no_sender"})
                 continue
+
+            shared_reel = shared_reel_identity(message)
+            shared_post_id = shared_post_media_id(message) if not shared_reel else None
+            shared_source_type = _shared_source_type(message)
 
             # A contact-card attachment used to be read as a WhatsApp number
             # the customer was asked to share. Channel policy retired that
@@ -1161,30 +1431,39 @@ def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks
                 # Parsed here because it is pure string work, but resolved and
                 # stored in the background task below — the webhook must keep
                 # returning 200 before Meta decides it timed out and redelivers.
-                shared_reel = (
-                    shared_reel_identity(messaging_event.get("message") or {})
-                    if reason == "attachment_only" else None
-                )
-                shared_post_id = (
-                    shared_post_media_id(messaging_event.get("message") or {})
-                    if reason == "attachment_only" and not shared_reel else None
-                )
-
                 # A photo, voice note or sticker is a real person saying
                 # something we cannot read. Silence is the worst available
                 # answer — they cannot tell whether anyone is there. Asking
                 # them to type costs one message and keeps the conversation
                 # alive; it was found by the drop log within a minute of that
                 # log existing.
+                if (shared_source_type or (entry_point.source == "story_reply" and entry_point.media_id)) and is_ad_qualified:
+                    if shared_source_type:
+                        background_fn = _handle_shared_attachment
+                        background_args = (sender_id, shared_reel, shared_post_id)
+                    else:
+                        background_fn = _process_instagram_event
+                        background_args = (sender_id, "", ad_id, entry_point)
+                    background_tasks.add_task(
+                        background_fn, *background_args,
+                    )
+                    results.append({
+                        "sender_id": sender_id,
+                        "action": "queued_shared_media" if not shared_source_type else "queued_attachment_reply",
+                        "shared_reel_shortcode": (shared_reel or {}).get("shortcode"),
+                        "shared_post_media_id": shared_post_id,
+                    })
+                    continue
+
                 if reason == "attachment_only" and is_ad_qualified:
                     background_tasks.add_task(
-                        _handle_shared_attachment, sender_id, shared_reel, shared_post_id,
+                        _handle_shared_attachment, sender_id, None, None,
                     )
                     results.append({
                         "sender_id": sender_id,
                         "action": "queued_attachment_reply",
-                        "shared_reel_shortcode": (shared_reel or {}).get("shortcode"),
-                        "shared_post_media_id": shared_post_id,
+                        "shared_reel_shortcode": None,
+                        "shared_post_media_id": None,
                     })
                     continue
 
@@ -1206,6 +1485,19 @@ def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks
 
             # Accepted. The reply itself is built and sent off the request path
             # so Meta gets its 200 immediately and does not retry this delivery.
+            if shared_source_type:
+                background_tasks.add_task(
+                    _process_instagram_event, sender_id, message_text, ad_id, entry_point,
+                    shared_reel, shared_post_id, shared_source_type,
+                )
+                results.append({
+                    "sender_id": sender_id,
+                    "action": "queued_shared_media",
+                    "ad_id": ad_id,
+                    "message_source": entry_point.source,
+                    "ad_title": entry_point.ad_title,
+                })
+                continue
             background_tasks.add_task(
                 _process_instagram_event, sender_id, message_text, ad_id, entry_point
             )
@@ -1876,6 +2168,7 @@ def _answering_capability() -> dict:
     if not collections and not weekly:
         problems.append(f"no menu content loaded from {config.MENU_JSON_PATH}")
 
+    template_seed = _template_seed_state()
     return {
         "ready": not problems,
         "templates_loaded": len(templates),
@@ -1883,7 +2176,10 @@ def _answering_capability() -> dict:
         "weekly_menus": len(weekly),
         "qa_templates_path": config.QA_TEMPLATES_PATH,
         "menu_json_path": config.MENU_JSON_PATH,
-        "template_seed": _template_seed_state(),
+        "template_seed": template_seed,
+        "home_table_required_templates": (
+            "PASS" if template_seed["home_table_required_templates_present"] else "FAIL"
+        ),
         "problems": problems,
     }
 
@@ -1908,6 +2204,8 @@ def _template_seed_state() -> dict:
         "seed_version": None,
         "live_seed_version": None,
         "undelivered_seed_changes": False,
+        "home_table_required_templates_present": False,
+        "home_table_required_templates_missing": [],
     }
     try:
         seed_hash = bootstrap.seed_fingerprint(seed_path)
@@ -1916,10 +2214,22 @@ def _template_seed_state() -> dict:
         live_path = Path(config.QA_TEMPLATES_PATH)
         if live_path.resolve() == seed_path.resolve():
             # No volume in play; the bot is reading the seed itself.
+            state["home_table_required_templates_missing"] = list(
+                bootstrap.missing_required_template_ids(seed_path)
+            )
+            state["home_table_required_templates_present"] = not state[
+                "home_table_required_templates_missing"
+            ]
             return state
 
         with open(live_path, "r", encoding="utf-8") as f:
             live = json.load(f)
+        state["home_table_required_templates_missing"] = list(
+            bootstrap.missing_required_template_ids(live_path)
+        )
+        state["home_table_required_templates_present"] = not state[
+            "home_table_required_templates_missing"
+        ]
         state["live_seed_version"] = live.get("seed_version")
         recorded = live.get("seeded_from_hash")
         if seed_hash and recorded and seed_hash != recorded:
@@ -2790,11 +3100,49 @@ def list_instagram_routes(
     return {
         "status": "success",
         "routes": routes,
+        "story_sources": db.list_instagram_story_sources(),
         "legacy_ad_routes": db.list_ad_product_routes(),
         "product_catalogue": product_catalogue(),
         "knowledge_scopes": sorted(SOURCE_MAP),
         "inbound_identifiers": ["ad_id", "story_media_id"],
     }
+
+
+@app.get("/admin/instagram-story-sources")
+def list_instagram_story_sources(
+    include_deleted: bool = False,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """Lists captured Story IDs, including unmapped IDs, for admin routing."""
+    require_admin(x_admin_key, x_admin_pin)
+    return {"status": "success", "story_sources": db.list_instagram_story_sources(include_deleted=include_deleted)}
+
+
+@app.delete("/admin/instagram-story-sources/{story_media_id}")
+def delete_instagram_story_source(
+    story_media_id: str,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """Hide one captured Story locally without calling any Meta delete API."""
+    require_admin(x_admin_key, x_admin_pin)
+    if not db.delete_instagram_story_source(story_media_id, removed_by="admin"):
+        raise HTTPException(status_code=404, detail="Captured Story not found.")
+    return {"status": "success", "story_media_id": story_media_id, "deleted": True}
+
+
+@app.post("/admin/instagram-story-sources/{story_media_id}/restore")
+def restore_instagram_story_source(
+    story_media_id: str,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """Restore local Story visibility; its archived route stays inactive."""
+    require_admin(x_admin_key, x_admin_pin)
+    if not db.restore_instagram_story_source(story_media_id, restored_by="admin"):
+        raise HTTPException(status_code=404, detail="Deleted Story not found.")
+    return {"status": "success", "story_media_id": story_media_id, "restored": True}
 
 
 @app.post("/admin/instagram-routes/{routing_id}/metadata/refresh")
@@ -5591,6 +5939,10 @@ def get_admin_dashboard():
             box-shadow: 0 25px 50px rgba(0,0,0,0.3); text-align: center; border: 1px solid rgba(212,175,55,0.3);
             animation: fadeIn 0.4s ease-out;
         }
+        .auth-restoring {
+            background: var(--surface); width: 100%; max-width: 420px; border-radius: 24px; padding: 36px 28px;
+            box-shadow: 0 25px 50px rgba(0,0,0,0.3); text-align: center; border: 1px solid rgba(212,175,55,0.3);
+        }
         .auth-icon {
             width: 68px; height: 68px; background: #FDF2F4; color: var(--primary); border-radius: 50%;
             display: flex; align-items: center; justify-content: center; font-size: 28px; margin: 0 auto 16px;
@@ -5710,6 +6062,11 @@ def get_admin_dashboard():
         .ig-cover-modal-actions button:disabled { opacity:.55; cursor:not-allowed; }
         .ig-media-details { grid-column:2 / -1; color:var(--text-muted); font-size:0.76rem; line-height:1.55; }
         .ig-media-large { max-width:240px; max-height:240px; border-radius:10px; display:block; margin:8px 0; object-fit:cover; }
+        .ig-story-form-card { margin-top:16px; padding:16px; background:#FCFBF9; border:1px solid var(--border); border-radius:12px; }
+        .ig-story-form-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:10px; margin-top:10px; }
+        .ig-story-readonly { background:#F1EEEA; font-family:ui-monospace, SFMono-Regular, Consolas, monospace; overflow-wrap:anywhere; }
+        .ig-story-preview-meta { color:var(--text-muted); font-size:0.76rem; overflow-wrap:anywhere; }
+        .ig-story-card .ig-media-preview { background:#EDE8E3; }
         @media (max-width: 660px) { .ig-media-card { grid-template-columns:76px minmax(0,1fr); } .ig-media-preview { width:76px; height:76px; } .ig-media-actions { grid-column:1 / -1; justify-content:flex-start; } .ig-media-details { grid-column:1 / -1; } }
         .ad-route-row {
             display: grid; grid-template-columns: 1fr auto auto; align-items: center; gap: 12px;
@@ -5878,7 +6235,12 @@ def get_admin_dashboard():
 
     <!-- Server-side session authentication overlay -->
     <div class="auth-overlay" id="authOverlay">
-        <div class="auth-card" id="authCard">
+        <div class="auth-restoring" id="authRestoring">
+            <div class="auth-icon">🔐</div>
+            <h2>Restoring secure session</h2>
+            <p>Checking your existing administrator session…</p>
+        </div>
+        <div class="auth-card" id="authCard" style="display:none">
             <div class="auth-icon">🔐</div>
             <h2>Kitchen Admin Portal</h2>
             <p>Protected access for Camellia Artisanal kitchen managers & staff.</p>
@@ -5938,6 +6300,7 @@ def get_admin_dashboard():
         <div class="tabs-nav">
             <button class="tab-btn active" onclick="switchTab('tab-image', this)">🍱 Menu</button>
             <button class="tab-btn" onclick="switchTab('tab-menu-manager', this)">📋 Menu Manager</button>
+            <button class="tab-btn" onclick="switchTab('tab-instagram-stories', this)">📖 Instagram Stories</button>
             <button class="tab-btn" onclick="switchTab('tab-ai-resolution', this)">🤖 AI Resolution &amp; Answers <span id="aiResolutionBadge" style="display:none; background: var(--danger); color: #fff; border-radius: 10px; padding: 1px 7px; font-size: 0.72rem; margin-left: 4px;"></span></button>
             <button class="tab-btn" onclick="switchTab('tab-custom-qa', this)">🗂️ Custom Q&amp;A</button>
         </div>
@@ -6000,10 +6363,16 @@ def get_admin_dashboard():
         <div id="tab-ad-routing" class="panel-card" data-group="menu" style="display: none;">
             <div class="panel-header">
                 <h2>📣 Instagram Content Routing</h2>
-                <p>Connect an Instagram post or reel to a Topic.</p>
+                <p>Connect an Instagram post, reel, or ad to a Topic. Story routing is managed separately in the dedicated Instagram Stories tab.</p>
             </div>
             <div class="ad-routing-form">
                 <div>
+                    <label class="field-label" for="igSourceType">Source</label>
+                    <select class="field-control" id="igSourceType" onchange="onInstagramSourceTypeChange()">
+                        <option value="post">Post</option><option value="reel">Reel</option><option value="ad">Ad</option>
+                    </select>
+                </div>
+                <div id="igRouteUrlWrap">
                     <label class="field-label" for="igRouteUrl">Instagram Link</label>
                     <input class="field-control" id="igRouteUrl" autocomplete="off" placeholder="https://www.instagram.com/reel/DdAnO6MTok1/" onblur="identifyInstagramRoute()" onchange="identifyInstagramRoute()">
                 </div>
@@ -6049,7 +6418,7 @@ def get_admin_dashboard():
 
             <details id="igAdvancedSettings" style="margin-top:12px;"><summary style="cursor:pointer;"><b>Advanced Settings</b></summary>
                 <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:10px; margin-top:10px;">
-                    <input class="field-control" id="igMediaId" placeholder="Verified Media / Story ID">
+                    <input class="field-control" id="igMediaId" placeholder="Verified Media ID">
                     <input class="field-control" id="igAdId" placeholder="Meta Ad ID">
                     <input class="field-control" id="igCampaignId" placeholder="Campaign ID (reference only)">
                     <select class="field-control" id="igEscalationPolicy"><option value="human_if_unsupported">Human if unsupported</option><option value="canonical">Normal canonical rules</option><option value="always_human">Always offer human help</option></select>
@@ -6075,6 +6444,89 @@ def get_admin_dashboard():
                 <button class="ig-media-filter" type="button" data-media-filter="ad" onclick="setInstagramMediaFilter('ad')">Ads</button>
             </div>
             <div id="adRouteList" class="ad-route-list"><p style="color:var(--text-muted);font-size:0.84rem;">Loading saved routes...</p></div>
+            <p style="margin-top:18px;font-size:0.8rem;color:var(--text-muted);">Captured Story sources and Story-only actions are managed in the dedicated <button class="btn-secondary" type="button" onclick="switchTab('tab-instagram-stories', null)" style="padding:5px 9px;font-size:0.76rem;">Instagram Stories</button> tab.</p>
+        </div>
+
+        <div id="tab-instagram-stories" class="panel-card" data-group="instagram_stories" style="display: none;">
+            <div class="panel-header">
+                <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px; flex-wrap:wrap;">
+                    <div>
+                        <h2>📖 Instagram Stories</h2>
+                        <p>Every Story a customer replies to appears here, newest first. Map a Story ID to a Topic without exposing temporary media URLs.</p>
+                        <p class="ig-media-muted">New Stories appear here after Instagram sends a Story interaction/reply event.</p>
+                    </div>
+                    <button class="btn-secondary" id="igStoryRefreshButton" type="button">🔄 Refresh Stories</button>
+                </div>
+            </div>
+            <div id="igStoryResult" class="result-box" role="status" aria-live="polite"></div>
+            <div id="igStoryRefreshStatus" class="result-box" role="status" aria-live="polite" style="display:none;"></div>
+            <div class="ig-media-toolbar" aria-label="Instagram Story filters">
+                <input class="field-control ig-media-search" id="igStorySearch" type="search" placeholder="Search Story ID or Topic" autocomplete="off">
+                <button class="ig-media-filter active ig-story-filter" type="button" data-story-filter="all">All</button>
+                <button class="ig-media-filter ig-story-filter" type="button" data-story-filter="UNMAPPED">Unmapped</button>
+                <button class="ig-media-filter ig-story-filter" type="button" data-story-filter="MAPPED">Mapped</button>
+                <button class="ig-media-filter ig-story-filter" type="button" data-story-filter="DISABLED">Disabled</button>
+                <button class="ig-media-filter ig-story-filter" type="button" data-story-filter="ARCHIVED">Archived</button>
+                <button class="ig-media-filter ig-story-filter" type="button" data-story-filter="DELETED">Deleted</button>
+            </div>
+
+            <div id="igStoryMapForm" class="ig-story-form-card" style="display:none;">
+                <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap;">
+                    <div>
+                        <h3 style="margin:0; color:var(--primary);">Map Instagram Story</h3>
+                        <p style="margin:3px 0 0; font-size:0.8rem; color:var(--text-muted);">The Story media ID is captured from Meta and cannot be edited here.</p>
+                    </div>
+                    <span id="igStoryEditingLabel" class="ig-media-muted"></span>
+                </div>
+                <div class="ig-story-form-grid">
+                    <div style="grid-column:1/-1;">
+                        <label class="field-label" for="igStoryMediaId">Story media ID</label>
+                        <input class="field-control ig-story-readonly" id="igStoryMediaId" readonly aria-readonly="true" autocomplete="off">
+                    </div>
+                    <div>
+                        <label class="field-label" for="igStoryTopicPicker">Topic</label>
+                        <select class="field-control" id="igStoryTopicPicker"><option value="">Select Topic</option></select>
+                    </div>
+                    <div>
+                        <label class="field-label" for="igStoryMenuMode">Menu behavior</label>
+                        <select class="field-control" id="igStoryMenuMode">
+                            <option value="INHERIT">Inherit Topic Menu</option>
+                            <option value="NONE">No Menu</option>
+                            <option value="SELECTED">Select Menu</option>
+                        </select>
+                    </div>
+                    <div id="igStoryMenuPickerWrap" style="display:none;">
+                        <label class="field-label" for="igStoryMenuPicker">Menu</label>
+                        <select class="field-control" id="igStoryMenuPicker"><option value="">Select a menu…</option></select>
+                    </div>
+                    <div>
+                        <label class="field-label" for="igStoryEscalationPolicy">Escalation policy</label>
+                        <select class="field-control" id="igStoryEscalationPolicy"><option value="human_if_unsupported">Human if unsupported</option><option value="canonical">Normal canonical rules</option><option value="always_human">Always offer human help</option></select>
+                    </div>
+                    <div>
+                        <label class="field-label" for="igStoryKnowledgeScope">Knowledge scope</label>
+                        <select class="field-control" id="igStoryKnowledgeScope" multiple title="Optional canonical knowledge scope" size="3"></select>
+                    </div>
+                    <div style="grid-column:1/-1;">
+                        <label class="field-label" for="igStoryPriorityPicker">Priority products</label>
+                        <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                            <select class="field-control" id="igStoryPriorityPicker" style="flex:1; min-width:220px;"><option value="">Choose an approved product…</option></select>
+                            <button class="btn-secondary" id="igStoryAddPriorityButton" type="button">+ Add Product</button>
+                        </div>
+                        <div id="igStoryPriorityProducts" class="ad-route-list" style="margin-top:8px;"></div>
+                    </div>
+                </div>
+                <label style="display:flex; align-items:center; gap:8px; margin-top:12px; font-size:0.84rem; font-weight:700;">
+                    <input type="checkbox" id="igStoryActive" checked> Active
+                </label>
+                <div class="action-bar">
+                    <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                        <button class="btn-primary" id="igStorySaveButton" type="button">Save Story Mapping</button>
+                        <button class="btn-secondary" id="igStoryCancelButton" type="button">Cancel</button>
+                    </div>
+                </div>
+            </div>
+            <div id="igStoryList" class="ad-route-list"><p style="color:var(--text-muted);font-size:0.84rem;">Open this tab to load captured Stories.</p></div>
         </div>
 
         <!-- MENU tab, panel 3 of 4: same job again, from a shared sheet -->
@@ -6848,6 +7300,7 @@ THIS WEEK'S BENGAL SPECIALS
         // sees only the short-lived CSRF token, never the session token,
         // password, PIN, or machine API key.
         let adminAuthenticated = false;
+        let authRequestGeneration = 0;
         let selectedFile = null;
 
         function readCookie(name) {
@@ -6856,16 +7309,38 @@ THIS WEEK'S BENGAL SPECIALS
             return item ? decodeURIComponent(item.slice(prefix.length)) : '';
         }
 
+        function showAuthChecking() {
+            document.getElementById('authOverlay').style.display = 'flex';
+            document.getElementById('authRestoring').style.display = 'block';
+            document.getElementById('authCard').style.display = 'none';
+        }
+
+        function showAuthLogin() {
+            document.getElementById('authOverlay').style.display = 'flex';
+            document.getElementById('authRestoring').style.display = 'none';
+            document.getElementById('authCard').style.display = 'block';
+        }
+
+        function hideAuthOverlay() {
+            document.getElementById('authRestoring').style.display = 'none';
+            document.getElementById('authCard').style.display = 'none';
+            document.getElementById('authOverlay').style.display = 'none';
+        }
+
         async function checkAdminSession() {
+            const requestGeneration = ++authRequestGeneration;
+            showAuthChecking();
             try {
                 const resp = await fetch('/admin/session', { credentials: 'same-origin' });
                 if (!resp.ok) throw new Error('not authenticated');
+                if (requestGeneration !== authRequestGeneration) return;
                 adminAuthenticated = true;
-                document.getElementById('authOverlay').style.display = 'none';
+                hideAuthOverlay();
                 loadActiveMenu(); loadAdRoutes(); loadAnalytics(); refreshCandidateBadge();
             } catch (e) {
+                if (requestGeneration !== authRequestGeneration) return;
                 adminAuthenticated = false;
-                document.getElementById('authOverlay').style.display = 'flex';
+                showAuthLogin();
             }
         }
 
@@ -6910,9 +7385,21 @@ THIS WEEK'S BENGAL SPECIALS
             refreshReaderStatus();
             checkAdminSession();
             setupDragAndDrop();
+            document.addEventListener('visibilitychange', syncInstagramStoryAutoRefresh);
+            document.getElementById('igStoryRefreshButton')?.addEventListener('click', loadInstagramStories);
+            document.getElementById('igStorySearch')?.addEventListener('input', renderInstagramStories);
+            document.querySelectorAll('.ig-story-filter').forEach(button => {
+                button.addEventListener('click', () => setInstagramStoryFilter(button.dataset.storyFilter || 'all'));
+            });
+            document.getElementById('igStoryTopicPicker')?.addEventListener('change', onInstagramStoryTopicChange);
+            document.getElementById('igStoryMenuMode')?.addEventListener('change', onInstagramStoryMenuModeChange);
+            document.getElementById('igStoryAddPriorityButton')?.addEventListener('click', addInstagramStoryPriorityProduct);
+            document.getElementById('igStorySaveButton')?.addEventListener('click', saveInstagramStoryMapping);
+            document.getElementById('igStoryCancelButton')?.addEventListener('click', cancelInstagramStoryMapping);
         });
 
         async function loginAdmin() {
+            const requestGeneration = ++authRequestGeneration;
             const username = document.getElementById('usernameInput').value.trim();
             const passwordInput = document.getElementById('passwordInput');
             const totpInput = document.getElementById('totpInput');
@@ -6929,6 +7416,7 @@ THIS WEEK'S BENGAL SPECIALS
                 });
                 const data = await resp.json().catch(() => ({}));
 
+                if (requestGeneration !== authRequestGeneration) return;
                 if (resp.ok) {
                     if (data.mfa_required) {
                         document.getElementById('totpInputWrap').style.display = 'block';
@@ -6938,7 +7426,7 @@ THIS WEEK'S BENGAL SPECIALS
                     adminAuthenticated = true;
                     passwordInput.value = '';
                     totpInput.value = '';
-                    document.getElementById('authOverlay').style.display = 'none';
+                    hideAuthOverlay();
                     loadActiveMenu();
                     loadAdRoutes();
                     loadAnalytics();
@@ -6961,12 +7449,13 @@ THIS WEEK'S BENGAL SPECIALS
         }
 
         async function lockPortal() {
+            ++authRequestGeneration;
             try { await fetch('/admin/logout', { method: 'POST', headers: getAuthHeaders(), credentials: 'same-origin' }); } catch (e) { /* session expires server-side */ }
             adminAuthenticated = false;
             document.getElementById('passwordInput').value = '';
             document.getElementById('totpInput').value = '';
             document.getElementById('totpInputWrap').style.display = 'none';
-            document.getElementById('authOverlay').style.display = 'flex';
+            showAuthLogin();
         }
 
         function getAuthHeaders() {
@@ -6987,6 +7476,7 @@ THIS WEEK'S BENGAL SPECIALS
         const TAB_GROUPS = {
             'tab-image': 'menu',
             'tab-menu-manager': 'menu_manager',
+            'tab-instagram-stories': 'instagram_stories',
             'tab-stats': 'customers',
             'tab-candidates': 'answers',
             'tab-ai-resolution': 'ai_resolution',
@@ -6997,6 +7487,7 @@ THIS WEEK'S BENGAL SPECIALS
             document.querySelectorAll('.panel-card').forEach(panel => {
                 panel.style.display = (panel.dataset.group === group) ? 'block' : 'none';
             });
+            syncInstagramStoryAutoRefresh();
         }
 
         function switchTab(tabId, el) {
@@ -7014,6 +7505,7 @@ THIS WEEK'S BENGAL SPECIALS
             if (group === 'answers') { loadCandidates(); loadKnowledge(); }
             if (group === 'ai_resolution') { loadAiResolution(); loadTriageShadow(); }
             if (group === 'custom_qa') { loadCustomQa(); loadAssistedEvaluation(); }
+            if (group === 'instagram_stories') { loadInstagramStories(); }
         }
 
         // MENU MANAGER tab: every menu is edited as a draft (server-side, in
@@ -7364,6 +7856,8 @@ THIS WEEK'S BENGAL SPECIALS
             igEditingId = null; igPriority = [];
             igMediaMetadata = { preview_url: null, media_type: null };
             ['igRouteUrl','igMediaId','igAdId','igCampaignId'].forEach(id => { const el=document.getElementById(id); if(el)el.value=''; });
+            document.getElementById('igSourceType').value = 'post';
+            onInstagramSourceTypeChange();
             document.getElementById('igTopicPicker').value = '';
             igResponseOrder = 'description_first';
             document.getElementById('igMenuPicker').value = '';
@@ -7380,6 +7874,13 @@ THIS WEEK'S BENGAL SPECIALS
             const status = document.getElementById('igPostConnectionStatus');
             if (status) status.style.display = 'none';
             renderIgPriorityProducts();
+        }
+
+        function onInstagramSourceTypeChange() {
+            // Story capture, mapping, and lifecycle live only in the dedicated
+            // Instagram Stories tab. This form handles post/reel/ad URLs.
+            const url = document.getElementById('igRouteUrl');
+            if (url) url.required = true;
         }
 
         async function identifyInstagramRoute() {
@@ -7399,6 +7900,8 @@ THIS WEEK'S BENGAL SPECIALS
         function editInstagramRoute(id) {
             const route=(window.igRoutes||[]).find(item=>item.routing_id===id); if(!route)return;
             igEditingId=id; igPriority=[...(route.priority_products||[])];
+            document.getElementById('igSourceType').value=route.source_type||'post';
+            onInstagramSourceTypeChange();
             document.getElementById('igRouteUrl').value=route.canonical_url||'';
             document.getElementById('igTopicPicker').value=route.topic_id||'';
             document.getElementById('igMenuPicker').value=route.menu_id||'';
@@ -7419,18 +7922,19 @@ THIS WEEK'S BENGAL SPECIALS
         async function saveInstagramRoute() {
             const result=document.getElementById('adRouteResult');
             const selectedMenuId=document.getElementById('igMenuPicker').value;
-            const payload={routing_id:igEditingId,url:document.getElementById('igRouteUrl').value.trim(),topic_id:document.getElementById('igTopicPicker').value,menu_id:selectedMenuId,menu_mode:selectedMenuId?'SELECTED':'NONE',media_id:document.getElementById('igMediaId').value.trim(),ad_id:document.getElementById('igAdId').value.trim(),campaign_id:document.getElementById('igCampaignId').value.trim(),preview_url:igMediaMetadata.preview_url,media_type:igMediaMetadata.media_type,escalation_policy:document.getElementById('igEscalationPolicy').value,priority_products:igPriority,knowledge_scope:Array.from(document.getElementById('igKnowledgeScope').selectedOptions).map(o=>o.value),active:true};
+            const sourceType=document.getElementById('igSourceType').value;
+            const payload={routing_id:igEditingId,source_type:sourceType,url:sourceType==='story'?'':document.getElementById('igRouteUrl').value.trim(),topic_id:document.getElementById('igTopicPicker').value,menu_id:selectedMenuId,menu_mode:selectedMenuId?'SELECTED':'NONE',media_id:document.getElementById('igMediaId').value.trim(),ad_id:document.getElementById('igAdId').value.trim(),campaign_id:document.getElementById('igCampaignId').value.trim(),preview_url:igMediaMetadata.preview_url,media_type:igMediaMetadata.media_type,escalation_policy:document.getElementById('igEscalationPolicy').value,priority_products:igPriority,knowledge_scope:Array.from(document.getElementById('igKnowledgeScope').selectedOptions).map(o=>o.value),active:true};
             const resp=await fetch('/admin/instagram-routes',{method:'POST',headers:{...getAuthHeaders(),'Content-Type':'application/json'},body:JSON.stringify(payload)});
             const data=await resp.json().catch(()=>({})); result.style.display='block';
             if(!resp.ok){result.className='result-box error';result.innerText=data.detail||'Could not save route.';return;}
             const saved = data.route || {};
             const topic = igTopics.find(item => item.topic_id === saved.topic_id) || {};
             const menu = igMenus.find(item => item.menu_id === (saved.menu_id || payload.menu_id)) || {};
-            const content = saved.source_type === 'reel' ? 'Reel' : saved.source_type === 'post' ? 'Post' : 'Instagram content';
+            const content = saved.source_type === 'reel' ? 'Reel' : saved.source_type === 'post' ? 'Post' : saved.source_type === 'story' ? 'Story' : 'Instagram Ad';
             const label = saved.shortcode ? `${content} ${saved.shortcode}` : content;
             resetInstagramRouteForm();
             result.style.display='block'; result.className='result-box success';
-            result.innerHTML=`<b>✓ Instagram content connected successfully</b><br><small>Instagram content: ${escapeHtml(label)}<br>Topic: ${escapeHtml(topic.name || saved.routing_topic || '—')}<br>Menu: ${escapeHtml(menu.name || saved.menu_id || '—')}</small>`;
+            result.innerHTML=`<b>✓ Instagram ${escapeHtml(content)} routing saved</b><br><small>Source: ${escapeHtml(label || saved.media_id || '—')}<br>Topic: ${escapeHtml(topic.name || saved.routing_topic || '—')}<br>Menu: ${escapeHtml(menu.name || saved.menu_id || '—')}</small>`;
             loadAdRoutes();
         }
 
@@ -7645,8 +8149,8 @@ THIS WEEK'S BENGAL SPECIALS
         }
 
         let igMediaFilter = 'all';
-        function instagramMediaLabel(route) { return route.source_type === 'reel' ? 'REEL' : route.source_type === 'post' ? 'POST' : 'AD'; }
-        function instagramMediaName(route) { return route.source_type === 'reel' ? 'Instagram Reel' : route.source_type === 'post' ? 'Instagram Post' : 'Instagram Ad'; }
+        function instagramMediaLabel(route) { return route.source_type === 'reel' ? 'REEL' : route.source_type === 'post' ? 'POST' : route.source_type === 'story' ? 'STORY' : 'AD'; }
+        function instagramMediaName(route) { return route.source_type === 'reel' ? 'Instagram Reel' : route.source_type === 'post' ? 'Instagram Post' : route.source_type === 'story' ? 'Instagram Story' : 'Instagram Ad'; }
         function instagramMenuLabel(route) {
             if (route.menu_mode === 'NONE') return 'NONE';
             if (route.menu_mode === 'INHERIT') return 'INHERIT';
@@ -7665,6 +8169,7 @@ THIS WEEK'S BENGAL SPECIALS
         function instagramMediaStatus(route) {
             if (route.archived_at) return { label: 'Archived', className: 'disabled' };
             if (!route.active) return { label: 'Disabled', className: 'disabled' };
+            if (route.source_type === 'story') return { label: 'Mapped', className: '' };
             if (route.source_type !== 'post' || route.media_id) return { label: 'Connected', className: '' };
             if (route.pairing_status === 'pending') return { label: `Waiting for shared post — expires ${route.pairing_expires_at || 'soon'}`, className: 'waiting' };
             return { label: 'Waiting for Post', className: 'waiting' };
@@ -7804,7 +8309,7 @@ THIS WEEK'S BENGAL SPECIALS
             const menu = instagramMenuLabel(route);
             const description = (route.topic_description || '').trim();
             const priority = (route.priority_products || []).map(id => ((igProducts.find(p => p.id === id) || {}).label || id)).join(' → ') || 'Normal conversation routing';
-            const link = route.canonical_url ? `<a class="ig-media-link" href="${escapeHtml(route.canonical_url)}" target="_blank" rel="noopener noreferrer">Open Instagram · ${escapeHtml(instagramShortUrl(route.canonical_url))}</a>` : '<span class="ig-media-muted">Instagram link unavailable</span>';
+            const link = route.canonical_url ? `<a class="ig-media-link" href="${escapeHtml(route.canonical_url)}" target="_blank" rel="noopener noreferrer">Open Instagram · ${escapeHtml(instagramShortUrl(route.canonical_url))}</a>` : route.source_type === 'story' ? `<span class="ig-media-muted">Story media ID: ${escapeHtml(route.media_id || '—')}</span>` : '<span class="ig-media-muted">Instagram link unavailable</span>';
             const pairingNote = route.source_type === 'post' && route.media_id && route.pairing_status === 'bound' ? '<span class="ig-media-muted">Connected via Post Pairing</span>' : '';
             const detailsImage = (route.preview_url || route.admin_preview_url) ? instagramPreview(route, true) : '<span class="ig-media-muted">Preview unavailable; route remains active.</span>';
             const previewSource = route.preview_url ? 'Meta-provided preview' : route.admin_preview_url ? 'Admin preview fallback' : 'Placeholder';
@@ -7823,10 +8328,400 @@ THIS WEEK'S BENGAL SPECIALS
             const coverControls = coverManaged ? `<div class="ig-cover-controls"><button class="btn-secondary" type="button" onclick="openInstagramCoverModal(${route.routing_id})">${hasCover ? 'Change Cover' : 'Add Cover'}</button>${route.admin_preview_url ? `<button class="btn-danger" type="button" onclick="removeInstagramAdminPreview(${route.routing_id})">Remove Cover</button>` : ''}</div><div class="ig-cover-label">Admin-only visual metadata</div>` : '';
             return `<article class="ig-media-card"><div>${instagramPreview(route)}${coverControls}</div><div class="ig-media-main"><div class="ig-media-title"><b class="ig-media-topic">${escapeHtml(route.routing_topic || 'Instagram content')}</b><span class="ig-media-status ${status.className}">${escapeHtml(status.label)}</span></div><div>${link}</div><div class="ig-media-summary">${escapeHtml(description || 'No description configured.')}</div><div class="ig-media-facts"><span><b>Menu:</b> ${escapeHtml(menu)}</span><span><b>Status:</b> ${escapeHtml(status.label)}</span><span><b>Updated:</b> ${escapeHtml(route.updated_at || route.created_at || '—')}</span>${pairingNote}</div></div><div class="ig-media-actions">${actions}</div>${details}</article>`;
         }
+
+        let igStorySources = [];
+        let igStoriesEverLoaded = false;
+        let igStoryFilter = 'all';
+        let igStoryEditingRoutingId = null;
+        let igStoryPriority = [];
+        let igStoryKnowledgeScopes = [];
+        let igStoryRefreshTimer = null;
+        let igStoryRefreshInFlight = false;
+        let igStoryRestoreInFlight = new Set();
+
+        function storyStatusClass(status) {
+            return status === 'UNMAPPED' || status === 'DISABLED' || status === 'ARCHIVED' ? 'disabled' : '';
+        }
+
+        // deleted_at is retained as historical audit evidence after Restore;
+        // only admin_deleted represents the current local tombstone state.
+        function storyIsAdminDeleted(source) {
+            return Number(source?.admin_deleted || 0) === 1;
+        }
+
+        function storyPreviewMetadata(value) {
+            if (!value) return 'Not available';
+            try {
+                const parsed = new URL(String(value), window.location.origin);
+                if (!['http:', 'https:'].includes(parsed.protocol)) return 'Available';
+                return `${parsed.hostname}${parsed.pathname || '/'}`;
+            } catch (err) {
+                return 'Available';
+            }
+        }
+
+        function storyMatches(source) {
+            const deleted = storyIsAdminDeleted(source);
+            if (igStoryFilter !== 'DELETED' && deleted) return false;
+            const status = deleted
+                ? 'DELETED'
+                : String(source.mapping_status || source.status || 'UNMAPPED').toUpperCase();
+            if (igStoryFilter !== 'all' && status !== igStoryFilter) return false;
+            const query = (document.getElementById('igStorySearch')?.value || '').trim().toLowerCase();
+            if (!query) return true;
+            return [source.story_media_id, source.routing_topic, source.topic_description, source.story_status, status]
+                .some(value => String(value || '').toLowerCase().includes(query));
+        }
+
+        function setInstagramStoryFilter(filter) {
+            igStoryFilter = filter || 'all';
+            document.querySelectorAll('.ig-story-filter').forEach(button => button.classList.toggle('active', (button.dataset.storyFilter || 'all') === igStoryFilter));
+            if (igStoryFilter === 'DELETED') loadInstagramStories(true);
+            else renderInstagramStories();
+        }
+
+        function populateInstagramStoryPickers() {
+            const topics = document.getElementById('igStoryTopicPicker');
+            const menus = document.getElementById('igStoryMenuPicker');
+            const products = document.getElementById('igStoryPriorityPicker');
+            const scopes = document.getElementById('igStoryKnowledgeScope');
+            if (topics) topics.innerHTML = '<option value="">Select Topic</option>' + igTopics.map(topic => `<option value="${escapeHtml(topic.topic_id)}">${escapeHtml(topic.name)}</option>`).join('');
+            if (menus) menus.innerHTML = '<option value="">Select a menu…</option>' + igMenus.map(menu => `<option value="${escapeHtml(menu.menu_id)}">${escapeHtml(menu.name)}</option>`).join('');
+            if (products) products.innerHTML = '<option value="">Choose an approved product…</option>' + igProducts.map(product => `<option value="${escapeHtml(product.id)}">${escapeHtml(product.label)}</option>`).join('');
+            if (scopes) scopes.innerHTML = igStoryKnowledgeScopes.map(scope => `<option value="${escapeHtml(scope)}">${escapeHtml(scope)}</option>`).join('');
+        }
+
+        function onInstagramStoryTopicChange() {
+            const topicId = document.getElementById('igStoryTopicPicker')?.value || '';
+            const topic = igTopics.find(item => item.topic_id === topicId);
+            if (!igStoryEditingRoutingId && topic) igStoryPriority = [...(topic.priority_products || [])];
+            renderInstagramStoryPriorityProducts();
+        }
+
+        // Three explicit, persisted menu states -- INHERIT / NONE / SELECTED
+        // -- rather than inferring one from whether a menu happens to be
+        // picked. An empty picker used to be indistinguishable from "no
+        // menu"; it is now only ever read when the mode is SELECTED.
+        function onInstagramStoryMenuModeChange() {
+            const mode = document.getElementById('igStoryMenuMode')?.value || 'INHERIT';
+            const wrap = document.getElementById('igStoryMenuPickerWrap');
+            if (wrap) wrap.style.display = mode === 'SELECTED' ? 'block' : 'none';
+            if (mode !== 'SELECTED') {
+                const picker = document.getElementById('igStoryMenuPicker');
+                if (picker) picker.value = '';
+            }
+        }
+
+        function renderInstagramStoryPriorityProducts() {
+            const box = document.getElementById('igStoryPriorityProducts');
+            if (!box) return;
+            if (!igStoryPriority.length) { box.innerHTML = '<small>No priority products. Normal conversation routing will apply.</small>'; return; }
+            box.innerHTML = igStoryPriority.map((id, index) => {
+                const product = igProducts.find(item => item.id === id);
+                return `<div class="ad-route-row"><span><b>${index + 1}.</b> ${escapeHtml(product ? product.label : `${id} (currently unavailable)`)}</span><button class="btn-danger" type="button" data-story-remove-priority="${index}">Remove</button></div>`;
+            }).join('');
+            box.querySelectorAll('[data-story-remove-priority]').forEach(button => button.addEventListener('click', () => {
+                igStoryPriority.splice(Number(button.dataset.storyRemovePriority), 1);
+                renderInstagramStoryPriorityProducts();
+            }));
+        }
+
+        function addInstagramStoryPriorityProduct() {
+            const id = document.getElementById('igStoryPriorityPicker')?.value || '';
+            if (!id || igStoryPriority.includes(id)) return;
+            igStoryPriority.push(id);
+            renderInstagramStoryPriorityProducts();
+        }
+
+        function openInstagramStoryMapping(mediaId) {
+            const source = igStorySources.find(item => String(item.story_media_id || '') === String(mediaId || '')) || { story_media_id: mediaId || '' };
+            const status = String(source.mapping_status || source.status || 'UNMAPPED').toUpperCase();
+            if (status === 'ARCHIVED') return;
+            const routeId = source.routing_id ? Number(source.routing_id) : null;
+            igStoryEditingRoutingId = routeId;
+            igStoryPriority = [...(source.priority_products || [])];
+            document.getElementById('igStoryMediaId').value = source.story_media_id || '';
+            document.getElementById('igStoryTopicPicker').value = source.topic_id || '';
+            // Load the persisted menu_mode as-is -- never inferred from
+            // whether menu_id happens to be set, and never silently
+            // coerced into a different mode (INHERIT stays INHERIT even
+            // though menu_id is empty for it, same as for NONE).
+            const persistedMenuMode = String(source.menu_mode || 'INHERIT').toUpperCase();
+            document.getElementById('igStoryMenuMode').value = ['INHERIT', 'NONE', 'SELECTED'].includes(persistedMenuMode) ? persistedMenuMode : 'INHERIT';
+            document.getElementById('igStoryMenuPicker').value = persistedMenuMode === 'SELECTED' ? (source.menu_id || '') : '';
+            onInstagramStoryMenuModeChange();
+            document.getElementById('igStoryEscalationPolicy').value = source.escalation_policy || 'human_if_unsupported';
+            document.getElementById('igStoryActive').checked = source.active !== false && status !== 'DISABLED';
+            Array.from(document.getElementById('igStoryKnowledgeScope').options).forEach(option => option.selected = (source.knowledge_scope || []).includes(option.value));
+            document.getElementById('igStoryEditingLabel').innerText = routeId ? `Editing routing #${routeId}` : 'New mapping';
+            renderInstagramStoryPriorityProducts();
+            const form = document.getElementById('igStoryMapForm');
+            form.style.display = 'block';
+            form.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+
+        function cancelInstagramStoryMapping() {
+            igStoryEditingRoutingId = null;
+            igStoryPriority = [];
+            const menuMode = document.getElementById('igStoryMenuMode');
+            if (menuMode) menuMode.value = 'INHERIT';
+            onInstagramStoryMenuModeChange();
+            const form = document.getElementById('igStoryMapForm');
+            if (form) form.style.display = 'none';
+        }
+
+        function showInstagramStoryResult(kind, message) {
+            const result = document.getElementById('igStoryResult');
+            if (!result) return;
+            result.style.display = 'block';
+            result.className = `result-box ${kind}`;
+            result.innerText = message;
+        }
+
+        async function saveInstagramStoryMapping() {
+            const mediaId = document.getElementById('igStoryMediaId')?.value.trim() || '';
+            const topicId = document.getElementById('igStoryTopicPicker')?.value || '';
+            if (!mediaId) return showInstagramStoryResult('error', 'Choose a captured Story before mapping it.');
+            if (!topicId) return showInstagramStoryResult('error', 'Select a Topic before saving the Story mapping.');
+            const menuMode = document.getElementById('igStoryMenuMode')?.value || 'INHERIT';
+            const menuId = document.getElementById('igStoryMenuPicker').value;
+            if (menuMode === 'SELECTED' && !menuId) return showInstagramStoryResult('error', 'Choose a menu, or switch Menu behavior to Inherit Topic Menu / No Menu.');
+            const payload = {
+                routing_id: igStoryEditingRoutingId,
+                source_type: 'story', url: '', media_id: mediaId, ad_id: '', campaign_id: '',
+                preview_url: null, media_type: 'story', topic_id: topicId,
+                menu_id: menuMode === 'SELECTED' ? menuId : null, menu_mode: menuMode,
+                escalation_policy: document.getElementById('igStoryEscalationPolicy').value,
+                priority_products: igStoryPriority,
+                knowledge_scope: Array.from(document.getElementById('igStoryKnowledgeScope').selectedOptions).map(option => option.value),
+                active: document.getElementById('igStoryActive').checked,
+            };
+            try {
+                const response = await fetch('/admin/instagram-routes', {
+                    method: 'POST', headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+                });
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok) throw new Error(data.detail || 'Could not save Story mapping.');
+                cancelInstagramStoryMapping();
+                showInstagramStoryResult('success', 'Story mapping saved.');
+                await loadInstagramStories();
+            } catch (err) {
+                showInstagramStoryResult('error', err.message || String(err));
+            }
+        }
+
+        async function setInstagramStoryActive(routingId, active) {
+            try {
+                const response = await fetch(`/admin/instagram-routes/${routingId}/active`, { method: 'PATCH', headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ active }) });
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok) throw new Error(data.detail || 'Could not update Story status.');
+                await loadInstagramStories();
+            } catch (err) { showInstagramStoryResult('error', err.message || String(err)); }
+        }
+
+        async function archiveInstagramStory(routingId) {
+            if (!confirm('Archive this Story mapping? It will stop matching traffic but remain recoverable.')) return;
+            try {
+                const response = await fetch(`/admin/instagram-routes/${routingId}`, { method: 'DELETE', headers: getAuthHeaders() });
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok) throw new Error(data.detail || 'Could not archive Story mapping.');
+                await loadInstagramStories();
+            } catch (err) { showInstagramStoryResult('error', err.message || String(err)); }
+        }
+
+        async function restoreInstagramStory(routingId) {
+            try {
+                const response = await fetch(`/admin/instagram-routes/${routingId}/restore`, { method: 'POST', headers: getAuthHeaders() });
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok) throw new Error(data.detail || 'Could not restore Story mapping.');
+                await loadInstagramStories();
+            } catch (err) { showInstagramStoryResult('error', err.message || String(err)); }
+        }
+
+        async function deleteInstagramStory(mediaId) {
+            if (!confirm('Delete this Story from Camellia Admin?\n\nThis removes the Story from the Admin dashboard and disables its Story routing. It does not delete the Story from Instagram.')) return;
+            try {
+                const response = await fetch(`/admin/instagram-story-sources/${encodeURIComponent(mediaId)}`, { method: 'DELETE', headers: getAuthHeaders() });
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok) throw new Error(data.detail || 'Could not delete Story from Camellia Admin.');
+                const normalizedMediaId = String(mediaId || '');
+                igStorySources = igStorySources.filter(source => String(source.story_media_id || '') !== normalizedMediaId);
+                window.igStorySources = igStorySources;
+                renderInstagramStories();
+                showInstagramStoryResult('success', 'Story removed from Camellia Admin. The Instagram Story itself was not deleted.');
+            } catch (err) { showInstagramStoryResult('error', err.message || String(err)); }
+        }
+
+        async function restoreInstagramStorySource(mediaId, button = null) {
+            const normalizedMediaId = String(mediaId || '');
+            if (!normalizedMediaId || igStoryRestoreInFlight.has(normalizedMediaId)) return;
+            igStoryRestoreInFlight.add(normalizedMediaId);
+            if (button) {
+                button.disabled = true;
+                button.textContent = 'Restoring…';
+            }
+            try {
+                const response = await fetch(`/admin/instagram-story-sources/${encodeURIComponent(normalizedMediaId)}/restore`, { method: 'POST', headers: getAuthHeaders() });
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok) throw new Error(data.detail || 'Could not restore Story in Camellia Admin.');
+                showInstagramStoryResult('success', 'Story restored in Camellia Admin. Its archived route remains inactive until explicitly restored and enabled.');
+                await loadInstagramStories(true);
+            } catch (err) { showInstagramStoryResult('error', err.message || String(err)); }
+            finally {
+                igStoryRestoreInFlight.delete(normalizedMediaId);
+                if (button) {
+                    button.disabled = false;
+                    button.textContent = 'Restore';
+                }
+            }
+        }
+
+        function renderInstagramStories() {
+            const list = document.getElementById('igStoryList');
+            if (!list) return;
+            const storyTimestamp = source => {
+                const value = source.last_seen || source.first_seen || '';
+                const timestamp = Date.parse(value);
+                return Number.isNaN(timestamp) ? 0 : timestamp;
+            };
+            const sources = [...igStorySources].filter(storyMatches).sort((left, right) => storyTimestamp(right) - storyTimestamp(left));
+            if (!sources.length) { list.innerHTML = '<p style="color:var(--text-muted);font-size:0.84rem;">No captured Stories match this filter.</p>'; return; }
+            list.innerHTML = sources.map(source => {
+                const status = storyIsAdminDeleted(source)
+                    ? 'DELETED'
+                    : String(source.mapping_status || source.status || 'UNMAPPED').toUpperCase();
+                const routeId = source.routing_id ? Number(source.routing_id) : null;
+                let actions = '';
+                if (status === 'DELETED') actions = `<button class="btn-secondary" type="button" data-story-action="restore-source" data-story-media-id="${escapeHtml(source.story_media_id || '')}">Restore</button>`;
+                else if (status === 'UNMAPPED') actions = `<button class="btn-secondary" type="button" data-story-action="map" data-story-media-id="${escapeHtml(source.story_media_id || '')}">Map Story</button><button class="btn-danger" type="button" data-story-action="delete" data-story-media-id="${escapeHtml(source.story_media_id || '')}">Delete</button>`;
+                else if (status === 'MAPPED') actions = `<button class="btn-secondary" type="button" data-story-action="edit" data-story-media-id="${escapeHtml(source.story_media_id || '')}">Edit Mapping</button><button class="btn-secondary" type="button" data-story-action="disable" data-routing-id="${routeId}">Disable</button><button class="btn-danger" type="button" data-story-action="archive" data-routing-id="${routeId}">Archive</button><button class="btn-danger" type="button" data-story-action="delete" data-story-media-id="${escapeHtml(source.story_media_id || '')}">Delete</button>`;
+                else if (status === 'DISABLED') actions = `<button class="btn-secondary" type="button" data-story-action="edit" data-story-media-id="${escapeHtml(source.story_media_id || '')}">Edit Mapping</button><button class="btn-secondary" type="button" data-story-action="enable" data-routing-id="${routeId}">Enable</button><button class="btn-danger" type="button" data-story-action="archive" data-routing-id="${routeId}">Archive</button><button class="btn-danger" type="button" data-story-action="delete" data-story-media-id="${escapeHtml(source.story_media_id || '')}">Delete</button>`;
+                else actions = `<button class="btn-secondary" type="button" data-story-action="restore" data-routing-id="${routeId}">Restore</button><button class="btn-danger" type="button" data-story-action="delete" data-story-media-id="${escapeHtml(source.story_media_id || '')}">Delete</button>`;
+                const topic = source.routing_topic || 'Unmapped Story';
+                const details = `<details class="ig-media-details"><summary style="cursor:pointer;">View details</summary><div>Story media ID: ${escapeHtml(source.story_media_id || '—')}<br>Routing ID: ${escapeHtml(String(routeId || '—'))}<br>Preview metadata: <span class="ig-story-preview-meta">${escapeHtml(storyPreviewMetadata(source.temporary_url))}</span><br>Meta Story status: ${escapeHtml(source.story_status || 'Not supplied')}<br>First seen: ${escapeHtml(source.first_seen || '—')}<br>Last seen: ${escapeHtml(source.last_seen || '—')}</div></details>`;
+                return `<article class="ig-media-card ig-story-card"><div class="ig-media-preview"><div class="ig-media-placeholder"><span class="ig-media-placeholder-icon">📖</span><span>STORY</span></div><span class="ig-media-badge">STORY</span></div><div class="ig-media-main"><div class="ig-media-title"><b class="ig-media-topic">${escapeHtml(topic)}</b><span class="ig-media-status ${storyStatusClass(status)}">${escapeHtml(status)}</span></div><div class="ig-media-summary">Captured Story media ID: ${escapeHtml(source.story_media_id || '—')}</div><div class="ig-media-facts"><span><b>Last seen:</b> ${escapeHtml(source.last_seen || '—')}</span><span><b>Source status:</b> ${escapeHtml(source.story_status || 'Not supplied')}</span></div></div><div class="ig-media-actions">${actions}</div>${details}</article>`;
+            }).join('');
+            list.querySelectorAll('[data-story-action]').forEach(button => button.addEventListener('click', () => {
+                const action = button.dataset.storyAction;
+                const routingId = Number(button.dataset.routingId || 0);
+                if (action === 'map' || action === 'edit') openInstagramStoryMapping(button.dataset.storyMediaId || '');
+                else if (action === 'disable') setInstagramStoryActive(routingId, false);
+                else if (action === 'enable') setInstagramStoryActive(routingId, true);
+                else if (action === 'archive') archiveInstagramStory(routingId);
+                else if (action === 'restore') restoreInstagramStory(routingId);
+                else if (action === 'delete') deleteInstagramStory(button.dataset.storyMediaId || '');
+                else if (action === 'restore-source') restoreInstagramStorySource(button.dataset.storyMediaId || '', button);
+            }));
+        }
+
+        function setInstagramStoryRefreshStatus(kind, message) {
+            const status = document.getElementById('igStoryRefreshStatus');
+            if (!status) return;
+            if (!message) { status.style.display = 'none'; status.innerHTML = ''; return; }
+            status.style.display = 'block';
+            status.className = `result-box ${kind}`;
+            status.innerHTML = '';
+            status.appendChild(document.createTextNode(message));
+            if (kind === 'error') {
+                const retry = document.createElement('button');
+                retry.className = 'btn-secondary';
+                retry.type = 'button';
+                retry.style.marginLeft = '10px';
+                retry.textContent = 'Retry';
+                retry.addEventListener('click', () => loadInstagramStories());
+                status.appendChild(retry);
+            }
+        }
+
+        // A refresh that fails must never take away Story data the client
+        // was already looking at. The list is only ever replaced after a
+        // successful response; a failed one leaves igStorySources (and
+        // everything rendered from it) exactly as it was, and reports the
+        // failure in its own banner instead of overwriting the list.
+        async function loadInstagramStories(includeDeleted = igStoryFilter === 'DELETED') {
+            const list = document.getElementById('igStoryList');
+            if (!list || !adminAuthenticated || igStoryRefreshInFlight) return;
+            igStoryRefreshInFlight = true;
+            const isFirstLoad = !igStoriesEverLoaded;
+            const refreshButton = document.getElementById('igStoryRefreshButton');
+
+            if (isFirstLoad) {
+                list.innerHTML = '<p style="color:var(--text-muted);font-size:0.84rem;">Loading captured Stories…</p>';
+            } else {
+                setInstagramStoryRefreshStatus('info', 'Refreshing Stories…');
+            }
+            if (refreshButton) { refreshButton.disabled = true; refreshButton.textContent = '🔄 Refreshing…'; }
+
+            try {
+                const [sourcesResponse, activeResponse, archivedResponse] = await Promise.all([
+                    fetch('/admin/instagram-story-sources' + (includeDeleted ? '?include_deleted=true' : ''), { headers: getAuthHeaders() }),
+                    fetch('/admin/instagram-routes', { headers: getAuthHeaders() }),
+                    fetch('/admin/instagram-routes?include_archived=true', { headers: getAuthHeaders() }),
+                ]);
+                const [sourcesData, activeData, archivedData] = await Promise.all([sourcesResponse.json(), activeResponse.json(), archivedResponse.json()]);
+                if (!sourcesResponse.ok) throw new Error(sourcesData.detail || 'Could not load captured Stories.');
+                if (!activeResponse.ok) throw new Error(activeData.detail || 'Could not load Story mappings.');
+                if (!archivedResponse.ok) throw new Error(archivedData.detail || 'Could not load archived Story mappings.');
+
+                const routes = [...(activeData.routes || []), ...(archivedData.routes || [])].filter(route => route.source_type === 'story');
+                const routesById = new Map(routes.filter(route => route.routing_id).map(route => [String(route.routing_id), route]));
+                igStorySources = (sourcesData.story_sources || []).map(source => ({ ...(routesById.get(String(source.routing_id)) || {}), ...source }));
+                window.igStorySources = igStorySources;
+                igProducts = activeData.product_catalogue || archivedData.product_catalogue || [];
+                igStoryKnowledgeScopes = activeData.knowledge_scopes || archivedData.knowledge_scopes || [];
+                if (!igTopics.length && !igMenus.length) await loadTopicsAndMenus();
+                populateInstagramStoryPickers();
+                renderInstagramStories();
+                igStoriesEverLoaded = true;
+                setInstagramStoryRefreshStatus(null, null);
+            } catch (err) {
+                if (isFirstLoad) {
+                    list.innerHTML = `<p style="color:var(--danger);font-size:0.84rem;">${escapeHtml(err.message || err)}</p>`;
+                } else {
+                    // Previously loaded Story cards, search text, and the
+                    // active status filter are all untouched -- only the
+                    // banner communicates that this particular refresh failed.
+                    setInstagramStoryRefreshStatus('error', 'Could not refresh Stories. Showing last loaded data.');
+                }
+            } finally {
+                igStoryRefreshInFlight = false;
+                if (refreshButton) { refreshButton.disabled = false; refreshButton.textContent = '🔄 Refresh Stories'; }
+            }
+        }
+
+        function instagramStoriesTabIsVisible() {
+            const panel = document.getElementById('tab-instagram-stories');
+            return Boolean(panel && panel.style.display === 'block' && document.visibilityState !== 'hidden');
+        }
+
+        function stopInstagramStoryAutoRefresh() {
+            if (igStoryRefreshTimer !== null) {
+                clearInterval(igStoryRefreshTimer);
+                igStoryRefreshTimer = null;
+            }
+        }
+
+        function startInstagramStoryAutoRefresh() {
+            stopInstagramStoryAutoRefresh();
+            if (!instagramStoriesTabIsVisible()) return;
+            igStoryRefreshTimer = setInterval(() => {
+                if (!instagramStoriesTabIsVisible()) {
+                    stopInstagramStoryAutoRefresh();
+                    return;
+                }
+                loadInstagramStories();
+            }, 15000);
+        }
+
+        function syncInstagramStoryAutoRefresh() {
+            if (instagramStoriesTabIsVisible()) startInstagramStoryAutoRefresh();
+            else stopInstagramStoryAutoRefresh();
+        }
+
         function renderInstagramMediaRegistry() {
             const list = document.getElementById('adRouteList');
             if (!list) return;
-            const all = [...(window.igRoutes || [])];
+            const all = [...(window.igRoutes || [])].filter(route => route.source_type !== 'story');
             if (igRouteTab === 'active') all.push(...(window.igLegacyAds || []));
             const filtered = all.filter(instagramRouteMatches);
             if (!filtered.length) { list.innerHTML=`<p style="color:var(--text-muted);font-size:0.84rem;">${all.length ? 'No connected media matches this search or filter.' : igRouteTab === 'archived' ? 'No archived routes.' : 'No Instagram routes added yet.'}</p>`; return; }

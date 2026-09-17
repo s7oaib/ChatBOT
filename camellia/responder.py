@@ -6,6 +6,7 @@ import re
 import time
 import unicodedata
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, Any, Tuple, Optional, List
 from camellia.config import config
 from camellia.ad_routing import product_for_ad
@@ -291,6 +292,16 @@ ORDER_INTENT_RE = re.compile(
     re.IGNORECASE
 )
 
+ORDER_READY_RE = re.compile(
+    r"^\s*(?:i\s+want\s+to\s+order|want\s+to\s+order|"
+    r"i'?m\s+ready\s+to\s+place\s+the\s+order|ready\s+to\s+place\s+the\s+order|"
+    r"let'?s\s+confirm|finali[sz]e\s+it|book\s+this|can\s+we\s+lock\s+this\s+in|"
+    r"go\s+ahead\s+and\s+book\s+it|order\s+now|i\s+wnt\s+2\s+ordr\s+pls|i\s+want\s+two\s+boxes|"
+    r"yes\s+place\s+my\s+order|final\s+selection|confirm\s+my\s+order|"
+    r"place\s+the\s+order)\s*[?.!]*$",
+    re.IGNORECASE,
+)
+
 # Words that carry no information about what the customer wants. Used to tell a
 # genuinely vague message ("ok tell me") from a short but specific one
 # ("do you serve bhapa pitha") — the first is worth a clarifying question, the
@@ -551,6 +562,38 @@ TIME_INTENT_RE = re.compile(
     re.IGNORECASE
 )
 
+# These two intent shapes are deliberately handled before the typed/semantic
+# router. They are complete questions, but carry no product noun for the
+# router to use: ``when should I book?`` is booking advice, not the generic
+# order-steps template, and ``how long will delivery take?`` is the approved
+# savoury delivery answer, not the broader Sondesh delivery template.
+SAVOURY_BOOKING_TIME_RE = re.compile(
+    r'\b(?:best time to book|when should i book|when to book|best time to order|'
+    r'when should i order|how early (?:should i )?(?:book|order)|'
+    r'how far in advance(?: should i (?:book|order))?|when to place order|'
+    r'best time to place order|advance booking)\b',
+    re.IGNORECASE,
+)
+GENERIC_SAVOURY_DELIVERY_TIME_RE = re.compile(
+    r'\b(?:how long(?: will| does)? (?:the )?delivery take|'
+    r'what(?: is|\'s)? (?:the )?delivery time|'
+    r'how soon can you deliver)\b',
+    re.IGNORECASE,
+)
+SUBSCRIPTION_DELIVERY_TIME_RE = re.compile(
+    r'(?:\bsubscription\b.*\b(?:delivery|deliver|arrive|time)\b|'
+    r'\b(?:delivery|deliver|arrive|time)\b.*\bsubscription\b)',
+    re.IGNORECASE,
+)
+
+MANAGER_CONTACT_QUERY_RE = re.compile(
+    r"(?:\bwho\s+can\s+i\s+speak\s+to\s+directly\b|"
+    r"\bhow\s+can\s+i\s+contact\s+(?:your|the)\s+manager\b|"
+    r"\bwho\s+(?:do|should)\s+i\s+contact\b|"
+    r"\bmanager(?:'s)?\s+(?:contact|email|details?)\b)",
+    re.IGNORECASE,
+)
+
 # A food-context word anywhere in a time question means the client's 45-minute
 # meals figure applies, not the 15/30/60-minute Sondesh dispatch numbers.
 FOOD_CONTEXT_WORDS = (
@@ -571,7 +614,36 @@ SONDESH_CONTEXT_WORDS = (
 # without that pairing, "who is the founder" or "is the kitchen open"
 # would wrongly pull in the Kolkata answer instead of their own template.
 KOLKATA_UNAMBIGUOUS_RE = re.compile(r'\b(kolkata|relocat\w*|shutting down|shut down)\b', re.IGNORECASE)
-BENGALI_HOME_TABLE_RETIRED_RE = re.compile(r'\bbengali\s+home\s+table\b', re.IGNORECASE)
+HOME_TABLE_RE = re.compile(
+    r'\b(?:bengal(?:i)?\s+home\s+(?:lunch\s+)?tables?|'
+    r'bengal(?:i)?\s+home\s+lunch|bengal(?:i)?\s+home\s+tabel(?:\s+kolkatta?)?|'
+    r'kolkata\s+home\s+tables?|'
+    r'home\s+table|home\s+tabel\s+pris(?:e|s)\s+kolkatta)\b',
+    re.IGNORECASE,
+)
+HOME_TABLE_PAYMENT_RE = re.compile(
+    r'\b(?:how\s+to\s+pay|how\s+do\s+i\s+pay|payment|pay)\b', re.IGNORECASE,
+)
+HOME_TABLE_DETAILED_PRICING_RE = re.compile(
+    r'\b(?:detailed\s+pricing|price\s+per\s+person|pricing|prices|price|pris[es]|cost|rate|'
+    r'how\s+much|per\s+person|per\s+head|'
+    r'veg(?:etarian)?|non[ -]?veg(?:etarian)?)\b', re.IGNORECASE,
+)
+HOME_TABLE_BARE_PRICE_RE = re.compile(
+    r'^\s*(?:what(?:\s+is|\'s)?\s+the\s+price|price|prices|cost|rate|how\s+much)\s*[?.!]*\s*$',
+    re.IGNORECASE,
+)
+HOME_TABLE_BOOKING_RE = re.compile(
+    r"\b(?:book|booking|reserve|reservation)\b",
+    re.IGNORECASE,
+)
+PAYMENT_QUERY_RE = re.compile(
+    r'\b(?:how\s+to\s+pay|how\s+do\s+i\s+pay|how\s+can\s+i\s+pay|'
+    r'payment(?:\s+details?|\s+method(?:s)?|\s+options?)?|pay(?:ment)?\s+details?|'
+    r'bank\s+transfer|upi|qr(?:\s+code)?|gpay|paytm|phonepe|net\s+banking|'
+    r'credit\s+card|debit\s+card|cash\s+on\s+delivery|\bcod\b)\b',
+    re.IGNORECASE,
+)
 KOLKATA_MOVE_VERB_RE = re.compile(r'\b(mov(e|ing)|leav(e|ing)|leaves|clos(e|ing))\b', re.IGNORECASE)
 KOLKATA_SUBJECT_RE = re.compile(
     r'\b(kitchen|gurgaon|founder|founders|recipes|recipe|quality|standards|team|somdeb)\b',
@@ -589,6 +661,42 @@ OUT_OF_AREA_GENERIC_RE = re.compile(
     r'internationally|international shipping|abroad|overseas|'
     r'outside india|another state|other states|worldwide|world[\s-]?wide|'
     r'outside the country|ship (it |this )?internationally)\b',
+    re.IGNORECASE,
+)
+
+# These are narrow, approved-area/contact questions. They run before the
+# general NLU path because a model may otherwise classify them as unsupported
+# stock availability or generic contact requests instead of using the exact
+# approved QA template.
+SUBSCRIPTION_AREA_QUERY_RE = re.compile(
+    r"(?=.*\b(?:subscription|subscriptions|meal plan|meal package|everyday meal|"
+    r"meal subscription|tiffin)\b)"
+    r"(?=.*\b(?:available|availability|deliver|delivery|offered|get|take)\b)"
+    r"(?=.*\b(?:delhi|new delhi|gurgaon|noida|greater noida|ghaziabad|faridabad|"
+    r"dwarka|ncr|mumbai|pune|bangalore|bengaluru|kolkata|hyderabad|chennai|"
+    r"jaipur|ahmedabad|chandigarh|lucknow)\b)",
+    re.IGNORECASE,
+)
+SUBSCRIPTION_CANONICAL_QUERY_RE = re.compile(
+    r"(?=.*\b(?:subscr(?:iption|ption)|meal\s+plan|meal\s+package|everyday\s+meal|"
+    r"meal\s+subscription|daily\s+meals|monthly\s+meal)\b)"
+    r"(?=.*\b(?:price|pricing|pric|cost|rate|more|about|details?|options?|"
+    r"what\s+subscriptions?)\b)",
+    re.IGNORECASE,
+)
+PICKUP_CONTACT_QUERY_RE = re.compile(
+    r"\b(?:where is (?:your|the) kitchen|kitchen address|pickup directions|"
+    r"directions for pickup|number .*\bpickup\b|call .*\bpickup\b)\b",
+    re.IGNORECASE,
+)
+MEAL_PREORDER_QUERY_RE = re.compile(
+    r"(?:"
+    r"(?=.*\b(?:pre[- ]?order|pre[- ]?book|prebook)\b)"
+    r"(?=.*\b(?:meal|food|savoury|savory|lunch|dinner|menu|a la carte|à la carte|alacarte)\b)"
+    r"|"
+    r"(?=.*\bbook(?:ing)?\b)"
+    r"(?=.*\b(?:meal|lunch|dinner|menu|a la carte|à la carte|alacarte)\b)"
+    r")",
     re.IGNORECASE,
 )
 
@@ -662,10 +770,11 @@ TOPIC_MAP = {
     "know_more": "sondesh_general",
     "sugar_free_options": "sondesh_general",
     "combo_bento": "savoury",
+    "bento_details": "bento",
     "weekly_menu_veg": "savoury",
     "weekly_menu_nonveg": "savoury",
     "savoury_food_intro": "savoury",
-    "subscription_details": "savoury",
+    "subscription_details": "subscription",
     "alacarte_prebooking_steps": "savoury",
 }
 
@@ -705,6 +814,11 @@ class DeterministicResponder:
         self.qa_path = qa_path or config.QA_TEMPLATES_PATH
         self.menu_path = menu_path or config.MENU_JSON_PATH
         self.qa_data = self._load_json(self.qa_path)
+        # Keep the trust source separate from the writable/admin-managed QA
+        # file.  Durable content may be preserved for operators, but it can
+        # never make itself an approved canonical response.
+        canonical_path = Path(__file__).resolve().parent.parent / "data" / "qa_templates.json"
+        self._canonical_qa_data = self._load_json(str(canonical_path))
         self.menu_data = self._load_json(self.menu_path)
 
     def _load_json(self, path: str) -> Dict[str, Any]:
@@ -832,22 +946,10 @@ class DeterministicResponder:
         knowledge id and sufficiency instead of answering blind.
         """
         text = " ".join(message.lower().split()).strip(" .?!")
-        # Staff-approved answers must win over broad conversational routing.
-        # A learned answer may intentionally contain words such as "bulk" or
-        # "corporate", but it is still a verified answer rather than a new
-        # escalation request.
-        # Conversational-only turns have a higher precedence than any learned
-        # row, so stale Custom Q&A content cannot turn a greeting into a menu
-        # dump.  The learned matcher remains authoritative for real questions.
-        if not (GREETING_ONLY_RE.fullmatch(text) or CLOSING_ONLY_RE.fullmatch(text) or ACK_ONLY_RE.fullmatch(text)):
-            try:
-                learned_match = db.search_learned_knowledge(message)
-                learned_answer = (learned_match or {}).get("verified_answer", "").strip()
-                if learned_answer:
-                    session_memory.add_turn(user_id, channel, message, learned_answer)
-                    return learned_answer, True, f"learned_{learned_match.get('id')}", None
-            except Exception:
-                pass
+        # Learned knowledge is deliberately not consulted here. Canonical
+        # customer intent must be resolved before a broad ACTIVE Custom Q&A
+        # row gets a chance to answer it; the learned fallback runs only after
+        # canonical guards/templates have declined the message.
         if (self.classify_unmatched_intent(message) == "complaint"
                 or re.search(r"\b(cancel (?:my |the )?order|order is missing|(?:speak|talk) to (?:a |an )?(?:human|person))\b", text)):
             reply, _ = self.build_handover_response(message)
@@ -970,7 +1072,7 @@ class DeterministicResponder:
         savoury_templates = {
             "savoury_food_intro", "weekly_menu_veg", "weekly_menu_nonveg",
             "combo_bento", "bento_details", "alacarte_prebooking_steps",
-            "subscription_details", "subscription_booking_steps",
+            "subscription_booking_steps",
             "savoury_best_time_to_book", "savoury_delivery_time",
         }
         # The expired-menu fallback ("kitchen is finalising this week's menu")
@@ -1682,6 +1784,16 @@ class DeterministicResponder:
         explicit_subject_match = EXPLICIT_SUBJECT_RE.search(
             semantic_remainder or user_message
         )
+        explicit_context_switch = bool(
+            SUBSCRIPTION_DELIVERY_TIME_RE.search(lowered_text)
+            or SUBSCRIPTION_CANONICAL_QUERY_RE.search(lowered_text)
+            or SUBSCRIPTION_AREA_QUERY_RE.search(lowered_text)
+            or MANAGER_CONTACT_QUERY_RE.search(lowered_text)
+            or (
+                TIME_INTENT_RE.search(lowered_text)
+                and any(word in lowered_text for word in SONDESH_CONTEXT_WORDS)
+            )
+        )
         normalized_slot_answer = re.sub(
             r"[?!.,]+$", "", " ".join((semantic_remainder or user_message).lower().split())
         ).strip()
@@ -1715,13 +1827,18 @@ class DeterministicResponder:
                 )
             )
         )
-        if explicit_subject_match and not is_relevant_slot_answer:
+        if (explicit_subject_match or explicit_context_switch) and not is_relevant_slot_answer:
+            # The named product/topic is a deliberate subject switch. Keep
+            # the source route for audit/history, but stop it from answering
+            # the next vague message as though the old subject were current.
+            facts["source_context_superseded"] = True
             interrupted_flags = []
             for flow_flag in (
                 "awaiting_area_confirmation", "awaiting_product_price",
                 "awaiting_menu_choice", "awaiting_subscription_booking",
                 "subscription_context", "awaiting_instagram_contact",
                 "awaiting_instagram_contact_confirmation", "awaiting_name",
+                "home_table_context",
             ):
                 if facts.get(flow_flag):
                     facts[flow_flag] = False
@@ -1733,26 +1850,46 @@ class DeterministicResponder:
                 facts["last_flow_interrupted"] = interrupted_flags
                 log.info(
                     "INTENT_INTERRUPT subject=%r flags=%s",
-                    explicit_subject_match.group(0), interrupted_flags,
+                    explicit_subject_match.group(0) if explicit_subject_match else "canonical_context",
+                    interrupted_flags,
                 )
 
         ad_product = product_for_ad(referral_ad_id, referral_ad_title) or facts.get("ad_product")
         if ad_product:
             facts["ad_product"] = ad_product
 
-        # The former Bengali Home Table event is retired. Keep a deterministic
-        # neutral answer for explicit mentions so stale learned/custom answers
-        # or source context can never resurrect its October event details.
-        if BENGALI_HOME_TABLE_RETIRED_RE.search(lowered_text):
-            retired_event_notice = (
-                "That Bengali Home Table event information is no longer current. "
-                "Please contact our team if you'd like to know about any upcoming events."
-            )
-            facts["last_route_source"] = "retired_content_guard"
-            facts["last_intents"] = [Intent.UNKNOWN.value]
+        # Bengali Home Table is a live Kolkata campaign and must be resolved
+        # before the broad ``kolkata_expansion_info`` matcher.  The campaign has
+        # four separate deterministic trigger paths; the ambiguous bare-price
+        # follow-up reuses the contextual introduction rather than guessing a
+        # numeric answer that the supplied golden text does not specify.
+        has_home_table_context = bool(facts.get("home_table_context"))
+        has_home_table_subject = bool(HOME_TABLE_RE.search(lowered_text))
+        if has_home_table_subject or has_home_table_context:
+            if HOME_TABLE_BOOKING_RE.search(lowered_text):
+                order_template = self._template_by_id("order_next_steps") or {}
+                order_response = order_template.get("response") or self._generic_fallback()
+                facts["last_route_source"] = "canonical_order_handoff"
+                facts["last_topic"] = "order"
+                session_memory.add_turn(user_id, channel, user_message, order_response)
+                return order_response, False, "order_next_steps", None
+            if HOME_TABLE_PAYMENT_RE.search(lowered_text):
+                home_table_template_id = "bengali_home_table_payment"
+            elif has_home_table_context and HOME_TABLE_BARE_PRICE_RE.fullmatch(lowered_text):
+                home_table_template_id = "bengali_home_table_details"
+            elif HOME_TABLE_DETAILED_PRICING_RE.search(lowered_text):
+                home_table_template_id = "bengali_home_table_pricing"
+            else:
+                home_table_template_id = "bengali_home_table_details"
+            home_table_template = self._template_by_id(home_table_template_id)
+            home_table_response = home_table_template.get("response") or self._generic_fallback()
+            facts["home_table_context"] = True
+            facts["last_topic"] = "bengali_home_table"
+            facts["active_product_context"] = None
             facts["source_context_used"] = False
-            session_memory.add_turn(user_id, channel, user_message, retired_event_notice)
-            return retired_event_notice, True, "retired_home_table_event", None
+            facts["last_route_source"] = "canonical_home_table"
+            session_memory.add_turn(user_id, channel, user_message, home_table_response)
+            return home_table_response, True, home_table_template_id, None
 
         # A direct human request always outranks an active order slot.  Without
         # this guard, "I need an agent" after a receipt could be treated as a
@@ -1761,6 +1898,7 @@ class DeterministicResponder:
             channel == "instagram"
             and semantic_fallback._ESCALATION_INTENT_RE.search(lowered_text)
             and not semantic_fallback._IDENTITY_QUESTION_RE.search(lowered_text)
+            and not MANAGER_CONTACT_QUERY_RE.search(lowered_text)
         ):
             fallback, _intent = self.build_handover_response(user_message)
             facts["last_route_source"] = "explicit_rule"
@@ -1772,6 +1910,21 @@ class DeterministicResponder:
             facts["knowledge_sufficient"] = False
             session_memory.add_turn(user_id, channel, user_message, fallback)
             return fallback, False, "explicit_escalation", None
+
+        # Ready-to-order is a deterministic, fully-anchored intent (see
+        # ORDER_READY_RE) and must be recognized here, before the generic
+        # this/it source-reference clarify gate below. That gate's bare word
+        # match on "this"/"it"/"that" would otherwise swallow phrases like
+        # "book this" or "finalise it" into a false "which item?" prompt,
+        # since ORDER_READY_RE would never get a chance to run. Checked
+        # after safety/escalation, ahead of everything else.
+        if ORDER_READY_RE.fullmatch(lowered_text):
+            order_template = self._template_by_id("order_next_steps") or {}
+            order_response = order_template.get("response") or self._generic_fallback()
+            facts["last_route_source"] = "canonical_order_handoff"
+            facts["last_topic"] = "order"
+            session_memory.add_turn(user_id, channel, user_message, order_response)
+            return order_response, False, "order_next_steps", None
 
         # A referral is a preference only for genuinely vague openings. It
         # runs before conversational shorthand (such as a bare "price"), so
@@ -1841,7 +1994,12 @@ class DeterministicResponder:
             )
             and not source_context_available
             and not explicit_product
-            and not facts.get("clarify_sent")
+            # "now THAT you're moving to Kolkata" is a conjunction, not a
+            # reference to a post/reel/product — has_explicit_source_reference
+            # matches the bare word "that" with no grammatical awareness.
+            # An unambiguous Kolkata-expansion question has its own approved
+            # canonical answer further below and must never be diverted here.
+            and not KOLKATA_UNAMBIGUOUS_RE.search(lowered_text)
         ):
             facts["clarify_sent"] = True
             clarification = (
@@ -1852,7 +2010,14 @@ class DeterministicResponder:
             return clarification, True, "clarify_request", None
         # Keep the historical shorthand behavior, while allowing ordinary
         # human phrasing such as "this one please" or "price for this".
-        vague_opening = bool(source_intent or (legacy_vague_opening and not conversational_opener))
+        # A pack-size follow-up is still about the source product even after
+        # the first Story/Reel/Post answer established ``last_topic``.
+        source_size_followup = bool(re.search(r"\b(?:250|500|1000|1)\s*(?:g|kg)\b", lowered_text))
+        vague_opening = bool(
+            source_intent
+            or source_size_followup
+            or (legacy_vague_opening and not conversational_opener)
+        )
         source_topic = (
             db.get_instagram_topic(source_route["topic_id"])
             if source_route and source_route.get("topic_id") else None
@@ -1869,7 +2034,15 @@ class DeterministicResponder:
         route_menu_mode = str((source_route or {}).get("menu_mode") or "INHERIT").strip().upper()
         menu_attached = route_menu_mode != "NONE"
         what_else = bool(re.fullmatch(r"what else(?: do you have)?[?!,. ]*", lowered_text))
-        can_use_source = not active_flow and (not facts.get("last_topic") or what_else)
+        source_context_authoritative = bool(
+            source_route and not facts.get("source_context_superseded")
+        )
+        can_use_source = not active_flow and (
+            not facts.get("last_topic")
+            or what_else
+            or source_size_followup
+            or source_context_authoritative
+        )
         if channel == "instagram" and source_context_available and source_product and menu_attached and vague_opening and not explicit_product and can_use_source:
             cursor = int(facts.get("source_priority_cursor") or 0)
             if what_else and priorities:
@@ -1892,6 +2065,11 @@ class DeterministicResponder:
                     )
                 facts["source_context_used"] = True
                 facts["source_priority_cursor"] = min(cursor + 1, len(priorities)) if priorities else 1
+                # Keep the canonical product topic available for a later
+                # bare follow-up while the exact source route remains the
+                # authoritative context for referential questions.
+                facts["last_topic"] = TOPIC_MAP.get(template_id, source_product)
+                facts["active_product_context"] = source_product
                 session_memory.add_turn(user_id, channel, user_message, response_text)
                 return response_text, True, f"source_{source_product}_{template_id}", images
 
@@ -1932,6 +2110,9 @@ class DeterministicResponder:
                         else:
                             images = [linked_image]
                 facts["source_context_used"] = True
+                if source_product:
+                    facts["last_topic"] = TOPIC_MAP.get(route_template_id(source_product) or "", source_product)
+                    facts["active_product_context"] = source_product
                 session_memory.add_turn(user_id, channel, user_message, response_text)
                 return response_text, True, "source_topic_know_more", images
 
@@ -1945,6 +2126,9 @@ class DeterministicResponder:
                     "", description, "", "description_first", "NONE",
                 )
                 facts["source_context_used"] = True
+                if source_product:
+                    facts["last_topic"] = TOPIC_MAP.get(route_template_id(source_product) or "", source_product)
+                    facts["active_product_context"] = source_product
                 session_memory.add_turn(user_id, channel, user_message, response_text)
                 return response_text, True, "source_topic_description_only", None
 
@@ -2117,7 +2301,118 @@ class DeterministicResponder:
             EXPLICIT_SUBJECT_RE.search(semantic_resolution_text)
             and GENERIC_DETAIL_WRAPPER_RE.search(semantic_resolution_text)
         )
-        if not active_conversation_flow and not explicit_subject_in_detail_wrapper:
+
+        # Keep the client-confirmed subscription area, pickup contact, and
+        # savoury pre-order answers deterministic when the wording is explicit.
+        # These are approved template replies, not new facts or model guesses.
+        if SUBSCRIPTION_CANONICAL_QUERY_RE.search(lowered_text):
+            template = self._template_by_id("subscription_details") or {}
+            response_text, images = self._format_dynamic_response(
+                "subscription_details", template.get("response") or self._generic_fallback(),
+                user_id=user_id, channel=channel, user_message=user_message,
+            )
+            facts["awaiting_subscription_booking"] = True
+            facts["subscription_context"] = True
+            facts["last_topic"] = "subscription"
+            session_memory.add_turn(user_id, channel, user_message, response_text)
+            return response_text, True, "subscription_details", images
+
+        if SUBSCRIPTION_AREA_QUERY_RE.search(lowered_text):
+            template = self._template_by_id("subscription_details") or {}
+            response_text = template.get("response") or self._generic_fallback()
+            facts["awaiting_subscription_booking"] = True
+            facts["subscription_context"] = True
+            facts["last_topic"] = "subscription"
+            session_memory.add_turn(user_id, channel, user_message, response_text)
+            return response_text, True, "subscription_details", None
+
+        if PICKUP_CONTACT_QUERY_RE.search(lowered_text):
+            template = self._template_by_id("GUARD_pickup_address_hours") or {}
+            response_text = template.get("response") or self._generic_fallback()
+            session_memory.add_turn(user_id, channel, user_message, response_text)
+            return response_text, True, "GUARD_pickup_address_hours", None
+
+        if MEAL_PREORDER_QUERY_RE.search(lowered_text):
+            template = self._template_by_id("alacarte_prebooking_steps") or {}
+            response_text = template.get("response") or self._generic_fallback()
+            response_text, images = self._apply_crosssell_nudges(
+                "alacarte_prebooking_steps", response_text, None, facts,
+            )
+            session_memory.add_turn(user_id, channel, user_message, response_text)
+            return response_text, True, "alacarte_prebooking_steps", images
+
+        # The approved subscription answer gives the current plan and delivery
+        # charge policy, but does not promise a delivery duration. Keep an
+        # explicit subscription-delivery question on that canonical route
+        # instead of borrowing the savoury 45-minute answer.
+        if (
+            not active_conversation_flow
+            and SUBSCRIPTION_DELIVERY_TIME_RE.search(lowered_text)
+        ):
+            template = self._template_by_id("subscription_details") or {}
+            response_text, images = self._format_dynamic_response(
+                "subscription_details", template.get("response") or self._generic_fallback(),
+                user_id=user_id, channel=channel, user_message=user_message,
+            )
+            facts["awaiting_subscription_booking"] = True
+            facts["subscription_context"] = True
+            facts["last_topic"] = "subscription"
+            session_memory.add_turn(user_id, channel, user_message, response_text)
+            return response_text, True, "subscription_details", images
+
+        # Context-free booking advice has a complete approved answer of its
+        # own. Keep subscription/Home Table/event flows above or outside this
+        # shortcut, and leave explicit product questions to their own routes.
+        if (
+            not active_conversation_flow
+            and not facts.get("subscription_context")
+            and SAVOURY_BOOKING_TIME_RE.search(lowered_text)
+            and not re.search(r"\b(?:subscription|home table|event|wedding|corporate)\b", lowered_text)
+        ):
+            template = self._template_by_id("savoury_best_time_to_book") or {}
+            response_text, images = self._format_dynamic_response(
+                "savoury_best_time_to_book", template.get("response") or self._generic_fallback(),
+                user_id=user_id, channel=channel, user_message=user_message,
+            )
+            response_text, images = self._apply_crosssell_nudges(
+                "savoury_best_time_to_book", response_text, images, facts,
+            )
+            if intro_greeting_prefix:
+                response_text = intro_greeting_prefix + response_text
+            session_memory.add_turn(user_id, channel, user_message, response_text)
+            return response_text, True, "savoury_best_time_to_book", images
+
+        # A generic delivery-time question has no product noun for the normal
+        # scorer to distinguish. Treat it as savoury only when it is not
+        # explicitly about Sondesh, a subscription, or an event.
+        if (
+            not active_conversation_flow
+            and not facts.get("subscription_context")
+            and (GENERIC_SAVOURY_DELIVERY_TIME_RE.search(lowered_text) or (
+                TIME_INTENT_RE.search(lowered_text)
+                and re.search(r"\b(?:delivery|deliver|arrive)\b", lowered_text)
+            ))
+            and not any(word in lowered_text for word in SONDESH_CONTEXT_WORDS)
+            and not re.search(r"\b(?:subscription|home table|event|wedding|corporate)\b", lowered_text)
+        ):
+            template = self._template_by_id("savoury_delivery_time") or {}
+            response_text, images = self._format_dynamic_response(
+                "savoury_delivery_time", template.get("response") or self._generic_fallback(),
+                user_id=user_id, channel=channel, user_message=user_message,
+            )
+            response_text, images = self._apply_crosssell_nudges(
+                "savoury_delivery_time", response_text, images, facts,
+            )
+            if intro_greeting_prefix:
+                response_text = intro_greeting_prefix + response_text
+            session_memory.add_turn(user_id, channel, user_message, response_text)
+            return response_text, True, "savoury_delivery_time", images
+
+        if (
+            not active_conversation_flow
+            and not explicit_subject_in_detail_wrapper
+            and not ORDER_READY_RE.fullmatch(lowered_text)
+        ):
             structured = self._structured_nlu_response(
                 user_message, user_id, channel, intro_greeting_prefix,
             )
@@ -2162,6 +2457,19 @@ class DeterministicResponder:
                 fallback = intro_greeting_prefix + fallback
             session_memory.add_turn(user_id, channel, user_message, fallback)
             return fallback, False, "explicit_escalation", None
+
+        # Payment facts are a high-risk canonical answer. Resolve short forms
+        # such as "bank transfer" and "payment details" before fuzzy scoring
+        # can turn them into a knowledge gap or a nearby product answer, while
+        # allowing complaints and other explicit escalations above to win.
+        if PAYMENT_QUERY_RE.search(lowered_text):
+            payment_template = self._template_by_id("GUARD_payment_method")
+            payment_response = payment_template.get("response") or self._generic_fallback()
+            facts["last_topic"] = "payment"
+            facts["last_route_source"] = "canonical_payment"
+            facts["source_context_used"] = False
+            session_memory.add_turn(user_id, channel, user_message, payment_response)
+            return payment_response, True, "GUARD_payment_method", None
 
         # 2.5 Check if accumulated order_draft slots form a complete order receipt
         order_draft = facts.get("order_draft", {})
@@ -2208,25 +2516,10 @@ class DeterministicResponder:
                     response_text = intro_greeting_prefix + response_text
                 session_memory.add_turn(user_id, channel, user_message, response_text)
                 return response_text, True, "order_draft_receipt", None
-        
-        # Check Self-Healing Learned Knowledge Base (Saved from Staff Escalation Resolutions)
-        try:
-            learned_items = db.get_active_learned_knowledge(limit=100)
-            for item in learned_items:
-                pattern = item.get("question_pattern", "").lower().strip()
-                ans = item.get("verified_answer", "").strip()
-                if not pattern or not ans:
-                    continue
-                p_words = set(re.findall(r'\b\w+\b', pattern))
-                sub_p_words = p_words - STOP_WORDS
-                sub_u_words = user_words - STOP_WORDS
-                if pattern in lowered_text or (sub_p_words and sub_p_words.issubset(sub_u_words)):
-                    if intro_greeting_prefix:
-                        ans = intro_greeting_prefix + ans
-                    session_memory.add_turn(user_id, channel, user_message, ans)
-                    return ans, True, f"learned_{item.get('id')}", None
-        except Exception:
-            pass
+
+        # Ready-to-order phrases are resolved earlier now (right after the
+        # escalation guard), before the this/it source-reference clarify
+        # gate gets a chance to hijack them.
 
         # 3. Clean Conversational Preamble to isolate Business Intent
         cleaned_business_text = re.sub(
@@ -2245,11 +2538,28 @@ class DeterministicResponder:
         # last product topic discussed this session, instead of letting a
         # message with no product words of its own fall through to a human
         # handover the customer didn't need.
+        active_product = facts.get("active_product_context")
+        followup_text = cleaned_business_text.strip() or user_message.strip()
+        if active_product and not explicit_product and re.search(
+            r"\b(?:250|500|1000)\s*(?:g|kg)\b|\b(?:price|cost|rate|how much)\b",
+            followup_text,
+        ):
+            wants_price = bool(re.search(r"price|cost|rate|how much", lowered_text))
+            active_template_id = route_template_id(str(active_product), price=wants_price)
+            active_template = self._template_by_id(active_template_id) if active_template_id else None
+            if active_template and active_template.get("response"):
+                response_text, images = self._format_dynamic_response(
+                    active_template_id, active_template["response"], user_id=user_id,
+                    channel=channel, user_message=user_message,
+                )
+                facts["source_context_used"] = False
+                session_memory.add_turn(user_id, channel, user_message, response_text)
+                return response_text, True, active_template_id, images
         last_topic = facts.get("last_topic")
         # The greeting-stripped text, so "Hi, what is the price?" is treated as
         # the same bare price question as "what is the price?" — a customer who
         # says hello first is not asking a different question.
-        stripped_for_bare_check = cleaned_business_text.strip() or user_message.strip()
+        stripped_for_bare_check = followup_text
         if last_topic and BARE_VEG_RE.match(stripped_for_bare_check):
             if last_topic == "savoury":
                 response_text = (
@@ -2281,6 +2591,15 @@ class DeterministicResponder:
             facts["awaiting_menu_choice"] = True
             session_memory.add_turn(user_id, channel, user_message, response_text)
             return response_text, True, "context_meal_price_followup", None
+
+        if last_topic == "bento" and BARE_PRICE_RE.match(stripped_for_bare_check):
+            template = self._template_by_id("bento_details") or {}
+            response_text, images = self._format_dynamic_response(
+                "bento_details", template.get("response") or self._generic_fallback(),
+                user_id=user_id, channel=channel, user_message=user_message,
+            )
+            session_memory.add_turn(user_id, channel, user_message, response_text)
+            return response_text, True, "bento_details", images
 
         # A bare "what's the price?" with no product topic established yet is
         # genuinely ambiguous — Sondesh and Bengali meals are priced and sold
@@ -2327,6 +2646,7 @@ class DeterministicResponder:
             choosing_a_plan = bool(facts.get("awaiting_subscription_booking"))
             asks_about_an_option = choosing_a_plan and bool(SUBSCRIPTION_OPTION_RE.search(lowered_text))
             wants_to_book = choosing_a_plan and bool(SUBSCRIPTION_BOOKING_INTENT_RE.search(lowered_text))
+            asks_about_subscription_price = bool(BARE_PRICE_RE.match(stripped_for_bare_check))
             changes_a_date = bool(SUBSCRIPTION_DATE_CHANGE_RE.search(lowered_text)) and not any(
                 w in lowered_text for w in SONDESH_CONTEXT_WORDS
             )
@@ -2334,6 +2654,11 @@ class DeterministicResponder:
             if changes_a_date or wants_to_book:
                 # The booking steps carry the 5-hour date-change notice.
                 follow_up_id = "subscription_booking_steps"
+            elif asks_about_subscription_price:
+                # A subscription customer asking the bare follow-up "price?"
+                # must receive the subscription answer and its exact chart, not
+                # the generic savoury per-dish clarification.
+                follow_up_id = "subscription_details"
             elif asks_about_an_option:
                 # What each option contains is in the plans message itself.
                 follow_up_id = "subscription_details"
@@ -2341,12 +2666,14 @@ class DeterministicResponder:
             if follow_up_id:
                 tmpl = self._template_by_id(follow_up_id)
                 if tmpl and tmpl.get("response"):
-                    response_text = tmpl["response"]
-                    images = None
+                    response_text, images = self._format_dynamic_response(
+                        follow_up_id, tmpl["response"], user_id=user_id,
+                        channel=channel, user_message=user_message,
+                    )
                     facts["subscription_context"] = True
                     if follow_up_id == "subscription_booking_steps":
                         facts["awaiting_subscription_booking"] = False
-                    if not facts.get("savoury_crosssell_sent"):
+                    if follow_up_id != "subscription_details" and not facts.get("savoury_crosssell_sent"):
                         facts["savoury_crosssell_sent"] = True
                         crosssell = self._template_by_id("savoury_crosssell_sondesh")
                         crosssell_text = ((crosssell or {}).get("response") or "").strip()
@@ -2975,6 +3302,8 @@ class DeterministicResponder:
 
             if tmpl_id in TOPIC_MAP:
                 facts["last_topic"] = TOPIC_MAP[tmpl_id]
+            if tmpl_id in {"jolbhora", "kanchagolla"}:
+                facts["active_product_context"] = tmpl_id
 
             # Last line of defence against sending the customer the identical
             # reply twice. Reached only when refinement did not already vary the
@@ -2999,6 +3328,21 @@ class DeterministicResponder:
             image_url = _strip_flower_emoji(image_url)
             session_memory.add_turn(user_id, channel, user_message, response_text)
             return response_text, True, tmpl_id, image_url
+
+        # Canonical resolution has had first refusal. Only now consult the
+        # ACTIVE learned-knowledge store for a genuine uncovered question.
+        # The database accessor enforces the ACTIVE-only customer-serving
+        # boundary; ARCHIVED and DISABLED rows never reach this path.
+        try:
+            learned_match = db.search_learned_knowledge(user_message)
+            learned_answer = (learned_match or {}).get("verified_answer", "").strip()
+            if learned_answer:
+                if intro_greeting_prefix:
+                    learned_answer = intro_greeting_prefix + learned_answer
+                session_memory.add_turn(user_id, channel, user_message, learned_answer)
+                return learned_answer, True, f"learned_{learned_match.get('id')}", None
+        except Exception:
+            pass
 
         # Check the active AI provider (Groq RAG) when enabled
         fallback, _intent = self.build_handover_response(user_message)
@@ -3234,6 +3578,14 @@ class DeterministicResponder:
             result["response"] = override.get("response") or ""
         return result
 
+    def _canonical_template_response(self, template_id: str) -> str:
+        """Return the immutable repository seed copy, excluding durable edits."""
+        template = next(
+            (t for t in self._canonical_qa_data.get("templates", []) if t.get("id") == template_id),
+            {},
+        )
+        return str(template.get("response") or ((template.get("responses") or [""])[0]))
+
     def _templates_with_overrides(self) -> List[Dict[str, Any]]:
         """Materialize runtime templates with managed copy overrides applied."""
         try:
@@ -3439,7 +3791,11 @@ class DeterministicResponder:
             channel=channel, user_message=(template.get("triggers") or [""])[0],
         )
         if runtime_quarantine_enabled(getattr(db, "db_path", "")):
-            rendered = quarantine_template_response(template_id, _strip_flower_emoji(rendered))
+            rendered = quarantine_template_response(
+                template_id,
+                _strip_flower_emoji(rendered),
+                canonical_text=self._canonical_template_response(template_id),
+            )
         else:
             rendered = _strip_flower_emoji(rendered)
         return rendered, _quarantine_image_claims(images)
@@ -3493,6 +3849,14 @@ class DeterministicResponder:
                 f"what we're cooking now.",
                 cards,
             )
+
+        # The subscription source requires the supplied Everyday Meal rate
+        # chart itself.  Keep this asset distinct from the Aamar, Signature,
+        # and weekly menu cards; the response text must not recreate its table.
+        elif template_id == "subscription_details":
+            target_images = [
+                "/images/Everyday%20Meal%20Subscription%20Rate%20Chart.jpeg"
+            ]
 
         if template_id in ["know_more", "product_overview"]:
             # The two Sondesh cards are undated and stay; only the weekly card
@@ -3779,7 +4143,11 @@ class DeterministicResponder:
             user_message, user_id, channel, referral_source, referral_ad_id, referral_ad_title
         )
         if runtime_quarantine_enabled(getattr(db, "db_path", "")):
-            safe_text = quarantine_template_response(template_id, text or "")
+            safe_text = quarantine_template_response(
+                template_id,
+                text or "",
+                canonical_text=self._canonical_template_response(template_id),
+            )
             safe_images = _quarantine_image_claims(image_url)
         else:
             safe_text, safe_images = text or "", image_url

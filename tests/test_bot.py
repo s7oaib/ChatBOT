@@ -2101,15 +2101,16 @@ class TestCamelliaBot(unittest.TestCase):
         self.assertIn("mutton is halal", resp3)
         self.assertIn("mustard oil", resp3)
 
-        # Scenario 4: Payment methods and COD clarification (Confirmed: UPI/bank transfer only, No COD)
+        # Scenario 4: Payment methods and COD clarification (current approved facts)
         uid4 = "sim_user_payment_4"
         session_memory.clear_session(uid4, "whatsapp")
         msg4 = "What payment methods do you accept, do you take COD?"
         resp4, matched4, tmpl4, imgs4 = responder.match_and_respond(msg4, user_id=uid4, channel="whatsapp")
         self.assertTrue(matched4)
         self.assertEqual(tmpl4, "GUARD_payment_method")
-        self.assertIn("UPI / bank transfer only", resp4)
-        self.assertIn("No COD", resp4)
+        self.assertIn("UPI at 9625083171", resp4)
+        self.assertIn("Yummraj Culinary Expeditions Pvt Ltd", resp4)
+        self.assertIn("credit card at https://razorpay.me/@camelliaartisanal", resp4)
 
         # Scenario 5: Transaction failure escalation
         uid5 = "sim_user_failed_tx_5"
@@ -2133,7 +2134,7 @@ class TestCamelliaBot(unittest.TestCase):
         self.assertIn("No minimum order", resp)
         self.assertIn("BENGALI BENTO", resp)
         self.assertIn("EVERYDAY MEAL SUBSCRIPTION", resp)
-        self.assertNotIn("Gurgaon only", resp)
+        self.assertIn("Gurgaon only", resp)
         self.assertIn("include GST", resp)
         self.assertIn("Delivery charges are at actuals", resp)
         # Image attachment must be weekly menu card
@@ -2174,13 +2175,12 @@ class TestCamelliaBot(unittest.TestCase):
         resp1, matched1, tmpl1, _ = responder.match_and_respond(msg1, user_id=uid, channel="whatsapp")
         self.assertTrue(matched1)
         self.assertEqual(tmpl1, "subscription_details")
-        # The client's own copy names the kitchen, not a delivery restriction.
+        self.assertIn("Price of 5 / 10 / 30 MEALS", resp1)
         self.assertIn("Sushant Lok Gurgaon kitchen", resp1)
-        self.assertIn("₹1,500", resp1)
-        self.assertIn("₹1,750", resp1)
-        self.assertIn("₹2,000", resp1)
-        self.assertIn("luchi or polao", resp1)
-        self.assertIn("gift you the 11th", resp1)
+        self.assertNotIn("₹1,750", resp1)
+        self.assertNotIn("₹2,000", resp1)
+        self.assertNotIn("luchi or polao", resp1)
+        self.assertNotIn("gift you the 11th", resp1)
         # Verify state flag set
         facts1 = session_memory.get_facts(uid, "whatsapp")
         self.assertTrue(facts1.get("awaiting_subscription_booking"))
@@ -2213,7 +2213,7 @@ class TestCamelliaBot(unittest.TestCase):
         self.assertNotIn("phone number", resp.lower())
         self.assertIn("preferred day or meal slot", resp)
         self.assertNotIn("Google location pin", resp)
-        self.assertNotIn("8796551990", resp)
+        self.assertIn("+91 87965 51990", resp)
 
     def test_phase_b_sondesh_dispatch_time(self):
         """Phase B: Test sondesh_dispatch_time returns standard dispatch timings."""
@@ -2323,7 +2323,7 @@ class TestCamelliaBot(unittest.TestCase):
         self.assertTrue(matched)
         self.assertEqual(tmpl, "savoury_delivery_time")
         self.assertIn("within 45 minutes", resp)
-        self.assertNotIn("8796551990", resp)
+        self.assertIn("+91 87965 51990", resp)
 
     def test_phase_e_kolkata_expansion_info(self):
         """Phase E: Test kolkata_expansion_info template response."""
@@ -2343,21 +2343,18 @@ class TestCamelliaBot(unittest.TestCase):
         self.assertEqual(tmpl, "GUARD_staff_names_manager_contact")
         self.assertIn("camellia.artisanal.gurgaon@gmail.com", resp)
         self.assertIn("Guru Dayal Singh", resp)
+        self.assertIn("+91 87965 51990", resp)
 
     def test_phase_c_subscription_booking_nudge(self):
-        """Phase C: Test subscription_details response explicitly ends with 'Would you like to book?'."""
+        """Phase C: Test subscription_details response includes the approved booking contact."""
         from camellia.session_memory import session_memory
         session_memory.clear_session("test_sub_nudge_user", "whatsapp")
         msg = "Tell me about your everyday meal subscription"
         resp, matched, tmpl, _ = responder.match_and_respond(msg, user_id="test_sub_nudge_user", channel="whatsapp")
         self.assertTrue(matched)
         self.assertEqual(tmpl, "subscription_details")
-        self.assertIn("Would you like to book?", resp)
-        # Verify it's at the end of the subscription response body
-        self.assertTrue(
-            resp.strip().endswith("Would you like to book?")
-            or "We also make & send Bengali mishti" in resp
-        )
+        self.assertIn("Our Manager of Kitchens", resp)
+        self.assertIn("share your invoice", resp)
 
     def test_phase_c_first_time_vs_returning_customer_detection(self):
         """Phase C: Test first-time vs returning customer detection on savoury_food_intro."""

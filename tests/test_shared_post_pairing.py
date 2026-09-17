@@ -226,7 +226,7 @@ def test_recognized_post_suppresses_the_unreadable_attachment_reply(post_route, 
     session_memory.clear_session("uid_reply", "instagram")
 
     replied = []
-    monkeypatch.setattr(app_module, "_reply_to_unreadable_attachment", lambda uid: replied.append(uid))
+    monkeypatch.setattr(app_module, "_reply_to_unreadable_attachment", lambda uid, **_kwargs: replied.append(uid))
 
     app_module._handle_shared_attachment("uid_reply", None, POST_MEDIA_ID)
     assert replied == []
@@ -235,7 +235,7 @@ def test_recognized_post_suppresses_the_unreadable_attachment_reply(post_route, 
 def test_unrecognized_post_still_gets_the_unreadable_attachment_reply(post_route, monkeypatch):
     database, routing_id = post_route
     replied = []
-    monkeypatch.setattr(app_module, "_reply_to_unreadable_attachment", lambda uid: replied.append(uid))
+    monkeypatch.setattr(app_module, "_reply_to_unreadable_attachment", lambda uid, **_kwargs: replied.append(uid))
 
     app_module._handle_shared_attachment("uid_unrec", None, THIRD_PARTY_MEDIA_ID)
     assert replied == ["uid_unrec"]
@@ -244,7 +244,7 @@ def test_unrecognized_post_still_gets_the_unreadable_attachment_reply(post_route
 def test_a_reel_share_still_gets_the_unreadable_reply_exactly_as_before(post_route, monkeypatch):
     """Section 11: the proven reel path must not change."""
     replied = []
-    monkeypatch.setattr(app_module, "_reply_to_unreadable_attachment", lambda uid: replied.append(uid))
+    monkeypatch.setattr(app_module, "_reply_to_unreadable_attachment", lambda uid, **_kwargs: replied.append(uid))
     app_module._handle_shared_attachment("uid_reel", {"shortcode": "unconfigured"}, None)
     assert replied == ["uid_reel"]
 

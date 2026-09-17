@@ -473,14 +473,14 @@ class TestDryRunAndUsage:
         assert "nothing has been sent" in data["note"].lower()
 
     def test_real_matched_response_increments_usage_exactly_once(self, isolated_db):
-        kid = isolated_db.add_learned_knowledge("Topic", "how much is one meal exactly", "It is 250 rupees.")
-        responder.match_and_respond("how much is one meal exactly", user_id="custom_qa_usage_1", channel="instagram", referral_source="ADS")
+        kid = isolated_db.add_learned_knowledge("Topic", "what is our catering process exactly", "It is handled by our team.")
+        responder.match_and_respond("what is our catering process exactly", user_id="custom_qa_usage_1", channel="instagram", referral_source="ADS")
         assert isolated_db.get_custom_qa(kid)["usage_count"] == 1
 
     def test_last_used_at_updates(self, isolated_db):
-        kid = isolated_db.add_learned_knowledge("Topic", "how much is one meal exactly", "It is 250 rupees.")
+        kid = isolated_db.add_learned_knowledge("Topic", "what is our catering process exactly", "It is handled by our team.")
         assert isolated_db.get_custom_qa(kid)["last_used_at"] is None
-        responder.match_and_respond("how much is one meal exactly", user_id="custom_qa_usage_2", channel="instagram", referral_source="ADS")
+        responder.match_and_respond("what is our catering process exactly", user_id="custom_qa_usage_2", channel="instagram", referral_source="ADS")
         assert isolated_db.get_custom_qa(kid)["last_used_at"] is not None
 
     def test_shadow_does_not_increment_usage(self, isolated_db):

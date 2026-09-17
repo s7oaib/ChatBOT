@@ -385,34 +385,9 @@
     },
     "everyday_meal_subscription": {
       "type_name": "Everyday Meal Subscription",
-      "package_meals_count": 5,
-      "pricing_note": "Includes GST, packaging, and portal charges; Porter delivery on actuals.",
-      "rules": [
-        "Basanti Polao or Luchi once during the 5-meal cycle at no extra charge",
-        "No fixed consecutive schedule — order meals flexibly as needed",
-        "Every 10 meals completed, the 11th meal is FREE",
-        "5 hours advance notice required for date or schedule changes"
-      ],
-      "plans": [
-        {
-          "plan_name": "Vegetarian Plan",
-          "price_inr": 1500,
-          "meals_count": 5,
-          "effective_per_meal_inr": 300
-        },
-        {
-          "plan_name": "Veg + Chicken Plan",
-          "price_inr": 1750,
-          "meals_count": 5,
-          "description": "Combination of Vegetarian & Chicken meals"
-        },
-        {
-          "plan_name": "Chicken Plan",
-          "price_inr": 2000,
-          "meals_count": 5,
-          "effective_per_meal_inr": 400
-        }
-      ]
+      "availability": "Gurgaon only",
+      "pricing_note": "See the attached Everyday Meal Subscription rate chart for current pricing. Porter delivery charges are on actuals from Sushant Arcade Gurgaon.",
+      "rate_chart_image": "/images/Everyday%20Meal%20Subscription%20Rate%20Chart.jpeg"
     }
   },
   "meta": {

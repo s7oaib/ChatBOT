@@ -27,8 +27,18 @@ def _write(path, templates, seed_version=None, extra=None):
     return path
 
 
-SEED_T = [{"id": "a", "response": "seed copy"}]
-LIVE_T = [{"id": "a", "response": "live copy"}]
+REQUIRED_T = [
+    {"id": "bengali_home_table_details", "response": "seed details"},
+    {"id": "bengali_home_table_pricing", "response": "seed pricing"},
+    {"id": "bengali_home_table_payment", "response": "seed payment"},
+]
+SEED_T = REQUIRED_T + [{"id": "a", "response": "seed copy"}]
+LIVE_T = [
+    REQUIRED_T[0],
+    {"id": "bengali_home_table_pricing", "response": "live pricing"},
+    {"id": "bengali_home_table_payment", "response": "live payment"},
+    {"id": "a", "response": "live copy"},
+]
 
 
 def _run(monkeypatch, tmp_path, seed, live=None):
@@ -118,6 +128,88 @@ def test_a_seed_without_a_version_never_touches_the_live_file(monkeypatch, tmp_p
     bootstrap.prepare_writable_storage()
 
     assert json.loads(target.read_text(encoding="utf-8"))["templates"] == LIVE_T
+
+
+def test_an_incomplete_qa_seed_fails_closed_without_replacing_live_file(monkeypatch, tmp_path):
+    seed = _write(
+        tmp_path / "seed.json",
+        [{"id": "unrelated", "response": "seed"}],
+        seed_version=22,
+    )
+    target = tmp_path / "volume" / "qa_templates.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    _write(target, LIVE_T, seed_version=21, extra={"operator": "preserve"})
+
+    monkeypatch.setattr(bootstrap, "_SEEDED_FILES", (("QA_TEMPLATES_PATH", seed),))
+    monkeypatch.setenv("QA_TEMPLATES_PATH", str(target))
+    actions = bootstrap.prepare_writable_storage()
+
+    assert json.loads(target.read_text(encoding="utf-8"))["templates"] == LIVE_T
+    assert not list(target.parent.glob("qa_templates.*backfill*.json"))
+    assert any("seed missing required templates" in action for action in actions)
+
+
+def test_same_version_missing_home_table_templates_are_backfilled_additively(monkeypatch, tmp_path):
+    seed = _write(tmp_path / "qa_templates.json", SEED_T, seed_version=21, extra={"seeded_from_hash": "seed"})
+    live_templates = [REQUIRED_T[0], {"id": "a", "response": "operator edit"}]
+    target = tmp_path / "volume" / "qa_templates.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    _write(
+        target,
+        live_templates,
+        seed_version=21,
+        extra={"operator_meta": "keep", "seeded_from_hash": "old"},
+    )
+
+    monkeypatch.setattr(bootstrap, "_SEEDED_FILES", (("QA_TEMPLATES_PATH", seed),))
+    monkeypatch.setenv("QA_TEMPLATES_PATH", str(target))
+    actions = bootstrap.prepare_writable_storage()
+
+    live = json.loads(target.read_text(encoding="utf-8"))
+    assert [item["id"] for item in live["templates"]] == [
+        "bengali_home_table_details", "a",
+        "bengali_home_table_pricing", "bengali_home_table_payment",
+    ]
+    assert live["templates"][1]["response"] == "operator edit"
+    assert live["operator_meta"] == "keep"
+    assert live["seed_version"] == 21
+    assert live["seeded_from_hash"] == "old"
+    assert any(
+        "backfilled QA_TEMPLATES_PATH with required templates: "
+        "bengali_home_table_pricing, bengali_home_table_payment" in action
+        for action in actions
+    )
+
+    second_actions = bootstrap.prepare_writable_storage()
+    assert second_actions == []
+    assert len(list(target.parent.glob("qa_templates.home-table-backfill.json"))) == 1
+
+
+def test_existing_home_table_operator_copy_is_preserved(monkeypatch, tmp_path):
+    seed = _write(tmp_path / "qa_templates.json", SEED_T, seed_version=21)
+    custom_details = {
+        "id": "bengali_home_table_details",
+        "response": "CUSTOM OPERATOR HOME TABLE COPY",
+    }
+    target = tmp_path / "volume" / "qa_templates.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    _write(target, [custom_details, {"id": "unrelated", "response": "keep"}], seed_version=21)
+
+    monkeypatch.setattr(bootstrap, "_SEEDED_FILES", (("QA_TEMPLATES_PATH", seed),))
+    monkeypatch.setenv("QA_TEMPLATES_PATH", str(target))
+    bootstrap.prepare_writable_storage()
+
+    live = json.loads(target.read_text(encoding="utf-8"))
+    assert live["templates"][0] == custom_details
+    assert {item["id"] for item in live["templates"]} >= set(bootstrap.REQUIRED_QA_TEMPLATE_IDS)
+
+
+def test_required_template_integrity_reports_missing_ids(tmp_path):
+    path = _write(tmp_path / "qa_templates.json", [REQUIRED_T[0]])
+    assert bootstrap.required_template_ids_present(path) is False
+    assert bootstrap.missing_required_template_ids(path) == (
+        "bengali_home_table_pricing", "bengali_home_table_payment"
+    )
 
 
 def test_the_shipped_seed_declares_a_version():

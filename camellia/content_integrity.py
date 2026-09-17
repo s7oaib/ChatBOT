@@ -7,6 +7,7 @@ operator's existing edit is never overwritten silently.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -73,6 +74,18 @@ UNCONFIRMED_CLAIM_PATTERNS = (
 _UNCONFIRMED_RE = re.compile("|".join(f"(?:{p})" for p in UNCONFIRMED_CLAIM_PATTERNS), re.IGNORECASE)
 
 QUARANTINE_TEMPLATE_FALLBACKS = {
+    "bengali_home_table_details": (
+        "Our team can assist you personally on WhatsApp. Please continue your enquiry "
+        "using the link below."
+    ),
+    "bengali_home_table_pricing": (
+        "Our team can assist you personally on WhatsApp. Please continue your enquiry "
+        "using the link below."
+    ),
+    "bengali_home_table_payment": (
+        "Our team can assist you personally on WhatsApp. Please continue your enquiry "
+        "using the link below."
+    ),
     "GUARD_dietary_suitability": (
         "Please tell us the exact dietary requirement. Our team will confirm the "
         "ingredients for the specific item before ordering."
@@ -119,6 +132,179 @@ QUARANTINE_TEMPLATE_FALLBACKS = {
         "A2 cow milk. Please ask our team for current product details."
     ),
 }
+
+# These are the client-confirmed Phase 3B responses.  The template ID is not a
+# blanket bypass: a later edit remains subject to the last-mile guard.  When a
+# trusted resolver selects one of these IDs, the safe result of that guard is
+# always this exact versioned copy, never an older fallback or edited wording.
+CLIENT_CONFIRMED_EXACT_RESPONSES = {
+    "bengali_home_table_details": (
+        "Hi! Thank you for connecting. Sharing details of the Camellia.artisanal Bengali "
+        "Home Table, Kolkata. 4th & 11th October 2026 | 1–6 pm Diamond Park, Joka, Kolkata "
+        "Think of the lunch as a Bengali omakase — you don't choose the menu; the season "
+        "does. An elaborate vegetarian & non-vegetarian Bengali home lunch, slow-cooked using "
+        "traditional methods, followed by several kinds of mishti made by us, a Darjeeling "
+        "tea ceremony and a sit-down storytelling session. Story & lunch theme 4th October — "
+        "MALE FOLK DEITIES OF BENGAL 11th October — DURGA PUJO Next steps to book a seat "
+        "Please let me know how many guests Which of the two dates would you prefer Sharing 4 "
+        "videos for you to take a look at details & also a bit of videos from the 100 Bengali "
+        "home tables we did at gurgaon. If this interests you, please let me know. I will "
+        "share the pricing & other details."
+    ),
+    "bengali_home_table_pricing": (
+        "This is a meal that unfolds slowly, one course and one story at a time. It is a "
+        "leisurely Bengali experience where each dish has its own place in the sequence—"
+        "allowing you to experience Bengal through its flavours, histories, rituals and "
+        "memories. The Vegetarian Experience includes 8 individually served dishes. The "
+        "Non-Vegetarian Experience includes 9 individually served dishes. Both conclude with "
+        "a seasonal pre-dessert, followed by three distinct desserts made entirely in our "
+        "kitchen—including our signature norom-pak Jolbhora Sondesh. Vegetarian Experience — "
+        "₹1,500 per person Non-Vegetarian Experience — ₹2,500 per person Prices include GST. "
+        "Please let me know if you decide to book. I will share the payment details."
+    ),
+    "bengali_home_table_payment": (
+        "A seat is booked on full payment of the total amount. You can transfer by UPI to "
+        "9625083171 Or bank transfer to Yummraj Culinary Expeditions Pvt Ltd Account number- "
+        "50200077136337 IFSC - HDFC0000572 Account type - Current OR credit card at "
+        "https://razorpay.me/@camelliaartisanal We will send a GST invoice as proof of "
+        "payment & confirmation of your seat"
+    ),
+    "sondesh_crosssell_savoury": (
+        "We also prepare and deliver freshly cooked Bengali meals across Delhi NCR. "
+        "I've attached this week's menu in case you'd like to have a look. Everything "
+        "is cooked fresh in small batches, and some dishes are available only in limited "
+        "quantities. If you'd like a recommendation based on whether you prefer "
+        "vegetarian, fish or meat, just let me know — I'd be happy to help."
+    ),
+    "delivery_out_of_area": (
+        "Hi, thank you for getting in touch.\n\n"
+        "I would have loved to. However, the Norom Pak Sondesh that we make can be "
+        "transported from one city to another only through a reliable cold-chain courier "
+        "service. Unfortunately, we haven't yet found a partner who can offer this at a "
+        "reasonable cost.\n\n"
+        "So for now, we're unable to ship our sondesh outside Delhi NCR — we do not "
+        "deliver to Bangalore or other cities at this time. We'd love to, though, and "
+        "will certainly start as soon as we find a dependable cold-chain delivery option.\n\n"
+        "That said, many of our regular customers who live in different parts of India "
+        "and the world do buy our sondesh by asking friends or family travelling from "
+        "Delhi NCR to carry a few boxes for them. We're happy to deliver the order to "
+        "their home, office, hotel, or any other convenient location before they travel.\n\n"
+        "Thank you for thinking of camellia.artisanal!"
+    ),
+    "savoury_best_time_to_book": (
+        "We always recommend pre-ordering. It helps us ensure that the dishes you want "
+        "are available, exactly as you'd like them. Since we cook everything in small "
+        "batches, some dishes may sell out if you order at the last minute. Pre-ordering "
+        "is the best way to avoid disappointment."
+    ),
+    "savoury_delivery_time": (
+        "Hi! Thank you for getting in touch.\n\n"
+        "We request you to always pre order. So that way the delivery time can be at your "
+        "convenience subject to our kitchen timings. If you are unable to pre order, once "
+        "your order is confirmed, we usually dispatch it from our kitchen in Sushant Lok, "
+        "Gurgaon within 45 minutes.\n\n"
+        "Delivery time after that depends on the Porter rider's travel time, which varies "
+        "based on traffic and the time of day.\n\n"
+        "Our kitchen is open 10:00 AM – 7:30 PM every day. You may also call +91 87965 "
+        "51990 or DM to pre order."
+    ),
+    "kolkata_expansion_info": (
+        "Over the past two months, we have personally run our Gurgaon kitchen to ensure "
+        "every aspect of the operation met the standards we had envisioned.\n\n"
+        "Today, we have a professional team in place, led by our Kitchen Manager, Guru "
+        "Dayal Singh (camellia.artisanal.gurgaon@gmail.com). Our women kitchen team has "
+        "been with us for the past four years and has been extensively trained by us. "
+        "Together, they now run the kitchen through well-established systems, processes, "
+        "quality checks and balances.\n\n"
+        "Over the last few weeks, we have deliberately reduced our physical presence in "
+        "the kitchen and have been monitoring operations remotely. The transition has gone "
+        "exactly as planned, and the kitchen is now operating independently while "
+        "consistently maintaining our standards.\n\n"
+        "This gives us the confidence to move to Kolkata, knowing that nothing changes for "
+        "our guests in Delhi NCR. The same kitchen, the same team, the same recipes, the "
+        "same ingredients, and the same goal of trying to be at uncompromising standards "
+        "will continue — exactly as they do today."
+    ),
+    "sondesh_dispatch_time": (
+        "Hi! Thank you for getting in touch.\n\n"
+        "Once your sondesh order is confirmed, we usually dispatch it from our kitchen "
+        "in Sushant Lok, Gurgaon within 15 minutes. Kanchagolla takes about 30 minutes. "
+        "Jolbhora takes about an hour.\n\n"
+        "Delivery time after that depends on the Porter rider's travel time, which varies "
+        "based on traffic and the time of day.\n\n"
+        "Our kitchen is open 10:00 AM – 7:30 PM every day. We always request a pre order "
+        "to ensure we are able to make & send exactly what you want. Else sometimes we "
+        "might run out of stock that we make in small batches."
+    ),
+    "GUARD_staff_names_manager_contact": (
+        "Our Manager of Kitchens, Mr. Guru Dayal Singh, is the point of contact for kitchen "
+        "enquiries. You can reach the kitchen at +91 87965 51990 or "
+        "camellia.artisanal.gurgaon@gmail.com."
+    ),
+}
+
+PHASE3B_REMEDIATION_ACTOR = "phase3b_client_confirmed_content"
+PHASE3B_REMEDIATION_REASON = "phase3b_client_confirmed_content_upgrade"
+HOME_TABLE_REMEDIATION_ACTOR = "phase3b_home_table_durable_copy"
+HOME_TABLE_REMEDIATION_REASON = "phase3b_home_table_stale_handoff_upgrade"
+HOME_TABLE_TEMPLATE_IDS = frozenset({
+    "bengali_home_table_details",
+    "bengali_home_table_pricing",
+    "bengali_home_table_payment",
+})
+SUBSCRIPTION_TEMPLATE_ID = "subscription_details"
+SUBSCRIPTION_REMEDIATION_ACTOR = "phase3a_subscription_durable_copy"
+SUBSCRIPTION_REMEDIATION_REASON = "phase3a_subscription_legacy_upgrade"
+KNOWN_LEGACY_SUBSCRIPTION_MARKERS = (
+    "₹1,500 for 5 meals",
+    "₹1,750",
+    "₹2,000 for 5 meals",
+    "luchi or polao",
+    "gift you the 11th",
+    "à la carte",
+)
+LEGACY_SUBSCRIPTION_RESPONSE = (
+    "*SUBSCRIPTION - HOME FOOD AWAY FROM HOME*\n\n"
+    "Hi! Thank you for asking about our Everyday Meal Subscription.\n\n"
+    "The Everyday Meal Subscription is available in Gurgaon only.\n\n"
+    "Freshly cooked, home-style balanced food, using good-quality ingredients, home recipes and no shortcuts.\n\n"
+    "Price of 5 MEALS (including GST). Porter delivery charges at actuals, depending on fare from our Sushant Lok Gurgaon kitchen to your location\n\n"
+    "• Option 1 Vegetarian — ₹1,500 for 5 meals\n"
+    "(Rice/roti + 2 sabzis + chatni/mishti)\n"
+    "• Option 2 Veg + Chicken — ₹1,750 (vegetarian on 3 days, chicken on 2 days) for 5 meals\n"
+    "• Option 3 Chicken — ₹2,000 for 5 meals\n"
+    "(Rice/roti + 1 sabzi + chicken + chatni/mishti)\n\n"
+    "Once during the package, you can opt for luchi or polao\n"
+    "• No fixed schedule — have your meals over 5 days, 10 days or at your own pace\n"
+    "• For every 10 meals, we gift you the 11th\n\n"
+    "Simple, varied everyday food — as close as we can make it to a meal from a home kitchen.\n\n"
+    "Attached below is our à la carte menu that changes every week. In case you don't want a subscription, you can just order a dish any day from here.\n\n"
+    "Would you like to book?"
+)
+KNOWN_LEGACY_SUBSCRIPTION_SHA256 = "1c1254cc608774fa65675d6f29aad9014e7c936bd251757f47addd6c35437940"
+
+
+def normalize_legacy_subscription_response(text: Any) -> str:
+    """Normalize only line endings and trailing whitespace for fingerprinting."""
+    normalized = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+    return "\n".join(line.rstrip() for line in normalized.split("\n")).rstrip()
+
+
+def legacy_subscription_response_fingerprint(text: Any) -> str:
+    return hashlib.sha256(
+        normalize_legacy_subscription_response(text).encode("utf-8")
+    ).hexdigest()
+
+
+def is_known_legacy_subscription_response(text: Any) -> bool:
+    """Return true only for the exact historical legacy subscription copy."""
+    return legacy_subscription_response_fingerprint(text) == KNOWN_LEGACY_SUBSCRIPTION_SHA256
+
+
+def is_client_confirmed_exact_response(template_id: str, text: Any) -> bool:
+    """Return true only for an exact, versioned Phase 3B approved response."""
+    approved = CLIENT_CONFIRMED_EXACT_RESPONSES.get(str(template_id or ""))
+    return approved is not None and str(text or "").strip() == approved.strip()
 
 
 def contains_unconfirmed_claim(text: Any) -> bool:
@@ -169,9 +355,30 @@ def quarantine_unconfirmed_claims(text: str) -> str:
     return "\n\n".join(kept_paragraphs).strip()
 
 
-def quarantine_template_response(template_id: str, text: str) -> str:
+def quarantine_template_response(
+    template_id: str, text: str, canonical_text: Optional[str] = None
+) -> str:
     """Apply a whole-template safe fallback where every claim is unverified."""
+    if (
+        str(template_id or "") == SUBSCRIPTION_TEMPLATE_ID
+        and canonical_text
+        and str(text or "").strip() == str(canonical_text).strip()
+    ):
+        # The subscription seed is the approved, durable copy.  Its confirmed
+        # wording includes phrases also used by the generic claim scrubber;
+        # exact equality must not reformat or partially remove that copy.
+        return str(canonical_text)
+    approved = CLIENT_CONFIRMED_EXACT_RESPONSES.get(str(template_id or ""))
+    if approved:
+        # Deterministic routing can append a secondary nudge or card caption,
+        # and a stale durable override can contain an older or edited copy.
+        # Keep only the approved versioned response.  This is quarantine, not
+        # an approval of the edited text.
+        return approved
     fallback = QUARANTINE_TEMPLATE_FALLBACKS.get(str(template_id or ""))
+    # Non-allowlisted templates remain behind the existing whole-template
+    # fallback, preserving the safety behavior even when edited wording does
+    # not happen to match today's claim-pattern list.
     if fallback and text:
         return fallback
     return quarantine_unconfirmed_claims(text)
@@ -270,7 +477,13 @@ def canonical_override_responses(
     if templates is not None:
         for template in templates:
             template_id = str(template.get("id") or "")
-            if template_id in CONFIRMED_COPY_TEMPLATES:
+            if template_id in CLIENT_CONFIRMED_EXACT_RESPONSES:
+                source_copy = template.get("response") or ((template.get("responses") or [""])[0])
+                if is_client_confirmed_exact_response(template_id, source_copy):
+                    result[template_id] = source_copy
+                elif contains_unconfirmed_claim(source_copy):
+                    result[template_id] = quarantine_template_response(template_id, source_copy)
+            elif template_id in CONFIRMED_COPY_TEMPLATES:
                 source_copy = template.get("response") or ((template.get("responses") or [""])[0])
                 result[template_id] = (
                     quarantine_template_response(template_id, source_copy)
@@ -302,14 +515,79 @@ def apply_safe_content_remediations(
     defaults = {str(t.get("id")): (t.get("response") or ((t.get("responses") or [""])[0]))
                 for t in templates if t.get("id")}
     desired = canonical_override_responses(menu_data, templates)
+    # Subscription copy has its own exact legacy-object migration below.  Do
+    # not let the generic claim quarantine turn it into a different managed
+    # response or overwrite a deliberate operator copy.
+    desired.pop(SUBSCRIPTION_TEMPLATE_ID, None)
     actions: Dict[str, str] = {}
     unsafe_health_terms = (
         "glycemic", "diabetic-friendly", "sugar-safe", "healthier for diabetes",
         "suitable for diabetics",
     )
+
+    # The subscription template is repaired only when the durable override is
+    # the complete known legacy copy.  The repository template remains the
+    # canonical source, so no customer-facing copy is duplicated here.
+    subscription_default = defaults.get(SUBSCRIPTION_TEMPLATE_ID, "")
+    if subscription_default:
+        current = database.get_response_template_override(SUBSCRIPTION_TEMPLATE_ID)
+        if current and str(current.get("status") or "ACTIVE").upper() == "ACTIVE":
+            current_copy = (current.get("response") or "").strip()
+            if current_copy == subscription_default.strip():
+                actions[SUBSCRIPTION_TEMPLATE_ID] = "unchanged"
+            elif is_known_legacy_subscription_response(current_copy):
+                ok = database.save_response_template_override(
+                    SUBSCRIPTION_TEMPLATE_ID,
+                    subscription_default,
+                    SUBSCRIPTION_REMEDIATION_ACTOR,
+                    change_reason=SUBSCRIPTION_REMEDIATION_REASON,
+                    previous_response=current_copy,
+                )
+                actions[SUBSCRIPTION_TEMPLATE_ID] = "updated" if ok else "failed"
+            else:
+                actions[SUBSCRIPTION_TEMPLATE_ID] = "skipped_operator_override"
+        elif current:
+            actions[SUBSCRIPTION_TEMPLATE_ID] = "skipped_operator_override"
+        else:
+            # With no durable override, the shipped template is already the
+            # authoritative runtime copy; avoid manufacturing a DB row.
+            actions[SUBSCRIPTION_TEMPLATE_ID] = "unchanged"
+
     for template_id, response in desired.items():
         current = database.get_response_template_override(template_id)
         default = defaults.get(template_id, "")
+
+        # Only the exact legacy fallback generated by this subsystem is
+        # eligible for automatic Phase 3B upgrade.  A distinct operator/client
+        # response remains intact and auditable.
+        approved = CLIENT_CONFIRMED_EXACT_RESPONSES.get(template_id)
+        if approved is not None:
+            if current and str(current.get("status") or "ACTIVE").upper() == "ACTIVE":
+                current_copy = (current.get("response") or "").strip()
+                if current_copy == approved.strip():
+                    actions[template_id] = "unchanged"
+                    continue
+                if current_copy != QUARANTINE_TEMPLATE_FALLBACKS.get(template_id, "").strip():
+                    actions[template_id] = "skipped"
+                    continue
+                actor = (
+                    HOME_TABLE_REMEDIATION_ACTOR
+                    if template_id in HOME_TABLE_TEMPLATE_IDS
+                    else PHASE3B_REMEDIATION_ACTOR
+                )
+                reason = (
+                    HOME_TABLE_REMEDIATION_REASON
+                    if template_id in HOME_TABLE_TEMPLATE_IDS
+                    else PHASE3B_REMEDIATION_REASON
+                )
+                ok = database.save_response_template_override(
+                    template_id, approved, actor, change_reason=reason,
+                )
+                actions[template_id] = "updated" if ok else "failed"
+                continue
+            if current:
+                actions[template_id] = "skipped"
+                continue
         if current and str(current.get("status") or "ACTIVE").upper() == "ACTIVE":
             if (current.get("response") or "").strip() == response.strip():
                 actions[template_id] = "unchanged"
@@ -333,14 +611,24 @@ def apply_safe_content_remediations(
             )
             actions[template_id] = "updated" if ok else "failed"
             continue
+        actor = (
+            HOME_TABLE_REMEDIATION_ACTOR
+            if template_id in HOME_TABLE_TEMPLATE_IDS
+            else ACTOR
+        )
+        reason = (
+            HOME_TABLE_REMEDIATION_REASON
+            if template_id in HOME_TABLE_TEMPLATE_IDS
+            else REASON
+        )
         ok = database.save_response_template_override(
-            template_id, response, ACTOR, change_reason=REASON,
+            template_id, response, actor, change_reason=reason,
             previous_response=LEGACY_RESPONSES.get(template_id, default),
         )
         actions[template_id] = "created" if ok else "failed"
     if logger:
         for template_id, action in actions.items():
-            if action in {"created", "updated", "skipped"}:
+            if action in {"created", "updated", "skipped", "skipped_operator_override"}:
                 logger.info("Content-integrity remediation %s: %s", template_id, action)
     return actions
 

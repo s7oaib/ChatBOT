@@ -1,4 +1,5 @@
 from camellia.content_integrity import (
+    CLIENT_CONFIRMED_EXACT_RESPONSES,
     canonical_override_responses,
     contains_unconfirmed_claim,
     quarantine_template_response,
@@ -36,7 +37,7 @@ def test_wholly_unconfirmed_domains_use_safe_fallbacks():
     ).startswith("Please tell us the exact dietary requirement")
     assert quarantine_template_response(
         "delivery_out_of_area", "We use a cold chain outside Delhi NCR."
-    ).startswith("Please share your city and area")
+    ) == CLIENT_CONFIRMED_EXACT_RESPONSES["delivery_out_of_area"]
 
 
 def test_confirmed_copy_is_not_quarantined():
@@ -65,10 +66,14 @@ def test_all_managed_quarantine_copies_are_free_of_unconfirmed_claims():
         templates = json.load(handle)["templates"]
     managed = canonical_override_responses(menu, templates)
     assert managed
-    assert all(not contains_unconfirmed_claim(text) for text in managed.values())
+    for template_id, text in managed.items():
+        if template_id in CLIENT_CONFIRMED_EXACT_RESPONSES:
+            assert text == CLIENT_CONFIRMED_EXACT_RESPONSES[template_id]
+        else:
+            assert not contains_unconfirmed_claim(text)
 
 
-def test_dispatch_template_never_emits_exact_timing(monkeypatch):
+def test_client_confirmed_dispatch_template_emits_exact_timing(monkeypatch):
     monkeypatch.setenv("CONTENT_INTEGRITY_REMEDIATION", "true")
     responder = DeterministicResponder()
     user_id = "quarantine-dispatch"
@@ -76,7 +81,8 @@ def test_dispatch_template_never_emits_exact_timing(monkeypatch):
     text, _matched, _template_id, _images = responder.match_and_respond(
         "how long to deliver sondesh", user_id=user_id, channel="whatsapp"
     )
-    lowered = text.lower()
-    assert "15 minutes" not in lowered
-    assert "30 minutes" not in lowered
-    assert "an hour" not in lowered
+    assert text == CLIENT_CONFIRMED_EXACT_RESPONSES["sondesh_dispatch_time"]
+    modified = text + " Trusted dairies."
+    safe = quarantine_template_response("sondesh_dispatch_time", modified)
+    assert safe == text
+    assert "Trusted dairies" not in safe

@@ -1,5 +1,5 @@
 {
-  "seed_version": 20,
+  "seed_version": 21,
   "matching_rules": {
     "guard_precedence": "GUARD_ templates (id starting with GUARD_) have absolute precedence over any answer template. When matched, they escalate immediately with response: null to prevent unverified brand statements.",
     "how_it_works": "Each template has 'triggers' (keywords/phrases). If a customer message contains ANY trigger from a template's list, that template fires. If multiple templates match, the one with the MOST matched keywords wins. If nothing matches confidently, escalate to human — never guess.",
@@ -255,9 +255,22 @@
         "confirm my order",
         "confirm order",
         "place the order",
-        "here is my address"
+        "here is my address",
+        "i want to order",
+        "want to order",
+        "i'm ready to place the order",
+        "im ready to place the order",
+        "ready to place the order",
+        "let's confirm",
+        "lets confirm",
+        "finalise it",
+        "finalize it",
+        "book this",
+        "i want two boxes",
+        "yes place my order",
+        "place my order"
       ],
-      "response": "Our team can assist you personally on WhatsApp. Please continue your enquiry using the link below.",
+      "response": "Our Manager of Kitchens, Mr. Guru Dayal Singh (+918796551990), will connect with you shortly and share your invoice. He will be your single point of contact for this order and will be happy to assist you with any queries.",
       "escalate": true,
       "source_ref": "client Q&A script > QUESTION",
       "router_hint": "The customer is ready to place an order and needs to know what to share."
@@ -844,7 +857,7 @@
         "credit card",
         "debit card"
       ],
-      "response": "UPI / bank transfer only (shared when order is confirmed — No COD on delivery). If you are picking up your order directly from our Sushant Lok kitchen, cash on pickup is accepted.",
+      "response": "You may please pay through UPI at 9625083171 OR bank transfer to Yummraj Culinary Expeditions Pvt Ltd Account number- 50200077136337 IFSC - HDFC0000572 Account type - Current OR credit card at https://razorpay.me/@camelliaartisanal",
       "escalate": false,
       "source_ref": "client confirmation (Somdeb Ji) > payment methods & COD"
     },
@@ -1220,7 +1233,7 @@
         "where is your kitchen",
         "where is the kitchen"
       ],
-      "response": "Address: E144, ground floor, Sushant Arcade, Sushant Lok 1, Gurgaon — easily accessible from Gate No. 4. Kitchen hours: 10:00 AM – 7:30 PM daily.",
+      "response": "Address: E144, ground floor, Sushant Arcade, Sushant Lok 1, Gurgaon — easily accessible from Gate No. 4. Kitchen hours: 10:00 AM – 7:30 PM daily. For pickup directions, call +91 87965 51990.",
       "escalate": false,
       "source_ref": "client confirmation (Somdeb Ji) > kitchen address & pickup hours"
     },
@@ -1356,7 +1369,7 @@
         "speak to your team",
         "talk to your team"
       ],
-      "response": "Our Manager of Kitchens, Mr. Guru Dayal Singh, is the point of contact for kitchen enquiries. You can reach the kitchen at camellia.artisanal.gurgaon@gmail.com.",
+      "response": "Our Manager of Kitchens, Mr. Guru Dayal Singh, is the point of contact for kitchen enquiries. You can reach the kitchen at +91 87965 51990 or camellia.artisanal.gurgaon@gmail.com.",
       "escalate": false,
       "source_ref": "client confirmation (Somdeb Ji) > kitchen manager (email camellia.artisanal.gurgaon@gmail.com confirmed Phase E-continued)"
     },
@@ -1393,7 +1406,7 @@
         "what dishes do you have",
         "whats on the menu this week"
       ],
-      "response": "Hi! Thank you for reaching out to Camellia.artisanal.\n\nWe cook freshly prepared Bengali food in small batches, with three ways to order:\n\n1. À LA CARTE | Across Delhi NCR\nChoose any dish from this week's menu, in any quantity. No minimum order.\n\n2. BENGALI BENTO | Across Delhi NCR\nA compact, complete Bengali meal, available in Vegetarian, Chicken and Mutton options.\n\n3. EVERYDAY MEAL SUBSCRIPTION\nFlexible 5 or 10 meal packages starting from ₹1,500 for 5 meals.\n\nAll prices mentioned in the menu include GST. Delivery charges are at actuals, with no other additional charges.\n\nEverything is cooked fresh and quantities are limited, so pre-ordering is recommended.\n\nThe weekly menu, including the BENGALI BENTO options, is attached below. If this is your first Camellia meal and the menu feels unfamiliar, I'll be happy to help you choose.",
+      "response": "Hi! Thank you for reaching out to Camellia.artisanal.\n\nWe cook freshly prepared Bengali food in small batches, with three ways to order:\n\n1. À LA CARTE | Across Delhi NCR\nChoose any dish from this week's menu, in any quantity. No minimum order.\n\n2. BENGALI BENTO | Across Delhi NCR\nA compact, complete Bengali meal, available in Vegetarian, Chicken and Mutton options.\n\n3. EVERYDAY MEAL SUBSCRIPTION | Gurgaon only\nFlexible 5 or 10 meal packages. Please see the attached rate chart for current subscription pricing.\n\nAll prices mentioned in the menu include GST. Delivery charges are at actuals, with no other additional charges.\n\nEverything is cooked fresh and quantities are limited, so pre-ordering is recommended.\n\nThe weekly menu, including the BENGALI BENTO options, is attached below. If this is your first Camellia meal and the menu feels unfamiliar, I'll be happy to help you choose.",
       "escalate": false,
       "source_ref": "client confirmation 2026-09-08 (Somdeb Ji)"
     },
@@ -1478,7 +1491,7 @@
         "what subscriptions",
         "meal subscriptions"
       ],
-      "response": "*SUBSCRIPTION - HOME FOOD AWAY FROM HOME*\n\nHi! Thank you for asking about our Everyday Meal Subscription.\n\nFreshly cooked, home-style balanced food, using good-quality ingredients, home recipes and no shortcuts.\n\nPrice of 5 MEALS (including GST). Porter delivery charges at actuals, depending on fare from our Sushant Lok Gurgaon kitchen to your location\n\n• Option 1 Vegetarian — ₹1,500 for 5 meals\n(Rice/roti + 2 sabzis + chatni/mishti)\n• Option 2 Veg + Chicken — ₹1,750 (vegetarian on 3 days, chicken on 2 days) for 5 meals\n• Option 3 Chicken — ₹2,000 for 5 meals\n(Rice/roti + 1 sabzi + chicken + chatni/mishti)\n\nOnce during the package, you can opt for luchi or polao\n• No fixed schedule — have your meals over 5 days, 10 days or at your own pace\n• For every 10 meals, we gift you the 11th\n\nSimple, varied everyday food — as close as we can make it to a meal from a home kitchen.\n\nAttached below is our à la carte menu that changes every week. In case you don't want a subscription, you can just order a dish any day from here.\n\nWould you like to book?",
+      "response": "Hi! Thank you for asking about our Everyday Meal Subscription. Here is the new subscription pricing Freshly cooked, home-style balanced food, using good-quality ingredients, home recipes and no shortcuts. Option 1 Vegetarian (Rice/roti + 2 sabzis) • Option 2 Veg + Chicken — (vegetarian on 3 days, chicken on 2 days) • Option 3 Chicken — (Rice/roti + 1 sabzi + chicken) Price of 5 / 10 / 30 MEALS (including GST) is attached in the chart below. Porter delivery charges at actuals, depending on fare from our Sushant Lok Gurgaon kitchen to your location Simple, varied everyday food — as close as we can make it to a meal from a home kitchen. You may also connect directly with Our Manager of Kitchens, Mr. Guru Dayal Singh (8796551990), on a call or WhatsApp . He will help you in the purchase process also and share your invoice. He will be your single point of contact for this order and will be happy to assist you with any queries.",
       "escalate": false,
       "source_ref": "client confirmation 2026-09-08 (Somdeb Ji)"
     },
@@ -1506,9 +1519,60 @@
         "i want to subscribe",
         "sign me up for the subscription"
       ],
-      "response": "NEXT STEPS\n\n1. Choose Option 1, 2 or 3 from the message above.\n2. Pay for your subscription.\n3. Let us know the dates you'd like your meals.\n4. That's it — we'll deliver on those dates without you having to follow up.\n\nIf you need to change a delivery date, please let us know at least 5 hours in advance.",
+      "response": "NEXT STEPS\n\nThe Everyday Meal Subscription is available in Gurgaon only.\n\n1. Choose Option 1, 2 or 3 from the message above.\n2. Pay for your subscription.\n3. Let us know the dates you'd like your meals.\n4. That's it — we'll deliver on those dates without you having to follow up.\n\nIf you need to change a delivery date, please let us know at least 5 hours in advance.",
       "escalate": false,
       "source_ref": "client confirmation 2026-09-08 (Somdeb Ji)"
+    },
+    {
+      "id": "bengali_home_table_details",
+      "client_confirmed_date": "2026-09-08",
+      "triggers": [
+        "bengali home table",
+        "bengali home tables",
+        "kolkata home table",
+        "home table kolkata",
+        "tell me more about bengali home table",
+        "tell me about bengali home table",
+        "tell me more about this home table",
+        "home table event",
+        "bengali home lunch table"
+      ],
+      "response": "Hi! Thank you for connecting. Sharing details of the Camellia.artisanal Bengali Home Table, Kolkata. 4th & 11th October 2026 | 1–6 pm Diamond Park, Joka, Kolkata Think of the lunch as a Bengali omakase — you don't choose the menu; the season does. An elaborate vegetarian & non-vegetarian Bengali home lunch, slow-cooked using traditional methods, followed by several kinds of mishti made by us, a Darjeeling tea ceremony and a sit-down storytelling session. Story & lunch theme 4th October — MALE FOLK DEITIES OF BENGAL 11th October — DURGA PUJO Next steps to book a seat Please let me know how many guests Which of the two dates would you prefer Sharing 4 videos for you to take a look at details & also a bit of videos from the 100 Bengali home tables we did at gurgaon. If this interests you, please let me know. I will share the pricing & other details.",
+      "escalate": false,
+      "media_status": "BLOCKED_PENDING_CLIENT_ASSETS",
+      "source_ref": "client Golden Response Matrix > Bengali Home Table introduction"
+    },
+    {
+      "id": "bengali_home_table_pricing",
+      "client_confirmed_date": "2026-09-08",
+      "triggers": [
+        "pricing of bengali home lunch tables kolkata",
+        "bengali home table pricing",
+        "bengali home table price",
+        "kolkata home table pricing",
+        "home table detailed pricing",
+        "home table price per person",
+        "how much is bengali home table"
+      ],
+      "response": "This is a meal that unfolds slowly, one course and one story at a time. It is a leisurely Bengali experience where each dish has its own place in the sequence—allowing you to experience Bengal through its flavours, histories, rituals and memories. The Vegetarian Experience includes 8 individually served dishes. The Non-Vegetarian Experience includes 9 individually served dishes. Both conclude with a seasonal pre-dessert, followed by three distinct desserts made entirely in our kitchen—including our signature norom-pak Jolbhora Sondesh. Vegetarian Experience — ₹1,500 per person Non-Vegetarian Experience — ₹2,500 per person Prices include GST. Please let me know if you decide to book. I will share the payment details.",
+      "escalate": false,
+      "media_status": "BLOCKED_PENDING_CLIENT_ASSETS",
+      "source_ref": "client Golden Response Matrix > Bengali Home Table detailed pricing"
+    },
+    {
+      "id": "bengali_home_table_payment",
+      "client_confirmed_date": "2026-09-08",
+      "triggers": [
+        "bengali home table how to pay",
+        "how to pay for bengali home table",
+        "bengali home table payment",
+        "kolkata home table payment",
+        "payment for home table"
+      ],
+      "response": "A seat is booked on full payment of the total amount. You can transfer by UPI to 9625083171 Or bank transfer to Yummraj Culinary Expeditions Pvt Ltd Account number- 50200077136337 IFSC - HDFC0000572 Account type - Current OR credit card at https://razorpay.me/@camelliaartisanal We will send a GST invoice as proof of payment & confirmation of your seat",
+      "escalate": false,
+      "media_status": "BLOCKED_PENDING_CLIENT_ASSETS",
+      "source_ref": "client Golden Response Matrix > Bengali Home Table payment"
     },
     {
       "id": "alacarte_prebooking_steps",
@@ -1529,12 +1593,16 @@
         "order à la carte",
         "prebooking steps",
         "how to pre-order food",
+        "how do i pre-order a meal",
+        "how do i pre order a meal",
+        "pre-order a meal",
+        "pre order a meal",
         "how to pre order ala carte meals",
         "how to pre-order ala carte meals",
         "pre-order ala carte meals",
         "pre order ala carte"
       ],
-      "response": "To prepare an order draft, please share your choice of items, quantity, and preferred day or meal slot. Once the draft is complete, you can continue it with our team on WhatsApp.",
+      "response": "To prepare an order draft, please share your choice of items, quantity, and preferred day or meal slot. Once the draft is complete, you can continue it with our team on WhatsApp. For pre-ordering help, call the kitchen at +91 87965 51990.",
       "escalate": false,
       "source_ref": "client confirmation 2026-09-08 (Somdeb Ji)"
     },
@@ -1656,7 +1724,7 @@
         "how soon can you deliver the meal",
         "meal delivery"
       ],
-      "response": "Hi! Thank you for getting in touch.\n\nWe request you to always pre order. So that way the delivery time can be at your convenience subject to our kitchen timings. If you are unable to pre order, once your order is confirmed, we usually dispatch it from our kitchen in Sushant Lok, Gurgaon within 45 minutes.\n\nDelivery time after that depends on the Porter rider's travel time, which varies based on traffic and the time of day.\n\nOur kitchen is open 10:00 AM – 7:30 PM every day. You may also DM to pre order.",
+      "response": "Hi! Thank you for getting in touch.\n\nWe request you to always pre order. So that way the delivery time can be at your convenience subject to our kitchen timings. If you are unable to pre order, once your order is confirmed, we usually dispatch it from our kitchen in Sushant Lok, Gurgaon within 45 minutes.\n\nDelivery time after that depends on the Porter rider's travel time, which varies based on traffic and the time of day.\n\nOur kitchen is open 10:00 AM – 7:30 PM every day. You may also call +91 87965 51990 or DM to pre order.",
       "escalate": false,
       "source_ref": "client confirmation 2026-09-08 (Somdeb Ji)"
     },
