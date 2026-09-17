@@ -92,6 +92,7 @@ from camellia.candidate_safety import candidate_eligibility, detect_business_com
 from camellia.assisted_resolution import create_suggestion
 from camellia.auto_resolve import simulate_auto_resolve
 from camellia.content_integrity import apply_confirmed_menu_facts, apply_safe_content_remediations
+from camellia.instagram_story_sync import sync_instagram_stories, story_sync_loop
 
 log = get_logger("camellia.app")
 
@@ -290,7 +291,27 @@ async def lifespan(app: FastAPI):
                 "Startup menu sync failed; serving the menu baked into the image."
             )
 
-    yield
+    story_sync_task = None
+    story_sync_stop = None
+    if config.INSTAGRAM_STORY_AUTO_SYNC_ENABLED:
+        story_sync_stop = asyncio.Event()
+        story_sync_task = asyncio.create_task(story_sync_loop(story_sync_stop, db))
+        log.info(
+            "Instagram Story auto-sync enabled; interval=%ss.",
+            config.INSTAGRAM_STORY_SYNC_INTERVAL_SECONDS,
+        )
+
+    try:
+        yield
+    finally:
+        if story_sync_stop is not None:
+            story_sync_stop.set()
+        if story_sync_task is not None:
+            story_sync_task.cancel()
+            try:
+                await story_sync_task
+            except asyncio.CancelledError:
+                pass
 
 limiter = Limiter(key_func=get_remote_address, default_limits=["300/minute"])
 app = FastAPI(
@@ -2774,6 +2795,16 @@ def list_instagram_story_sources(
     """Lists captured Story IDs, including unmapped IDs, for admin routing."""
     require_admin(x_admin_key, x_admin_pin)
     return {"status": "success", "story_sources": db.list_instagram_story_sources(include_deleted=include_deleted)}
+
+
+@app.post("/admin/instagram-story-sources/sync")
+def sync_instagram_story_sources(
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """Synchronize owned active Stories into the admin-only inventory."""
+    require_admin(x_admin_key, x_admin_pin)
+    return sync_instagram_stories(db)
 
 
 @app.delete("/admin/instagram-story-sources/{story_media_id}")
@@ -6107,10 +6138,13 @@ def get_admin_dashboard():
                 <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px; flex-wrap:wrap;">
                     <div>
                         <h2>📖 Instagram Stories</h2>
-                        <p>Every Story a customer replies to appears here, newest first. Map a Story ID to a Topic without exposing temporary media URLs.</p>
-                        <p class="ig-media-muted">New Stories appear here after Instagram sends a Story interaction/reply event.</p>
+                        <p>Stories discovered by Meta sync or customer replies appear here, newest first. Map a Story ID to a Topic without exposing temporary media URLs.</p>
+                        <p class="ig-media-muted">New Stories appear here after Instagram sends a Story interaction/reply event. New synced Stories also remain <b>UNMAPPED</b> until an operator chooses a Topic.</p>
                     </div>
-                    <button class="btn-secondary" id="igStoryRefreshButton" type="button">🔄 Refresh Stories</button>
+                    <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                        <button class="btn-secondary" id="igStorySyncButton" type="button">↻ Sync Stories Now</button>
+                        <button class="btn-secondary" id="igStoryRefreshButton" type="button">🔄 Refresh Stories</button>
+                    </div>
                 </div>
             </div>
             <div id="igStoryResult" class="result-box" role="status" aria-live="polite"></div>
@@ -6122,6 +6156,8 @@ def get_admin_dashboard():
                 <button class="ig-media-filter ig-story-filter" type="button" data-story-filter="MAPPED">Mapped</button>
                 <button class="ig-media-filter ig-story-filter" type="button" data-story-filter="DISABLED">Disabled</button>
                 <button class="ig-media-filter ig-story-filter" type="button" data-story-filter="ARCHIVED">Archived</button>
+                <button class="ig-media-filter ig-story-filter" type="button" data-story-filter="ACTIVE">Active</button>
+                <button class="ig-media-filter ig-story-filter" type="button" data-story-filter="EXPIRED">Expired</button>
                 <button class="ig-media-filter ig-story-filter" type="button" data-story-filter="DELETED">Deleted</button>
             </div>
 
@@ -7041,6 +7077,7 @@ THIS WEEK'S BENGAL SPECIALS
             checkAdminSession();
             setupDragAndDrop();
             document.addEventListener('visibilitychange', syncInstagramStoryAutoRefresh);
+            document.getElementById('igStorySyncButton')?.addEventListener('click', syncInstagramStoriesNow);
             document.getElementById('igStoryRefreshButton')?.addEventListener('click', loadInstagramStories);
             document.getElementById('igStorySearch')?.addEventListener('input', renderInstagramStories);
             document.querySelectorAll('.ig-story-filter').forEach(button => {
@@ -7995,7 +8032,7 @@ THIS WEEK'S BENGAL SPECIALS
         let igStoryRestoreInFlight = new Set();
 
         function storyStatusClass(status) {
-            return status === 'UNMAPPED' || status === 'DISABLED' || status === 'ARCHIVED' ? 'disabled' : '';
+            return status === 'UNMAPPED' || status === 'DISABLED' || status === 'ARCHIVED' || status === 'EXPIRED' ? 'disabled' : '';
         }
 
         // deleted_at is retained as historical audit evidence after Restore;
@@ -8021,7 +8058,10 @@ THIS WEEK'S BENGAL SPECIALS
             const status = deleted
                 ? 'DELETED'
                 : String(source.mapping_status || source.status || 'UNMAPPED').toUpperCase();
-            if (igStoryFilter !== 'all' && status !== igStoryFilter) return false;
+            const lifecycle = String(source.story_status || 'ACTIVE').toUpperCase();
+            if (igStoryFilter !== 'all' && ['ACTIVE', 'EXPIRED'].includes(igStoryFilter)) {
+                if (lifecycle !== igStoryFilter) return false;
+            } else if (igStoryFilter !== 'all' && status !== igStoryFilter) return false;
             const query = (document.getElementById('igStorySearch')?.value || '').trim().toLowerCase();
             if (!query) return true;
             return [source.story_media_id, source.routing_topic, source.topic_description, source.story_status, status]
@@ -8131,6 +8171,29 @@ THIS WEEK'S BENGAL SPECIALS
             result.style.display = 'block';
             result.className = `result-box ${kind}`;
             result.innerText = message;
+        }
+
+        async function syncInstagramStoriesNow() {
+            const button = document.getElementById('igStorySyncButton');
+            if (button) { button.disabled = true; button.textContent = '↻ Syncing…'; }
+            try {
+                const response = await fetch('/admin/instagram-story-sources/sync', {
+                    method: 'POST', headers: getAuthHeaders(),
+                });
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok || data.status === 'failed' || data.status === 'partial' || data.status === 'busy') {
+                    throw new Error(data.failure?.category || data.detail || 'Could not sync Stories.');
+                }
+                showInstagramStoryResult(
+                    'success',
+                    `Story sync complete: ${Number(data.fetched || 0)} fetched, ${Number(data.created || 0)} new, ${Number(data.updated || 0)} updated, ${Number(data.unchanged || 0)} unchanged, ${Number(data.expired || 0)} expired.`,
+                );
+                await loadInstagramStories(igStoryFilter === 'DELETED');
+            } catch (err) {
+                showInstagramStoryResult('error', err.message || String(err));
+            } finally {
+                if (button) { button.disabled = false; button.textContent = '↻ Sync Stories Now'; }
+            }
         }
 
         async function saveInstagramStoryMapping() {
@@ -8245,6 +8308,7 @@ THIS WEEK'S BENGAL SPECIALS
                 const status = storyIsAdminDeleted(source)
                     ? 'DELETED'
                     : String(source.mapping_status || source.status || 'UNMAPPED').toUpperCase();
+                const lifecycle = String(source.story_status || 'ACTIVE').toUpperCase();
                 const routeId = source.routing_id ? Number(source.routing_id) : null;
                 let actions = '';
                 if (status === 'DELETED') actions = `<button class="btn-secondary" type="button" data-story-action="restore-source" data-story-media-id="${escapeHtml(source.story_media_id || '')}">Restore</button>`;
@@ -8253,8 +8317,9 @@ THIS WEEK'S BENGAL SPECIALS
                 else if (status === 'DISABLED') actions = `<button class="btn-secondary" type="button" data-story-action="edit" data-story-media-id="${escapeHtml(source.story_media_id || '')}">Edit Mapping</button><button class="btn-secondary" type="button" data-story-action="enable" data-routing-id="${routeId}">Enable</button><button class="btn-danger" type="button" data-story-action="archive" data-routing-id="${routeId}">Archive</button><button class="btn-danger" type="button" data-story-action="delete" data-story-media-id="${escapeHtml(source.story_media_id || '')}">Delete</button>`;
                 else actions = `<button class="btn-secondary" type="button" data-story-action="restore" data-routing-id="${routeId}">Restore</button><button class="btn-danger" type="button" data-story-action="delete" data-story-media-id="${escapeHtml(source.story_media_id || '')}">Delete</button>`;
                 const topic = source.routing_topic || 'Unmapped Story';
-                const details = `<details class="ig-media-details"><summary style="cursor:pointer;">View details</summary><div>Story media ID: ${escapeHtml(source.story_media_id || '—')}<br>Routing ID: ${escapeHtml(String(routeId || '—'))}<br>Preview metadata: <span class="ig-story-preview-meta">${escapeHtml(storyPreviewMetadata(source.temporary_url))}</span><br>Meta Story status: ${escapeHtml(source.story_status || 'Not supplied')}<br>First seen: ${escapeHtml(source.first_seen || '—')}<br>Last seen: ${escapeHtml(source.last_seen || '—')}</div></details>`;
-                return `<article class="ig-media-card ig-story-card"><div class="ig-media-preview"><div class="ig-media-placeholder"><span class="ig-media-placeholder-icon">📖</span><span>STORY</span></div><span class="ig-media-badge">STORY</span></div><div class="ig-media-main"><div class="ig-media-title"><b class="ig-media-topic">${escapeHtml(topic)}</b><span class="ig-media-status ${storyStatusClass(status)}">${escapeHtml(status)}</span></div><div class="ig-media-summary">Captured Story media ID: ${escapeHtml(source.story_media_id || '—')}</div><div class="ig-media-facts"><span><b>Last seen:</b> ${escapeHtml(source.last_seen || '—')}</span><span><b>Source status:</b> ${escapeHtml(source.story_status || 'Not supplied')}</span></div></div><div class="ig-media-actions">${actions}</div>${details}</article>`;
+                const isNewUnmapped = source.source === 'META_STORY_SYNC' && status === 'UNMAPPED';
+                const details = `<details class="ig-media-details"><summary style="cursor:pointer;">View details</summary><div>Story media ID: ${escapeHtml(source.story_media_id || '—')}<br>Routing ID: ${escapeHtml(String(routeId || '—'))}<br>Preview metadata: <span class="ig-story-preview-meta">${escapeHtml(storyPreviewMetadata(source.temporary_url))}</span><br>Media type: ${escapeHtml(source.media_type || 'Not supplied')}<br>Published: ${escapeHtml(source.published_at || 'Not supplied')}<br>Meta Story status: ${escapeHtml(lifecycle)}<br>Inventory source: ${escapeHtml(source.source || 'WEBHOOK_STORY_REPLY')}<br>First seen: ${escapeHtml(source.first_seen || '—')}<br>Last seen: ${escapeHtml(source.last_seen || '—')}</div></details>`;
+                return `<article class="ig-media-card ig-story-card"><div class="ig-media-preview"><div class="ig-media-placeholder"><span class="ig-media-placeholder-icon">📖</span><span>STORY</span></div><span class="ig-media-badge">STORY</span></div><div class="ig-media-main"><div class="ig-media-title"><b class="ig-media-topic">${escapeHtml(topic)}</b><span class="ig-media-status ${storyStatusClass(status)}">${escapeHtml(status)}</span>${isNewUnmapped ? '<span class="ig-media-status">NEW / UNMAPPED</span>' : ''}</div><div class="ig-media-summary">Story media ID: ${escapeHtml(source.story_media_id || '—')}</div><div class="ig-media-facts"><span><b>Last seen:</b> ${escapeHtml(source.last_seen || '—')}</span><span><b>Meta status:</b> ${escapeHtml(lifecycle)}</span><span><b>Source:</b> ${escapeHtml(source.source || 'WEBHOOK_STORY_REPLY')}</span></div></div><div class="ig-media-actions">${actions}</div>${details}</article>`;
             }).join('');
             list.querySelectorAll('[data-story-action]').forEach(button => button.addEventListener('click', () => {
                 const action = button.dataset.storyAction;

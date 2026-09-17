@@ -2,6 +2,7 @@ import os
 import re
 import sqlite3
 import json
+import time
 from difflib import SequenceMatcher
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional, Tuple
@@ -666,6 +667,18 @@ class Database:
             );
             """)
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_instagram_story_sources_seen ON instagram_story_sources(last_seen)")
+            # Story sync metadata is additive.  The webhook evidence fields
+            # above remain the source of truth for existing captured Stories;
+            # these fields let the opt-in Meta inventory keep its own safe
+            # lifecycle data without changing route identity or mappings.
+            for column, declaration in (
+                ("media_type", "TEXT"),
+                ("temporary_url", "TEXT"),
+                ("permalink", "TEXT"),
+                ("published_at", "TIMESTAMP"),
+                ("source", "TEXT NOT NULL DEFAULT 'WEBHOOK_STORY_REPLY'"),
+            ):
+                self._ensure_column(cursor, "instagram_story_sources", column, declaration)
             # Admin deletion is a local tombstone, never a hard delete. Keep
             # existing captured evidence and allow a later webhook to update
             # last-seen metadata without silently restoring visibility.
@@ -674,6 +687,16 @@ class Database:
             self._ensure_column(cursor, "instagram_story_sources", "deleted_by", "TEXT")
             self._ensure_column(cursor, "instagram_story_sources", "restored_at", "TIMESTAMP")
             self._ensure_column(cursor, "instagram_story_sources", "restored_by", "TEXT")
+
+            # One short-lived lease protects an idempotent sync when more than
+            # one process is serving the same durable SQLite volume.
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS instagram_story_sync_locks (
+                lock_name TEXT PRIMARY KEY,
+                owner TEXT,
+                locked_until REAL NOT NULL DEFAULT 0
+            );
+            """)
 
             # A shared post carries no shortcode/URL Meta will put in a
             # webhook, and its messaging-attachment id has not been shown to
@@ -1282,6 +1305,114 @@ class Database:
                 "SELECT * FROM instagram_story_sources WHERE story_media_id = ?", (media_id,)
             ).fetchone()
         return dict(row) if row else None
+
+    def upsert_instagram_story_sync(
+        self,
+        story_media_id: str,
+        *,
+        media_type: Optional[str] = None,
+        temporary_url: Optional[str] = None,
+        permalink: Optional[str] = None,
+        published_at: Optional[str] = None,
+        event_metadata: Optional[Dict[str, Any]] = None,
+        seen_at: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Upsert one exact Story returned by Meta's owned-Stories edge.
+
+        This method deliberately never touches admin tombstones or routes.
+        A sync can refresh Meta metadata, but mapping, archive, disable and
+        restore decisions remain operator-owned.
+        """
+        media_id = str(story_media_id or "").strip()
+        if not media_id:
+            return None
+        now = seen_at or datetime.utcnow().isoformat()
+        metadata = json.dumps(event_metadata or {}, ensure_ascii=False, sort_keys=True)
+        with self.get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO instagram_story_sources
+                    (story_media_id, temporary_url, story_status, first_seen,
+                     last_seen, last_event_metadata, media_type, permalink,
+                     published_at, source)
+                VALUES (?, ?, 'ACTIVE', ?, ?, ?, ?, ?, ?, 'META_STORY_SYNC')
+                ON CONFLICT(story_media_id) DO UPDATE SET
+                    temporary_url=COALESCE(excluded.temporary_url, instagram_story_sources.temporary_url),
+                    story_status='ACTIVE',
+                    last_seen=excluded.last_seen,
+                    last_event_metadata=excluded.last_event_metadata,
+                    media_type=COALESCE(excluded.media_type, instagram_story_sources.media_type),
+                    permalink=COALESCE(excluded.permalink, instagram_story_sources.permalink),
+                    published_at=COALESCE(excluded.published_at, instagram_story_sources.published_at),
+                    source='META_STORY_SYNC'
+                """,
+                (media_id, temporary_url, now, now, metadata,
+                 media_type, permalink, published_at),
+            )
+            conn.commit()
+            row = conn.execute(
+                "SELECT * FROM instagram_story_sources WHERE story_media_id = ?", (media_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def expire_missing_instagram_synced_stories(
+        self, active_story_ids: List[str], *, expired_before: str,
+    ) -> int:
+        """Mark only proven-old, sync-owned Stories absent from a good fetch.
+
+        No rows are changed on a failed fetch, and webhook-only evidence is
+        not eligible.  A missing Story without a trustworthy published time
+        is retained rather than guessed expired.
+        """
+        ids = [str(value or "").strip() for value in active_story_ids if str(value or "").strip()]
+        with self.get_connection() as conn:
+            params: List[Any] = [expired_before]
+            where = (
+                "source='META_STORY_SYNC' AND admin_deleted=0 "
+                "AND story_status='ACTIVE' AND published_at IS NOT NULL "
+                "AND published_at <= ?"
+            )
+            if ids:
+                where += f" AND story_media_id NOT IN ({','.join('?' for _ in ids)})"
+                params.extend(ids)
+            cursor = conn.execute(
+                f"UPDATE instagram_story_sources SET story_status='EXPIRED' WHERE {where}",
+                tuple(params),
+            )
+            conn.commit()
+        return int(cursor.rowcount or 0)
+
+    def try_acquire_instagram_story_sync_lock(
+        self, owner: str, lease_seconds: float = 120.0,
+    ) -> bool:
+        """Atomically acquire the shared sync lease, or report it is busy."""
+        now = time.time()
+        lease_until = now + max(1.0, float(lease_seconds))
+        lock_name = "story_inventory"
+        with self.get_connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT owner, locked_until FROM instagram_story_sync_locks WHERE lock_name=?",
+                (lock_name,),
+            ).fetchone()
+            if row and float(row["locked_until"] or 0) > now and row["owner"] != owner:
+                conn.rollback()
+                return False
+            conn.execute(
+                "INSERT INTO instagram_story_sync_locks(lock_name, owner, locked_until) "
+                "VALUES (?, ?, ?) ON CONFLICT(lock_name) DO UPDATE SET owner=excluded.owner, locked_until=excluded.locked_until",
+                (lock_name, str(owner)[:128], lease_until),
+            )
+            conn.commit()
+        return True
+
+    def release_instagram_story_sync_lock(self, owner: str) -> None:
+        with self.get_connection() as conn:
+            conn.execute(
+                "UPDATE instagram_story_sync_locks SET locked_until=0 WHERE lock_name=? AND owner=?",
+                ("story_inventory", str(owner)[:128]),
+            )
+            conn.commit()
 
     def list_instagram_story_sources(self, include_deleted: bool = False) -> List[Dict[str, Any]]:
         """Return captured Stories with exact mapping status for admin.

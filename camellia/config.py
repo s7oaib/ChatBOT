@@ -250,6 +250,11 @@ class Config:
     # Instagram Config — uses its own Page token (may differ from WhatsApp token)
     INSTAGRAM_PAGE_ID: str = os.getenv("INSTAGRAM_PAGE_ID", "")
     INSTAGRAM_ACCESS_TOKEN: str = os.getenv("INSTAGRAM_ACCESS_TOKEN", "") or os.getenv("WHATSAPP_ACCESS_TOKEN", "")
+    # Story inventory sync is deliberately opt-in.  The manual Admin action
+    # is always available; automatic polling is enabled only after the Meta
+    # account has been verified for the documented owned-Stories edge.
+    INSTAGRAM_STORY_AUTO_SYNC_ENABLED: bool = os.getenv("INSTAGRAM_STORY_AUTO_SYNC_ENABLED", "false").lower() in ("true", "1", "t", "yes")
+    INSTAGRAM_STORY_SYNC_INTERVAL_SECONDS: int = max(300, int(os.getenv("INSTAGRAM_STORY_SYNC_INTERVAL_SECONDS", "900")))
 
     # --- Channel policy: Instagram is the only AI chatbot channel -----------
     # The client does not want customers talking to an AI on WhatsApp at all.
