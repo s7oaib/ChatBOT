@@ -30,8 +30,11 @@ def _subscription_template():
 
 
 def test_live_production_fingerprint_is_an_exact_allowlist_member():
-    assert KNOWN_LEGACY_SUBSCRIPTION_SHA256 in KNOWN_LEGACY_SUBSCRIPTION_SHA256S
+    assert KNOWN_LIVE_STALE_SUBSCRIPTION_SHA256 == (
+        "b9b8de0e125cd1cfdf4f15894c674c2576fee0a27a4f6805246e69d3b9e991f4"
+    )
     assert KNOWN_LIVE_STALE_SUBSCRIPTION_SHA256 in KNOWN_LEGACY_SUBSCRIPTION_SHA256S
+    assert KNOWN_LEGACY_SUBSCRIPTION_SHA256 in KNOWN_LEGACY_SUBSCRIPTION_SHA256S
     assert subscription_response_fingerprint(LEGACY_SUBSCRIPTION_RESPONSE) == KNOWN_LEGACY_SUBSCRIPTION_SHA256
     assert is_known_legacy_subscription_response(LEGACY_SUBSCRIPTION_RESPONSE)
     assert not is_known_legacy_subscription_response(

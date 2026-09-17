@@ -286,7 +286,7 @@ KNOWN_LEGACY_SUBSCRIPTION_SHA256 = "1c1254cc608774fa65675d6f29aad9014e7c936bd251
 # Exact normalized fingerprint captured from the active production override
 # during the Phase 3A live acceptance investigation.  This is an allowlist of
 # one known stale durable object, not a content-pattern matcher.
-KNOWN_LIVE_STALE_SUBSCRIPTION_SHA256 = "b9b8de0e125cd1cfd4f415894c674c2576fee0a27a4f6805246e69d3b9e991f4"
+KNOWN_LIVE_STALE_SUBSCRIPTION_SHA256 = "b9b8de0e125cd1cfdf4f15894c674c2576fee0a27a4f6805246e69d3b9e991f4"
 KNOWN_LEGACY_SUBSCRIPTION_SHA256S = frozenset({
     KNOWN_LEGACY_SUBSCRIPTION_SHA256,
     KNOWN_LIVE_STALE_SUBSCRIPTION_SHA256,
