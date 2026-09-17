@@ -73,6 +73,18 @@ UNCONFIRMED_CLAIM_PATTERNS = (
 _UNCONFIRMED_RE = re.compile("|".join(f"(?:{p})" for p in UNCONFIRMED_CLAIM_PATTERNS), re.IGNORECASE)
 
 QUARANTINE_TEMPLATE_FALLBACKS = {
+    "bengali_home_table_details": (
+        "Our team can assist you personally on WhatsApp. Please continue your enquiry "
+        "using the link below."
+    ),
+    "bengali_home_table_pricing": (
+        "Our team can assist you personally on WhatsApp. Please continue your enquiry "
+        "using the link below."
+    ),
+    "bengali_home_table_payment": (
+        "Our team can assist you personally on WhatsApp. Please continue your enquiry "
+        "using the link below."
+    ),
     "GUARD_dietary_suitability": (
         "Please tell us the exact dietary requirement. Our team will confirm the "
         "ingredients for the specific item before ordering."
@@ -125,6 +137,37 @@ QUARANTINE_TEMPLATE_FALLBACKS = {
 # trusted resolver selects one of these IDs, the safe result of that guard is
 # always this exact versioned copy, never an older fallback or edited wording.
 CLIENT_CONFIRMED_EXACT_RESPONSES = {
+    "bengali_home_table_details": (
+        "Hi! Thank you for connecting. Sharing details of the Camellia.artisanal Bengali "
+        "Home Table, Kolkata. 4th & 11th October 2026 | 1–6 pm Diamond Park, Joka, Kolkata "
+        "Think of the lunch as a Bengali omakase — you don't choose the menu; the season "
+        "does. An elaborate vegetarian & non-vegetarian Bengali home lunch, slow-cooked using "
+        "traditional methods, followed by several kinds of mishti made by us, a Darjeeling "
+        "tea ceremony and a sit-down storytelling session. Story & lunch theme 4th October — "
+        "MALE FOLK DEITIES OF BENGAL 11th October — DURGA PUJO Next steps to book a seat "
+        "Please let me know how many guests Which of the two dates would you prefer Sharing 4 "
+        "videos for you to take a look at details & also a bit of videos from the 100 Bengali "
+        "home tables we did at gurgaon. If this interests you, please let me know. I will "
+        "share the pricing & other details."
+    ),
+    "bengali_home_table_pricing": (
+        "This is a meal that unfolds slowly, one course and one story at a time. It is a "
+        "leisurely Bengali experience where each dish has its own place in the sequence—"
+        "allowing you to experience Bengal through its flavours, histories, rituals and "
+        "memories. The Vegetarian Experience includes 8 individually served dishes. The "
+        "Non-Vegetarian Experience includes 9 individually served dishes. Both conclude with "
+        "a seasonal pre-dessert, followed by three distinct desserts made entirely in our "
+        "kitchen—including our signature norom-pak Jolbhora Sondesh. Vegetarian Experience — "
+        "₹1,500 per person Non-Vegetarian Experience — ₹2,500 per person Prices include GST. "
+        "Please let me know if you decide to book. I will share the payment details."
+    ),
+    "bengali_home_table_payment": (
+        "A seat is booked on full payment of the total amount. You can transfer by UPI to "
+        "9625083171 Or bank transfer to Yummraj Culinary Expeditions Pvt Ltd Account number- "
+        "50200077136337 IFSC - HDFC0000572 Account type - Current OR credit card at "
+        "https://razorpay.me/@camelliaartisanal We will send a GST invoice as proof of "
+        "payment & confirmation of your seat"
+    ),
     "sondesh_crosssell_savoury": (
         "We also prepare and deliver freshly cooked Bengali meals across Delhi NCR. "
         "I've attached this week's menu in case you'd like to have a look. Everything "
@@ -201,6 +244,13 @@ CLIENT_CONFIRMED_EXACT_RESPONSES = {
 
 PHASE3B_REMEDIATION_ACTOR = "phase3b_client_confirmed_content"
 PHASE3B_REMEDIATION_REASON = "phase3b_client_confirmed_content_upgrade"
+HOME_TABLE_REMEDIATION_ACTOR = "phase3b_home_table_durable_copy"
+HOME_TABLE_REMEDIATION_REASON = "phase3b_home_table_stale_handoff_upgrade"
+HOME_TABLE_TEMPLATE_IDS = frozenset({
+    "bengali_home_table_details",
+    "bengali_home_table_pricing",
+    "bengali_home_table_payment",
+})
 
 
 def is_client_confirmed_exact_response(template_id: str, text: Any) -> bool:
@@ -428,9 +478,18 @@ def apply_safe_content_remediations(
                 if current_copy != QUARANTINE_TEMPLATE_FALLBACKS.get(template_id, "").strip():
                     actions[template_id] = "skipped"
                     continue
+                actor = (
+                    HOME_TABLE_REMEDIATION_ACTOR
+                    if template_id in HOME_TABLE_TEMPLATE_IDS
+                    else PHASE3B_REMEDIATION_ACTOR
+                )
+                reason = (
+                    HOME_TABLE_REMEDIATION_REASON
+                    if template_id in HOME_TABLE_TEMPLATE_IDS
+                    else PHASE3B_REMEDIATION_REASON
+                )
                 ok = database.save_response_template_override(
-                    template_id, approved, PHASE3B_REMEDIATION_ACTOR,
-                    change_reason=PHASE3B_REMEDIATION_REASON,
+                    template_id, approved, actor, change_reason=reason,
                 )
                 actions[template_id] = "updated" if ok else "failed"
                 continue
