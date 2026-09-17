@@ -53,6 +53,20 @@ REQUIRED_QA_TEMPLATE_IDS = (
 )
 
 _HOME_TABLE_BACKUP_SUFFIX = ".home-table-backfill"
+_SUBSCRIPTION_TEMPLATE_ID = "subscription_details"
+_SUBSCRIPTION_BACKUP_SUFFIX = ".subscription-template-backfill"
+
+# This is deliberately a complete fingerprint of the rejected legacy copy,
+# rather than a single price marker.  A partial match could overwrite a
+# deliberate operator edit made after the old template was installed.
+_KNOWN_LEGACY_SUBSCRIPTION_MARKERS = (
+    "₹1,500 for 5 meals",
+    "₹1,750",
+    "₹2,000 for 5 meals",
+    "luchi or polao",
+    "gift you the 11th",
+    "à la carte",
+)
 
 
 def seed_fingerprint(path: Path) -> str | None:
@@ -152,8 +166,17 @@ def _atomic_json_write(target: Path, data: dict) -> None:
         raise
 
 
+def _is_known_legacy_subscription_template(template: object) -> bool:
+    """Identify only the exact legacy subscription family safe to replace."""
+    if not isinstance(template, dict) or template.get("id") != _SUBSCRIPTION_TEMPLATE_ID:
+        return False
+    response = str(template.get("response") or "")
+    lowered = response.casefold()
+    return all(marker.casefold() in lowered for marker in _KNOWN_LEGACY_SUBSCRIPTION_MARKERS)
+
+
 def _backfill_required_qa_templates(target: Path, seed: Path) -> str:
-    """Append only missing required objects, returning a startup audit result."""
+    """Reconcile only approved structural/template drift in the QA file."""
     try:
         with open(seed, "r", encoding="utf-8") as f:
             seed_data = json.load(f)
@@ -173,27 +196,60 @@ def _backfill_required_qa_templates(target: Path, seed: Path) -> str:
             for item in live_templates
             if isinstance(item, dict) and item.get("id")
         }
+        seed_required_ids = REQUIRED_QA_TEMPLATE_IDS
+        # Older isolated fixtures may intentionally contain only the original
+        # structural requirements.  The shipped seed carries subscription_details,
+        # and only then is its durable reconciliation enabled.
+        if _SUBSCRIPTION_TEMPLATE_ID in seed_by_id:
+            seed_required_ids = (*seed_required_ids, _SUBSCRIPTION_TEMPLATE_ID)
         missing_from_seed = tuple(
-            template_id for template_id in REQUIRED_QA_TEMPLATE_IDS
+            template_id for template_id in seed_required_ids
             if template_id not in seed_by_id
         )
         if missing_from_seed:
             return "seed-missing:" + ", ".join(missing_from_seed)
         missing = tuple(
-            template_id for template_id in REQUIRED_QA_TEMPLATE_IDS
+            template_id for template_id in seed_required_ids
             if template_id not in live_ids
         )
-        if not missing:
-            return "unchanged"
+        reconciled_templates = list(live_templates)
+        actions: list[str] = []
+        for template_id in missing:
+            reconciled_templates.append(deepcopy(seed_by_id[template_id]))
+        if missing:
+            actions.append("backfilled:" + ", ".join(missing))
 
-        backup = target.with_name(target.stem + _HOME_TABLE_BACKUP_SUFFIX + target.suffix)
-        if not backup.exists():
-            shutil.copyfile(target, backup)
+        subscription_replaced = False
+        if _SUBSCRIPTION_TEMPLATE_ID in live_ids:
+            seed_subscription = seed_by_id[_SUBSCRIPTION_TEMPLATE_ID]
+            for index, template in enumerate(reconciled_templates):
+                if not isinstance(template, dict) or template.get("id") != _SUBSCRIPTION_TEMPLATE_ID:
+                    continue
+                if template == seed_subscription:
+                    continue
+                if _is_known_legacy_subscription_template(template):
+                    reconciled_templates[index] = deepcopy(seed_subscription)
+                    subscription_replaced = True
+                else:
+                    actions.append("skipped_operator_override:" + _SUBSCRIPTION_TEMPLATE_ID)
+            if subscription_replaced:
+                actions.append("replaced:" + _SUBSCRIPTION_TEMPLATE_ID)
 
-        live_data["templates"] = list(live_templates)
-        live_data["templates"].extend(deepcopy(seed_by_id[template_id]) for template_id in missing)
+        if not missing and not subscription_replaced:
+            return ";".join(dict.fromkeys(actions)) or "unchanged"
+
+        if missing:
+            backup = target.with_name(target.stem + _HOME_TABLE_BACKUP_SUFFIX + target.suffix)
+            if not backup.exists():
+                shutil.copyfile(target, backup)
+        if _SUBSCRIPTION_TEMPLATE_ID in missing or subscription_replaced:
+            backup = target.with_name(target.stem + _SUBSCRIPTION_BACKUP_SUFFIX + target.suffix)
+            if not backup.exists():
+                shutil.copyfile(target, backup)
+
+        live_data["templates"] = reconciled_templates
         _atomic_json_write(target, live_data)
-        return "backfilled:" + ", ".join(missing)
+        return ";".join(dict.fromkeys(actions))
     except Exception as exc:
         return f"error: {exc}"
 
@@ -269,13 +325,24 @@ def prepare_writable_storage() -> list[str]:
                     result = _backfill_required_qa_templates(target, seed)
                     if result == "unchanged":
                         continue
-                    if result.startswith("backfilled:"):
-                        actions.append(
-                            f"backfilled {env_var} with required templates: "
-                            + result.removeprefix("backfilled:")
-                        )
-                    else:
-                        actions.append(f"could not reconcile {env_var}: {result}")
+                    for reconciliation in result.split(";"):
+                        if reconciliation.startswith("backfilled:"):
+                            actions.append(
+                                f"backfilled {env_var} with required templates: "
+                                + reconciliation.removeprefix("backfilled:")
+                            )
+                        elif reconciliation.startswith("replaced:"):
+                            actions.append(
+                                f"replaced {env_var} template: "
+                                + reconciliation.removeprefix("replaced:")
+                            )
+                        elif reconciliation.startswith("skipped_operator_override:"):
+                            actions.append(
+                                f"preserved {env_var} operator override: "
+                                + reconciliation.removeprefix("skipped_operator_override:")
+                            )
+                        else:
+                            actions.append(f"could not reconcile {env_var}: {reconciliation}")
                     continue
                 backup = target.with_name(f"{target.stem}.superseded-{int(time.time())}{target.suffix}")
                 try:

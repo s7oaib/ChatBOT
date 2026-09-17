@@ -251,6 +251,23 @@ HOME_TABLE_TEMPLATE_IDS = frozenset({
     "bengali_home_table_pricing",
     "bengali_home_table_payment",
 })
+SUBSCRIPTION_TEMPLATE_ID = "subscription_details"
+SUBSCRIPTION_REMEDIATION_ACTOR = "phase3a_subscription_durable_copy"
+SUBSCRIPTION_REMEDIATION_REASON = "phase3a_subscription_legacy_upgrade"
+KNOWN_LEGACY_SUBSCRIPTION_MARKERS = (
+    "₹1,500 for 5 meals",
+    "₹1,750",
+    "₹2,000 for 5 meals",
+    "luchi or polao",
+    "gift you the 11th",
+    "à la carte",
+)
+
+
+def is_known_legacy_subscription_response(text: Any) -> bool:
+    """Return true only for the complete legacy subscription copy."""
+    lowered = str(text or "").casefold()
+    return bool(lowered) and all(marker.casefold() in lowered for marker in KNOWN_LEGACY_SUBSCRIPTION_MARKERS)
 
 
 def is_client_confirmed_exact_response(template_id: str, text: Any) -> bool:
@@ -307,8 +324,19 @@ def quarantine_unconfirmed_claims(text: str) -> str:
     return "\n\n".join(kept_paragraphs).strip()
 
 
-def quarantine_template_response(template_id: str, text: str) -> str:
+def quarantine_template_response(
+    template_id: str, text: str, canonical_text: Optional[str] = None
+) -> str:
     """Apply a whole-template safe fallback where every claim is unverified."""
+    if (
+        str(template_id or "") == SUBSCRIPTION_TEMPLATE_ID
+        and canonical_text
+        and str(text or "").strip() == str(canonical_text).strip()
+    ):
+        # The subscription seed is the approved, durable copy.  Its confirmed
+        # wording includes phrases also used by the generic claim scrubber;
+        # exact equality must not reformat or partially remove that copy.
+        return str(canonical_text)
     approved = CLIENT_CONFIRMED_EXACT_RESPONSES.get(str(template_id or ""))
     if approved:
         # Deterministic routing can append a secondary nudge or card caption,
@@ -456,11 +484,44 @@ def apply_safe_content_remediations(
     defaults = {str(t.get("id")): (t.get("response") or ((t.get("responses") or [""])[0]))
                 for t in templates if t.get("id")}
     desired = canonical_override_responses(menu_data, templates)
+    # Subscription copy has its own exact legacy-object migration below.  Do
+    # not let the generic claim quarantine turn it into a different managed
+    # response or overwrite a deliberate operator copy.
+    desired.pop(SUBSCRIPTION_TEMPLATE_ID, None)
     actions: Dict[str, str] = {}
     unsafe_health_terms = (
         "glycemic", "diabetic-friendly", "sugar-safe", "healthier for diabetes",
         "suitable for diabetics",
     )
+
+    # The subscription template is repaired only when the durable override is
+    # the complete known legacy copy.  The repository template remains the
+    # canonical source, so no customer-facing copy is duplicated here.
+    subscription_default = defaults.get(SUBSCRIPTION_TEMPLATE_ID, "")
+    if subscription_default:
+        current = database.get_response_template_override(SUBSCRIPTION_TEMPLATE_ID)
+        if current and str(current.get("status") or "ACTIVE").upper() == "ACTIVE":
+            current_copy = (current.get("response") or "").strip()
+            if current_copy == subscription_default.strip():
+                actions[SUBSCRIPTION_TEMPLATE_ID] = "unchanged"
+            elif is_known_legacy_subscription_response(current_copy):
+                ok = database.save_response_template_override(
+                    SUBSCRIPTION_TEMPLATE_ID,
+                    subscription_default,
+                    SUBSCRIPTION_REMEDIATION_ACTOR,
+                    change_reason=SUBSCRIPTION_REMEDIATION_REASON,
+                    previous_response=current_copy,
+                )
+                actions[SUBSCRIPTION_TEMPLATE_ID] = "updated" if ok else "failed"
+            else:
+                actions[SUBSCRIPTION_TEMPLATE_ID] = "skipped_operator_override"
+        elif current:
+            actions[SUBSCRIPTION_TEMPLATE_ID] = "skipped_operator_override"
+        else:
+            # With no durable override, the shipped template is already the
+            # authoritative runtime copy; avoid manufacturing a DB row.
+            actions[SUBSCRIPTION_TEMPLATE_ID] = "unchanged"
+
     for template_id, response in desired.items():
         current = database.get_response_template_override(template_id)
         default = defaults.get(template_id, "")
@@ -536,7 +597,7 @@ def apply_safe_content_remediations(
         actions[template_id] = "created" if ok else "failed"
     if logger:
         for template_id, action in actions.items():
-            if action in {"created", "updated", "skipped"}:
+            if action in {"created", "updated", "skipped", "skipped_operator_override"}:
                 logger.info("Content-integrity remediation %s: %s", template_id, action)
     return actions
 

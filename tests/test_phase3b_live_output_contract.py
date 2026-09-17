@@ -61,9 +61,7 @@ def test_subscription_delivery_uses_one_safe_primary_instagram_payload(tmp_path,
 
     assert len(sent) == 1
     assert not escalated.called
-    assert sent[0]["text"] == quarantine_template_response(
-        "subscription_details", _template_response("subscription_details")
-    )
+    assert sent[0]["text"] == _template_response("subscription_details")
     assert sent[0]["image_url"] == ["/images/Everyday%20Meal%20Subscription%20Rate%20Chart.jpeg"]
     assert "45 minutes" not in sent[0]["text"]
     assert "à la carte" not in sent[0]["text"].lower()

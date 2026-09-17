@@ -3572,6 +3572,14 @@ class DeterministicResponder:
             result["response"] = override.get("response") or ""
         return result
 
+    def _canonical_template_response(self, template_id: str) -> str:
+        """Return the repository seed copy, excluding any Response Library edit."""
+        template = next(
+            (t for t in self.qa_data.get("templates", []) if t.get("id") == template_id),
+            {},
+        )
+        return str(template.get("response") or ((template.get("responses") or [""])[0]))
+
     def _templates_with_overrides(self) -> List[Dict[str, Any]]:
         """Materialize runtime templates with managed copy overrides applied."""
         try:
@@ -3777,7 +3785,11 @@ class DeterministicResponder:
             channel=channel, user_message=(template.get("triggers") or [""])[0],
         )
         if runtime_quarantine_enabled(getattr(db, "db_path", "")):
-            rendered = quarantine_template_response(template_id, _strip_flower_emoji(rendered))
+            rendered = quarantine_template_response(
+                template_id,
+                _strip_flower_emoji(rendered),
+                canonical_text=self._canonical_template_response(template_id),
+            )
         else:
             rendered = _strip_flower_emoji(rendered)
         return rendered, _quarantine_image_claims(images)
@@ -4125,7 +4137,11 @@ class DeterministicResponder:
             user_message, user_id, channel, referral_source, referral_ad_id, referral_ad_title
         )
         if runtime_quarantine_enabled(getattr(db, "db_path", "")):
-            safe_text = quarantine_template_response(template_id, text or "")
+            safe_text = quarantine_template_response(
+                template_id,
+                text or "",
+                canonical_text=self._canonical_template_response(template_id),
+            )
             safe_images = _quarantine_image_claims(image_url)
         else:
             safe_text, safe_images = text or "", image_url
