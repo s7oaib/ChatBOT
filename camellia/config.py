@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 from pathlib import Path
 from dotenv import load_dotenv
@@ -82,6 +83,18 @@ def _resolve_path(env_var: str, default: Path, must_exist: bool = False) -> str:
         )
         return str(default)
     return str(resolved)
+
+
+_GRAPH_API_VERSION_RE = re.compile(r"^v\d+\.\d+$")
+_DEFAULT_INSTAGRAM_API_VERSION = "v25.0"
+
+
+def _resolve_graph_api_version(env_var: str, default: str) -> str:
+    """Validate a configured Graph API version, falling back to default on malformed input."""
+    raw = os.getenv(env_var, default).strip()
+    if _GRAPH_API_VERSION_RE.match(raw):
+        return raw
+    return default
 
 
 class Config:
@@ -250,6 +263,12 @@ class Config:
     # Instagram Config — uses its own Page token (may differ from WhatsApp token)
     INSTAGRAM_PAGE_ID: str = os.getenv("INSTAGRAM_PAGE_ID", "")
     INSTAGRAM_ACCESS_TOKEN: str = os.getenv("INSTAGRAM_ACCESS_TOKEN", "") or os.getenv("WHATSAPP_ACCESS_TOKEN", "")
+    # Instagram Graph API version is independent of WhatsApp's — the two
+    # products deprecate versions on separate schedules, so Story sync must
+    # never inherit WHATSAPP_API_VERSION.
+    INSTAGRAM_API_VERSION: str = _resolve_graph_api_version(
+        "INSTAGRAM_API_VERSION", _DEFAULT_INSTAGRAM_API_VERSION
+    )
     # Story inventory sync is deliberately opt-in.  The manual Admin action
     # is always available; automatic polling is enabled only after the Meta
     # account has been verified for the documented owned-Stories edge.

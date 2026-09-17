@@ -63,11 +63,15 @@ def _story(story_id=STORY_ID, timestamp="2026-09-17T08:00:00+00:00"):
     }
 
 
-def _install_meta(monkeypatch, responses):
+def _install_meta(monkeypatch, responses, token="PAGE_TOKEN"):
     calls = []
-    monkeypatch.setattr(config, "INSTAGRAM_ACCESS_TOKEN", "PAGE_TOKEN")
+    monkeypatch.setattr(config, "INSTAGRAM_ACCESS_TOKEN", token)
     monkeypatch.setattr(config, "INSTAGRAM_PAGE_ID", "page-1")
-    monkeypatch.setattr(config, "WHATSAPP_API_VERSION", "v25.0")
+    # Deliberately mismatched from INSTAGRAM_API_VERSION so any accidental
+    # reintroduction of config.WHATSAPP_API_VERSION into Story sync surfaces
+    # as a wrong Graph version in the requested URLs.
+    monkeypatch.setattr(config, "WHATSAPP_API_VERSION", "v19.0")
+    monkeypatch.setattr(config, "INSTAGRAM_API_VERSION", "v25.0")
     monkeypatch.setattr(
         sync_module.httpx,
         "Client",
@@ -198,3 +202,63 @@ def test_synced_story_id_routes_through_existing_webhook_identity(sync_db, monke
 
 def test_auto_sync_is_conservatively_disabled_by_default():
     assert config.INSTAGRAM_STORY_AUTO_SYNC_ENABLED is False
+
+
+def test_story_sync_uses_instagram_api_version_facebook_login(sync_db, monkeypatch):
+    """Facebook-login (Page token) Story endpoint must use INSTAGRAM_API_VERSION."""
+    calls = _install_meta(monkeypatch, [_page(), _stories([_story()])], token="PAGE_TOKEN")
+
+    result = sync_module.sync_instagram_stories(sync_db)
+
+    assert result["status"] == "success"
+    for url, _params in calls:
+        assert "/v25.0/" in url
+        assert "/v19.0/" not in url
+
+
+def test_story_sync_uses_instagram_api_version_instagram_login(sync_db, monkeypatch):
+    """Instagram-login (IGAA token) Story endpoint must use INSTAGRAM_API_VERSION."""
+    calls = _install_meta(
+        monkeypatch,
+        [FakeResponse(200, {"id": "ig-account-1"}), _stories([_story()])],
+        token="IGAA_TOKEN",
+    )
+
+    result = sync_module.sync_instagram_stories(sync_db)
+
+    assert result["status"] == "success"
+    for url, _params in calls:
+        assert "/v25.0/" in url
+        assert "/v19.0/" not in url
+
+
+def test_story_sync_does_not_use_whatsapp_api_version(sync_db, monkeypatch):
+    calls = _install_meta(monkeypatch, [_page(), _stories([_story()])])
+
+    sync_module.sync_instagram_stories(sync_db)
+
+    assert not any("v19.0" in url for url, _params in calls)
+
+
+def test_changing_whatsapp_api_version_does_not_change_story_sync_url(sync_db, monkeypatch):
+    calls = _install_meta(monkeypatch, [_page(), _stories([_story()])])
+    monkeypatch.setattr(config, "WHATSAPP_API_VERSION", "v99.0")
+
+    sync_module.sync_instagram_stories(sync_db)
+
+    assert any("/v25.0/" in url for url, _params in calls)
+    assert not any("v99.0" in url for url, _params in calls)
+
+
+def test_instagram_api_version_falls_back_when_malformed(monkeypatch):
+    from camellia.config import _resolve_graph_api_version, _DEFAULT_INSTAGRAM_API_VERSION
+
+    monkeypatch.setenv("INSTAGRAM_API_VERSION", "not-a-version")
+    assert _resolve_graph_api_version(
+        "INSTAGRAM_API_VERSION", _DEFAULT_INSTAGRAM_API_VERSION
+    ) == _DEFAULT_INSTAGRAM_API_VERSION
+
+    monkeypatch.setenv("INSTAGRAM_API_VERSION", "v22.0")
+    assert _resolve_graph_api_version(
+        "INSTAGRAM_API_VERSION", _DEFAULT_INSTAGRAM_API_VERSION
+    ) == "v22.0"

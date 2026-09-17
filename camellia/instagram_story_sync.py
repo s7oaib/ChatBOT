@@ -146,7 +146,7 @@ def sync_instagram_stories(database=None) -> Dict[str, Any]:
         return {**base_result, "status": "busy", "failure": {"category": "sync_already_running"}}
 
     try:
-        version = config.WHATSAPP_API_VERSION
+        version = config.INSTAGRAM_API_VERSION
         with httpx.Client(timeout=10.0) as client:
             endpoint, account_id, failure = _resolve_stories_endpoint(client, token, version)
             if failure or not endpoint or not account_id:
