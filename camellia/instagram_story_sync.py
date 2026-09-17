@@ -136,7 +136,7 @@ def sync_instagram_stories(database=None) -> Dict[str, Any]:
     token = (config.INSTAGRAM_ACCESS_TOKEN or "").strip()
     base_result = {
         "status": "failed", "fetched": 0, "created": 0, "updated": 0,
-        "unchanged": 0, "expired": 0, "failed": 0,
+        "unchanged": 0, "expired": 0, "removed": 0, "miss_pending": 0, "failed": 0,
     }
     if not token:
         return {**base_result, "failure": {"category": "instagram_token_not_configured"}}
@@ -198,14 +198,21 @@ def sync_instagram_stories(database=None) -> Dict[str, Any]:
 
         if malformed_item:
             # A partial/malformed page must not be treated as a complete
-            # active set, or it could incorrectly expire unrelated Stories.
+            # active set, or it could incorrectly expire/remove unrelated
+            # Stories, and must never count as evidence of absence.
             result["status"] = "partial"
             result["failure"] = {"category": "malformed_story_item"}
         else:
             cutoff = (datetime.utcnow() - timedelta(hours=24)).isoformat()
-            result["expired"] = database.expire_missing_instagram_synced_stories(
+            lifecycle_counts = database.reconcile_instagram_story_lifecycle(
                 active_ids, expired_before=cutoff,
             )
+            result["expired"] = lifecycle_counts["expired"]
+            result["removed"] = lifecycle_counts["removed"]
+            result["miss_pending"] = lifecycle_counts["miss_pending"]
+            # Admin-facing ordinal labels only; never used for routing, and
+            # never renumbers an already-assigned Story.
+            database.backfill_instagram_story_sequence_numbers()
         result["fetched"] = len(raw_stories)
         return result
     except (httpx.HTTPError, ValueError, TypeError):

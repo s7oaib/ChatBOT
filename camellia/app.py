@@ -6158,6 +6158,7 @@ def get_admin_dashboard():
                 <button class="ig-media-filter ig-story-filter" type="button" data-story-filter="ARCHIVED">Archived</button>
                 <button class="ig-media-filter ig-story-filter" type="button" data-story-filter="ACTIVE">Active</button>
                 <button class="ig-media-filter ig-story-filter" type="button" data-story-filter="EXPIRED">Expired</button>
+                <button class="ig-media-filter ig-story-filter" type="button" data-story-filter="REMOVED">Removed</button>
                 <button class="ig-media-filter ig-story-filter" type="button" data-story-filter="DELETED">Deleted</button>
             </div>
 
@@ -8032,7 +8033,7 @@ THIS WEEK'S BENGAL SPECIALS
         let igStoryRestoreInFlight = new Set();
 
         function storyStatusClass(status) {
-            return status === 'UNMAPPED' || status === 'DISABLED' || status === 'ARCHIVED' || status === 'EXPIRED' ? 'disabled' : '';
+            return status === 'UNMAPPED' || status === 'DISABLED' || status === 'ARCHIVED' || status === 'EXPIRED' || status === 'REMOVED' ? 'disabled' : '';
         }
 
         // deleted_at is retained as historical audit evidence after Restore;
@@ -8059,7 +8060,12 @@ THIS WEEK'S BENGAL SPECIALS
                 ? 'DELETED'
                 : String(source.mapping_status || source.status || 'UNMAPPED').toUpperCase();
             const lifecycle = String(source.story_status || 'ACTIVE').toUpperCase();
-            if (igStoryFilter !== 'all' && ['ACTIVE', 'EXPIRED'].includes(igStoryFilter)) {
+            // Default/current view: Stories that left Meta's inventory
+            // (EXPIRED or REMOVED) are current-view noise, not deleted — they
+            // stay fully visible under History (its own filter selection),
+            // never hard-deleted.
+            if (igStoryFilter === 'all' && !deleted && ['EXPIRED', 'REMOVED'].includes(lifecycle)) return false;
+            if (igStoryFilter !== 'all' && ['ACTIVE', 'EXPIRED', 'REMOVED'].includes(igStoryFilter)) {
                 if (lifecycle !== igStoryFilter) return false;
             } else if (igStoryFilter !== 'all' && status !== igStoryFilter) return false;
             const query = (document.getElementById('igStorySearch')?.value || '').trim().toLowerCase();
@@ -8318,8 +8324,11 @@ THIS WEEK'S BENGAL SPECIALS
                 else actions = `<button class="btn-secondary" type="button" data-story-action="restore" data-routing-id="${routeId}">Restore</button><button class="btn-danger" type="button" data-story-action="delete" data-story-media-id="${escapeHtml(source.story_media_id || '')}">Delete</button>`;
                 const topic = source.routing_topic || 'Unmapped Story';
                 const isNewUnmapped = source.source === 'META_STORY_SYNC' && status === 'UNMAPPED';
-                const details = `<details class="ig-media-details"><summary style="cursor:pointer;">View details</summary><div>Story media ID: ${escapeHtml(source.story_media_id || '—')}<br>Routing ID: ${escapeHtml(String(routeId || '—'))}<br>Preview metadata: <span class="ig-story-preview-meta">${escapeHtml(storyPreviewMetadata(source.temporary_url))}</span><br>Media type: ${escapeHtml(source.media_type || 'Not supplied')}<br>Published: ${escapeHtml(source.published_at || 'Not supplied')}<br>Meta Story status: ${escapeHtml(lifecycle)}<br>Inventory source: ${escapeHtml(source.source || 'WEBHOOK_STORY_REPLY')}<br>First seen: ${escapeHtml(source.first_seen || '—')}<br>Last seen: ${escapeHtml(source.last_seen || '—')}</div></details>`;
-                return `<article class="ig-media-card ig-story-card"><div class="ig-media-preview"><div class="ig-media-placeholder"><span class="ig-media-placeholder-icon">📖</span><span>STORY</span></div><span class="ig-media-badge">STORY</span></div><div class="ig-media-main"><div class="ig-media-title"><b class="ig-media-topic">${escapeHtml(topic)}</b><span class="ig-media-status ${storyStatusClass(status)}">${escapeHtml(status)}</span>${isNewUnmapped ? '<span class="ig-media-status">NEW / UNMAPPED</span>' : ''}</div><div class="ig-media-summary">Story media ID: ${escapeHtml(source.story_media_id || '—')}</div><div class="ig-media-facts"><span><b>Last seen:</b> ${escapeHtml(source.last_seen || '—')}</span><span><b>Meta status:</b> ${escapeHtml(lifecycle)}</span><span><b>Source:</b> ${escapeHtml(source.source || 'WEBHOOK_STORY_REPLY')}</span></div></div><div class="ig-media-actions">${actions}</div>${details}</article>`;
+                // Sequence is an admin convenience label only — routing and
+                // mapping always use the exact story_media_id shown below.
+                const sequenceDisplay = source.story_sequence_display || 'Story — sequence unavailable';
+                const details = `<details class="ig-media-details"><summary style="cursor:pointer;">View details</summary><div>Meta Story ID: ${escapeHtml(source.story_media_id || '—')}<br>Routing ID: ${escapeHtml(String(routeId || '—'))}<br>Preview metadata: <span class="ig-story-preview-meta">${escapeHtml(storyPreviewMetadata(source.temporary_url))}</span><br>Media type: ${escapeHtml(source.media_type || 'Not supplied')}<br>Published: ${escapeHtml(source.published_at || 'Not supplied')}<br>Meta Story status: ${escapeHtml(lifecycle)}<br>Inventory source: ${escapeHtml(source.source || 'WEBHOOK_STORY_REPLY')}<br>First seen: ${escapeHtml(source.first_seen || '—')}<br>Last seen: ${escapeHtml(source.last_seen || '—')}</div></details>`;
+                return `<article class="ig-media-card ig-story-card"><div class="ig-media-preview"><div class="ig-media-placeholder"><span class="ig-media-placeholder-icon">📖</span><span>STORY</span></div><span class="ig-media-badge">STORY</span></div><div class="ig-media-main"><div class="ig-media-title"><b class="ig-media-topic">${escapeHtml(topic)}</b><span class="ig-media-status ${storyStatusClass(status)}">${escapeHtml(status)}</span>${isNewUnmapped ? '<span class="ig-media-status">NEW / UNMAPPED</span>' : ''}</div><div class="ig-media-summary">${escapeHtml(sequenceDisplay)}</div><div class="ig-media-facts"><span><b>Last seen:</b> ${escapeHtml(source.last_seen || '—')}</span><span><b>Meta status:</b> ${escapeHtml(lifecycle)}</span><span><b>Source:</b> ${escapeHtml(source.source || 'WEBHOOK_STORY_REPLY')}</span></div></div><div class="ig-media-actions">${actions}</div>${details}</article>`;
             }).join('');
             list.querySelectorAll('[data-story-action]').forEach(button => button.addEventListener('click', () => {
                 const action = button.dataset.storyAction;

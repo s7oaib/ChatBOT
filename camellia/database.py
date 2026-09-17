@@ -4,7 +4,8 @@ import sqlite3
 import json
 import time
 from difflib import SequenceMatcher
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from typing import Dict, Any, List, Optional, Tuple
 from camellia.config import config
 from camellia.text_rules import strip_flower_emoji
@@ -15,6 +16,52 @@ from camellia.candidate_safety import (
     normalize_question,
     validate_candidate_answer,
 )
+
+_KOLKATA_TZ = ZoneInfo("Asia/Kolkata")
+
+
+def _story_publication_date_kolkata(published_at: Optional[str]) -> Optional[str]:
+    """Derive the Asia/Kolkata publication date (YYYY-MM-DD) from a trustworthy
+    ``published_at`` timestamp, or None if it cannot be parsed. Never guesses."""
+    raw = str(published_at or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(_KOLKATA_TZ).strftime("%Y-%m-%d")
+
+
+def _ordinal_suffix(number: int) -> str:
+    if 10 <= (number % 100) <= 20:
+        return "th"
+    return {1: "st", 2: "nd", 3: "rd"}.get(number % 10, "th")
+
+
+def format_story_sequence_label(number: Optional[int]) -> Optional[str]:
+    """Admin-facing ordinal label, e.g. '2nd Story'. Never used for routing."""
+    if number is None:
+        return None
+    try:
+        value = int(number)
+    except (TypeError, ValueError):
+        return None
+    return f"{value}{_ordinal_suffix(value)} Story"
+
+
+def format_story_sequence_date_display(date_value: Optional[str]) -> Optional[str]:
+    """Human-facing date, e.g. '17 Sep 2026', from a stored YYYY-MM-DD."""
+    raw = str(date_value or "").strip()
+    if not raw:
+        return None
+    try:
+        return datetime.strptime(raw, "%Y-%m-%d").strftime("%d %b %Y")
+    except ValueError:
+        return None
+
 
 class Database:
     def __init__(self, db_path: str = None):
@@ -688,6 +735,21 @@ class Database:
             self._ensure_column(cursor, "instagram_story_sources", "restored_at", "TIMESTAMP")
             self._ensure_column(cursor, "instagram_story_sources", "restored_by", "TEXT")
 
+            # Phase 3C-A.1 lifecycle: distinguishes a Story that naturally
+            # expired from one that disappeared from Meta's inventory before
+            # its normal lifetime — the latter only after two consecutive
+            # COMPLETE successful syncs confirm it absent (see
+            # reconcile_instagram_story_lifecycle). Never a hard delete.
+            self._ensure_column(cursor, "instagram_story_sources", "sync_miss_count", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(cursor, "instagram_story_sources", "last_confirmed_active_at", "TIMESTAMP")
+            self._ensure_column(cursor, "instagram_story_sources", "removed_at", "TIMESTAMP")
+            self._ensure_column(cursor, "instagram_story_sources", "removed_reason", "TEXT")
+            # Phase 3C-A.1 sequence: an admin-facing ordinal ("2nd Story"),
+            # never a routing identity. Assigned once and never renumbered —
+            # see backfill_instagram_story_sequence_numbers.
+            self._ensure_column(cursor, "instagram_story_sources", "story_sequence_number", "INTEGER")
+            self._ensure_column(cursor, "instagram_story_sources", "story_sequence_date", "TEXT")
+
             # One short-lived lease protects an idempotent sync when more than
             # one process is serving the same durable SQLite volume.
             cursor.execute("""
@@ -909,6 +971,11 @@ class Database:
         # answers after the base schema is committed. This keeps startup
         # migration-safe and leaves current Kolkata/business knowledge intact.
         self._retire_outdated_home_table_knowledge()
+
+        # Existing Phase 3C-A rows predate sequence numbering; backfill them
+        # deterministically once the schema above is committed. Uses its own
+        # connection, so it must run after the migration transaction closes.
+        self.backfill_instagram_story_sequence_numbers()
 
     def set_ad_product_route(self, ad_id: str, product: str) -> Dict[str, Any]:
         """Creates or updates the product shown first for one Meta ad ID."""
@@ -1334,11 +1401,13 @@ class Database:
                 INSERT INTO instagram_story_sources
                     (story_media_id, temporary_url, story_status, first_seen,
                      last_seen, last_event_metadata, media_type, permalink,
-                     published_at, source)
-                VALUES (?, ?, 'ACTIVE', ?, ?, ?, ?, ?, ?, 'META_STORY_SYNC')
+                     published_at, source, sync_miss_count, last_confirmed_active_at)
+                VALUES (?, ?, 'ACTIVE', ?, ?, ?, ?, ?, ?, 'META_STORY_SYNC', 0, ?)
                 ON CONFLICT(story_media_id) DO UPDATE SET
                     temporary_url=COALESCE(excluded.temporary_url, instagram_story_sources.temporary_url),
                     story_status='ACTIVE',
+                    sync_miss_count=0,
+                    last_confirmed_active_at=excluded.last_confirmed_active_at,
                     last_seen=excluded.last_seen,
                     last_event_metadata=excluded.last_event_metadata,
                     media_type=COALESCE(excluded.media_type, instagram_story_sources.media_type),
@@ -1347,7 +1416,7 @@ class Database:
                     source='META_STORY_SYNC'
                 """,
                 (media_id, temporary_url, now, now, metadata,
-                 media_type, permalink, published_at),
+                 media_type, permalink, published_at, now),
             )
             conn.commit()
             row = conn.execute(
@@ -1355,32 +1424,118 @@ class Database:
             ).fetchone()
         return dict(row) if row else None
 
-    def expire_missing_instagram_synced_stories(
-        self, active_story_ids: List[str], *, expired_before: str,
-    ) -> int:
-        """Mark only proven-old, sync-owned Stories absent from a good fetch.
+    def reconcile_instagram_story_lifecycle(
+        self, active_story_ids: List[str], *, expired_before: str, now: Optional[str] = None,
+    ) -> Dict[str, int]:
+        """Apply Story lifecycle rules after one COMPLETE successful Meta fetch.
 
-        No rows are changed on a failed fetch, and webhook-only evidence is
-        not eligible.  A missing Story without a trustworthy published time
-        is retained rather than guessed expired.
+        Only call this once ``active_story_ids`` reflects everything Meta's
+        owned-Stories edge returned in a fully successful (non-partial, non-
+        failed) fetch — a failure, timeout, rate limit, or malformed/partial
+        page must never reach here, since only a complete successful fetch is
+        trustworthy evidence that an ACTIVE Story is actually absent.
+
+        A sync-owned ACTIVE Story absent from this fetch is:
+        - marked EXPIRED if its trustworthy ``published_at`` is older than
+          ``expired_before`` (it lived out its normal lifetime), regardless
+          of miss count;
+        - otherwise, on its first complete miss, only has ``sync_miss_count``
+          incremented and stays ACTIVE (never hidden after one miss);
+        - marked REMOVED only on its second consecutive complete miss, with
+          ``removed_at``/``removed_reason`` set.
+
+        Admin-deleted rows and rows already EXPIRED/REMOVED are left alone —
+        this never restores an admin tombstone and never re-litigates a
+        terminal lifecycle state. A Story returned by Meta again (including a
+        previously REMOVED one) is reactivated exclusively through
+        ``upsert_instagram_story_sync``, which resets ``sync_miss_count`` and
+        preserves mapping, routes, and admin_deleted untouched.
         """
         ids = [str(value or "").strip() for value in active_story_ids if str(value or "").strip()]
+        now = now or datetime.utcnow().isoformat()
+        counts = {"expired": 0, "removed": 0, "miss_pending": 0}
         with self.get_connection() as conn:
-            params: List[Any] = [expired_before]
-            where = (
-                "source='META_STORY_SYNC' AND admin_deleted=0 "
-                "AND story_status='ACTIVE' AND published_at IS NOT NULL "
-                "AND published_at <= ?"
-            )
+            params: List[Any] = []
+            where = "source='META_STORY_SYNC' AND admin_deleted=0 AND story_status='ACTIVE'"
             if ids:
                 where += f" AND story_media_id NOT IN ({','.join('?' for _ in ids)})"
                 params.extend(ids)
-            cursor = conn.execute(
-                f"UPDATE instagram_story_sources SET story_status='EXPIRED' WHERE {where}",
+            missing_rows = conn.execute(
+                f"SELECT story_media_id, published_at, sync_miss_count FROM instagram_story_sources WHERE {where}",
                 tuple(params),
-            )
+            ).fetchall()
+            for row in missing_rows:
+                story_id = row["story_media_id"]
+                published_at = row["published_at"]
+                miss_count = int(row["sync_miss_count"] or 0)
+                if published_at and str(published_at) <= expired_before:
+                    conn.execute(
+                        "UPDATE instagram_story_sources SET story_status='EXPIRED' WHERE story_media_id=?",
+                        (story_id,),
+                    )
+                    counts["expired"] += 1
+                elif miss_count >= 1:
+                    conn.execute(
+                        """
+                        UPDATE instagram_story_sources
+                        SET story_status='REMOVED', removed_at=?, removed_reason='missing_from_two_complete_meta_syncs'
+                        WHERE story_media_id=?
+                        """,
+                        (now, story_id),
+                    )
+                    counts["removed"] += 1
+                else:
+                    conn.execute(
+                        "UPDATE instagram_story_sources SET sync_miss_count=sync_miss_count+1 WHERE story_media_id=?",
+                        (story_id,),
+                    )
+                    counts["miss_pending"] += 1
             conn.commit()
-        return int(cursor.rowcount or 0)
+        return counts
+
+    def backfill_instagram_story_sequence_numbers(self) -> int:
+        """Assign a stable admin-facing sequence number/date to Stories missing one.
+
+        Numbering is derived only from ``published_at`` (Asia/Kolkata
+        publication date) and ``story_media_id`` as a deterministic tie-
+        breaker — never Meta's array order, the numeric Story ID, first/last
+        seen, or any content signal. Already-assigned rows are never
+        renumbered: a new row for an existing date is appended after the
+        current maximum for that date. Rows without a trustworthy
+        ``published_at`` are left unassigned rather than guessed. Touches
+        only ``story_sequence_number``/``story_sequence_date`` — never
+        mapping, routes, topic, admin tombstone, history, or the Story ID.
+        """
+        with self.get_connection() as conn:
+            unassigned = conn.execute(
+                "SELECT story_media_id, published_at FROM instagram_story_sources "
+                "WHERE story_sequence_number IS NULL AND published_at IS NOT NULL"
+            ).fetchall()
+            by_date: Dict[str, List[Tuple[str, str]]] = {}
+            for row in unassigned:
+                pub_date = _story_publication_date_kolkata(row["published_at"])
+                if not pub_date:
+                    continue
+                by_date.setdefault(pub_date, []).append((str(row["published_at"]), row["story_media_id"]))
+            updated = 0
+            for pub_date, items in by_date.items():
+                items.sort(key=lambda pair: (pair[0], pair[1]))
+                existing_max = conn.execute(
+                    "SELECT COALESCE(MAX(story_sequence_number), 0) FROM instagram_story_sources "
+                    "WHERE story_sequence_date = ?",
+                    (pub_date,),
+                ).fetchone()[0]
+                next_number = int(existing_max or 0) + 1
+                for _, story_media_id in items:
+                    conn.execute(
+                        "UPDATE instagram_story_sources SET story_sequence_number=?, story_sequence_date=? "
+                        "WHERE story_media_id=?",
+                        (next_number, pub_date, story_media_id),
+                    )
+                    next_number += 1
+                    updated += 1
+            conn.commit()
+        return updated
 
     def try_acquire_instagram_story_sync_lock(
         self, owner: str, lease_seconds: float = 120.0,
@@ -1454,6 +1609,17 @@ class Database:
                 item["routing_id"] = route["routing_id"] if route else None
                 item["topic_id"] = route["topic_id"] if route else None
                 item["routing_topic"] = route["routing_topic"] if route else None
+                # Admin-only ordinal convenience label — never a routing
+                # identity. story_media_id above remains what any reply/
+                # webhook or mapping actually matches against.
+                sequence_label = format_story_sequence_label(item.get("story_sequence_number"))
+                sequence_date_display = format_story_sequence_date_display(item.get("story_sequence_date"))
+                item["story_sequence_label"] = sequence_label
+                item["story_sequence_date_display"] = sequence_date_display
+                if sequence_label and sequence_date_display:
+                    item["story_sequence_display"] = f"{sequence_label} • {sequence_date_display}"
+                else:
+                    item["story_sequence_display"] = "Story — sequence unavailable"
                 output.append(item)
         return output
 
