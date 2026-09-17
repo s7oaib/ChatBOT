@@ -255,6 +255,7 @@ HOME_TABLE_TEMPLATE_IDS = frozenset({
 SUBSCRIPTION_TEMPLATE_ID = "subscription_details"
 SUBSCRIPTION_REMEDIATION_ACTOR = "phase3a_subscription_durable_copy"
 SUBSCRIPTION_REMEDIATION_REASON = "phase3a_subscription_legacy_upgrade"
+SUBSCRIPTION_LIVE_STALE_REMEDIATION_REASON = "phase3a_subscription_live_stale_override_upgrade"
 KNOWN_LEGACY_SUBSCRIPTION_MARKERS = (
     "₹1,500 for 5 meals",
     "₹1,750",
@@ -282,6 +283,14 @@ LEGACY_SUBSCRIPTION_RESPONSE = (
     "Would you like to book?"
 )
 KNOWN_LEGACY_SUBSCRIPTION_SHA256 = "1c1254cc608774fa65675d6f29aad9014e7c936bd251757f47addd6c35437940"
+# Exact normalized fingerprint captured from the active production override
+# during the Phase 3A live acceptance investigation.  This is an allowlist of
+# one known stale durable object, not a content-pattern matcher.
+KNOWN_LIVE_STALE_SUBSCRIPTION_SHA256 = "b9b8de0e125cd1cfd4f415894c674c2576fee0a27a4f6805246e69d3b9e991f4"
+KNOWN_LEGACY_SUBSCRIPTION_SHA256S = frozenset({
+    KNOWN_LEGACY_SUBSCRIPTION_SHA256,
+    KNOWN_LIVE_STALE_SUBSCRIPTION_SHA256,
+})
 
 
 def normalize_legacy_subscription_response(text: Any) -> str:
@@ -291,14 +300,19 @@ def normalize_legacy_subscription_response(text: Any) -> str:
 
 
 def legacy_subscription_response_fingerprint(text: Any) -> str:
+    return subscription_response_fingerprint(text)
+
+
+def subscription_response_fingerprint(text: Any) -> str:
+    """Return the shared exact fingerprint for a subscription response."""
     return hashlib.sha256(
         normalize_legacy_subscription_response(text).encode("utf-8")
     ).hexdigest()
 
 
 def is_known_legacy_subscription_response(text: Any) -> bool:
-    """Return true only for the exact historical legacy subscription copy."""
-    return legacy_subscription_response_fingerprint(text) == KNOWN_LEGACY_SUBSCRIPTION_SHA256
+    """Return true only for an exact allowlisted stale subscription copy."""
+    return subscription_response_fingerprint(text) in KNOWN_LEGACY_SUBSCRIPTION_SHA256S
 
 
 def is_client_confirmed_exact_response(template_id: str, text: Any) -> bool:
@@ -536,11 +550,17 @@ def apply_safe_content_remediations(
             if current_copy == subscription_default.strip():
                 actions[SUBSCRIPTION_TEMPLATE_ID] = "unchanged"
             elif is_known_legacy_subscription_response(current_copy):
+                reason = (
+                    SUBSCRIPTION_LIVE_STALE_REMEDIATION_REASON
+                    if subscription_response_fingerprint(current_copy)
+                    == KNOWN_LIVE_STALE_SUBSCRIPTION_SHA256
+                    else SUBSCRIPTION_REMEDIATION_REASON
+                )
                 ok = database.save_response_template_override(
                     SUBSCRIPTION_TEMPLATE_ID,
                     subscription_default,
                     SUBSCRIPTION_REMEDIATION_ACTOR,
-                    change_reason=SUBSCRIPTION_REMEDIATION_REASON,
+                    change_reason=reason,
                     previous_response=current_copy,
                 )
                 actions[SUBSCRIPTION_TEMPLATE_ID] = "updated" if ok else "failed"

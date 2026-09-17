@@ -32,6 +32,8 @@ from camellia.content_integrity import (
     quarantine_template_response,
     quarantine_unconfirmed_claims,
     runtime_quarantine_enabled,
+    is_known_legacy_subscription_response,
+    subscription_response_fingerprint,
 )
 
 log = get_logger("camellia.responder")
@@ -3571,6 +3573,26 @@ class DeterministicResponder:
             override = None
         if not override or str(override.get("status") or "ACTIVE").upper() != "ACTIVE":
             return template
+        if (
+            template_id == "subscription_details"
+            and is_known_legacy_subscription_response(override.get("response"))
+        ):
+            # A known stale durable object must not win over the immutable
+            # repository subscription copy while startup remediation catches
+            # up. Distinct operator edits continue through the normal
+            # Response Library path unchanged.
+            canonical = dict(template)
+            canonical_response = self._canonical_template_response(template_id)
+            if canonical.get("responses"):
+                canonical["responses"] = [canonical_response]
+            else:
+                canonical["response"] = canonical_response
+            log.warning(
+                "SUBSCRIPTION_STALE_OVERRIDE_BYPASS template_id=%s sha256=%s",
+                template_id,
+                subscription_response_fingerprint(override.get("response")),
+            )
+            return canonical
         result = dict(template)
         if result.get("responses"):
             result["responses"] = [override.get("response") or ""]
