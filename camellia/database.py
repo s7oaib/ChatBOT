@@ -20,6 +20,28 @@ from camellia.candidate_safety import (
 _KOLKATA_TZ = ZoneInfo("Asia/Kolkata")
 
 
+def _parse_trustworthy_datetime(value: Optional[str]) -> Optional[datetime]:
+    """Parse an ISO-8601 timestamp into a timezone-aware UTC datetime.
+
+    Returns None for anything empty or unparseable — callers must treat that
+    as "age unknown", never as a proxy for "old" or "young". Accepts ``Z``,
+    explicit ``+00:00``-style offsets, and naive timestamps (assumed UTC,
+    matching how this codebase generates its own cutoffs). Comparison must
+    always happen on the resulting datetime instant, never on the raw
+    string, so a non-UTC offset compares correctly against a UTC cutoff.
+    """
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
 def _story_publication_date_kolkata(published_at: Optional[str]) -> Optional[str]:
     """Derive the Asia/Kolkata publication date (YYYY-MM-DD) from a trustworthy
     ``published_at`` timestamp, or None if it cannot be parsed. Never guesses."""
@@ -1435,14 +1457,25 @@ class Database:
         page must never reach here, since only a complete successful fetch is
         trustworthy evidence that an ACTIVE Story is actually absent.
 
-        A sync-owned ACTIVE Story absent from this fetch is:
-        - marked EXPIRED if its trustworthy ``published_at`` is older than
-          ``expired_before`` (it lived out its normal lifetime), regardless
-          of miss count;
+        A sync-owned ACTIVE Story absent from this fetch is classified only
+        when its ``published_at`` parses into a trustworthy timezone-aware
+        instant (see ``_parse_trustworthy_datetime`` — never a raw string
+        comparison, so a non-UTC offset compares correctly against the UTC
+        cutoff):
+        - marked EXPIRED if that instant is at/before ``expired_before``
+          (it lived out its normal lifetime), regardless of miss count;
         - otherwise, on its first complete miss, only has ``sync_miss_count``
           incremented and stays ACTIVE (never hidden after one miss);
         - marked REMOVED only on its second consecutive complete miss, with
           ``removed_at``/``removed_reason`` set.
+
+        ``REMOVED`` is a claim that a Story went missing *before* its normal
+        expiry — a claim this code cannot make without knowing its age. So a
+        Story with a missing or malformed ``published_at`` is never marked
+        EXPIRED or REMOVED, no matter how many complete misses accumulate:
+        ``sync_miss_count`` still advances as pending/unknown-age evidence,
+        but the row stays ACTIVE. Age is never guessed from first_seen,
+        last_seen, the Story ID, Meta's array order, or the sequence number.
 
         Admin-deleted rows and rows already EXPIRED/REMOVED are left alone —
         this never restores an admin tombstone and never re-litigates a
@@ -1453,6 +1486,7 @@ class Database:
         """
         ids = [str(value or "").strip() for value in active_story_ids if str(value or "").strip()]
         now = now or datetime.utcnow().isoformat()
+        expired_before_dt = _parse_trustworthy_datetime(expired_before)
         counts = {"expired": 0, "removed": 0, "miss_pending": 0}
         with self.get_connection() as conn:
             params: List[Any] = []
@@ -1466,15 +1500,15 @@ class Database:
             ).fetchall()
             for row in missing_rows:
                 story_id = row["story_media_id"]
-                published_at = row["published_at"]
+                published_dt = _parse_trustworthy_datetime(row["published_at"])
                 miss_count = int(row["sync_miss_count"] or 0)
-                if published_at and str(published_at) <= expired_before:
+                if published_dt is not None and expired_before_dt is not None and published_dt <= expired_before_dt:
                     conn.execute(
                         "UPDATE instagram_story_sources SET story_status='EXPIRED' WHERE story_media_id=?",
                         (story_id,),
                     )
                     counts["expired"] += 1
-                elif miss_count >= 1:
+                elif published_dt is not None and miss_count >= 1:
                     conn.execute(
                         """
                         UPDATE instagram_story_sources
@@ -1485,6 +1519,9 @@ class Database:
                     )
                     counts["removed"] += 1
                 else:
+                    # Either still within its first miss with a trustworthy
+                    # timestamp, or the timestamp is missing/malformed —
+                    # either way, age cannot justify hiding it yet.
                     conn.execute(
                         "UPDATE instagram_story_sources SET sync_miss_count=sync_miss_count+1 WHERE story_media_id=?",
                         (story_id,),
