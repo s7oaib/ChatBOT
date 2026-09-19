@@ -32,7 +32,6 @@ jobs:
       ADMIN_PIN: "51990"
       DB_PATH: "test_camellia_ci.db"
       ENABLE_WEB_TESTER: "true"
-      INSTAGRAM_ACCESS_TOKEN: "mock_test_token"
       WHATSAPP_MOCK_MODE: "true"
       WHATSAPP_CHATBOT_ENABLED: "false"
       WHATSAPP_CHATBOT_ENABLE_CONFIRM: "false"
