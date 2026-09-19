@@ -16,11 +16,20 @@ Instagram DM -> approved AI response
 
 `camellia/handoff.py` owns the opaque reference, deduplication, the
 `WHATSAPP_BUSINESS_NUMBER` link target, and the staff-facing summary built
-from Instagram's existing structured state. The durable escalation outbox
-records the handoff for admin visibility and marks external notification as
-`SKIPPED`; no provider credential or network send is involved. Explicit admin
-resume remains idempotent and restores Instagram AI only after the handoff is
-closed.
+from Instagram's existing structured state. The existing durable escalation
+outbox remains the parent event; additive `notification_deliveries` rows track
+EMAIL, WEB_PUSH, and ADMIN independently. Email and push contain only the CAM
+reference, reason, source, timestamp, `WAITING_FOR_HUMAN`, and an Admin link.
+Duplicate/reused handoffs never enqueue another event. A channel failure is
+retryable or terminal in its own row and never rolls back CAM creation.
+Explicit admin resume remains idempotent and restores Instagram AI only after
+the handoff is closed.
+
+The Admin browser polls authenticated notification state for a badge/count and
+one non-intrusive toast. Seen state lives in `admin_notification_states`, not
+in the CAM business status. Optional sound is local to the browser and off by
+default. Web Push uses a root-scoped service worker and VAPID secrets supplied
+only through deployment configuration; expired subscriptions are revoked.
 
 `INSTAGRAM_CHATBOT_ENABLED` is the only channel automation control. The
 WhatsApp business number is retained solely for the manual `wa.me` link.

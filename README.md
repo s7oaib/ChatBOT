@@ -41,6 +41,7 @@ Built to convert Meta Ad leads, filter out organic DM noise, send high-resolutio
 - **Out-of-Syllabus Protection**: Unmatched customer queries are never answered with guesses.
 - **Sensitive Trigger Guard**: Queries containing sensitive keywords (`refund`, `complaint`, `cancel order`, `custom order`, `bulk order`, `payment link`) immediately trigger human escalation.
 - **Manual Handoff**: Stores durable conversation/handoff state in `camellia.db` subject to retention, while normal logs use hashed identifiers and safe error metadata only. Customers receive a `wa.me` link; WhatsApp is handled by a human.
+- **Owner Notifications**: Each newly-created CAM handoff creates one durable parent event with independent Email, Admin/browser, and optional Web Push delivery state. Reused handoffs do not send duplicate owner alerts. Email is configured through the approved SMTP destination variables; Web Push requires explicit Admin opt-in and VAPID secrets.
 
 ### 5. 🔐 Kitchen & Menu Admin Portal (`/admin` / `/admin/dashboard`)
 - **Secure Admin Authentication**: Browser access uses `ADMIN_USERNAME` + an Argon2id `ADMIN_PASSWORD_HASH`, production TOTP MFA, durable rate limiting, CSRF-protected server sessions, and logout revocation. `ADMIN_API_KEY` remains a separate machine credential; legacy `ADMIN_PIN` is not accepted.
@@ -49,6 +50,7 @@ Built to convert Meta Ad leads, filter out organic DM noise, send high-resolutio
 - **📊 Google Sheets Live Sync**: One-click sync from Google Sheets CSV without server restarts or touching code.
 - **🍱 Active Menu Viewer**: Inspect live menu items visually with an instant **Reset to Authentic Bengali Culinary Baseline**.
 - **📈 Analytics & Escalations**: Tracks real-time match rates, query totals, and unresolved human escalations.
+- **🔔 New Handoff Alerts**: Shows an unread badge, non-intrusive toast, optional user-controlled sound, and per-browser Web Push opt-in. Notification seen state never changes `WAITING_FOR_HUMAN`.
 
 ### 6. 💬 Browser-Based Live Chat Tester (`/chat`)
 - Built-in Instagram-style web chat interface for local testing in your browser (`http://localhost:8000/chat`); it is disabled in production. WhatsApp is not a tester channel.

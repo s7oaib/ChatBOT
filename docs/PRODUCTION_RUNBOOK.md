@@ -4,10 +4,14 @@
 
 1. Check `GET /health` and confirm `status=healthy`, Instagram delivery is
    configured, `ENABLE_WEB_TESTER=false`, and WhatsApp is human-only.
-2. Check the authenticated `GET /admin/auto-resolve/evaluation` endpoint.
+2. Check `owner_notifications` in `/health`: Admin should be enabled; email
+   should be `ready` only after the approved SMTP destination is provisioned;
+   Web Push is optional and must show complete VAPID configuration before the
+   Admin opt-in button is enabled.
+3. Check the authenticated `GET /admin/auto-resolve/evaluation` endpoint.
    The normal production state is `AUTO RESOLVE: OFF`, simulation enabled, and
    zero WhatsApp activity, source-route overrides, and order/CAM interference.
-3. Check the authenticated assisted-resolution evaluation before reviewing a
+4. Check the authenticated assisted-resolution evaluation before reviewing a
    customer reply. Never treat a simulation decision as a sent reply.
 
 ## Disable controls and kill switch
@@ -53,6 +57,16 @@ WhatsApp automation has been removed. Confirm `/health` reports
 WhatsApp webhook or Cloud API sender; the only WhatsApp runtime surface is the
 business number used to build the customer-facing `wa.me` link. Staff reply
 manually from the business account.
+
+## Owner notification safety
+
+The customer path remains Instagram AI → durable CAM → customer-owned `wa.me`
+link → human WhatsApp continuation. Owner email, Admin badge/toast, and Web
+Push are separate notification channels. On a controlled handoff verify one
+CAM reference, one parent event, one email (when configured), one Admin toast,
+and no duplicate alert after the customer repeats the message. Channel
+delivery failures must remain in the outbox and must never create a second CAM
+or change `WAITING_FOR_HUMAN`.
 
 ## Rollback deployment
 

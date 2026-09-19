@@ -110,13 +110,30 @@ authority.
 Unsupported, sensitive, order/event, or explicit human requests create or
 reuse an opaque durable CAM handoff reference. Repeated customer messages do
 not create duplicate active handoffs. Staff-facing handoff data uses the
-bounded durable outbox path; external WhatsApp alerts are not sent by this
-service.
+bounded durable outbox path. The parent event fans out to the configured owner
+email, authenticated Admin browser notification state, and optional Web Push.
+No owner channel includes raw Meta IDs or the customer's full message.
 
 While a handoff is `WAITING_FOR_HUMAN`, autonomous AI replies are suppressed.
 The operator must explicitly resume the handoff before chatbot behavior can
-continue. A notification failure must not be represented to the customer as a
-successful handoff.
+continue. A notification failure must not roll back or block the customer
+handoff. The Admin row remains durable and channel delivery state is visible
+to operators.
+
+### Owner notification setup
+
+Email uses the existing approved destination names when present:
+`ADMIN_RECOVERY_EMAIL` (preferred) or `HUMAN_ESCALATION_EMAIL`, with
+`ADMIN_EMAIL_FROM`, `ADMIN_EMAIL_PROVIDER=smtp`, and the `ADMIN_EMAIL_SMTP_*`
+settings. If these values are absent, health reports email not configured and
+the event is safely `SKIPPED` for that channel.
+
+Web Push is opt-in per Admin browser. It requires
+`WEB_PUSH_VAPID_PUBLIC_KEY`, `WEB_PUSH_VAPID_PRIVATE_KEY`, and
+`WEB_PUSH_VAPID_SUBJECT` in the deployment secret store. The public key may be
+returned to the authenticated Admin UI; the private key never leaves the
+server. If VAPID is incomplete, push remains disabled rather than generating a
+key during deployment.
 
 ## 7. Health verification
 

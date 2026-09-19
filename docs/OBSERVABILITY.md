@@ -22,9 +22,11 @@ is safe for operator use and includes:
 - `auto_resolve` and `language_understanding`: enabled/simulation state; and
 - `session_state` and retention configuration.
 
-The `human_escalation_notifications` health block reports `SKIPPED` because
-external staff notifications are intentionally manual-only; there is no
-WhatsApp notification gate or server-side sender.
+The legacy `human_escalation_notifications` block remains `SKIPPED` to make the
+removed WhatsApp sender boundary explicit. The additive `owner_notifications`
+block reports safe readiness for `email`, `admin`, and `web_push`, including
+only booleans, provider name, and subscription count. It never exposes an
+email address, API key, VAPID private key, or subscription endpoint.
 
 The normal production policy is Instagram AI enabled, WhatsApp automation
 removed with manual handoff available,
@@ -48,9 +50,11 @@ Use the existing Admin endpoints for detailed state:
   simulation/read-only state; and
 - `/admin/db-backup` for an authenticated, integrity-checked SQLite snapshot.
 
-The normal human handoff records a durable outbox event as `SKIPPED`. This is
-an intentional manual-only policy state, not a provider failure or a failed
-CAM handoff. No WhatsApp credential, webhook, or Cloud API request is used.
+The normal human handoff records one durable parent event and one delivery row
+per owner channel. `SENT`, `FAILED`, `RETRYING`, and `SKIPPED` are channel
+delivery states; an email configuration failure is visible without making the
+customer handoff fail. No WhatsApp credential, webhook, or Cloud API request
+is used.
 
 ## Log safety contract
 
