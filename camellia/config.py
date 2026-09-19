@@ -300,14 +300,17 @@ class Config:
     # Owner notifications are independent of the customer channel.  The
     # existing names are intentionally retained so a deployment can reuse an
     # already-approved email destination/provider without adding credentials
-    # to application code.  SMTP is the dependency-free provider; a future
-    # provider adapter can use ADMIN_EMAIL_API_KEY without changing the
-    # durable event model.
+    # to application code. Provider adapters are deliberately independent of
+    # the durable event model.
     ADMIN_EMAIL_PROVIDER: str = os.getenv("ADMIN_EMAIL_PROVIDER", "").strip().lower()
     ADMIN_EMAIL_API_KEY: str = _env_secret("ADMIN_EMAIL_API_KEY")
     ADMIN_EMAIL_FROM: str = os.getenv("ADMIN_EMAIL_FROM", "").strip()
     ADMIN_RECOVERY_EMAIL: str = os.getenv("ADMIN_RECOVERY_EMAIL", "").strip()
     HUMAN_ESCALATION_EMAIL: str = os.getenv("HUMAN_ESCALATION_EMAIL", "").strip()
+    GMAIL_API_CLIENT_ID: str = os.getenv("GMAIL_API_CLIENT_ID", "").strip()
+    GMAIL_API_CLIENT_SECRET: str = _env_secret("GMAIL_API_CLIENT_SECRET")
+    GMAIL_API_REFRESH_TOKEN: str = _env_secret("GMAIL_API_REFRESH_TOKEN")
+    GMAIL_API_USER_ID: str = os.getenv("GMAIL_API_USER_ID", "me").strip() or "me"
     ADMIN_EMAIL_SMTP_HOST: str = os.getenv("ADMIN_EMAIL_SMTP_HOST", "").strip()
     try:
         ADMIN_EMAIL_SMTP_PORT: int = max(1, min(65535, int(os.getenv("ADMIN_EMAIL_SMTP_PORT", "587"))))

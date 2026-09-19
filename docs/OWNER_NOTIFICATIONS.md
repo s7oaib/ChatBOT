@@ -19,8 +19,9 @@ row is created and remains `WAITING_FOR_HUMAN` regardless of provider state.
 
 ## Configuration
 
-Email reuses the client's approved provider when these variables are
-provisioned; otherwise it remains safely skipped:
+Email uses the explicitly selected provider when these variables are
+provisioned; otherwise it remains safely skipped. The existing `smtp` and
+`resend` adapters remain available, but production should select exactly one:
 
 ```text
 ADMIN_EMAIL_PROVIDER=resend
@@ -42,8 +43,58 @@ ADMIN_EMAIL_API_KEY=approved-provider-secret
 ```
 
 `HUMAN_ESCALATION_EMAIL` is retained as a compatibility fallback for the
-recipient. This build supports only the explicitly selected `resend` and
-`smtp` adapters; it does not guess or call an unknown API provider.
+recipient. The Gmail API adapter uses HTTPS only; it never opens an SMTP
+socket and does not require domain DNS verification.
+
+### Gmail API over HTTPS runbook
+
+Use this path when Railway SMTP egress is unavailable. The application uses a
+normal Gmail or Google Workspace mailbox with OAuth 2.0 refresh tokens; it does
+not use service accounts or domain-wide delegation.
+
+1. In [Google Cloud Console](https://console.cloud.google.com/), create or
+   select the production Google Cloud project for Camellia.
+2. Enable **Gmail API** for that project.
+3. Configure the **OAuth consent screen**. Use **Internal** only when the
+   mailbox is in the same Google Workspace organization and the organization
+   allows it; otherwise use **External**. For an External app in **Testing**,
+   add the mailbox as a test user. Google limits Testing apps to 100 test users
+   and refresh tokens issued to test users expire after seven days, so use
+   **In production**/complete the required verification before relying on it
+   for a long-lived production mailbox.
+4. Create **Credentials → OAuth client ID**. A **Desktop app** client is
+   acceptable for the one-time operator token acquisition; use the existing
+   Web application flow instead if this repository already has one.
+5. Request only this scope:
+   `https://www.googleapis.com/auth/gmail.send`.
+6. Run a one-time offline authorization flow for the owner mailbox with
+   `access_type=offline` and `prompt=consent`, then securely capture the
+   returned refresh token. The operator may use Google's OAuth Playground or a
+   local helper; never send the authorization code or token through chat.
+7. Add the resulting values directly to Railway for the `ChatBOT` service:
+
+   ```text
+   ADMIN_EMAIL_PROVIDER=gmail_api
+   GMAIL_API_CLIENT_ID=<OAuth client ID>
+   GMAIL_API_CLIENT_SECRET=<OAuth client secret>
+   GMAIL_API_REFRESH_TOKEN=<offline refresh token>
+   ADMIN_EMAIL_FROM=<approved sender mailbox>
+   ADMIN_RECOVERY_EMAIL=<owner alert recipient>
+   GMAIL_API_USER_ID=me
+   ```
+
+   `GMAIL_API_USER_ID=me` is optional because `me` is the default.
+8. Never commit these values or paste them into chat, tickets, public logs, or
+   health responses. If a refresh token is revoked or expires, repeat the
+   offline-consent flow and replace only the Railway secret.
+
+The send path first exchanges the refresh token at Google's OAuth token
+endpoint, then sends an RFC 2822 MIME message to Gmail's
+`users.messages.send` endpoint with base64url `raw` content. Token exchange
+and Gmail API network timeouts, HTTP 408/429, and 5xx responses are retried by
+the existing durable outbox. OAuth configuration/authentication errors and
+other 4xx responses are terminal for that delivery but never block CAM
+creation or change `WAITING_FOR_HUMAN`.
 
 Web Push requires all of the following in the deployment secret store:
 

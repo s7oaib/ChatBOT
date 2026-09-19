@@ -6,11 +6,13 @@ email and Web Push channels independently.  A provider failure is returned to
 the outbox caller; it is never raised into Instagram handoff creation.
 """
 
+import base64
 import json
 import smtplib
 import ssl
 from email.message import EmailMessage
-from typing import Any, Dict
+from typing import Any, Dict, Optional, Tuple
+from urllib.parse import quote
 import httpx
 
 from camellia.config import config
@@ -18,9 +20,23 @@ from camellia.monitoring import get_logger
 
 log = get_logger("camellia.owner_notifications")
 
+_GMAIL_TOKEN_URL = "https://oauth2.googleapis.com/token"
+_GMAIL_SEND_URL = "https://gmail.googleapis.com/gmail/v1/users"
+
 
 def _recipient() -> str:
     return (config.ADMIN_RECOVERY_EMAIL or config.HUMAN_ESCALATION_EMAIL or "").strip()
+
+
+def _email_provider_readiness(provider: str, recipient: str, requirements: tuple) -> Dict[str, Any]:
+    missing = [name for name, value in requirements if not value]
+    return {
+        "configured": not missing,
+        "provider": provider,
+        "recipient_configured": bool(recipient),
+        "ready": not missing,
+        "reason": ", ".join(missing) if missing else None,
+    }
 
 
 def email_readiness() -> Dict[str, Any]:
@@ -34,7 +50,7 @@ def email_readiness() -> Dict[str, Any]:
             "ready": False,
             "reason": "ADMIN_EMAIL_PROVIDER/ADMIN_EMAIL_SMTP_HOST is not configured",
         }
-    if provider not in {"smtp", "resend", ""}:
+    if provider not in {"smtp", "resend", "gmail_api", ""}:
         return {
             "configured": bool(recipient),
             "provider": provider,
@@ -42,34 +58,25 @@ def email_readiness() -> Dict[str, Any]:
             "ready": False,
             "reason": "email provider adapter is not supported by this build",
         }
-    missing = []
     if provider == "resend":
-        if not config.ADMIN_EMAIL_API_KEY:
-            missing.append("ADMIN_EMAIL_API_KEY")
-        if not config.ADMIN_EMAIL_FROM:
-            missing.append("ADMIN_EMAIL_FROM")
-        if not recipient:
-            missing.append("ADMIN_RECOVERY_EMAIL or HUMAN_ESCALATION_EMAIL")
-        return {
-            "configured": not missing,
-            "provider": "resend",
-            "recipient_configured": bool(recipient),
-            "ready": not missing,
-            "reason": ", ".join(missing) if missing else None,
-        }
-    if not config.ADMIN_EMAIL_SMTP_HOST:
-        missing.append("ADMIN_EMAIL_SMTP_HOST")
-    if not config.ADMIN_EMAIL_FROM:
-        missing.append("ADMIN_EMAIL_FROM")
-    if not recipient:
-        missing.append("ADMIN_RECOVERY_EMAIL or HUMAN_ESCALATION_EMAIL")
-    return {
-        "configured": not missing,
-        "provider": "smtp",
-        "recipient_configured": bool(recipient),
-        "ready": not missing,
-        "reason": ", ".join(missing) if missing else None,
-    }
+        return _email_provider_readiness("resend", recipient, (
+            ("ADMIN_EMAIL_API_KEY", config.ADMIN_EMAIL_API_KEY),
+            ("ADMIN_EMAIL_FROM", config.ADMIN_EMAIL_FROM),
+            ("ADMIN_RECOVERY_EMAIL or HUMAN_ESCALATION_EMAIL", recipient),
+        ))
+    if provider == "gmail_api":
+        return _email_provider_readiness("gmail_api", recipient, (
+            ("GMAIL_API_CLIENT_ID", config.GMAIL_API_CLIENT_ID),
+            ("GMAIL_API_CLIENT_SECRET", config.GMAIL_API_CLIENT_SECRET),
+            ("GMAIL_API_REFRESH_TOKEN", config.GMAIL_API_REFRESH_TOKEN),
+            ("ADMIN_EMAIL_FROM", config.ADMIN_EMAIL_FROM),
+            ("ADMIN_RECOVERY_EMAIL or HUMAN_ESCALATION_EMAIL", recipient),
+        ))
+    return _email_provider_readiness("smtp", recipient, (
+        ("ADMIN_EMAIL_SMTP_HOST", config.ADMIN_EMAIL_SMTP_HOST),
+        ("ADMIN_EMAIL_FROM", config.ADMIN_EMAIL_FROM),
+        ("ADMIN_RECOVERY_EMAIL or HUMAN_ESCALATION_EMAIL", recipient),
+    ))
 
 
 def web_push_readiness(subscription_count: int) -> Dict[str, Any]:
@@ -124,11 +131,86 @@ def _email_message(payload: Dict[str, Any]) -> EmailMessage:
     return message
 
 
+def _http_failure(status_code: int) -> Dict[str, Any]:
+    """Classify an HTTP failure without retaining a provider response body."""
+    if status_code in (408, 429) or status_code >= 500:
+        return {"status": "failed", "retryable": True, "error": f"HTTP {status_code}"}
+    return {"status": "failed", "retryable": False, "error": f"HTTP {status_code}"}
+
+
+def _gmail_access_token() -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
+    """Exchange the configured refresh token without exposing OAuth material."""
+    try:
+        response = httpx.post(
+            _GMAIL_TOKEN_URL,
+            data={
+                "client_id": config.GMAIL_API_CLIENT_ID,
+                "client_secret": config.GMAIL_API_CLIENT_SECRET,
+                "refresh_token": config.GMAIL_API_REFRESH_TOKEN,
+                "grant_type": "refresh_token",
+            },
+            headers={"Accept": "application/json"},
+            timeout=15,
+        )
+    except (httpx.TimeoutException, httpx.NetworkError) as exc:
+        return None, {"status": "failed", "retryable": True, "error": type(exc).__name__}
+
+    if not 200 <= response.status_code < 300:
+        failure = _http_failure(response.status_code)
+        if not failure["retryable"] and response.status_code in (400, 401, 403):
+            # These are configuration/authorization failures. The known OAuth
+            # error code is safe to retain; the rest of Google's response is not.
+            try:
+                error_code = str(response.json().get("error") or "")
+            except (TypeError, ValueError, AttributeError):
+                error_code = ""
+            if error_code in {"invalid_grant", "invalid_client", "unauthorized_client", "invalid_scope"}:
+                failure["error"] = f"OAuth {error_code}"
+        return None, failure
+
+    try:
+        access_token = response.json().get("access_token")
+    except (TypeError, ValueError, AttributeError):
+        access_token = None
+    if not isinstance(access_token, str) or not access_token.strip():
+        return None, {"status": "failed", "retryable": False, "error": "invalid OAuth token response"}
+    return access_token, None
+
+
+def _send_via_gmail_api(payload: Dict[str, Any]) -> Dict[str, Any]:
+    access_token, failure = _gmail_access_token()
+    if failure:
+        return failure
+
+    message = _email_message(payload)
+    raw = base64.urlsafe_b64encode(message.as_bytes()).decode("ascii").rstrip("=")
+    user_id = quote(config.GMAIL_API_USER_ID or "me", safe="")
+    try:
+        response = httpx.post(
+            f"{_GMAIL_SEND_URL}/{user_id}/messages/send",
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+            json={"raw": raw},
+            timeout=15,
+        )
+    except (httpx.TimeoutException, httpx.NetworkError) as exc:
+        return {"status": "failed", "retryable": True, "error": type(exc).__name__}
+
+    if not 200 <= response.status_code < 300:
+        return _http_failure(response.status_code)
+    return {"status": "sent"}
+
+
 def send_email(payload: Dict[str, Any]) -> Dict[str, Any]:
     readiness = email_readiness()
     if not readiness["ready"]:
         return {"status": "skipped", "retryable": False, "error": readiness["reason"]}
     try:
+        if readiness["provider"] == "gmail_api":
+            return _send_via_gmail_api(payload)
         if readiness["provider"] == "resend":
             response = httpx.post(
                 "https://api.resend.com/emails",
