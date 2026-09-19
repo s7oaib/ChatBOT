@@ -3377,23 +3377,23 @@ def get_human_notifications_list(limit: int = 50, status: Optional[str] = None, 
 
 
 @app.get("/admin/notification-status")
-def get_admin_notification_status(limit: int = 50):
+def get_admin_notification_status(limit: int = 50, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
     """Return Admin-only unread/seen state, separate from CAM business status."""
-    require_admin()
+    require_admin(x_admin_key, x_admin_pin)
     return db.get_admin_notification_state(limit=limit)
 
 
 @app.post("/admin/notification-status/{handoff_ref}/seen")
-def mark_admin_notification_seen(handoff_ref: str):
-    require_admin()
+def mark_admin_notification_seen(handoff_ref: str, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
     db.mark_admin_notification_seen(handoff_ref)
     return {"status": "seen", "handoff_ref": handoff_ref}
 
 
 @app.get("/admin/notifications/config")
-def get_owner_notification_config():
+def get_owner_notification_config(x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
     """Safe channel readiness plus the public VAPID key only."""
-    require_admin()
+    require_admin(x_admin_key, x_admin_pin)
     email = owner_notifications.email_readiness()
     push = owner_notifications.web_push_readiness(db.web_push_subscription_count())
     return {
@@ -3407,8 +3407,8 @@ def get_owner_notification_config():
 
 
 @app.post("/admin/notifications/push-subscriptions")
-async def subscribe_owner_web_push(request: Request):
-    require_admin()
+async def subscribe_owner_web_push(request: Request, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
     try:
         body = await request.json()
         keys = body.get("keys") or {}
@@ -3427,8 +3427,8 @@ async def subscribe_owner_web_push(request: Request):
 
 
 @app.delete("/admin/notifications/push-subscriptions")
-async def unsubscribe_owner_web_push(request: Request):
-    require_admin()
+async def unsubscribe_owner_web_push(request: Request, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
     try:
         body = await request.json()
     except Exception:
