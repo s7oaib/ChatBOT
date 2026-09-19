@@ -70,6 +70,13 @@ def test_same_user_phase3b_sequence_preserves_explicit_subject_boundaries(tmp_pa
         assert len(sent) == 9
 
         row = _send(database, user_id, "Tell me about the subscription")
+        assert row["template_id"] == "waiting_for_human"
+        assert len(sent) == 9
+        waiting = database.get_active_handoff("instagram", user_id)
+        assert waiting is not None
+        database.resume_handoff(waiting["handoff_ref"])
+
+        row = _send(database, user_id, "Tell me about the subscription")
         assert row["template_id"] == "subscription_details"
         row = _send(database, user_id, "Actually I want Bengali Bento")
         assert row["template_id"] in {"bento_details", "combo_bento"}

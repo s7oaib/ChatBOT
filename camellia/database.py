@@ -2928,7 +2928,7 @@ class Database:
                 """
                 SELECT * FROM cross_channel_handoffs
                 WHERE source_channel = ? AND source_user_id = ?
-                  AND status NOT IN ('RESOLVED', 'EXPIRED')
+                  AND status NOT IN ('RESOLVED', 'EXPIRED', 'RESUMED')
                   AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
                 ORDER BY id DESC LIMIT 1
                 """,
@@ -2979,7 +2979,7 @@ class Database:
                 """
                 SELECT * FROM cross_channel_handoffs
                 WHERE source_channel = ? AND source_user_id = ?
-                  AND status NOT IN ('RESOLVED', 'EXPIRED')
+                  AND status NOT IN ('RESOLVED', 'EXPIRED', 'RESUMED')
                   AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
                 ORDER BY id DESC LIMIT 1
                 """,
@@ -2995,6 +2995,29 @@ class Database:
                 (status, handoff_ref),
             )
             conn.commit()
+
+    def resume_handoff(self, handoff_ref: str) -> Optional[Dict[str, Any]]:
+        """Close the waiting gate through an explicit operator action."""
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM cross_channel_handoffs WHERE handoff_ref = ?",
+                (handoff_ref,),
+            ).fetchone()
+            if not row:
+                return None
+            if row["status"] in {"RESUMED", "RESOLVED", "EXPIRED"}:
+                return dict(row)
+            conn.execute(
+                "UPDATE cross_channel_handoffs SET status = 'RESUMED', "
+                "updated_at = CURRENT_TIMESTAMP WHERE handoff_ref = ?",
+                (handoff_ref,),
+            )
+            conn.commit()
+            updated = conn.execute(
+                "SELECT * FROM cross_channel_handoffs WHERE handoff_ref = ?",
+                (handoff_ref,),
+            ).fetchone()
+            return dict(updated)
 
     def get_handoffs(self, limit: int = 50, status: Optional[str] = None) -> List[Dict[str, Any]]:
         """Staff-facing listing, newest first."""

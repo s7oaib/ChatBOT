@@ -553,6 +553,23 @@ def _process_instagram_event(
     """
     try:
         facts = session_memory.get_facts(sender_id, "instagram")
+        active_handoff = db.get_active_handoff("instagram", sender_id)
+        if active_handoff:
+            # A customer message remains durable context, but cannot wake the
+            # autonomous responder or create a second ticket while staff own
+            # the conversation. Only the authenticated resume endpoint below
+            # removes this gate.
+            entry = entry_point or EntryPoint()
+            customer_message = str(message_text or "").strip() or "[shared media]"
+            db.log_conversation(
+                sender_id, "instagram", customer_message, "", False,
+                "waiting_for_human", message_source=entry.source, ad_id=ad_id,
+            )
+            log.info(
+                "Stored Instagram customer message while handoff %s is waiting for human.",
+                active_handoff["handoff_ref"],
+            )
+            return
         shared_source_type = shared_source_type or (
             "reel" if shared_reel else "post" if shared_post_id else None
         )
@@ -3348,6 +3365,23 @@ def get_human_notifications_list(limit: int = 50, status: Optional[str] = None, 
     require_admin(x_admin_key, x_admin_pin)
     events = db.get_human_notification_events(limit=limit, status=status)
     return {"count": len(events), "notifications": events}
+
+@app.post("/admin/handoffs/{handoff_ref}/resume")
+def resume_handoff(
+    handoff_ref: str,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """Explicitly release one handoff back to autonomous Instagram handling."""
+    require_admin(x_admin_key, x_admin_pin)
+    handoff = db.resume_handoff(handoff_ref)
+    if not handoff:
+        raise HTTPException(status_code=404, detail="Handoff not found")
+    return {
+        "status": "resumed" if handoff["status"] == "RESUMED" else handoff["status"].lower(),
+        "handoff_ref": handoff_ref,
+        "handoff_status": handoff["status"],
+    }
 
 @app.get("/admin/analytics")
 def get_analytics(x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):

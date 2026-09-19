@@ -309,8 +309,8 @@ def staff_summary(handoff: Dict[str, Any]) -> str:
 
 
 def mark_referred(handoff_ref: str) -> None:
-    """Called once the WhatsApp continuation link has actually been sent."""
-    db.update_handoff_status(handoff_ref, "REFERRED_TO_WHATSAPP")
+    """Put the customer into the explicit waiting-for-human state."""
+    db.update_handoff_status(handoff_ref, "WAITING_FOR_HUMAN")
 
 
 def retire_order_state(user_id: str, channel: str) -> None:

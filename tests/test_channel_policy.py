@@ -270,8 +270,8 @@ def test_verified_order_receipt_adds_concise_order_handoff_and_reuses_cam():
     ) as escalate, patch.object(config, "WHATSAPP_BUSINESS_NUMBER", "919800000000"):
         app._process_instagram_event(user_id, "I want Jolbhora 250g", "ad-1")
         receipt, order_link = [call.args[1] for call in send_reply.call_args_list[-2:]]
+        sent_before_waiting = send_reply.call_count
         app._process_instagram_event(user_id, "I need an agent", "ad-1")
-        agent_notice, agent_reply = [call.args[1] for call in send_reply.call_args_list[-2:]]
 
     assert "ORDER DRAFT RECEIPT" in receipt
     assert "Continue on WhatsApp" in receipt
@@ -294,11 +294,10 @@ def test_verified_order_receipt_adds_concise_order_handoff_and_reuses_cam():
     assert user_id not in decoded
     assert "address" not in decoded.lower()
     assert escalate.call_count == 1
-
-    first_ref = re.search(r"CAM-\d{5,6}", decoded).group(0)
-    second_ref = re.search(r"CAM-\d{5,6}", urllib.parse.unquote(agent_reply)).group(0)
-    assert first_ref == second_ref
-    assert agent_notice == "Our team can assist you personally on WhatsApp. Please continue your enquiry using the link below."
+    assert send_reply.call_count == sent_before_waiting
+    waiting_rows = db.get_conversations(user_id=user_id, channel="instagram")
+    assert waiting_rows[0]["template_id"] == "waiting_for_human"
+    assert waiting_rows[0]["bot_response"] == ""
 
 
 def test_instagram_bulk_event_request_escalates():
