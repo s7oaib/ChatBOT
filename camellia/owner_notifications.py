@@ -10,7 +10,8 @@ import json
 import smtplib
 import ssl
 from email.message import EmailMessage
-from typing import Any, Dict, Iterable
+from typing import Any, Dict
+import httpx
 
 from camellia.config import config
 from camellia.monitoring import get_logger
@@ -33,7 +34,7 @@ def email_readiness() -> Dict[str, Any]:
             "ready": False,
             "reason": "ADMIN_EMAIL_PROVIDER/ADMIN_EMAIL_SMTP_HOST is not configured",
         }
-    if provider not in {"smtp", ""}:
+    if provider not in {"smtp", "resend", ""}:
         return {
             "configured": bool(recipient),
             "provider": provider,
@@ -42,6 +43,20 @@ def email_readiness() -> Dict[str, Any]:
             "reason": "email provider adapter is not supported by this build",
         }
     missing = []
+    if provider == "resend":
+        if not config.ADMIN_EMAIL_API_KEY:
+            missing.append("ADMIN_EMAIL_API_KEY")
+        if not config.ADMIN_EMAIL_FROM:
+            missing.append("ADMIN_EMAIL_FROM")
+        if not recipient:
+            missing.append("ADMIN_RECOVERY_EMAIL or HUMAN_ESCALATION_EMAIL")
+        return {
+            "configured": not missing,
+            "provider": "resend",
+            "recipient_configured": bool(recipient),
+            "ready": not missing,
+            "reason": ", ".join(missing) if missing else None,
+        }
     if not config.ADMIN_EMAIL_SMTP_HOST:
         missing.append("ADMIN_EMAIL_SMTP_HOST")
     if not config.ADMIN_EMAIL_FROM:
@@ -114,6 +129,31 @@ def send_email(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not readiness["ready"]:
         return {"status": "skipped", "retryable": False, "error": readiness["reason"]}
     try:
+        if readiness["provider"] == "resend":
+            response = httpx.post(
+                "https://api.resend.com/emails",
+                headers={"Authorization": f"Bearer {config.ADMIN_EMAIL_API_KEY}"},
+                json={
+                    "from": config.ADMIN_EMAIL_FROM,
+                    "to": [_recipient()],
+                    "subject": f"New Camellia handoff {payload['handoff_ref']}",
+                    "text": (
+                        "A new Camellia human handoff is waiting.\n\n"
+                        f"CAM reference: {payload['handoff_ref']}\n"
+                        f"Reason: {payload['reason']}\n"
+                        f"Source: {payload['source']}\n"
+                        f"Time: {payload['timestamp']}\n"
+                        f"Status: {payload['status']}\n\n"
+                        f"Open Admin: {payload['admin_url']}\n"
+                    ),
+                },
+                timeout=15,
+            )
+            if response.status_code in (408, 429) or response.status_code >= 500:
+                return {"status": "failed", "retryable": True, "error": f"HTTP {response.status_code}"}
+            if response.status_code >= 400:
+                return {"status": "failed", "retryable": False, "error": f"HTTP {response.status_code}"}
+            return {"status": "sent"}
         if config.ADMIN_EMAIL_SMTP_USE_TLS:
             with smtplib.SMTP(config.ADMIN_EMAIL_SMTP_HOST, config.ADMIN_EMAIL_SMTP_PORT, timeout=15) as client:
                 client.ehlo()
@@ -127,7 +167,7 @@ def send_email(payload: Dict[str, Any]) -> Dict[str, Any]:
                 if config.ADMIN_EMAIL_SMTP_USERNAME:
                     client.login(config.ADMIN_EMAIL_SMTP_USERNAME, config.ADMIN_EMAIL_SMTP_PASSWORD)
                 client.send_message(_email_message(payload))
-    except (smtplib.SMTPConnectError, smtplib.SMTPServerDisconnected, TimeoutError, OSError) as exc:
+    except (smtplib.SMTPConnectError, smtplib.SMTPServerDisconnected, TimeoutError, OSError, httpx.TimeoutException, httpx.NetworkError) as exc:
         return {"status": "failed", "retryable": True, "error": type(exc).__name__}
     except smtplib.SMTPException as exc:
         code = getattr(exc, "smtp_code", None)

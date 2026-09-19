@@ -124,7 +124,9 @@ to operators.
 
 Email uses the existing approved destination names when present:
 `ADMIN_RECOVERY_EMAIL` (preferred) or `HUMAN_ESCALATION_EMAIL`, with
-`ADMIN_EMAIL_FROM`, `ADMIN_EMAIL_PROVIDER=smtp`, and the `ADMIN_EMAIL_SMTP_*`
+`ADMIN_EMAIL_FROM`, and the selected provider. The existing approved Resend
+path uses `ADMIN_EMAIL_PROVIDER=resend` and `ADMIN_EMAIL_API_KEY`; SMTP remains
+available with `ADMIN_EMAIL_PROVIDER=smtp` and the `ADMIN_EMAIL_SMTP_*`
 settings. If these values are absent, health reports email not configured and
 the event is safely `SKIPPED` for that channel.
 

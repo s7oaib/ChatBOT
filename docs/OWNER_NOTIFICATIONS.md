@@ -19,11 +19,11 @@ row is created and remains `WAITING_FOR_HUMAN` regardless of provider state.
 
 ## Configuration
 
-Email is intentionally off until the client's approved infrastructure is
-provisioned:
+Email reuses the client's approved provider when these variables are
+provisioned; otherwise it remains safely skipped:
 
 ```text
-ADMIN_EMAIL_PROVIDER=smtp
+ADMIN_EMAIL_PROVIDER=resend
 ADMIN_EMAIL_FROM=approved-sender@example.com
 ADMIN_RECOVERY_EMAIL=approved-owner@example.com
 ADMIN_EMAIL_SMTP_HOST=smtp.example.com
@@ -33,9 +33,17 @@ ADMIN_EMAIL_SMTP_PASSWORD=...
 ADMIN_EMAIL_SMTP_USE_TLS=true
 ```
 
+For the existing Resend setup, `ADMIN_EMAIL_API_KEY` is used with the Resend
+API and the SMTP settings are ignored. For SMTP, set
+`ADMIN_EMAIL_PROVIDER=smtp` and provision the SMTP host/credentials.
+
+```text
+ADMIN_EMAIL_API_KEY=approved-provider-secret
+```
+
 `HUMAN_ESCALATION_EMAIL` is retained as a compatibility fallback for the
-recipient. `ADMIN_EMAIL_API_KEY` is read only for forward-compatible provider
-selection; this build does not guess or call an unknown API provider.
+recipient. This build supports only the explicitly selected `resend` and
+`smtp` adapters; it does not guess or call an unknown API provider.
 
 Web Push requires all of the following in the deployment secret store:
 

@@ -88,6 +88,33 @@ def test_email_retry_is_persisted_without_breaking_handoff(owner_db, monkeypatch
     assert deliveries["WEB_PUSH"]["status"] == "SKIPPED"
 
 
+def test_existing_resend_provider_is_used_without_exposing_payload_secrets(monkeypatch):
+    monkeypatch.setattr(config, "ADMIN_EMAIL_PROVIDER", "resend")
+    monkeypatch.setattr(config, "ADMIN_EMAIL_API_KEY", "test-provider-key")
+    monkeypatch.setattr(config, "ADMIN_EMAIL_FROM", "owner@example")
+    monkeypatch.setattr(config, "ADMIN_RECOVERY_EMAIL", "recipient@example")
+
+    class Response:
+        status_code = 200
+
+    captured = {}
+
+    def fake_post(url, **kwargs):
+        captured.update({"url": url, **kwargs})
+        return Response()
+
+    with patch.object(owner_notifications.httpx, "post", side_effect=fake_post):
+        result = owner_notifications.send_email({
+            "handoff_ref": "CAM-54321", "reason": "Explicit human request",
+            "source": "Instagram", "timestamp": "2026-09-20 12:00:00",
+            "status": "WAITING_FOR_HUMAN", "admin_url": "/admin",
+        })
+    assert result["status"] == "sent"
+    assert captured["url"] == "https://api.resend.com/emails"
+    assert "test-provider-key" not in repr(captured["json"])
+    assert "raw" not in repr(captured["json"]).lower()
+
+
 def test_admin_seen_state_is_separate_from_waiting_status(owner_db):
     handoff = _new_handoff(owner_db, "seen-user")
     with owner_db.get_connection() as conn:
