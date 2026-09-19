@@ -1,6 +1,7 @@
 # Deployment
 
-The live service runs on **Railway**, at `https://chatbot-production-8164.up.railway.app`.
+The live service runs on **Railway**. The current service URL is an operator-managed
+deployment value; verify it in Railway before running a production health check.
 
 Build and start config lives in [`railway.json`](railway.json) (`main.py` via
 Nixpacks). Railway has no committed environment file — **every variable below is
@@ -101,11 +102,11 @@ Confirm it worked in `/health`:
 
 ## Menu updates — the Google Sheet is the source of truth
 
-The container filesystem does not persist. A menu edited through `/admin` is
-written to `/app/data/menu.json` **inside the container** and is gone on the
-next deploy, when the copy baked into the image comes back. No volume is
-mounted there, and mounting one would hide the seed `menu.json` and
-`qa_templates.json` the bot needs to start.
+With the production storage contract, a menu edited through `/admin` is written
+to the configured durable `MENU_JSON_PATH` (normally `/app/var/menu.json`). If
+the volume is missing or the path is left inside the image, the edit is lost on
+the next deploy. Do not mount a volume at `/app/data`: that would hide the seed
+`menu.json` and `qa_templates.json` the bot needs to start.
 
 So the durable path is a published Google Sheet, which the bot re-pulls on
 every boot. Whatever the client last saved in the sheet is what customers are
