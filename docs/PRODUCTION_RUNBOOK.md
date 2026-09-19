@@ -48,17 +48,18 @@ Auto Resolve, preserve the evidence, and roll back the deployment.
 
 ## WhatsApp safety
 
-WhatsApp is HUMAN ONLY. Confirm `WHATSAPP_CHATBOT_ENABLED=false` and
-`WHATSAPP_CHATBOT_ENABLE_CONFIRM=false`. An inbound WhatsApp message may be
-recorded and linked to its CAM reference, but must receive no AI, Assisted, or
-Auto Resolve reply. Staff reply manually from the business account.
+WhatsApp automation has been removed. Confirm `/health` reports
+`whatsapp.automation=removed` and `manual_handoff=available`. There is no
+WhatsApp webhook or Cloud API sender; the only WhatsApp runtime surface is the
+business number used to build the customer-facing `wa.me` link. Staff reply
+manually from the business account.
 
 ## Rollback deployment
 
 1. Disable Auto Resolve and Assisted Resolution in the host environment.
 2. Record the deployment ID and the failing health/evaluation evidence.
 3. Redeploy the last known-good commit or use the host's rollback action.
-4. Re-run `/health`, webhook verification, and the WhatsApp human-only check.
+4. Re-run `/health`, Instagram webhook verification, and the manual handoff check.
 5. Keep the database backup and decision audit rows for review.
 
 ## Future Auto Resolve pilot (not executed now)

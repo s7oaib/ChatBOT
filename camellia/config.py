@@ -255,28 +255,13 @@ class Config:
     BUSINESS_LEGAL_NAME: str = os.getenv("BUSINESS_LEGAL_NAME", "Camellia Artisanal")
     PRIVACY_CONTACT_EMAIL: str = os.getenv("PRIVACY_CONTACT_EMAIL", "")
     
-    # WhatsApp Cloud API Config
-    # Mock mode is deliberately enabled by default so local/test runs never call Meta.
-    WHATSAPP_MOCK_MODE: bool = os.getenv("WHATSAPP_MOCK_MODE", "true").lower() in ("true", "1", "t", "yes")
-    WHATSAPP_ACCESS_TOKEN: str = os.getenv("WHATSAPP_ACCESS_TOKEN", "")
-    WHATSAPP_PHONE_NUMBER_ID: str = os.getenv("WHATSAPP_PHONE_NUMBER_ID", "")
-    WHATSAPP_API_VERSION: str = os.getenv("WHATSAPP_API_VERSION", "v19.0")
-    # Staff escalation notifications must not use the WhatsApp Cloud API in
-    # the normal handoff path. Enable only as a separately approved feature;
-    # unset/false is the secure production default.
-    HUMAN_ESCALATION_WHATSAPP_API_ENABLED: bool = os.getenv(
-        "HUMAN_ESCALATION_WHATSAPP_API_ENABLED", "false"
-    ).lower() in ("true", "1", "t", "yes")
-
-    # Instagram Config — uses its own Page token (may differ from WhatsApp token)
+    # Instagram Config. Instagram owns the only automated customer channel and
+    # therefore has its own token; it must never inherit a WhatsApp credential.
     # When set, webhook entries must belong to this exact Instagram account.
     # Leaving it blank preserves compatibility with existing integrations.
     INSTAGRAM_ACCOUNT_ID: str = os.getenv("INSTAGRAM_ACCOUNT_ID", "").strip()
     INSTAGRAM_PAGE_ID: str = os.getenv("INSTAGRAM_PAGE_ID", "")
-    INSTAGRAM_ACCESS_TOKEN: str = os.getenv("INSTAGRAM_ACCESS_TOKEN", "") or os.getenv("WHATSAPP_ACCESS_TOKEN", "")
-    # Instagram Graph API version is independent of WhatsApp's — the two
-    # products deprecate versions on separate schedules, so Story sync must
-    # never inherit WHATSAPP_API_VERSION.
+    INSTAGRAM_ACCESS_TOKEN: str = os.getenv("INSTAGRAM_ACCESS_TOKEN", "")
     INSTAGRAM_API_VERSION: str = _resolve_graph_api_version(
         "INSTAGRAM_API_VERSION", _DEFAULT_INSTAGRAM_API_VERSION
     )
@@ -287,22 +272,7 @@ class Config:
     INSTAGRAM_STORY_SYNC_INTERVAL_SECONDS: int = max(300, int(os.getenv("INSTAGRAM_STORY_SYNC_INTERVAL_SECONDS", "900")))
 
     # --- Channel policy: Instagram is the only AI chatbot channel -----------
-    # The client does not want customers talking to an AI on WhatsApp at all.
-    # WHATSAPP_CHATBOT_ENABLED defaults false and is the one flag that would
-    # restore the old auto-reply behaviour; camellia/whatsapp_adapter.py only
-    # consults it as an explicit, logged escape hatch for a future policy
-    # change — the code path that calls the understanding/RAG/template stack
-    # for WhatsApp does not run by default, and nothing else in this file
-    # turns it on implicitly.
     INSTAGRAM_CHATBOT_ENABLED: bool = os.getenv("INSTAGRAM_CHATBOT_ENABLED", "true").lower() in ("true", "1", "t", "yes")
-    WHATSAPP_CHATBOT_ENABLED: bool = os.getenv("WHATSAPP_CHATBOT_ENABLED", "false").lower() in ("true", "1", "t", "yes")
-    # A single flipped boolean (a copy-pasted .env, a typo'd override) must not
-    # be enough to put the AI back on WhatsApp. Restoring the old behaviour
-    # requires this second, differently-named flag as well — whatsapp_adapter
-    # treats WHATSAPP_CHATBOT_ENABLED alone as a misconfiguration and fails
-    # safe to human-only, logging an error instead of guessing intent.
-    WHATSAPP_CHATBOT_ENABLE_CONFIRM: bool = os.getenv("WHATSAPP_CHATBOT_ENABLE_CONFIRM", "false").lower() in ("true", "1", "t", "yes")
-    WHATSAPP_HUMAN_HANDOFF_ENABLED: bool = os.getenv("WHATSAPP_HUMAN_HANDOFF_ENABLED", "true").lower() in ("true", "1", "t", "yes")
     # The client's own WhatsApp Business number that customers are sent to,
     # digits only with country code (e.g. "9198XXXXXXXX") — NOT the Meta Cloud
     # API sender number above, which never faces the customer directly here.
@@ -326,12 +296,6 @@ class Config:
         "Our team can assist you personally on WhatsApp. "
         "Please continue your enquiry using the link below.",
     )
-
-    # Human Escalation Contact
-    # Where the bot sends its internal escalation alerts. It is never printed
-    # in the customer reply; customers use the configured wa.me continuation.
-    HUMAN_ESCALATION_PHONE: str = os.getenv("HUMAN_ESCALATION_PHONE", "+919902181650")
-    HUMAN_ESCALATION_EMAIL: str = os.getenv("HUMAN_ESCALATION_EMAIL", "")
 
     # Slow-reply notice.
     # When the bot itself becomes slow to answer, the customer is sitting there

@@ -6,7 +6,7 @@ import pytest
 
 from camellia import app as app_module
 from camellia import handoff as handoff_module
-from camellia.handoff import get_or_create_handoff, mark_referred, mark_whatsapp_connected
+from camellia.handoff import get_or_create_handoff, mark_referred
 from camellia.session_memory import session_memory
 
 
@@ -47,21 +47,6 @@ def test_waiting_customer_message_is_stored_without_ai_reply_or_new_escalation(w
     assert rows[0]["bot_response"] == ""
     assert rows[0]["template_id"] == "waiting_for_human"
     assert len(waiting_db.get_handoffs(limit=20)) == 1
-
-
-def test_whatsapp_connected_handoff_remains_suppressed(waiting_db):
-    user_id = "waiting-whatsapp-connected"
-    handoff = _waiting_handoff(waiting_db, user_id)
-    mark_whatsapp_connected(handoff["handoff_ref"])
-
-    with patch.object(app_module.responder, "match_and_respond") as respond, patch.object(
-        app_module, "send_instagram_reply"
-    ) as send:
-        app_module._process_instagram_event(user_id, "I sent the reference", "ad-1")
-
-    respond.assert_not_called()
-    send.assert_not_called()
-    assert waiting_db.get_handoff_by_ref(handoff["handoff_ref"])["status"] == "WHATSAPP_CONNECTED"
 
 
 def test_only_explicit_operator_resume_restores_ai_and_is_idempotent(waiting_db, monkeypatch):

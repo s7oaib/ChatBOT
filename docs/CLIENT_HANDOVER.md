@@ -7,8 +7,9 @@ secret manager or the approved local development environment.
 ## 1. Architecture
 
 Camellia is a FastAPI webhook service with durable SQLite state on the Railway
-volume. Instagram is the AI chatbot channel. WhatsApp is human-only except for
-the already approved, narrowly scoped continuation of an Instagram handoff.
+volume. Instagram is the only AI chatbot channel. WhatsApp is outside this
+service: customers receive a manual `wa.me` continuation link and the human
+team handles the conversation there.
 
 Customer response order is:
 
@@ -36,8 +37,8 @@ The frozen release is not edited directly. Future work uses an isolated
 ## 3. Channel and safety policy
 
 - Instagram AI: enabled.
-- WhatsApp general AI: disabled; human-only.
-- WhatsApp order continuation: only the approved narrow continuation path.
+- WhatsApp automation: removed; no inbound webhook, AI path, or server sender.
+- WhatsApp continuation: manual `wa.me` link only; preserve the CAM reference.
 - Story Auto Sync: off; manual Admin sync remains available.
 - LLM Auto Resolve: off; simulation/evaluation is not customer sending.
 - Web Tester: off in production.
@@ -108,8 +109,9 @@ authority.
 
 Unsupported, sensitive, order/event, or explicit human requests create or
 reuse an opaque durable CAM handoff reference. Repeated customer messages do
-not create duplicate active handoffs. Staff notifications use the bounded
-outbox retry path.
+not create duplicate active handoffs. Staff-facing handoff data uses the
+bounded durable outbox path; external WhatsApp alerts are not sent by this
+service.
 
 While a handoff is `WAITING_FOR_HUMAN`, autonomous AI replies are suppressed.
 The operator must explicitly resume the handoff before chatbot behavior can
@@ -130,7 +132,8 @@ change. Verify:
 - `ai` reports the intended provider/model and safe cooldown state;
 - reply latency is within the configured threshold;
 - `auto_resolve.actual_enabled=false`; and
-- WhatsApp remains human-only.
+- `/health` reports `whatsapp.automation=removed` and
+  `manual_handoff=available`.
 
 Use authenticated Admin audit/evaluation endpoints for detailed outbound,
 Topic/source, Story, handoff, notification, and AI-resolution state.
@@ -166,7 +169,7 @@ authentication must remain enabled.
 | Duplicate handoff | Handoff reference and outbox audit | Do not mint another reference; inspect durable deduplication state |
 | Bot replies while waiting for human | Handoff state and resume audit | Stop autonomous paths, preserve evidence, investigate before deploy |
 | Database warning | `storage` block and `/app/var` mount | Do not wipe data; follow backup/recovery procedure |
-| WhatsApp AI reply observed | Channel-policy health/evaluation and environment flags | Treat as an incident; disable the path and seek approval before change |
+| WhatsApp bot reply observed | `/health`, route inventory, and deployment logs | Treat as an incident; preserve evidence and investigate before change |
 
 ## 11. Maintenance and change approval
 
@@ -181,5 +184,5 @@ The workflow is:
 
 Green tests do not authorize production deployment. Never deploy, restore,
 rotate credentials, change Meta configuration, enable Story Auto Sync, enable
-Auto Resolve, enable WhatsApp general AI, or alter locked business facts
-without explicit approval.
+Auto Resolve, or alter locked business facts without explicit approval. The
+removed WhatsApp automation must not be reintroduced as a flag-only change.

@@ -1647,8 +1647,8 @@ class DeterministicResponder:
         # up on — was_matched is False here in exactly the cases that reach
         # the candidate/escalation/knowledge-gap machinery further down this
         # same fallback tail. Instagram-only and behind its own flag, on top
-        # of WhatsApp's existing human-only gate in whatsapp_adapter.py, so a
-        # future flip of WHATSAPP_CHATBOT_ENABLED could never also turn this on.
+        # Instagram-only, so a future channel integration cannot accidentally
+        # turn this assisted path into a WhatsApp automation surface.
         if (
             config.LLM_TRIAGE_ENABLED
             and channel == "instagram"

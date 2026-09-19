@@ -21,11 +21,10 @@ only signal is the `warnings` array and the fields below it.
 
 | Variable | Set to | What happens if it is wrong |
 |---|---|---|
-| `WHATSAPP_MOCK_MODE` | `false` | In mock mode the bot never builds an outbound request. It accepts webhooks, matches, logs a reply, and sends nothing — customers get silence while the process looks perfectly healthy. |
 | `PUBLIC_BASE_URL` | the service's own `https://` URL | Menu cards are stored as relative paths and Meta fetches them by URL. Unset, every card is dropped and customers get text-only replies with no menu photos. |
+| `WHATSAPP_BUSINESS_NUMBER` | digits with country code | Used only to build the manual `wa.me` link. It is not a Cloud API credential and is never used to receive or send messages server-side. |
 | `BYPASS_AD_GATE` | `true` | `false` restores PRD #4: only ad-originated Instagram DMs (`referral.source == "ADS"`) get a reply and organic ones are left for a human. With it `true` the bot answers everyone, including complaints — the escalation triggers in `data/qa_templates.json` are then the only thing routing those to a human. |
-| `ENABLE_WEB_TESTER` | leave unset | Defaults off. Setting it `true` exposes `/chat` to anyone with the URL, and that tester writes real conversation rows and fires real escalation alerts at the manager's phone. |
-| `HUMAN_ESCALATION_WHATSAPP_API_ENABLED` | leave unset or `false` | The durable CAM handoff still records the escalation, but the external WhatsApp staff notification is recorded as `SKIPPED` and no Meta WhatsApp API request is made. Set `true` only for a separately approved notification feature with credentials. |
+| `ENABLE_WEB_TESTER` | leave unset | Defaults off. Setting it `true` exposes `/chat` to anyone with the URL, and that tester writes real conversation and handoff rows. |
 
 ## Persistent storage (required)
 
@@ -163,8 +162,8 @@ still goes out as text, built from `menu.json`'s structured items.
 
 ## Secrets — set in the dashboard, never committed
 
-`META_APP_SECRET`, `META_VERIFY_TOKEN`, `WHATSAPP_ACCESS_TOKEN`,
-`WHATSAPP_PHONE_NUMBER_ID`, `INSTAGRAM_ACCESS_TOKEN`, `INSTAGRAM_PAGE_ID`,
+`META_APP_SECRET`, `META_VERIFY_TOKEN`, `INSTAGRAM_ACCESS_TOKEN`,
+`INSTAGRAM_PAGE_ID`, `WHATSAPP_BUSINESS_NUMBER`,
 `ADMIN_API_KEY`, `ADMIN_PIN`, `GROQ_API_KEY`.
 
 Once `META_APP_SECRET` is set and `/health` reports `webhook_signature:

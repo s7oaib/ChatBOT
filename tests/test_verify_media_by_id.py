@@ -29,7 +29,6 @@ class _FakeResponse:
 def test_a_real_media_id_resolves_its_permalink_and_shortcode(monkeypatch):
     monkeypatch.setattr(instagram_routing.config, "INSTAGRAM_ACCESS_TOKEN", "IGAAtoken")
     monkeypatch.setattr(instagram_routing.config, "INSTAGRAM_API_VERSION", "v25.0")
-    monkeypatch.setattr(instagram_routing.config, "WHATSAPP_API_VERSION", "v99.0")
     captured = {}
 
     class _Client:

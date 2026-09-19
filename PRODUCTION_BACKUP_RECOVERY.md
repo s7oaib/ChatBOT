@@ -84,7 +84,7 @@ Minimum checks:
 - Foreign-account webhooks are ignored safely.
 - Webhook signatures remain enforced.
 - Instagram AI remains enabled.
-- WhatsApp general AI remains disabled/human-only.
+- WhatsApp automation is removed; only the manual handoff link remains.
 - Story Auto Sync remains OFF unless separately approved.
 - LLM Auto Resolve remains OFF.
 - Opening-hours deterministic answer remains exactly:

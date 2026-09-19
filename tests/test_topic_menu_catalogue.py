@@ -787,24 +787,6 @@ def test_post_pairing_still_unaffected_by_topic_changes(catalogue_db):
     assert method == "shared_post_media_id"
 
 
-def test_whatsapp_remains_human_only_after_topic_changes(catalogue_db, monkeypatch):
-    """Behavioral, not textual: with default config, an inbound WhatsApp
-    message must never reach the responder, regardless of anything Topic
-    or Menu catalogue related."""
-    import camellia.whatsapp_adapter as whatsapp_module
-
-    monkeypatch.setattr(whatsapp_module.config, "WHATSAPP_CHATBOT_ENABLED", False)
-    called = []
-    monkeypatch.setattr(
-        whatsapp_module.responder, "match_and_respond",
-        lambda *a, **k: called.append(True) or ("x", True, "t", None),
-    )
-    result = whatsapp_module.whatsapp_adapter.process_incoming_message("919000000000", "Hello")
-    assert called == []
-    assert result["bot_replied"] is False
-    assert result["template_id"] == "whatsapp_human_only"
-
-
 # --- Admin auth on new endpoints ------------------------------------------
 
 def test_new_endpoints_require_admin_auth():

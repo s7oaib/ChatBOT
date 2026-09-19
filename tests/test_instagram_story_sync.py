@@ -67,10 +67,6 @@ def _install_meta(monkeypatch, responses, token="PAGE_TOKEN"):
     calls = []
     monkeypatch.setattr(config, "INSTAGRAM_ACCESS_TOKEN", token)
     monkeypatch.setattr(config, "INSTAGRAM_PAGE_ID", "page-1")
-    # Deliberately mismatched from INSTAGRAM_API_VERSION so any accidental
-    # reintroduction of config.WHATSAPP_API_VERSION into Story sync surfaces
-    # as a wrong Graph version in the requested URLs.
-    monkeypatch.setattr(config, "WHATSAPP_API_VERSION", "v19.0")
     monkeypatch.setattr(config, "INSTAGRAM_API_VERSION", "v25.0")
     monkeypatch.setattr(
         sync_module.httpx,
@@ -240,9 +236,8 @@ def test_story_sync_does_not_use_whatsapp_api_version(sync_db, monkeypatch):
     assert not any("v19.0" in url for url, _params in calls)
 
 
-def test_changing_whatsapp_api_version_does_not_change_story_sync_url(sync_db, monkeypatch):
+def test_story_sync_url_uses_only_instagram_api_version(sync_db, monkeypatch):
     calls = _install_meta(monkeypatch, [_page(), _stories([_story()])])
-    monkeypatch.setattr(config, "WHATSAPP_API_VERSION", "v99.0")
 
     sync_module.sync_instagram_stories(sync_db)
 

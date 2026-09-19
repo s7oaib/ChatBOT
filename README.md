@@ -1,4 +1,4 @@
-# Camellia Artisanal — Meta Instagram & WhatsApp Auto-Response Bot
+# Camellia Artisanal — Instagram AI with manual WhatsApp handoff
 
 ![Python Version](https://img.shields.io/badge/Python-3.11%2B-blue.svg)
 ![Framework](https://img.shields.io/badge/FastAPI-0.110.0-green.svg)
@@ -25,7 +25,7 @@ Built to convert Meta Ad leads, filter out organic DM noise, send high-resolutio
 > on this behavior. See the [deployment guide](docs/deployment.md).
 
 ### 2. 🖼️ Visual Menu Photo Card Engine
-- Delivers high-resolution menu photo cards directly in Instagram DMs and WhatsApp chats instead of long text lists.
+- Delivers high-resolution menu photo cards directly in Instagram DMs instead of long text lists.
 - **Dynamic Weekly Menu Switch**:
   - **Mon – Thu**: Sends `Till Thursday.jpeg` (Mid-week menu card).
   - **Fri – Sun**: Sends `From Friday.jpeg` (Weekend menu card).
@@ -40,18 +40,18 @@ Built to convert Meta Ad leads, filter out organic DM noise, send high-resolutio
 ### 4. 🚨 Human Escalation Pipeline (PRD Requirement #4b)
 - **Out-of-Syllabus Protection**: Unmatched customer queries are never answered with guesses.
 - **Sensitive Trigger Guard**: Queries containing sensitive keywords (`refund`, `complaint`, `cancel order`, `custom order`, `bulk order`, `payment link`) immediately trigger human escalation.
-- **Owner Notification**: Stores durable conversation/handoff state in `camellia.db` subject to retention, while normal logs use hashed identifiers and safe error metadata only.
+- **Manual Handoff**: Stores durable conversation/handoff state in `camellia.db` subject to retention, while normal logs use hashed identifiers and safe error metadata only. Customers receive a `wa.me` link; WhatsApp is handled by a human.
 
 ### 5. 🔐 Kitchen & Menu Admin Portal (`/admin` / `/admin/dashboard`)
 - **Secure Admin Authentication**: Browser access uses `ADMIN_USERNAME` + an Argon2id `ADMIN_PASSWORD_HASH`, production TOTP MFA, durable rate limiting, CSRF-protected server sessions, and logout revocation. `ADMIN_API_KEY` remains a separate machine credential; legacy `ADMIN_PIN` is not accepted.
-- **📋 Paste Menu Card Parser**: Extracts dish names, descriptions, weights, and prices from raw WhatsApp text, flyer notes, or dish lists, automatically categorizing items as Veg or Non-Veg.
+- **📋 Paste Menu Card Parser**: Extracts dish names, descriptions, weights, and prices from flyer notes or dish lists, automatically categorizing items as Veg or Non-Veg.
 - **📸 Flyer Photo & Graphic OCR**: Scans printed menu photos or Instagram flyers with a Groq vision model, using the same key the bot already needs for replies.
 - **📊 Google Sheets Live Sync**: One-click sync from Google Sheets CSV without server restarts or touching code.
 - **🍱 Active Menu Viewer**: Inspect live menu items visually with an instant **Reset to Authentic Bengali Culinary Baseline**.
 - **📈 Analytics & Escalations**: Tracks real-time match rates, query totals, and unresolved human escalations.
 
 ### 6. 💬 Browser-Based Live Chat Tester (`/chat`)
-- Built-in WhatsApp/Instagram-style web chat interface for local testing in your browser (`http://localhost:8000/chat`); it is disabled in production.
+- Built-in Instagram-style web chat interface for local testing in your browser (`http://localhost:8000/chat`); it is disabled in production. WhatsApp is not a tester channel.
 - Interactive memory badges, channel switcher, and direct link to the Kitchen Admin Portal.
 
 ---
@@ -61,9 +61,9 @@ Built to convert Meta Ad leads, filter out organic DM noise, send high-resolutio
 - **Backend Framework**: Python 3.11+, FastAPI, Uvicorn
 - **Deterministic Matcher & Parser**: Python Regex & Rule-Based Matchers ($0 Operating Cost)
 - **AI assistance**: Groq-compatible provider using `openai/gpt-oss-120b` for structured understanding and `openai/gpt-oss-20b` for responder/refinement by default; provider assistance never replaces canonical facts.
-- **HTTP Client**: `httpx` (Async Meta Graph API & WhatsApp Cloud API calls)
+- **HTTP Client**: `httpx` (Meta Instagram Graph API calls)
 - **Database**: SQLite3 (`camellia.db`)
-- **API Standards**: Instagram Graph API v25.0 by default; WhatsApp Graph API v19.0 by default. Verify configured versions before deployment.
+- **API Standards**: Instagram Graph API v25.0 by default. Verify the configured version before deployment.
 
 ---
 
@@ -75,7 +75,6 @@ Camellia.artisal/
 ├── camellia/                    # Application package
 │   ├── app.py                   # FastAPI app, webhooks & /admin portal
 │   ├── responder.py             # Deterministic Q&A matcher & photo card engine
-│   ├── whatsapp_adapter.py      # Meta WhatsApp Cloud API adapter
 │   ├── ad_gate.py               # Instagram Ad-Gate filter
 │   ├── menu_parser.py           # Text & image menu extraction engine
 │   ├── order_calculator.py      # Order draft parsing & receipt totals
@@ -141,9 +140,9 @@ the hosting provider's secret manager:
 Fill in your Meta App Credentials:
 ```env
 META_VERIFY_TOKEN=your_meta_verify_token
-WHATSAPP_ACCESS_TOKEN=your_meta_access_token
 INSTAGRAM_PAGE_ID=your_instagram_page_id
-HUMAN_ESCALATION_PHONE=+918796551990
+INSTAGRAM_ACCESS_TOKEN=your_instagram_access_token
+WHATSAPP_BUSINESS_NUMBER=919800000000
 ```
 
 ### 3. Run Server
@@ -196,7 +195,7 @@ Then open the Web Chat Interface in your browser:
    - **📢 Instagram Ad DM (`instagram_ad`)**: Simulates user entering via a paid Instagram Ad referral (`referral.source == 'ADS'`). Generates auto-replies + high-resolution Menu Photo Cards.
    - **🛑 Instagram Organic DM (`instagram_organic`)**: Simulates non-ad organic DMs. Tests the **Ad-Gate Filter**, displaying:
      `🛑 [AD-GATE BLOCKED]: This is an organic (non-ad) DM. The bot does not auto-reply to organic DMs. Message sits in Inbox for human reply.`
-   - **🟢 WhatsApp Business (`whatsapp`)**: Simulates incoming WhatsApp Cloud API messages.
+   - **🟢 WhatsApp Business**: Not simulated here; customers reach a human through the generated `wa.me` handoff link.
 
 2. **Preset Quick Test Chips**:
    - **🍬 Sondesh Prices**: Triggers Sondesh pricing matrix & dispatches `Signature Sondesh.jpeg` or `AAMAR MISHTI.jpeg`.
@@ -239,7 +238,7 @@ Run all 25 automated unit tests:
 ```bash
 python -m pytest tests/
 ```
-*Tests:* Ad-Gate inspection, webhook challenges (`GET /webhook/*`), webhook signature rejection, WhatsApp human-only behavior, menu photo card logic, controlled provider fallbacks, refusals, SQLite persistence, retention purge, per-user data deletion, legal pages, tester lockdown, delivery-failure alerting, human handoff, and Topic/source mapping.
+*Tests:* Ad-Gate inspection, independent Instagram webhook challenges/signatures, manual CAM handoff and deduplication, menu photo card logic, controlled provider fallbacks, refusals, SQLite persistence, retention purge, per-user data deletion, legal pages, tester lockdown, delivery-failure logging, and Topic/source mapping.
 
 ### Method 3: Interactive CLI Terminal Simulator (`scripts/simulate_bot.py`)
 Run an interactive terminal chat session:

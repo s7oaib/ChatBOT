@@ -9,7 +9,6 @@ from camellia.config import config
 from camellia.database import db
 from camellia.responder import responder
 from camellia.session_memory import session_memory
-from camellia.whatsapp_adapter import whatsapp_adapter
 
 
 def test_delivery_area_followup_confirms_a_serviceable_area_and_keeps_area_flow_active():
@@ -259,52 +258,6 @@ def test_bare_price_question_after_meals_topic_still_asks_about_the_weekly_menu(
     reply = responder.match_and_respond("What's the price?", user_id=user_id, channel="whatsapp")
 
     assert reply[2] == "context_meal_price_followup"
-
-
-def test_whatsapp_never_escalates_or_replies_it_is_already_a_human_channel():
-    """
-    OLD REQUIREMENT: a WhatsApp message that the chatbot could not answer
-    triggered escalator.handle_escalation and a bot-composed reply — the
-    same escalation path Instagram uses.
-
-    NEW REQUIREMENT: WhatsApp has no chatbot to escalate FROM any more. A
-    human is already reading the message directly, so there is nothing to
-    hand off and nothing to auto-reply with.
-
-    WHY CHANGED: explicit client channel-policy requirement.
-    """
-    with patch(
-        "camellia.whatsapp_adapter.responder.match_and_respond",
-        return_value=("standard escalation", False, None, None),
-    ) as match_and_respond, patch(
-        "camellia.whatsapp_adapter.escalator.handle_escalation"
-    ) as escalate, patch.object(whatsapp_adapter, "send_message") as send_message:
-        result = whatsapp_adapter.process_incoming_message("919876543210", "I need help")
-
-    assert not escalate.called
-    assert not match_and_respond.called
-    assert not send_message.called
-    assert result["bot_replied"] is False
-
-
-def test_a_whatsapp_message_naming_a_handoff_reference_still_gets_no_bot_reply():
-    """A customer pasting "Ref: CAM-48371" is recorded for staff tracking —
-    the reference is marked connected — but still receives no automated
-    reply. Nothing about a handoff reference makes WhatsApp intelligent."""
-    with patch(
-        "camellia.whatsapp_adapter.mark_whatsapp_connected",
-    ) as mark_connected, patch(
-        "camellia.whatsapp_adapter.responder.match_and_respond"
-    ) as match_and_respond, patch.object(whatsapp_adapter, "send_message") as send_message:
-        result = whatsapp_adapter.process_incoming_message(
-            "919876543210", "Hi, I'm continuing my Camellia Instagram enquiry. Ref: CAM-48371",
-        )
-
-    assert result["bot_replied"] is False
-    assert result["handoff_ref"] == "CAM-48371"
-    mark_connected.assert_called_once_with("CAM-48371")
-    match_and_respond.assert_not_called()
-    send_message.assert_not_called()
 
 
 def test_asking_about_delivery_outside_ncr_lists_the_covered_cities():

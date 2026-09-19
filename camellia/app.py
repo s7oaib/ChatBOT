@@ -38,7 +38,6 @@ from camellia.ice_breakers import (
 import camellia.responder as responder_module
 from camellia.responder import compose_topic_response, responder
 from camellia.ai_responder import ai_responder
-from camellia.whatsapp_adapter import whatsapp_adapter
 from camellia.escalator import escalator
 from camellia.handoff import (
     customer_facing_link_message,
@@ -256,11 +255,6 @@ async def lifespan(app: FastAPI):
         log.warning("ADMIN_PIN is configured only as a legacy value and is never accepted for browser admin authentication.")
     if config.ADMIN_API_KEY:
         log.info("Machine admin API authentication is configured separately from browser sessions.")
-    if not config.WHATSAPP_MOCK_MODE and not (config.WHATSAPP_ACCESS_TOKEN and config.WHATSAPP_PHONE_NUMBER_ID):
-        log.critical(
-            "WhatsApp is in live mode but WHATSAPP_ACCESS_TOKEN / WHATSAPP_PHONE_NUMBER_ID "
-            "are incomplete. Replies will not be delivered."
-        )
     try:
         removed = db.purge_expired_data()
         if any(removed.values()):
@@ -352,7 +346,7 @@ async def _human_notification_loop(stop_event: asyncio.Event) -> None:
 
 limiter = Limiter(key_func=get_remote_address, default_limits=["300/minute"])
 app = FastAPI(
-    title="FastAPI Webhook Application for Camellia Artisanal — Instagram & WhatsApp Auto-Response Bot",
+    title="FastAPI Webhook Application for Camellia Artisanal — Instagram AI and human handoff",
     version="1.0.0",
     lifespan=lifespan
 )
@@ -477,9 +471,9 @@ def require_web_tester() -> None:
     """
     Guards the browser chat tester and its APIs.
 
-    These write real conversation rows and fire real escalation alerts to the
-    owner's phone, so on a public domain they are abusable by anyone who finds
-    the URL. Keep ENABLE_WEB_TESTER false in production; it exists for local
+    These write real conversation rows and create durable handoff/outbox
+    records, so on a public domain they are abusable by anyone who finds the
+    URL. Keep ENABLE_WEB_TESTER false in production; it exists for local
     development, where a browser cannot attach an admin header on navigation.
     """
     if not config.ENABLE_WEB_TESTER:
@@ -498,7 +492,7 @@ def read_root(request: Request):
         return RedirectResponse(url="/admin")
     return {
         "client": "camellia.artisanal",
-        "service": "Ad-Gated Auto-Response Bot",
+        "service": "Instagram Ad-Gated AI with manual WhatsApp handoff",
         "status": "running",
         "chat_url": "/chat",
         "admin_url": "/admin"
@@ -1679,6 +1673,28 @@ def _instagram_natural_split(value: str, limit: int) -> int:
     return min(limit, _INSTAGRAM_MAX_TEXT_CHARS)
 
 
+def _normalise_images(image_url) -> list:
+    """Return image values as ``(url, caption)`` pairs for Instagram sends."""
+    raw = [image_url] if isinstance(image_url, (str, dict)) else list(image_url or [])
+    pairs = []
+    for entry in raw:
+        if isinstance(entry, dict):
+            url = entry.get("url")
+            if url:
+                pairs.append((url, entry.get("caption")))
+        elif entry:
+            pairs.append((entry, None))
+    return pairs
+
+
+def _public_url(path: str) -> str:
+    """Make a local asset path fetchable by Meta's Instagram API."""
+    if path.startswith(("http://", "https://")):
+        return path
+    base = config.PUBLIC_BASE_URL.rstrip("/")
+    return base + path if base else path
+
+
 def send_instagram_reply(
     recipient_id: str,
     text: str,
@@ -1691,19 +1707,18 @@ def send_instagram_reply(
     """Sends text plus zero or more image cards via Meta Graph API to Instagram user."""
     # Instagram has no caption field on attachments, so a captioned card is sent
     # as the image followed by its own text message — same card, detail, card,
-    # detail sequence the customer sees on WhatsApp.
+    # detail sequence the customer sees in the customer-facing continuation.
     # Meta fetches a card by URL, so it has to be absolute. This path used to
     # hand it the raw template value — "/images/AAMAR%20MISHTI.jpeg" — which
     # Meta cannot resolve, so the attachment POST failed and took the whole
     # reply down with it: "show me the menu" (captioned cards, sent first)
     # returned nothing at all, and "sondesh price" (uncaptioned, text first)
-    # arrived as text with no menu. The WhatsApp adapter always did this
-    # conversion; only Instagram was missing it.
-    pairs = whatsapp_adapter._normalise_images(image_url)
+    # arrived as text with no menu.
+    pairs = _normalise_images(image_url)
     captioned = []
     undelivered_captions = []
     for img, caption in pairs:
-        public = whatsapp_adapter._public_url(img)
+        public = _public_url(img)
         if not public.startswith(("http://", "https://")):
             log.warning(
                 "Instagram card '%s' is relative and PUBLIC_BASE_URL is unset, so Meta "
@@ -1967,58 +1982,6 @@ def send_instagram_reply(
         return {"error": str(e), "status": "failed"}
 
 # --------------------------------------------------------------------------
-# WhatsApp Webhook Endpoints
-# --------------------------------------------------------------------------
-@app.get("/webhook/whatsapp", response_class=PlainTextResponse)
-def verify_whatsapp_webhook(
-    hub_mode: Optional[str] = Query(None, alias="hub.mode"),
-    hub_verify_token: Optional[str] = Query(None, alias="hub.verify_token"),
-    hub_challenge: Optional[str] = Query(None, alias="hub.challenge")
-):
-    """Meta Webhook verification endpoint for WhatsApp Business API."""
-    if hub_mode == "subscribe" and hub_verify_token == config.META_VERIFY_TOKEN:
-        log.info("WhatsApp webhook verification successful.")
-        return hub_challenge or ""
-    log.warning("WhatsApp webhook verification failed: invalid token.")
-    raise HTTPException(status_code=403, detail="Verification token mismatch")
-
-def _process_whatsapp_event(sender_phone: str, message_text: str) -> None:
-    """
-    Handles one WhatsApp message off the webhook request path.
-
-    Same reasoning as the Instagram side: the work is blocking, it used to run
-    inside the `async` handler and stall the event loop for every other
-    customer, and a slow 200 makes Meta redeliver the message.
-    """
-    try:
-        whatsapp_adapter.process_incoming_message(sender_phone, message_text)
-    except Exception:
-        log.exception("Failed to process WhatsApp message from %s.", sender_phone)
-
-
-@app.post("/webhook/whatsapp")
-@limiter.limit("120/minute")
-async def handle_whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
-    """Handles WhatsApp Business Webhook events."""
-    raw_body = await request.body()
-    verify_meta_signature(raw_body, request.headers.get("X-Hub-Signature-256"))
-    try:
-        payload = json.loads(raw_body or b"{}")
-    except json.JSONDecodeError:
-        log.warning("Received malformed JSON on WhatsApp webhook — ignoring.")
-        return {"status": "ignored", "reason": "malformed_json"}
-    if payload.get("object") in ("instagram", "page"):
-        return _dispatch_instagram_payload(payload, background_tasks)
-
-    parsed = whatsapp_adapter.parse_webhook_message(payload)
-    if not parsed:
-        return {"status": "no_message_event"}
-
-    sender_phone, msg_id, message_text = parsed
-    background_tasks.add_task(_process_whatsapp_event, sender_phone, message_text)
-    return {"status": "queued", "sender_phone": sender_phone, "message_id": msg_id}
-
-# --------------------------------------------------------------------------
 # Legal Pages (required by Meta before an app can go Live, and by the
 # DPDP Act 2023 because we store customer names and message history)
 # --------------------------------------------------------------------------
@@ -2051,7 +2014,8 @@ def privacy_policy():
 <p class="updated">{config.BUSINESS_LEGAL_NAME} &middot; Last updated 5 August 2026</p>
 
 <p>This policy explains what happens to your information when you message
-{config.BUSINESS_LEGAL_NAME} on Instagram or WhatsApp and our automated assistant replies.
+{config.BUSINESS_LEGAL_NAME} on Instagram. WhatsApp is available only as a
+human continuation after a handoff; there is no WhatsApp bot.
 We have tried to write it in plain language rather than legal boilerplate.</p>
 
 <h2>Who is responsible for your data</h2>
@@ -2063,8 +2027,7 @@ or call +91 87965 51990.</p>
 <h2>What we collect</h2>
 <ul>
   <li><strong>Your messages to us</strong> and the assistant's replies.</li>
-  <li><strong>Your Instagram or WhatsApp account identifier</strong>, as supplied by Meta.
-      For WhatsApp this is your phone number.</li>
+  <li><strong>Your Instagram account identifier</strong>, as supplied by Meta.</li>
   <li><strong>Your first name</strong>, only if you tell it to us in the chat.</li>
   <li><strong>Whether you arrived via one of our advertisements</strong>, because our assistant
       only replies automatically to enquiries that started from an ad.</li>
@@ -2092,9 +2055,10 @@ This deletion is enforced by the software itself, not by someone remembering to 
 
 <h2>Who we share it with</h2>
 <p>We do not sell your information, and we do not share it with advertisers or data brokers.
-Your messages travel through <strong>Meta Platforms</strong> (Instagram and WhatsApp), which
-handles them under its own privacy policy — that is unavoidable for any business reachable on
-those apps. Beyond Meta, your conversation stays on our own server. No third-party analytics
+Your Instagram messages travel through <strong>Meta Platforms</strong>, which handles them under
+its own privacy policy. If you choose the manual WhatsApp continuation, WhatsApp handles that
+conversation under its own privacy policy; our server does not receive or answer WhatsApp
+messages. Beyond Meta, your Instagram conversation stays on our own server. No third-party analytics
 or advertising service receives it.</p>
 
 <h2>Where it is stored</h2>
@@ -2142,11 +2106,13 @@ def terms_of_service():
 <p class="updated">{config.BUSINESS_LEGAL_NAME} &middot; Last updated 5 August 2026</p>
 
 <p>These terms cover the automated chat assistant that replies to messages sent to
-{config.BUSINESS_LEGAL_NAME} on Instagram and WhatsApp.</p>
+{config.BUSINESS_LEGAL_NAME} on Instagram. WhatsApp is a human-only continuation
+available through a manual handoff link.</p>
 
 <h2>You are talking to software</h2>
-<p>Replies are generated automatically. When the assistant is not confident about your
-question, it stops and passes you to a human colleague rather than guessing.</p>
+<p>Instagram replies are generated automatically. When the assistant is not confident
+about your question, it stops and passes you to a human colleague rather than guessing.
+WhatsApp messages are handled by the human team and are not processed by this service.</p>
 
 <h2>Prices and availability</h2>
 <p>Prices quoted in chat are indicative and may change with ingredient costs and seasonal
@@ -2321,35 +2287,14 @@ def _storage_durability() -> dict:
 
 
 def _delivery_capability() -> dict:
-    """
-    Reports whether a reply would actually reach a customer.
-
-    Mock mode is the failure worth naming here: it never constructs an outbound
-    request, so the bot looks entirely healthy while every customer sits in
-    silence. That is indistinguishable from working unless something says so.
-    """
-    if config.WHATSAPP_MOCK_MODE:
-        # Not counted as unhealthy: mock is the correct and default state for
-        # local development and the test suite, and failing health there would
-        # train everyone to ignore a red health check. It is surfaced as a
-        # warning instead, so an operator looking at a deployed bot can see it.
-        return {
-            "delivering": False,
-            "mode": "mock",
-            "problem": "WHATSAPP_MOCK_MODE is on — replies are logged, never sent to customers.",
-        }
-    missing = [
-        name for name, value in (
-            ("WHATSAPP_ACCESS_TOKEN", config.WHATSAPP_ACCESS_TOKEN),
-            ("WHATSAPP_PHONE_NUMBER_ID", config.WHATSAPP_PHONE_NUMBER_ID),
-        ) if not value
-    ]
+    """Report Instagram delivery and the manual-only WhatsApp boundary."""
     return {
-        "delivering": not missing,
-        "mode": "live",
-        "problem": f"missing {', '.join(missing)}" if missing else None,
+        "delivering": True,
+        "mode": "instagram_only",
+        "problem": None,
+        "whatsapp_automation": "removed",
+        "manual_handoff": "available",
     }
-
 
 def _webhook_signature_status() -> str:
     """How webhook payloads are being authenticated, in one word."""
@@ -2457,19 +2402,6 @@ def health_check():
     instagram_token = instagram_token_status()
     instagram_outbound = db.instagram_outbound_health()
 
-    # Which phone actually receives escalation alerts. The environment
-    # overrides the code default, and the environment is a dashboard nothing
-    # here can read — so changing the number in code and assuming it took is
-    # the same mistake the undelivered templates and the dead token both were.
-    # Masked to the last four digits: enough to tell two numbers apart, not
-    # enough to publish someone's phone on an unauthenticated endpoint.
-    escalation_phone = (config.HUMAN_ESCALATION_PHONE or "").strip()
-    alert_destination = {
-        "configured": bool(escalation_phone),
-        "ends_with": escalation_phone[-4:] if len(escalation_phone) >= 4 else None,
-        "from_environment": bool(os.getenv("HUMAN_ESCALATION_PHONE")),
-    }
-
     # Shadow mode is switched on in the host dashboard, which nothing in this
     # repo can read. Without this, turning it on and hoping is the only option.
     router_shadow: Dict[str, Any] = {
@@ -2498,21 +2430,14 @@ def health_check():
             llm_triage["error"] = f"{type(e).__name__}"
             log.warning("Could not read the triage shadow pulse: %s", e)
 
-    # A bot that cannot answer is down, whatever else is working. Live mode
-    # without credentials is the same kind of failure one step later — it
-    # produces a reply that cannot be delivered.
-    live_but_broken = delivery["mode"] == "live" and not delivery["delivering"]
-    healthy = outbound["healthy"] and answering["ready"] and not live_but_broken
+    healthy = outbound["healthy"] and answering["ready"]
     if not answering["ready"]:
         log.error("Health check failed — bot cannot answer: %s", "; ".join(answering["problems"]))
-    if live_but_broken:
-        log.error("Health check failed — replies cannot be delivered: %s", delivery["problem"])
 
     # Things that are not outages but that an operator needs to see, because
     # each of them looks exactly like a working bot from the outside.
     warnings = []
-    if delivery["mode"] == "mock":
-        warnings.append(delivery["problem"])
+    warnings.append("WhatsApp automation removed; manual human handoff via wa.me is available.")
     if signature == "DISABLED":
         warnings.append("META_APP_SECRET unset — webhook payloads are not verified.")
     if config.ENABLE_WEB_TESTER:
@@ -2530,11 +2455,8 @@ def health_check():
         )
     if instagram_token.get("state") == "invalid":
         # A warning rather than a 503, on purpose. This genuinely is an outage
-        # of the Instagram channel, but the health endpoint is what the host
-        # restarts the service on — and returning 503 for a dead credential
-        # would take WhatsApp down too, to fix nothing. Only a new token in the
-        # environment can resolve this, so it is reported as loudly as possible
-        # without knocking over the half that still works.
+        # of the Instagram channel, but the health endpoint remains available
+        # so an operator can see the credential failure and repair it.
         warnings.append(
             "Instagram access token is rejected by Meta "
             f"({instagram_token.get('detail')}). DMs are still being received "
@@ -2571,10 +2493,15 @@ def health_check():
             # Diagnostic only: no traffic is not an outage, so this block never
             # participates in the overall healthy/degraded calculation.
             "instagram_outbound": instagram_outbound,
-            "escalation_alerts_to": alert_destination,
             "human_escalation_notifications": {
-                "external_whatsapp_api_enabled": config.HUMAN_ESCALATION_WHATSAPP_API_ENABLED,
-                "disabled_status": "SKIPPED",
+                "status": "SKIPPED",
+                "reason": "WhatsApp automation removed; staff alerts are manual-only.",
+            },
+            "whatsapp": {
+                "automation": "removed",
+                "manual_handoff": "available",
+                "business_number_configured": bool(config.WHATSAPP_BUSINESS_NUMBER),
+                "cloud_api": "unavailable",
             },
             "router_shadow": router_shadow,
             "llm_triage": llm_triage,
@@ -3389,7 +3316,6 @@ def delete_user_data(user_id: str, x_admin_key: Optional[str] = Header(None), x_
     require_admin(x_admin_key, x_admin_pin)
     removed = db.delete_user_data(user_id)
     session_memory.clear_session(user_id, "instagram")
-    session_memory.clear_session(user_id, "whatsapp")
     log.info("Erased all stored data for user_hash=%s: %s", _safe_identifier_hash(user_id), removed)
     return {"status": "deleted", "user_id": user_id, "removed": removed}
 
@@ -6151,7 +6077,7 @@ def get_admin_dashboard():
             <div class="drop-zone" id="dropZone" onclick="document.getElementById('fileInput').click()">
                 <div class="drop-zone-icon">📷</div>
                 <h3>Drag & Drop, Paste, or Click to Add the Full Menu Photo</h3>
-                <p>Copy a menu image and press Ctrl+V here, or use JPEG, PNG, WEBP (flyer, WhatsApp image, Instagram banner).</p>
+                <p>Copy a menu image and press Ctrl+V here, or use JPEG, PNG, WEBP (flyer or Instagram banner).</p>
                 <input type="file" id="fileInput" class="file-input-hidden" accept="image/jpeg,image/png,image/webp" onchange="handleFileSelected(event)">
             </div>
 
@@ -6358,7 +6284,7 @@ def get_admin_dashboard():
         <div id="tab-paste" class="panel-card" data-group="menu" style="display: none;">
             <div class="panel-header">
                 <h2>📋 No photo? Paste the menu as text</h2>
-                <p>Paste raw unstructured flyer text, WhatsApp broadcast message, or dish lists. The AI extractor categorizes veg/non-veg, captures prices, and updates the bot instantly.</p>
+                <p>Paste raw unstructured flyer text or dish lists. The AI extractor categorizes veg/non-veg, captures prices, and updates the menu instantly.</p>
             </div>
             
             <textarea id="rawTextPaste" class="text-input" placeholder="Example:
@@ -6438,7 +6364,7 @@ THIS WEEK'S BENGAL SPECIALS
                 <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
                     <div>
                         <h2>🍱 What the bot is serving right now</h2>
-                        <p>Real-time view of all dishes currently served by the bot to customers on Instagram & WhatsApp.</p>
+                        <p>Real-time view of all dishes currently served by the Instagram assistant.</p>
                     </div>
                     <div style="display: flex; gap: 8px;">
                         <button class="btn-secondary" onclick="loadActiveMenu()">🔄 Refresh View</button>
@@ -6543,13 +6469,12 @@ THIS WEEK'S BENGAL SPECIALS
                 <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
                     <div>
                         <h2>💬 What customers are asking</h2>
-                        <p>Audit recent customer interactions across Instagram Ads and WhatsApp.</p>
+                        <p>Audit recent Instagram customer interactions and human handoffs.</p>
                     </div>
                     <div style="display: flex; gap: 8px; align-items: center;">
                         <select id="convChannelFilter" style="padding: 8px 12px; border-radius: 8px; border: 1px solid var(--border);" onchange="loadConversations()">
                             <option value="">All Channels</option>
                             <option value="instagram">Instagram</option>
-                            <option value="whatsapp">WhatsApp</option>
                         </select>
                         <button class="btn-secondary" onclick="loadConversations()">🔄 Refresh</button>
                     </div>
@@ -9895,7 +9820,7 @@ Non-Veg:
                 const metricTarget = document.getElementById('autoResolveMetrics');
                 if (metricTarget) {
                     const metric = (label, value) => `<div style="padding:10px;border:1px solid var(--border);border-radius:10px;text-align:center"><small>${escapeHtml(label)}</small><h3 style="margin:4px 0">${escapeHtml(value)}</h3></div>`;
-                    metricTarget.innerHTML = [metric('Simulated Eligible', ar.simulated_eligible_cases || 0), metric('False Positives', ar.simulation_false_positives || 0), metric('Grounded Reviewed', ar.reviewed_grounded_cases || 0), metric('Risk Violations', ar.risk_violations || 0), metric('Source Overrides', ar.source_routing_overrides || 0), metric('WhatsApp AI', ar.whatsapp_ai_activity || 0), metric('Order/CAM Interference', ar.order_cam_interference || 0)].join('');
+                    metricTarget.innerHTML = [metric('Simulated Eligible', ar.simulated_eligible_cases || 0), metric('False Positives', ar.simulation_false_positives || 0), metric('Grounded Reviewed', ar.reviewed_grounded_cases || 0), metric('Risk Violations', ar.risk_violations || 0), metric('Source Overrides', ar.source_routing_overrides || 0), metric('Legacy WhatsApp AI', ar.whatsapp_ai_activity || 0), metric('Order/CAM Interference', ar.order_cam_interference || 0)].join('');
                 }
                 const rows = (obj, labels) => labels.map(label => { const x = obj[label] || {}; return `<tr><td>${escapeHtml(label)}</td><td>${x.reviewed ?? x.total ?? 0}</td><td>${x.approved_as_is || x.approved || 0}</td><td>${x.edited || 0}</td><td>${x.rejected || 0}</td><td>${x.human_handoff || x.sent_to_human || 0}</td></tr>`; }).join('');
                 document.getElementById('assistedConfidenceTable').innerHTML = rows(ev.confidence_buckets || {}, Object.keys(ev.confidence_buckets || {}));
@@ -9906,7 +9831,7 @@ Non-Veg:
                 document.getElementById('assistedHighConfidenceProblems').innerHTML = problems.length ? problems.map(x => `<div style="padding:6px;border-bottom:1px solid var(--border)"><b>${escapeHtml(x.confidence)}</b> · ${escapeHtml(x.triage_category)} · ${escapeHtml(x.status)} · ${escapeHtml(x.customer_message)}<br><small>Grounding: ${escapeHtml(x.grounding_status)} · Knowledge: ${escapeHtml(x.matched_knowledge_source || '—')} · Reason: ${escapeHtml(x.rejection_reason || x.edit_severity || '—')}</small></div>`).join('') : 'None recorded.';
                 const comparisons = ev.shadow_vs_assisted || [];
                 document.getElementById('assistedShadowComparison').innerHTML = comparisons.length ? comparisons.map(x => `<div>${escapeHtml(x.shadow_prediction)} → ${escapeHtml(x.assisted_prediction)} → ${escapeHtml(x.human_final_decision || 'Pending')}</div>`).join('') : 'No correlated records.';
-                document.getElementById('assistedSafetyMetrics').innerHTML = `Source Routing Overrides by AI: <b>${safety.source_routing_overrides || 0}</b> · WhatsApp Assisted AI Activity: <b>${safety.whatsapp_assisted_activity || 0}</b> · Protected order flow: <b>${safety.protected_order_flow || 0}</b> · CAM interference: <b>${safety.cam_interference || 0}</b>`;
+                document.getElementById('assistedSafetyMetrics').innerHTML = `Source Routing Overrides by AI: <b>${safety.source_routing_overrides || 0}</b> · Legacy WhatsApp AI Activity: <b>${safety.whatsapp_assisted_activity || 0}</b> · Protected order flow: <b>${safety.protected_order_flow || 0}</b> · CAM interference: <b>${safety.cam_interference || 0}</b>`;
                 const signal = document.getElementById('customQaAiSignals');
                 if (signal) signal.innerHTML = 'AI Review Signal: ' + ((ev.knowledge_signals || []).length ? (ev.knowledge_signals || []).map(k => `${escapeHtml(k.topic || k.knowledge_id)} — Used in ${k.total || 0} assisted suggestions; Approved ${k.approved_as_is || 0}; Edited ${k.edited || 0}; Rejected ${k.rejected || 0}${k.knowledge_review_recommended ? ' · <b>Knowledge Review Recommended</b>' : ''}`).join('<br>') : 'No Custom Q&A usage yet.');
             } catch (err) {
@@ -10785,15 +10710,23 @@ async def api_test_chat(request: Request):
             "active_memory": session_memory.get_session(user_id, "instagram")["facts"]
         }
 
-    # Simulate Instagram Ad or WhatsApp
+    if channel == "whatsapp":
+        return {
+            "status": "manual_only",
+            "is_ad_qualified": False,
+            "response": None,
+            "was_matched": False,
+            "template_id": None,
+            "image_url": None,
+            "whatsapp_automation": "removed",
+            "manual_handoff": "available",
+        }
+
+    # Simulate an Instagram ad-originated conversation.
     if channel == "instagram_ad":
         db.set_ad_qualified(user_id, "instagram", is_ad_qualified=True)
         ch_name = "instagram"
         ref_source = "ADS"
-    else:
-        ch_name = "whatsapp"
-        ref_source = None
-
     response_text, was_matched, template_id, image_url = responder.match_and_respond(
         user_message, user_id=user_id, channel=ch_name, referral_source=ref_source
     )
@@ -10821,7 +10754,7 @@ async def api_reset_session(request: Request):
     payload = await request.json()
     user_id = payload.get("user_id", "web_tester")
     channel = payload.get("channel", "instagram_ad")
-    ch_name = "whatsapp" if channel == "whatsapp" else "instagram"
+    ch_name = "instagram"
     session_memory.clear_session(user_id, ch_name)
     return {"status": "cleared", "user_id": user_id, "channel": ch_name}
 
@@ -10909,7 +10842,6 @@ def get_web_chat():
                 <select id="channelSelect" class="channel-select" onchange="resetSession()">
                     <option value="instagram_ad">Instagram DM (Ad-Originated) ✅ Auto-Reply Enabled</option>
                     <option value="instagram_organic">Instagram DM (Organic) 🛑 Auto-Reply Blocked</option>
-                    <option value="whatsapp">WhatsApp Business 🛑 Human-Only in Production (engine preview only)</option>
                 </select>
             </div>
             
@@ -10941,7 +10873,7 @@ def get_web_chat():
         <div class="modal-overlay" id="menuModal">
             <div class="modal-box">
                 <h3>📋 Paste Raw Menu Card Text</h3>
-                <p style="margin: 0; font-size: 0.8rem; color: #555;">Paste raw flyer text, WhatsApp broadcast, or dish items with prices below. The AI/parser will structure & update the bot's menu automatically!</p>
+                <p style="margin: 0; font-size: 0.8rem; color: #555;">Paste raw flyer text or dish items with prices below. The AI/parser will structure & update the menu automatically!</p>
                 <textarea id="rawMenuInput" placeholder="Example:&#10;Rose Sondesh 250g - Rs 450&#10;Jolbhora Nolen Gur 500g ₹1400&#10;Kosha Mangsho Bento ₹650 (non veg)"></textarea>
                 <div class="modal-actions">
                     <button class="btn-cancel" onclick="closeMenuModal()">Cancel</button>
@@ -11182,8 +11114,8 @@ def get_web_chat():
                 // then each collection's note-and-card pair). This function
                 // used to always draw every image before the outer text
                 // regardless of that flag, so the tester showed the general
-                // text arriving dead last — the opposite of what Instagram and
-                // WhatsApp actually send, and of the order the client asked for.
+                // text arriving dead last — the opposite of the order the
+                // Instagram client asked for.
                 const entries0 = Array.isArray(imageUrl) ? imageUrl : (imageUrl ? [imageUrl] : []);
                 const leadsWithText = entries0.some(e => e && typeof e === 'object' && e.text_first);
 

@@ -1,12 +1,11 @@
 """
 Interactive CLI Simulator for Camellia Artisanal Bot.
-Allows testing Instagram (Ad vs Organic DMs) and WhatsApp messages locally.
+Allows testing Instagram (Ad vs Organic DMs) locally.
 """
 import sys
 from camellia.database import db
 from camellia.ad_gate import ad_gate
 from camellia.responder import responder
-from camellia.whatsapp_adapter import whatsapp_adapter
 from camellia.escalator import escalator
 
 # Ensure Unicode stdout compatibility on Windows
@@ -23,8 +22,7 @@ def main():
     print("Select Testing Mode:")
     print("1. Instagram DM (Ad-Originated Referral) [Auto-Reply Enabled]")
     print("2. Instagram DM (Organic Non-Ad) [Auto-Reply Blocked by Ad-Gate]")
-    print("3. WhatsApp Business Message [Auto-Reply Enabled]")
-    print("4. View Live Analytics & Recorded Escalations")
+    print("3. View Live Analytics & Recorded Escalations")
     print("Q. Quit")
     print("-" * 60)
 
@@ -32,7 +30,7 @@ def main():
     
     while True:
         try:
-            choice = input(f"\n[Mode {mode}] Enter message (or 'mode 1/2/3/4', 'q' to quit): ").strip()
+            choice = input(f"\n[Mode {mode}] Enter message (or 'mode 1/2/3', 'q' to quit): ").strip()
         except (KeyboardInterrupt, EOFError):
             break
 
@@ -53,10 +51,6 @@ def main():
             print("--> Switched to Mode 2: Instagram DM (Organic / Non-Ad).")
             continue
         elif lowered in ["mode 3", "3"]:
-            mode = "3"
-            print("--> Switched to Mode 3: WhatsApp Business Message.")
-            continue
-        elif lowered in ["mode 4", "4"]:
             print("\n📊 LIVE DATABASE ANALYTICS:")
             analytics = db.get_analytics()
             for k, v in analytics.items():
@@ -109,17 +103,6 @@ def main():
             print(f"🛑 [AD-GATE]: Qualified={is_ad} (No Ad Referral found)")
             print("🚫 [BOT ACTION]: AUTO-REPLY BLOCKED! Message sits in Inbox for manual human reply.")
 
-        elif mode == "3":
-            # Simulate WhatsApp Message
-            sender_phone = "+919876543210"
-            result = whatsapp_adapter.process_incoming_message(sender_phone, user_message)
-            print(f"📱 [WHATSAPP PROCESSOR]: Matched={result['was_matched']} (Template={result['template_id']})")
-            if not result['was_matched']:
-                print("🚨 [ESCALATED TO HUMAN]: Recorded in database & human alert dispatched.")
-                print(f"🤖 [BOT HOLDING RESPONSE]:\n{result['response_text']}")
-            else:
-                print(f"🤖 [BOT RESPONSE]:\n{result['response_text']}")
-        
         print("-" * 50)
 
 if __name__ == "__main__":

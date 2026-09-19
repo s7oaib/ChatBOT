@@ -28,7 +28,6 @@ ROOT = Path(__file__).resolve().parent.parent
 SHIPPED = [
     "camellia/responder.py",
     "camellia/app.py",
-    "camellia/whatsapp_adapter.py",
     "camellia/weekly_flyer.py",
     "camellia/order_calculator.py",
     "data/qa_templates.json",

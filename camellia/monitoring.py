@@ -55,13 +55,7 @@ def classify_instagram_delivery(
 
 class DeliveryHealthMonitor:
     """
-    Watches outbound Meta API calls and alerts the owner once when sending
-    starts failing consistently.
-
-    The failure this exists for is a silently expired WHATSAPP_ACCESS_TOKEN: the
-    bot keeps accepting webhooks and looks healthy, but every reply is dropped,
-    and nobody notices until a customer complains. Counts consecutive failures
-    per channel so a single network blip does not page anyone.
+    Watches outbound Instagram API calls and records repeated failures.
     """
 
     def __init__(self, failure_threshold: int = 3):
@@ -98,45 +92,11 @@ class DeliveryHealthMonitor:
 
     def _send_owner_alert(self, channel: str, count: int, detail: str) -> None:
         message = (
-            f"[CAMELLIA BOT ALERT] {count} consecutive send failures on {channel}. "
+            f"[CAMELLIA DELIVERY ALERT] {count} consecutive send failures on {channel}. "
             f"Customers are NOT receiving replies. Most likely cause: expired "
-            f"WHATSAPP_ACCESS_TOKEN. Last error: {detail[:200]}"
+            f"Instagram credentials or provider failure. Last error: {detail[:200]}"
         )
         log.critical(message)
-
-        # The log above is the monitoring record. Do not create a second
-        # WhatsApp Cloud API dependency unless the separately approved human
-        # escalation notification feature is explicitly enabled.
-        if not config.HUMAN_ESCALATION_WHATSAPP_API_ENABLED:
-            log.info(
-                "Owner delivery alert not sent: external WhatsApp API notification is disabled."
-            )
-            return
-
-        # Best-effort WhatsApp alert. If the credential itself is what broke,
-        # this cannot get through — the CRITICAL log line above is the fallback.
-        if not (config.WHATSAPP_ACCESS_TOKEN and config.WHATSAPP_PHONE_NUMBER_ID):
-            return
-        try:
-            import httpx
-
-            url = (
-                f"https://graph.facebook.com/{config.WHATSAPP_API_VERSION}/"
-                f"{config.WHATSAPP_PHONE_NUMBER_ID}/messages"
-            )
-            with httpx.Client(timeout=10.0) as client:
-                client.post(
-                    url,
-                    headers={"Authorization": f"Bearer {config.WHATSAPP_ACCESS_TOKEN}"},
-                    json={
-                        "messaging_product": "whatsapp",
-                        "to": config.HUMAN_ESCALATION_PHONE.lstrip("+"),
-                        "type": "text",
-                        "text": {"body": message},
-                    },
-                )
-        except Exception as exc:
-            log.error("Could not deliver health alert to owner: %s", exc)
 
     def snapshot(self) -> dict:
         return {

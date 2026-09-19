@@ -22,11 +22,12 @@ is safe for operator use and includes:
 - `auto_resolve` and `language_understanding`: enabled/simulation state; and
 - `session_state` and retention configuration.
 
-The `human_escalation_notifications` health block reports whether the optional
-external WhatsApp notification gate is enabled and documents `SKIPPED` as the
-disabled status without exposing credentials.
+The `human_escalation_notifications` health block reports `SKIPPED` because
+external staff notifications are intentionally manual-only; there is no
+WhatsApp notification gate or server-side sender.
 
-The normal production policy is Instagram AI enabled, WhatsApp human-only,
+The normal production policy is Instagram AI enabled, WhatsApp automation
+removed with manual handoff available,
 web tester off, webhook signatures enforced, Story auto-sync off, and LLM Auto
 Resolve off. Confirm the actual environment through `/health` and the
 authenticated Admin evaluation endpoints; repository defaults alone cannot
@@ -47,9 +48,9 @@ Use the existing Admin endpoints for detailed state:
   simulation/read-only state; and
 - `/admin/db-backup` for an authenticated, integrity-checked SQLite snapshot.
 
-The normal human handoff records a durable outbox event as `SKIPPED` when
-`HUMAN_ESCALATION_WHATSAPP_API_ENABLED` is unset or false. This is an
-intentional policy state, not a provider failure or a failed CAM handoff.
+The normal human handoff records a durable outbox event as `SKIPPED`. This is
+an intentional manual-only policy state, not a provider failure or a failed
+CAM handoff. No WhatsApp credential, webhook, or Cloud API request is used.
 
 ## Log safety contract
 
@@ -67,5 +68,5 @@ the authenticated audit row. Do not temporarily enable raw-payload logging.
 Review `/health` and recent safe logs after deployment, after a provider
 incident, and during production soak. Investigate repeated outbound failures,
 HTTP 429/5xx, latency degradation, notification retry growth, database
-durability warnings, or unexpected channel-policy flags. A single harmless
-dependency warning is not a production incident.
+durability warnings, or an unexpected reappearance of a WhatsApp route or
+sender. A single harmless dependency warning is not a production incident.

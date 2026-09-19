@@ -77,7 +77,7 @@ as a debugging shortcut.
    `0ced6ed4050a2c295e25d4c2bc64dd1cbaec7804`.
 4. Do not roll back or overwrite the database automatically.
 5. Verify health, webhook signature enforcement, Instagram routing, and the
-   WhatsApp human-only policy.
+   WhatsApp automation-removed/manual-handoff policy.
 
 ### Bad schema/data migration
 

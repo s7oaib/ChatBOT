@@ -31,10 +31,6 @@ log = get_logger("camellia.handoff")
 def _user_hash(user_id: str) -> str:
     return hashlib.sha256(str(user_id or "").encode("utf-8")).hexdigest()[:12]
 
-# The reference is opaque by design: no database id, no phone number, no
-# sequential counter a competitor could use to estimate order volume.
-_REF_RE = re.compile(r"\bCAM-(\d{5,6})\b", re.IGNORECASE)
-
 # Entity keys worth surfacing to staff when present — the ones the responder
 # already extracts (see camellia/understanding.py's entity schema) plus the
 # order-draft/cart slots the deterministic flows fill in. Nothing here is
@@ -110,12 +106,6 @@ def _generate_reference() -> str:
             return candidate
     # Astronomically unlikely at this volume; widen rather than loop forever.
     return f"CAM-{random.randint(100000, 999999)}"
-
-
-def extract_reference(text: str) -> Optional[str]:
-    """Pulls a "CAM-48371"-shaped reference out of free text, if present."""
-    match = _REF_RE.search(text or "")
-    return f"CAM-{match.group(1)}" if match else None
 
 
 def _known_entities(facts: Dict[str, Any], *, include_order: bool = False) -> Dict[str, Any]:
@@ -334,13 +324,3 @@ def retire_order_state(user_id: str, channel: str) -> None:
     """
     session_memory.clear_order_draft(user_id, channel)
     log.info("Retired Instagram order state for channel=%s user_hash=%s after WhatsApp referral.", channel, _user_hash(user_id))
-
-
-def mark_whatsapp_connected(handoff_ref: str) -> Optional[Dict[str, Any]]:
-    """Called when the reference shows up in an inbound WhatsApp message."""
-    handoff = db.get_handoff_by_ref(handoff_ref)
-    if not handoff:
-        return None
-    db.update_handoff_status(handoff_ref, "WHATSAPP_CONNECTED")
-    log.info("Handoff %s connected on WhatsApp.", handoff_ref)
-    return handoff

@@ -44,7 +44,7 @@ python -m pytest -q `
 | Handoff durability | Handoff creation, durable reference, order state and concurrent deduplication | `tests/test_handoff_order_state.py`, `tests/test_channel_policy.py` |
 | Notification outbox | Idempotency, bounded retry, terminal failure and recorded delivery state | `tests/test_human_notifications.py` |
 | Waiting for human | Customer messages are stored, AI is suppressed, explicit resume is idempotent | `tests/test_waiting_for_human.py` |
-| WhatsApp policy | General AI remains off; human-only path and narrow continuation remain bounded | `tests/test_channel_policy.py` |
+| WhatsApp boundary | No inbound bot path or Cloud API sender; CAM/`wa.me` manual continuation remains available | `tests/test_whatsapp_cleanup.py`, `tests/test_channel_policy.py` |
 | Privacy | Default logs exclude customer text, tokens, signatures and provider bodies | `tests/test_privacy_logging.py`, `tests/test_instagram_attachment_diagnostics.py` |
 | Content integrity | Dispatch-time claims remain quarantined unless confirmed | `tests/test_content_integrity_quarantine.py`, `tests/test_opening_hours_canonical.py` |
 | Story lifecycle | Unknown age stays active; partial/failed sync never falsely removes a Story | `tests/test_instagram_story_lifecycle.py`, `tests/test_instagram_story_sync.py` |

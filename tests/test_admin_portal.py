@@ -600,40 +600,18 @@ def test_candidate_queue_requires_admin_auth():
 
 def test_health_warns_about_silent_failure_modes():
     """
-    Mock mode and an unverified webhook both look exactly like a working bot
-    from the outside, so health has to name them explicitly.
+    Removed WhatsApp automation and an unverified webhook must be visible.
     """
     body = client.get("/health").json()
     assert "warnings" in body
     assert "reply_delivery" in body
     assert "webhook_signature" in body
 
-    with_mock = [w for w in body["warnings"] if "MOCK" in w.upper()]
-    assert with_mock, "mock mode must be surfaced — it means customers get silence"
-    assert body["reply_delivery"]["mode"] == "mock"
-    assert body["reply_delivery"]["delivering"] is False
+    assert any("WhatsApp automation removed" in w for w in body["warnings"])
+    assert body["reply_delivery"]["mode"] == "instagram_only"
+    assert body["reply_delivery"]["manual_handoff"] == "available"
 
     # Mock mode is the correct default locally, so it must not fail the check.
-    assert client.get("/health").status_code == 200
-
-
-def test_health_fails_when_live_mode_has_no_credentials():
-    """Live mode without a token produces replies that cannot be delivered."""
-    saved_mock = config.WHATSAPP_MOCK_MODE
-    saved_token = config.WHATSAPP_ACCESS_TOKEN
-    config.WHATSAPP_MOCK_MODE = False
-    config.WHATSAPP_ACCESS_TOKEN = ""
-    try:
-        resp = client.get("/health")
-        assert resp.status_code == 503
-        body = resp.json()
-        assert body["reply_delivery"]["mode"] == "live"
-        assert body["reply_delivery"]["delivering"] is False
-        assert "WHATSAPP_ACCESS_TOKEN" in body["reply_delivery"]["problem"]
-    finally:
-        config.WHATSAPP_MOCK_MODE = saved_mock
-        config.WHATSAPP_ACCESS_TOKEN = saved_token
-
     assert client.get("/health").status_code == 200
 
 

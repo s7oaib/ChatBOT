@@ -2,7 +2,6 @@ from unittest.mock import patch
 
 from camellia import app as app_module
 from camellia.config import config
-from camellia.whatsapp_adapter import whatsapp_adapter
 
 
 class _Response:
@@ -37,7 +36,6 @@ def _send_and_capture_url(monkeypatch, token, page_id="page-123"):
     monkeypatch.setattr(config, "INSTAGRAM_ACCESS_TOKEN", token)
     monkeypatch.setattr(config, "INSTAGRAM_PAGE_ID", page_id)
     monkeypatch.setattr(config, "INSTAGRAM_API_VERSION", "v25.0")
-    monkeypatch.setattr(config, "WHATSAPP_API_VERSION", "v99.0")
     monkeypatch.setattr(app_module.httpx, "Client", lambda *args, **kwargs: client)
     with patch.object(app_module.db, "create_instagram_outbound_audit", return_value=None), \
          patch.object(app_module.db, "finalize_instagram_outbound_audit"), \
@@ -62,7 +60,6 @@ def test_instagram_facebook_host_outbound_uses_instagram_api_version(monkeypatch
 
 def test_instagram_messenger_profile_uses_instagram_api_version(monkeypatch):
     monkeypatch.setattr(config, "INSTAGRAM_API_VERSION", "v25.0")
-    monkeypatch.setattr(config, "WHATSAPP_API_VERSION", "v99.0")
 
     monkeypatch.setattr(config, "INSTAGRAM_ACCESS_TOKEN", "IGAA_login_token")
     login_url, _ = app_module._instagram_profile_url_and_identity()
@@ -72,13 +69,3 @@ def test_instagram_messenger_profile_uses_instagram_api_version(monkeypatch):
     monkeypatch.setattr(config, "INSTAGRAM_PAGE_ID", "page-123")
     page_url, _ = app_module._instagram_profile_url_and_identity()
     assert page_url == "https://graph.facebook.com/v25.0/page-123/messenger_profile"
-
-
-def test_whatsapp_api_url_continues_to_use_whatsapp_api_version(monkeypatch):
-    monkeypatch.setattr(config, "WHATSAPP_API_VERSION", "v19.0")
-    monkeypatch.setattr(config, "INSTAGRAM_API_VERSION", "v25.0")
-    monkeypatch.setattr(config, "WHATSAPP_PHONE_NUMBER_ID", "phone-123")
-
-    assert whatsapp_adapter.api_url == (
-        "https://graph.facebook.com/v19.0/phone-123/messages"
-    )

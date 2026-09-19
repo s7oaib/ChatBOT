@@ -1,7 +1,5 @@
 import json
-import httpx
 from typing import Dict, Any, Optional
-from camellia.config import config
 from camellia.database import db
 from camellia.monitoring import get_logger
 
@@ -19,18 +17,6 @@ class Escalator:
     - Logs escalation details in database with Customer Handoff Briefs for full client visibility.
     - Sends automated alert message to owner/human contact.
     """
-
-    # Read from config on every use rather than captured once at import. This
-    # is a module-level singleton, so a captured copy would keep alerting the
-    # previous number for the life of the process after the setting changed —
-    # the failure would look exactly like the change not having been made.
-    @property
-    def human_phone(self) -> str:
-        return config.HUMAN_ESCALATION_PHONE
-
-    @property
-    def human_email(self) -> str:
-        return config.HUMAN_ESCALATION_EMAIL
 
     def handle_escalation(
         self,
@@ -143,91 +129,17 @@ class Escalator:
         reason: str,
         context: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """Queue result for a human alert; Cloud API use is explicitly gated."""
-        handoff = context.get("handoff_brief", {})
-        cust_name = handoff.get("customer_name", "Unknown")
-        chat_history = "\n".join(handoff.get("recent_chat_history", []))
-
-        verif_status = self._evaluate_order_verification(user_message, chat_history)
-
-        # A cross-channel handoff (camellia/handoff.py) attaches its own
-        # CAM-XXXXX reference and known-entities summary here so staff see, in
-        # the same alert, the reference the customer will quote on WhatsApp —
-        # not a second, disconnected notification.
-        handoff_ref = context.get("handoff_ref")
-        handoff_block = f"\n🔗 *Handoff Reference:* {handoff_ref}\n" if handoff_ref else ""
-        handoff_summary = context.get("handoff_summary")
-        summary_block = f"\n{handoff_summary}\n" if handoff_summary else ""
-
-        alert_body = (
-            f"🚨 *NEW CAMELLIA BOT ORDER / ESCALATION #{escalation_id}*\n"
-            f"{handoff_block}"
-            f"• *Verification Status:* {verif_status}\n"
-            f"• *Channel:* {channel.upper()}\n"
-            f"• *Customer ID/Phone:* {user_id}\n"
-            f"• *Customer Name:* {cust_name}\n"
-            f"• *Reason:* {reason}\n"
-            f"• *Last Message:* \"{user_message}\"\n\n"
-            f"📋 *Recent Conversation History:*\n{chat_history or 'None'}\n"
-            f"{summary_block}\n"
-            f"Please verify order details & send invoice via WhatsApp/Call to customer before cooking/dispatching."
+        """Record the escalation; customer and staff continuation are manual."""
+        log.info(
+            "Human escalation notification skipped: manual handoff only "
+            "(escalation_id=%s, channel=%s).",
+            escalation_id,
+            channel,
         )
-
-        if not config.HUMAN_ESCALATION_WHATSAPP_API_ENABLED:
-            log.info(
-                "Human escalation notification skipped: external WhatsApp API is disabled."
-            )
-            return {
-                "status": "skipped",
-                "reason": "HUMAN_ESCALATION_WHATSAPP_API_ENABLED is false",
-            }
-
-        # The separately approved feature uses Meta WhatsApp API only when the
-        # explicit gate and all required credentials are present.
-        if config.WHATSAPP_ACCESS_TOKEN and config.WHATSAPP_PHONE_NUMBER_ID and self.human_phone:
-            url = f"https://graph.facebook.com/{config.WHATSAPP_API_VERSION}/{config.WHATSAPP_PHONE_NUMBER_ID}/messages"
-            headers = {
-                "Authorization": f"Bearer {config.WHATSAPP_ACCESS_TOKEN}",
-                "Content-Type": "application/json"
-            }
-            payload = {
-                "messaging_product": "whatsapp",
-                "to": self.human_phone.lstrip("+"),
-                "type": "text",
-                "text": {"body": alert_body}
-            }
-            try:
-                with httpx.Client(timeout=10.0) as client:
-                    resp = client.post(url, headers=headers, json=payload)
-                    resp.raise_for_status()
-                    return {"status": "sent", "api_response": resp.json()}
-            except httpx.HTTPStatusError as e:
-                status_code = e.response.status_code if e.response is not None else None
-                retryable = status_code == 429 or bool(status_code and status_code >= 500)
-                log.error("Failed to send escalation alert to owner: HTTP %s", status_code)
-                return {
-                    "status": "failed", "retryable": retryable,
-                    "error": f"HTTP {status_code or 'unknown'}",
-                }
-            except (httpx.TimeoutException, httpx.NetworkError) as e:
-                log.error("Failed to send escalation alert to owner: %s", type(e).__name__)
-                return {
-                    "status": "failed", "retryable": True,
-                    "error": type(e).__name__,
-                }
-            except Exception as e:
-                log.error("Failed to send escalation alert to owner: %s", type(e).__name__)
-                return {"status": "failed", "retryable": False, "error": type(e).__name__}
-        else:
-            safe_alert = alert_body.encode("ascii", "backslashreplace").decode("ascii")
-            log.warning(
-                "HUMAN ESCALATION ALERT not sent: WhatsApp API is enabled but credentials are not configured\n%s",
-                safe_alert,
-            )
-            return {
-                "status": "failed",
-                "retryable": False,
-                "error": "WhatsApp escalation API credentials are not configured",
-            }
+        return {
+            "status": "skipped",
+            "retryable": False,
+            "reason": "manual_handoff_only",
+        }
 
 escalator = Escalator()

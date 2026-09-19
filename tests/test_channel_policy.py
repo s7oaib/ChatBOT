@@ -1,18 +1,4 @@
-"""Channel policy: Instagram is the only AI chatbot channel; WhatsApp is
-human-only.
-
-The client explicitly decided customers must never talk to an AI bot on
-WhatsApp. This is enforced in application code, not by instructing an LLM
-not to answer — `whatsapp_adapter.process_incoming_message` (the one function
-an inbound WhatsApp message reaches) does not call understanding, Groq, RAG,
-semantic fallback, or template rendering by default. These tests spy on every
-one of those call sites directly, for a representative set of WhatsApp
-messages, and assert zero calls — not merely "no reply", but "the machinery
-never ran".
-
-Instagram keeps the full architecture from prior phases unchanged; that is
-verified here too, briefly, as a regression guard.
-"""
+"""Instagram customer AI plus durable manual human handoff policy."""
 
 import json
 import re
@@ -23,83 +9,10 @@ from unittest.mock import patch
 import pytest
 
 from camellia import app, handoff as handoff_module
-from camellia.ai_responder import ai_responder
 from camellia.config import config
 from camellia.database import db
-from camellia.rag_fallback import rag_fallback_engine
 from camellia.responder import responder
-from camellia.semantic_fallback import read as semantic_fallback_read
 from camellia.session_memory import session_memory
-from camellia.understanding import understanding_engine
-from camellia.whatsapp_adapter import whatsapp_adapter
-
-
-# ---------------------------------------------------------------------------
-# WhatsApp: no AI machinery ever runs
-# ---------------------------------------------------------------------------
-
-WHATSAPP_PROBE_MESSAGES = [
-    "Hi",
-    "send menu",
-    "what's the price",
-    "do you deliver?",
-    "Jolbhora price",
-    "can I get discount?",
-    "Ref: CAM-48371",
-]
-
-
-@pytest.mark.parametrize("message", WHATSAPP_PROBE_MESSAGES)
-def test_whatsapp_message_calls_no_understanding_no_groq_no_rag_no_templates(message):
-    """The exact assertion style requested: every relevant call_count is 0."""
-    with patch.object(understanding_engine, "analyze") as analyze, patch.object(
-        ai_responder, "_query_groq"
-    ) as query_groq, patch.object(
-        rag_fallback_engine, "retrieve"
-    ) as rag_retrieve, patch.object(
-        responder, "match_and_respond"
-    ) as match_and_respond, patch.object(
-        whatsapp_adapter, "send_message"
-    ) as send_message:
-        result = whatsapp_adapter.process_incoming_message("919876543210", message)
-
-    assert analyze.call_count == 0
-    assert query_groq.call_count == 0
-    assert rag_retrieve.call_count == 0
-    assert match_and_respond.call_count == 0
-    assert send_message.call_count == 0
-    assert result["bot_replied"] is False
-    assert result["response_text"] is None
-
-
-WHATSAPP_HUMAN_INTENT_PROBE_MESSAGES = ["human", "menu", "price", "hello", "Ref: CAM-12345"]
-
-
-@pytest.mark.parametrize("message", WHATSAPP_HUMAN_INTENT_PROBE_MESSAGES)
-def test_whatsapp_never_answers_even_a_direct_human_request(message):
-    """A bare human-intent word on WhatsApp ("human") must not trigger any
-    chatbot machinery either — WhatsApp is already the human destination, so
-    there is nothing for the bot to escalate. Same zero-call-count assertion
-    style as the general WhatsApp probes above, covering the exact messages
-    named in the production-readiness checklist."""
-    with patch.object(understanding_engine, "analyze") as analyze, patch.object(
-        ai_responder, "_query_groq"
-    ) as query_groq, patch.object(
-        rag_fallback_engine, "retrieve"
-    ) as rag_retrieve, patch.object(
-        responder, "match_and_respond"
-    ) as match_and_respond, patch.object(
-        whatsapp_adapter, "send_message"
-    ) as send_message:
-        result = whatsapp_adapter.process_incoming_message("919876543210", message)
-
-    assert analyze.call_count == 0
-    assert query_groq.call_count == 0
-    assert rag_retrieve.call_count == 0
-    assert match_and_respond.call_count == 0
-    assert send_message.call_count == 0
-    assert result["bot_replied"] is False
-    assert result["response_text"] is None
 
 
 INSTAGRAM_HUMAN_INTENT_PROBE_MESSAGES = [
@@ -120,45 +33,6 @@ def test_instagram_direct_human_request_triggers_whatsapp_handoff(message):
     reply_text = send_reply.call_args.args[1]
     assert escalate.called
     assert "wa.me" in reply_text
-    assert re.search(r"CAM-\d{5,6}", reply_text)
-
-
-def test_whatsapp_semantic_fallback_reader_is_never_invoked_either():
-    """The offline concept reader is understanding's own fallback, reachable
-    only through analyze/deterministic_fallback — confirm the WhatsApp path
-    doesn't call it by some other route."""
-    with patch("camellia.semantic_fallback.read", wraps=semantic_fallback_read) as reader:
-        whatsapp_adapter.process_incoming_message("919876543210", "do you deliver to Delhi?")
-    assert reader.call_count == 0
-
-
-def test_no_qa_template_response_is_composed_for_whatsapp():
-    """response_text must be None/empty, not an approved-template answer
-    quietly generated some other way."""
-    result = whatsapp_adapter.process_incoming_message("919876543210", "what is the price of Jolbhora?")
-    assert not result.get("response_text")
-    assert result["was_matched"] is False
-
-
-def test_a_handoff_reference_on_whatsapp_still_produces_no_bot_response():
-    result = whatsapp_adapter.process_incoming_message(
-        "919876543210", "Hi, I'm continuing my Camellia Instagram enquiry. Ref: CAM-48371",
-    )
-    assert result["bot_replied"] is False
-    assert result["response_text"] is None
-
-
-def test_whatsapp_webhook_route_never_reaches_the_chatbot_stack(monkeypatch):
-    """End-to-end through the actual webhook dispatch function, not just the
-    adapter method — the request path a real Meta webhook would take."""
-    with patch.object(responder, "match_and_respond") as match_and_respond, patch.object(
-        whatsapp_adapter, "send_message"
-    ) as send_message:
-        app._process_whatsapp_event("919876543210", "Hi, do you deliver to Delhi?")
-    assert match_and_respond.call_count == 0
-    assert send_message.call_count == 0
-
-
 # ---------------------------------------------------------------------------
 # Instagram: the full architecture is unchanged
 # ---------------------------------------------------------------------------
@@ -370,46 +244,5 @@ def test_duplicate_instagram_escalation_does_not_create_duplicate_handoffs():
     assert len(rows) == 1
 
 
-# ---------------------------------------------------------------------------
-# Configuration is protected in code, not just by default value
-# ---------------------------------------------------------------------------
-
-def test_whatsapp_chatbot_enabled_default_is_false():
-    assert config.WHATSAPP_CHATBOT_ENABLED is False
-
-
 def test_instagram_chatbot_enabled_default_is_true():
     assert config.INSTAGRAM_CHATBOT_ENABLED is True
-
-
-def test_disabling_whatsapp_chatbot_is_the_only_way_to_change_the_behavior():
-    """Flipping the flag on is an explicit, logged escape hatch — proving the
-    code path exists behind it without it being reachable by any other means.
-    Both flags must be set: a single flipped boolean is not a decision."""
-    with patch.object(config, "WHATSAPP_CHATBOT_ENABLED", True), patch.object(
-        config, "WHATSAPP_CHATBOT_ENABLE_CONFIRM", True,
-    ), patch.object(
-        responder, "match_and_respond", return_value=("x", True, "greeting", None),
-    ) as match_and_respond, patch.object(whatsapp_adapter, "send_message"):
-        whatsapp_adapter.process_incoming_message("919876543210", "Hi")
-    assert match_and_respond.called
-
-
-def test_whatsapp_chatbot_enabled_alone_fails_safe_to_human_only():
-    """A single accidentally-flipped WHATSAPP_CHATBOT_ENABLED=true (a stray
-    .env value, a copy-paste mistake) must not be enough to put the AI back
-    on WhatsApp — the client's channel policy is enforced in code, not by one
-    default. Without the separate WHATSAPP_CHATBOT_ENABLE_CONFIRM flag, the
-    message is still handled human-only and no chatbot machinery runs."""
-    with patch.object(config, "WHATSAPP_CHATBOT_ENABLED", True), patch.object(
-        responder, "match_and_respond",
-    ) as match_and_respond, patch.object(whatsapp_adapter, "send_message") as send_message:
-        result = whatsapp_adapter.process_incoming_message("919876543210", "Hi")
-    assert not match_and_respond.called
-    assert not send_message.called
-    assert result["bot_replied"] is False
-    assert result["response_text"] is None
-
-
-def test_whatsapp_chatbot_enable_confirm_defaults_false():
-    assert config.WHATSAPP_CHATBOT_ENABLE_CONFIRM is False
