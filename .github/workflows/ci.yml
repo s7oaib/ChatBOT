@@ -30,7 +30,7 @@ jobs:
       META_APP_SECRET: "test_secret_for_ci_pipeline"
       ADMIN_API_KEY: "test_admin_api_key_ci"
       ADMIN_PIN: "51990"
-      DB_PATH: ${{ runner.temp }}/camellia-ci.db
+      DB_PATH: "test_camellia_ci.db"
       ENABLE_WEB_TESTER: "true"
       INSTAGRAM_ACCESS_TOKEN: "mock_test_token"
       WHATSAPP_MOCK_MODE: "true"
