@@ -109,7 +109,7 @@ def verify_media_by_id(media_id: str) -> Dict[str, Any]:
         return {"status": "not_configured"}
     if not media_id or not media_id.isdigit():
         return {"status": "invalid_media_id"}
-    version = config.WHATSAPP_API_VERSION
+    version = config.INSTAGRAM_API_VERSION
     host = "graph.instagram.com" if token.startswith("IGAA") else "graph.facebook.com"
     url = f"https://{host}/{version}/{media_id}"
     try:
@@ -153,7 +153,7 @@ def lookup_instagram_media(identity: Dict[str, str]) -> Dict[str, Any]:
     token = (config.INSTAGRAM_ACCESS_TOKEN or "").strip()
     if not token:
         return {"metadata_status": "not_configured"}
-    version = config.WHATSAPP_API_VERSION
+    version = config.INSTAGRAM_API_VERSION
     fields = "id,caption,media_type,media_url,permalink,thumbnail_url,children{media_type,media_url,thumbnail_url}"
     try:
         with httpx.Client(timeout=8.0) as client:

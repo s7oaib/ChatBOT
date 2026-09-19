@@ -13,6 +13,7 @@ A repeated "human please" from the same customer reuses the active handoff
 (`db.get_active_handoff`) instead of minting a new reference every time.
 """
 
+import hashlib
 import random
 import re
 import urllib.parse
@@ -25,6 +26,10 @@ from camellia.monitoring import get_logger
 from camellia.session_memory import session_memory
 
 log = get_logger("camellia.handoff")
+
+
+def _user_hash(user_id: str) -> str:
+    return hashlib.sha256(str(user_id or "").encode("utf-8")).hexdigest()[:12]
 
 # The reference is opaque by design: no database id, no phone number, no
 # sequential counter a competitor could use to estimate order volume.
@@ -202,7 +207,7 @@ def get_or_create_handoff(
         expires_at=expires_at,
     )
     if newly_created:
-        log.info("Created handoff %s for %s/%s (%s).", reference, channel, user_id, reason)
+        log.info("Created handoff %s for channel=%s user_hash=%s (%s).", reference, channel, _user_hash(user_id), reason)
     handoff["newly_created"] = newly_created
     handoff["verified_order"] = order_summary
     return handoff
@@ -328,7 +333,7 @@ def retire_order_state(user_id: str, channel: str) -> None:
     reel and then ordered is still in that reel's context afterwards.
     """
     session_memory.clear_order_draft(user_id, channel)
-    log.info("Retired Instagram order state for %s/%s after WhatsApp referral.", channel, user_id)
+    log.info("Retired Instagram order state for channel=%s user_hash=%s after WhatsApp referral.", channel, _user_hash(user_id))
 
 
 def mark_whatsapp_connected(handoff_ref: str) -> Optional[Dict[str, Any]]:

@@ -28,6 +28,8 @@ class _FakeResponse:
 
 def test_a_real_media_id_resolves_its_permalink_and_shortcode(monkeypatch):
     monkeypatch.setattr(instagram_routing.config, "INSTAGRAM_ACCESS_TOKEN", "IGAAtoken")
+    monkeypatch.setattr(instagram_routing.config, "INSTAGRAM_API_VERSION", "v25.0")
+    monkeypatch.setattr(instagram_routing.config, "WHATSAPP_API_VERSION", "v99.0")
     captured = {}
 
     class _Client:
@@ -49,9 +51,8 @@ def test_a_real_media_id_resolves_its_permalink_and_shortcode(monkeypatch):
     monkeypatch.setattr(instagram_routing.httpx, "Client", lambda **kw: _Client())
     result = verify_media_by_id("17930882778146779")
 
-    assert captured["url"] == "https://graph.instagram.com/v22.0/17930882778146779".replace(
-        "v22.0", instagram_routing.config.WHATSAPP_API_VERSION
-    )
+    assert captured["url"] == "https://graph.instagram.com/v25.0/17930882778146779"
+    assert "v99.0" not in captured["url"]
     assert result["status"] == "verified"
     assert result["canonical_url"] == "https://www.instagram.com/p/Dc2PmrQE3Y4/"
     assert result["shortcode"] == "Dc2PmrQE3Y4"

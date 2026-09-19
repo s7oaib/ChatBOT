@@ -452,16 +452,11 @@ def verify_meta_signature(raw_body: bytes, signature_header: Optional[str]) -> N
 
     if not signature_header or not hmac.compare_digest(expected, signature_header):
         log.warning(
-            "Rejected webhook payload signature mismatch!\n"
-            "  Body length: %d bytes\n"
-            "  Secret length: %d (starts with '%s...')\n"
-            "  Received Header: %s\n"
-            "  Expected HMAC:   %s",
+            "Rejected webhook payload signature mismatch (body_length=%d, "
+            "secret_configured=%s, signature_present=%s).",
             len(raw_body),
-            len(secret),
-            secret[:4] if len(secret) >= 4 else "***",
-            signature_header,
-            expected,
+            bool(secret),
+            bool(signature_header),
         )
         raise HTTPException(status_code=403, detail="Invalid payload signature")
 
@@ -676,8 +671,11 @@ def _process_instagram_event(
         customer_message = str(message_text or "").strip() or "[shared media]"
         response_input = str(message_text or "").strip() or "Tell me more"
         log.info(
-            "Instagram inbound from %s: source=%s ad_id=%s ad_title=%r payload=%r",
-            sender_id, entry.source, trace["ad_id"], trace["ad_title"], entry.raw_payload,
+            "Instagram inbound: sender_hash=%s source=%s ad_present=%s "
+            "ad_title_present=%s media_present=%s text_present=%s",
+            _safe_identifier_hash(sender_id), entry.source,
+            bool(trace["ad_id"]), bool(trace["ad_title"]),
+            bool(source_media_present), bool(str(message_text or "").strip()),
         )
 
         response_text, was_matched, template_id, image_url = responder.match_and_respond(
@@ -881,7 +879,7 @@ def _reply_to_unreadable_attachment(
     try:
         facts = session_memory.get_facts(sender_id, "instagram")
         if facts.get("attachment_notice_sent"):
-            log.info("Attachment from %s; the type-instead notice was already sent.", sender_id)
+            log.info("Attachment notice already sent for sender_hash=%s.", _safe_identifier_hash(sender_id))
             if source_media_present:
                 _log_unreadable_attachment_audit(
                     sender_id, source_type=source_type, media_id=media_id,
@@ -1357,14 +1355,42 @@ def get_instagram_media_verification(
     return verify_media_by_id(media_id)
 
 
-def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks) -> dict:
-    log.info("Instagram Webhook Raw Payload:\n%s", json.dumps(payload, indent=2))
+def _safe_identifier_hash(value: Any) -> Optional[str]:
+    """Return a short correlation token without logging the raw identifier."""
+    raw = str(value or "").strip()
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12] if raw else None
 
-    results = []
+
+def _safe_instagram_event_shape(messaging_event: dict) -> Dict[str, Any]:
+    """Describe an event without retaining customer text or raw payload."""
+    message = messaging_event.get("message") or {}
+    reply_to = message.get("reply_to") or {}
+    return {
+        "has_text": bool(message.get("text") or (messaging_event.get("message_edit") or {}).get("text")),
+        "has_attachment": bool(message.get("attachments")),
+        "has_postback": bool(messaging_event.get("postback")),
+        "has_story_reply": bool(isinstance(reply_to, dict) and reply_to.get("story")),
+        "has_story_mention": bool(message.get("story_mention") or messaging_event.get("story_mention")),
+        "has_referral": bool(message.get("referral") or messaging_event.get("referral")),
+        "is_echo": bool(message.get("is_echo") or (messaging_event.get("message_edit") or {}).get("is_echo")),
+        "is_read": "read" in messaging_event,
+        "is_delivery": "delivery" in messaging_event,
+    }
+
+
+def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks) -> dict:
+    entries = payload.get("entry", []) if isinstance(payload, dict) else []
+    if not isinstance(entries, list):
+        entries = []
     configured_account_id = str(getattr(config, "INSTAGRAM_ACCOUNT_ID", "") or "").strip()
-    for entry in payload.get("entry", []):
+    log.info(
+        "Instagram webhook received: entry_count=%d account_guard_configured=%s",
+        len(entries), bool(configured_account_id),
+    )
+    results = []
+    for entry in entries:
         if configured_account_id and str(entry.get("id", "")) != configured_account_id:
-            log.info("Ignored Instagram webhook entry for a foreign account.")
+            log.info("Ignored Instagram webhook entry for foreign account (foreign_account=true).")
             continue
 
         events = list(entry.get("messaging", []))
@@ -1378,6 +1404,11 @@ def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks
             is_ad_qualified, sender_id, message_text, ad_id = ad_gate.inspect_and_gate_message(messaging_event)
             entry_point = describe_entry_point(messaging_event)
             message = messaging_event.get("message") or {}
+            log.info(
+                "Instagram event observed: sender_hash=%s source=%s shape=%s",
+                _safe_identifier_hash(sender_id), entry_point.source,
+                _safe_instagram_event_shape(messaging_event),
+            )
 
             # Story IDs are durable routing evidence even when the operator
             # has not mapped them yet. Capture before sender/ad-gate handling
@@ -1476,8 +1507,9 @@ def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks
                 if reason:
                     _record_dropped_webhook_event(reason, messaging_event, sender_id)
                 log.warning(
-                    "Ignored Instagram event without text payload (sender: %s, keys: %s, inner: %s).",
-                    sender_id, list(messaging_event.keys()),
+                    "Ignored Instagram event without text payload "
+                    "(sender_hash=%s, keys=%s, inner=%s).",
+                    _safe_identifier_hash(sender_id), list(messaging_event.keys()),
                     list((messaging_event.get("postback") or messaging_event.get("message") or {}).keys()),
                 )
                 results.append({"sender_id": sender_id, "action": "ignored_empty_text"})
@@ -1485,7 +1517,7 @@ def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks
 
             if not is_ad_qualified:
                 # Hard Gate: Ignore organic messages per PRD Requirement #4
-                log.info("Ad-gate: sender %s is a non-ad organic DM; left for manual reply.", sender_id)
+                log.info("Ad-gate: sender_hash=%s is a non-ad organic DM; left for manual reply.", _safe_identifier_hash(sender_id))
                 results.append({"sender_id": sender_id, "action": "ignored_organic_dm"})
                 continue
 
@@ -1703,9 +1735,11 @@ def send_instagram_reply(
     cards_first = any(caption for _, caption in captioned) and not text_first
 
     if not config.INSTAGRAM_ACCESS_TOKEN:
-        safe_text = text[:60].encode("ascii", "backslashreplace").decode("ascii")
-        msg_type = f"IMAGE x{len(images)} ({', '.join(images)})" if images else "TEXT"
-        log.info("[MOCK IG OUTBOUND] [%s] To: %s | Message: %s...", msg_type, recipient_id, safe_text)
+        msg_type = f"IMAGE x{len(images)}" if images else "TEXT"
+        log.info(
+            "[MOCK IG OUTBOUND] type=%s recipient_hash=%s text_length=%d",
+            msg_type, _safe_identifier_hash(recipient_id), len(text or ""),
+        )
         return {"mock": True, "status": "sent", "recipient": recipient_id, "type": msg_type}
 
     token = config.INSTAGRAM_ACCESS_TOKEN.strip()
@@ -1918,7 +1952,7 @@ def send_instagram_reply(
             log.warning(
                 "Could not finalize failed Instagram outbound audit %s: %s",
                 parent_send_id, _safe_outbound_exception(audit_error),
-            )
+        )
         delivery_monitor.record_failure(
             "instagram", str(e),
             classification=failure_classification or classify_instagram_delivery(
@@ -1926,7 +1960,10 @@ def send_instagram_reply(
             ),
         )
         if hasattr(e, "response") and getattr(e, "response", None) is not None:
-            log.error("Instagram Meta API Error Body: %s", e.response.text)
+            log.error(
+                "Instagram Meta API request failed: http_status=%s error_type=%s.",
+                e.response.status_code, type(e).__name__,
+            )
         return {"error": str(e), "status": "failed"}
 
 # --------------------------------------------------------------------------
@@ -3349,7 +3386,7 @@ def delete_user_data(user_id: str, x_admin_key: Optional[str] = Header(None), x_
     removed = db.delete_user_data(user_id)
     session_memory.clear_session(user_id, "instagram")
     session_memory.clear_session(user_id, "whatsapp")
-    log.info("Erased all stored data for user %s: %s", user_id, removed)
+    log.info("Erased all stored data for user_hash=%s: %s", _safe_identifier_hash(user_id), removed)
     return {"status": "deleted", "user_id": user_id, "removed": removed}
 
 @app.get("/admin/escalations")
