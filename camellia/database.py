@@ -364,6 +364,27 @@ class Database:
             );
             """)
 
+            # Durable staff notification outbox. The escalation row is the
+            # source of truth for the payload; this table tracks one delivery
+            # attempt per escalation without putting customer work on an
+            # in-memory callback that disappears on restart.
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS human_notification_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_key TEXT NOT NULL UNIQUE,
+                event_type TEXT NOT NULL DEFAULT 'ESCALATION_CREATED',
+                escalation_id INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'PENDING',
+                attempts INTEGER NOT NULL DEFAULT 0,
+                next_attempt_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                locked_until TIMESTAMP,
+                last_error TEXT,
+                sent_at TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+
             # Self-Healing Learned Knowledge base. This is the single live,
             # bot-servable answer store — Teach & Resolve, candidate approval,
             # staff/client manual entry and CSV import (Custom Q&A) all write
@@ -2099,6 +2120,8 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_escalations_status_id ON escalations(status, id DESC);",
             "CREATE INDEX IF NOT EXISTS idx_escalations_user ON escalations(user_id);",
             "CREATE INDEX IF NOT EXISTS idx_escalations_created ON escalations(created_at);",
+            "CREATE INDEX IF NOT EXISTS idx_human_notification_due "
+            "ON human_notification_events(status, next_attempt_at, id);",
             # sessions already has a UNIQUE(user_id, channel) index, which
             # serves the per-user lookup; this one serves the dashboard's
             # channel filter with its updated_at ordering and the purge.
@@ -2705,6 +2728,135 @@ class Database:
             """, (user_id, channel, user_message, reason, context_str))
             conn.commit()
             return cursor.lastrowid
+
+    def enqueue_human_notification(self, escalation_id: int) -> Dict[str, Any]:
+        """Create one durable notification event for an escalation."""
+        event_key = f"escalation:{int(escalation_id)}"
+        with self.get_connection() as conn:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO human_notification_events
+                    (event_key, escalation_id)
+                VALUES (?, ?)
+                """,
+                (event_key, int(escalation_id)),
+            )
+            row = conn.execute(
+                "SELECT * FROM human_notification_events WHERE event_key = ?",
+                (event_key,),
+            ).fetchone()
+            conn.commit()
+            return dict(row)
+
+    def claim_human_notification_events(
+        self, *, limit: int = 10, event_id: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """Lease due outbox events so concurrent workers cannot double-send."""
+        limit = max(1, min(int(limit or 1), 50))
+        with self.get_connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            clauses = [
+                "status IN ('PENDING', 'RETRY')",
+                "next_attempt_at <= CURRENT_TIMESTAMP",
+                "(locked_until IS NULL OR locked_until <= CURRENT_TIMESTAMP)",
+            ]
+            params: List[Any] = []
+            if event_id is not None:
+                clauses.append("id = ?")
+                params.append(int(event_id))
+            params.append(limit)
+            rows = conn.execute(
+                "SELECT * FROM human_notification_events WHERE "
+                + " AND ".join(clauses)
+                + " ORDER BY id LIMIT ?",
+                tuple(params),
+            ).fetchall()
+            claimed = []
+            for row in rows:
+                conn.execute(
+                    """
+                    UPDATE human_notification_events
+                    SET status = 'SENDING', attempts = attempts + 1,
+                        locked_until = datetime('now', '+5 minutes'),
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    """,
+                    (int(row["id"]),),
+                )
+                updated = conn.execute(
+                    "SELECT * FROM human_notification_events WHERE id = ?",
+                    (int(row["id"]),),
+                ).fetchone()
+                claimed.append(dict(updated))
+            conn.commit()
+            return claimed
+
+    def complete_human_notification(
+        self,
+        event_id: int,
+        *,
+        success: bool,
+        retryable: bool = False,
+        error: Optional[str] = None,
+        retry_after_seconds: int = 60,
+    ) -> None:
+        """Record an outbox result without retaining provider secrets."""
+        if success:
+            status = "SENT"
+            modifier = None
+        elif retryable:
+            status = "RETRY"
+            modifier = f"+{max(1, min(int(retry_after_seconds), 86400))} seconds"
+        else:
+            status = "FAILED"
+            modifier = None
+        safe_error = str(error or "")[:500] or None
+        with self.get_connection() as conn:
+            if modifier:
+                conn.execute(
+                    """
+                    UPDATE human_notification_events
+                    SET status = ?, next_attempt_at = datetime('now', ?),
+                        locked_until = NULL, last_error = ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    """,
+                    (status, modifier, safe_error, int(event_id)),
+                )
+            else:
+                conn.execute(
+                    """
+                    UPDATE human_notification_events
+                    SET status = ?, sent_at = CASE WHEN ? = 'SENT' THEN CURRENT_TIMESTAMP ELSE sent_at END,
+                        locked_until = NULL, last_error = ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    """,
+                    (status, status, safe_error, int(event_id)),
+                )
+            conn.commit()
+
+    def get_human_notification_events(
+        self, *, limit: int = 50, status: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Return safe outbox audit metadata for operators."""
+        with self.get_connection() as conn:
+            params: List[Any] = []
+            query = "SELECT * FROM human_notification_events"
+            if status:
+                query += " WHERE status = ?"
+                params.append(status)
+            query += " ORDER BY id DESC LIMIT ?"
+            params.append(max(1, min(int(limit or 1), 200)))
+            return [dict(row) for row in conn.execute(query, tuple(params)).fetchall()]
+
+    def get_human_notification_event(self, event_id: int) -> Optional[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM human_notification_events WHERE id = ?",
+                (int(event_id),),
+            ).fetchone()
+            return dict(row) if row else None
 
     def get_escalations(self, limit: int = 50, status: Optional[str] = None) -> List[Dict[str, Any]]:
         """Retrieve recorded escalations."""
@@ -3568,6 +3720,11 @@ class Database:
             cursor = conn.cursor()
             cursor.execute(f"DELETE FROM conversations WHERE {older_than('timestamp')}", (cutoff,))
             removed_conversations = cursor.rowcount
+            cursor.execute(
+                "DELETE FROM human_notification_events WHERE escalation_id IN "
+                "(SELECT id FROM escalations WHERE " + older_than("created_at") + ")",
+                (cutoff,),
+            )
             cursor.execute(f"DELETE FROM escalations WHERE {older_than('created_at')}", (cutoff,))
             removed_escalations = cursor.rowcount
             cursor.execute(f"DELETE FROM sessions WHERE {older_than('updated_at')}", (cutoff,))
@@ -3589,6 +3746,11 @@ class Database:
             cursor = conn.cursor()
             cursor.execute("DELETE FROM conversations WHERE user_id = ?", (user_id,))
             removed_conversations = cursor.rowcount
+            cursor.execute(
+                "DELETE FROM human_notification_events WHERE escalation_id IN "
+                "(SELECT id FROM escalations WHERE user_id = ?)",
+                (user_id,),
+            )
             cursor.execute("DELETE FROM escalations WHERE user_id = ?", (user_id,))
             removed_escalations = cursor.rowcount
             cursor.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))

@@ -1,3 +1,4 @@
+import json
 import httpx
 from typing import Dict, Any, Optional
 from camellia.config import config
@@ -58,15 +59,61 @@ class Escalator:
             context_data=context
         )
 
-        # 2. Dispatch human alert notification
-        alert_result = self.send_human_alert(escalation_id, user_id, channel, user_message, reason, context)
+        # 2. Enqueue before attempting delivery. The escalation row and its
+        # outbox event survive a process restart or provider outage.
+        event = db.enqueue_human_notification(escalation_id)
+        self.process_pending_notifications(event_id=int(event["id"]))
+        notification = db.get_human_notification_event(int(event["id"]))
+        alert_sent = bool(notification and notification.get("status") == "SENT")
 
         return {
             "escalation_id": escalation_id,
             "status": "escalated",
             "handoff_brief": handoff_brief,
-            "alert_sent": alert_result.get("status") == "sent" or alert_result.get("mock") is True
+            "alert_sent": alert_sent,
         }
+
+    def process_pending_notifications(
+        self, *, limit: int = 10, event_id: Optional[int] = None,
+    ) -> int:
+        """Deliver due durable staff events once, with bounded retry state."""
+        delivered = 0
+        for event in db.claim_human_notification_events(limit=limit, event_id=event_id):
+            escalation = db.get_escalation_by_id(int(event["escalation_id"]))
+            if not escalation:
+                db.complete_human_notification(
+                    int(event["id"]), success=False, retryable=False,
+                    error="escalation record is missing",
+                )
+                continue
+            try:
+                context = json.loads(escalation.get("context_data") or "{}")
+                if not isinstance(context, dict):
+                    context = {}
+            except (TypeError, ValueError):
+                context = {}
+            try:
+                result = self.send_human_alert(
+                    int(escalation["id"]), escalation["user_id"], escalation["channel"],
+                    escalation["user_message"], escalation["reason"], context,
+                )
+            except Exception as exc:
+                log.exception("Durable human notification dispatch failed unexpectedly.")
+                result = {
+                    "status": "failed", "retryable": False,
+                    "error": type(exc).__name__,
+                }
+            success = result.get("status") == "sent" or result.get("mock") is True
+            attempts = max(1, int(event.get("attempts") or 1))
+            retry_delay = min(3600, 60 * (2 ** min(attempts - 1, 6)))
+            db.complete_human_notification(
+                int(event["id"]), success=success,
+                retryable=bool(result.get("retryable")),
+                error=result.get("error"), retry_after_seconds=retry_delay,
+            )
+            if success:
+                delivered += 1
+        return delivered
 
     def _evaluate_order_verification(self, user_message: str, chat_history: str) -> str:
         """Inspects message & history for phone number & address to flag potential fake/unverified orders."""
@@ -142,9 +189,23 @@ class Escalator:
                     resp = client.post(url, headers=headers, json=payload)
                     resp.raise_for_status()
                     return {"status": "sent", "api_response": resp.json()}
+            except httpx.HTTPStatusError as e:
+                status_code = e.response.status_code if e.response is not None else None
+                retryable = status_code == 429 or bool(status_code and status_code >= 500)
+                log.error("Failed to send escalation alert to owner: HTTP %s", status_code)
+                return {
+                    "status": "failed", "retryable": retryable,
+                    "error": f"HTTP {status_code or 'unknown'}",
+                }
+            except (httpx.TimeoutException, httpx.NetworkError) as e:
+                log.error("Failed to send escalation alert to owner: %s", type(e).__name__)
+                return {
+                    "status": "failed", "retryable": True,
+                    "error": type(e).__name__,
+                }
             except Exception as e:
-                log.error("Failed to send escalation alert to owner: %s", e)
-                return {"status": "failed", "error": str(e)}
+                log.error("Failed to send escalation alert to owner: %s", type(e).__name__)
+                return {"status": "failed", "retryable": False, "error": type(e).__name__}
         else:
             # Development / Mock notification
             safe_alert = alert_body.encode("ascii", "backslashreplace").decode("ascii")

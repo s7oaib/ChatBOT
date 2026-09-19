@@ -198,6 +198,14 @@ async def lifespan(app: FastAPI):
     _prune_expired_weekly_menus()
 
     db.init_db()
+    try:
+        delivered_notifications = await asyncio.to_thread(
+            escalator.process_pending_notifications, limit=20,
+        )
+        if delivered_notifications:
+            log.info("Delivered %s durable human notification event(s) on startup.", delivered_notifications)
+    except Exception:
+        log.exception("Could not process durable human notification events on startup.")
     configured_recovery_hashes = [
         item.strip()
         for item in re.split(r"[\s,]+", config.ADMIN_MFA_RECOVERY_CODE_HASHES or "")
@@ -301,9 +309,19 @@ async def lifespan(app: FastAPI):
             config.INSTAGRAM_STORY_SYNC_INTERVAL_SECONDS,
         )
 
+    notification_stop = asyncio.Event()
+    notification_task = asyncio.create_task(
+        _human_notification_loop(notification_stop),
+    )
     try:
         yield
     finally:
+        notification_stop.set()
+        notification_task.cancel()
+        try:
+            await notification_task
+        except asyncio.CancelledError:
+            pass
         if story_sync_stop is not None:
             story_sync_stop.set()
         if story_sync_task is not None:
@@ -312,6 +330,25 @@ async def lifespan(app: FastAPI):
                 await story_sync_task
             except asyncio.CancelledError:
                 pass
+
+
+async def _human_notification_loop(stop_event: asyncio.Event) -> None:
+    """Poll the durable notification outbox with bounded work per pass."""
+    while not stop_event.is_set():
+        try:
+            delivered = await asyncio.to_thread(
+                escalator.process_pending_notifications, limit=20,
+            )
+            if delivered:
+                log.info("Delivered %s durable human notification event(s).", delivered)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("Durable human notification poll failed.")
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=30.0)
+        except asyncio.TimeoutError:
+            pass
 
 limiter = Limiter(key_func=get_remote_address, default_limits=["300/minute"])
 app = FastAPI(
@@ -3304,6 +3341,13 @@ def get_escalations_list(limit: int = 50, status: Optional[str] = None, x_admin_
     require_admin(x_admin_key, x_admin_pin)
     escalations = db.get_escalations(limit, status)
     return {"count": len(escalations), "escalations": escalations}
+
+@app.get("/admin/notifications")
+def get_human_notifications_list(limit: int = 50, status: Optional[str] = None, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    """Returns durable staff-notification delivery status, without payloads."""
+    require_admin(x_admin_key, x_admin_pin)
+    events = db.get_human_notification_events(limit=limit, status=status)
+    return {"count": len(events), "notifications": events}
 
 @app.get("/admin/analytics")
 def get_analytics(x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
