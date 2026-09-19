@@ -92,6 +92,7 @@ from camellia.assisted_resolution import create_suggestion
 from camellia.auto_resolve import simulate_auto_resolve
 from camellia.content_integrity import apply_confirmed_menu_facts, apply_safe_content_remediations
 from camellia.instagram_story_sync import sync_instagram_stories, story_sync_loop
+from camellia import owner_notifications
 
 log = get_logger("camellia.app")
 
@@ -422,6 +423,34 @@ app.mount("/images", StaticFiles(directory=os.path.join(BASE_DIR, "images")), na
 # have it yet, and StaticFiles raises if the directory is missing at mount time.
 os.makedirs(weekly_flyer.uploads_dir(), exist_ok=True)
 app.mount("/uploads", StaticFiles(directory=weekly_flyer.uploads_dir()), name="uploads")
+
+
+@app.get("/camellia-push-sw.js")
+def camellia_push_service_worker():
+    """Minimal root-scoped service worker for explicit Admin Web Push opt-in."""
+    return Response(
+        content="""self.addEventListener('push', function(event) {
+  if (!event.data) return;
+  const payload = event.data.json();
+  event.waitUntil(self.registration.showNotification(payload.title || 'Camellia notification', {
+    body: payload.body || 'A new handoff is waiting.',
+    tag: payload.handoff_ref || 'camellia-handoff',
+    data: { url: payload.url || '/admin' },
+    renotify: false
+  }));
+});
+self.addEventListener('notificationclick', function(event) {
+  event.notification.close();
+  const url = (event.notification.data && event.notification.data.url) || '/admin';
+  event.waitUntil(clients.matchAll({type: 'window', includeUncontrolled: true}).then(function(windows) {
+    for (const client of windows) {
+      if ('focus' in client) { client.navigate(url); return client.focus(); }
+    }
+    return clients.openWindow(url);
+  }));
+});""",
+        media_type="application/javascript",
+    )
 
 def verify_meta_signature(raw_body: bytes, signature_header: Optional[str]) -> None:
     """
@@ -2401,6 +2430,12 @@ def health_check():
     storage = _storage_durability()
     instagram_token = instagram_token_status()
     instagram_outbound = db.instagram_outbound_health()
+    try:
+        notification_email = owner_notifications.email_readiness()
+        notification_push = owner_notifications.web_push_readiness(db.web_push_subscription_count())
+    except Exception as exc:
+        notification_email = {"configured": False, "ready": False, "reason": type(exc).__name__}
+        notification_push = {"enabled": bool(config.WEB_PUSH_ENABLED), "configured": False, "ready": False, "subscriber_count": 0, "reason": type(exc).__name__}
 
     # Shadow mode is switched on in the host dashboard, which nothing in this
     # repo can read. Without this, turning it on and hoping is the only option.
@@ -2496,6 +2531,11 @@ def health_check():
             "human_escalation_notifications": {
                 "status": "SKIPPED",
                 "reason": "WhatsApp automation removed; staff alerts are manual-only.",
+            },
+            "owner_notifications": {
+                "email": notification_email,
+                "admin": {"enabled": True},
+                "web_push": notification_push,
             },
             "whatsapp": {
                 "automation": "removed",
@@ -3331,7 +3371,72 @@ def get_human_notifications_list(limit: int = 50, status: Optional[str] = None, 
     """Returns durable staff-notification delivery status, without payloads."""
     require_admin(x_admin_key, x_admin_pin)
     events = db.get_human_notification_events(limit=limit, status=status)
+    for event in events:
+        event["deliveries"] = db.get_notification_deliveries(int(event["id"]))
     return {"count": len(events), "notifications": events}
+
+
+@app.get("/admin/notification-status")
+def get_admin_notification_status(limit: int = 50):
+    """Return Admin-only unread/seen state, separate from CAM business status."""
+    require_admin()
+    return db.get_admin_notification_state(limit=limit)
+
+
+@app.post("/admin/notification-status/{handoff_ref}/seen")
+def mark_admin_notification_seen(handoff_ref: str):
+    require_admin()
+    db.mark_admin_notification_seen(handoff_ref)
+    return {"status": "seen", "handoff_ref": handoff_ref}
+
+
+@app.get("/admin/notifications/config")
+def get_owner_notification_config():
+    """Safe channel readiness plus the public VAPID key only."""
+    require_admin()
+    email = owner_notifications.email_readiness()
+    push = owner_notifications.web_push_readiness(db.web_push_subscription_count())
+    return {
+        "email": email,
+        "admin": {"enabled": True},
+        "web_push": {
+            **push,
+            "public_key": config.WEB_PUSH_VAPID_PUBLIC_KEY if push["configured"] else None,
+        },
+    }
+
+
+@app.post("/admin/notifications/push-subscriptions")
+async def subscribe_owner_web_push(request: Request):
+    require_admin()
+    try:
+        body = await request.json()
+        keys = body.get("keys") or {}
+        endpoint = str(body.get("endpoint") or "").strip()
+        p256dh = str(keys.get("p256dh") or "").strip()
+        auth = str(keys.get("auth") or "").strip()
+        if not endpoint or not p256dh or not auth:
+            raise ValueError("endpoint and subscription keys are required")
+        stored = db.upsert_web_push_subscription(
+            endpoint=endpoint, p256dh=p256dh, auth=auth,
+            user_agent=request.headers.get("user-agent", ""),
+        )
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"status": "subscribed", "subscription": stored}
+
+
+@app.delete("/admin/notifications/push-subscriptions")
+async def unsubscribe_owner_web_push(request: Request):
+    require_admin()
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    endpoint = str(body.get("endpoint") or "").strip()
+    if endpoint:
+        db.revoke_web_push_endpoint(endpoint)
+    return {"status": "unsubscribed"}
 
 @app.post("/admin/handoffs/{handoff_ref}/resume")
 def resume_handoff(
@@ -6028,10 +6133,17 @@ def get_admin_dashboard():
         <div class="status-items">
             <span class="status-pill"><span class="dot gold" id="ocrDot"></span> Menu reader: <b id="ocrStatus">checking…</b></span>
             <span class="status-pill">Dishes live: <b id="activeCountBadge">Loading...</b></span>
+            <button class="status-pill" id="handoffAlertButton" type="button" onclick="openNewHandoffs()" style="border:1px solid var(--border); cursor:pointer; background:#fff;">🔔 New handoff <b id="handoffUnreadBadge">0</b></button>
         </div>
         <div>
             <span>Escalation Contact: <b>Camellia Kitchen Team</b> (+91 87965 51990)</span>
         </div>
+    </div>
+
+    <div id="handoffToast" role="status" aria-live="polite" style="display:none; position:fixed; right:20px; top:92px; z-index:8000; max-width:360px; background:#fff; border:1px solid #E8C56A; border-left:5px solid var(--gold); border-radius:12px; box-shadow:0 8px 28px rgba(0,0,0,.14); padding:14px 16px;">
+        <div style="display:flex; justify-content:space-between; gap:12px; align-items:start;"><b id="handoffToastTitle">New handoff</b><button type="button" onclick="hideHandoffToast()" aria-label="Dismiss" style="border:0;background:none;cursor:pointer;font-size:1.1rem;">×</button></div>
+        <div id="handoffToastBody" style="font-size:.84rem; margin-top:5px;"></div>
+        <button type="button" class="btn-secondary" style="margin-top:10px; padding:6px 10px;" onclick="openNewHandoffs()">Open handoffs</button>
     </div>
 
     <!-- Main Workspace -->
@@ -6427,6 +6539,13 @@ THIS WEEK'S BENGAL SPECIALS
                 <h2>📈 Customers waiting on a person</h2>
                 <p>Monitor automated Q&A resolution rates and view queries routed to kitchen management with 1-click self-healing.</p>
             </div>
+
+            <div style="display:flex; flex-wrap:wrap; gap:12px; align-items:center; padding:12px 14px; margin-bottom:18px; background:#FFFBEB; border:1px solid #FDE68A; border-radius:12px;">
+                <div style="flex:1; min-width:230px;"><b>Owner notifications</b><div id="ownerNotificationStatus" style="font-size:.8rem; color:#64748B; margin-top:3px;">Checking channel readiness…</div></div>
+                <label style="font-size:.82rem; display:flex; gap:6px; align-items:center;"><input type="checkbox" id="handoffSoundToggle"> Sound for new handoffs</label>
+                <button class="btn-secondary" type="button" id="pushOptInButton" onclick="toggleOwnerPush()">Enable browser push</button>
+            </div>
+            <div style="margin-bottom:20px;"><b style="font-size:.92rem;">Recent CAM handoffs</b><div id="newHandoffsList" aria-live="polite"></div></div>
 
             <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 24px;">
                 <div style="background: #F8FAFC; border: 1px solid var(--border); padding: 18px; border-radius: 14px; text-align: center;">
@@ -7052,6 +7171,160 @@ THIS WEEK'S BENGAL SPECIALS
         let adminAuthenticated = false;
         let authRequestGeneration = 0;
         let selectedFile = null;
+        let ownerNotificationInitialized = false;
+        let ownerNotificationRefs = new Set();
+        let ownerNotificationPoll = null;
+        let ownerNotificationToastTimer = null;
+        let ownerPushConfig = null;
+
+        function ownerNotificationSoundEnabled() {
+            return localStorage.getItem('camellia_handoff_sound') === 'true';
+        }
+
+        function playHandoffChime() {
+            if (!ownerNotificationSoundEnabled()) return;
+            try {
+                const audio = new (window.AudioContext || window.webkitAudioContext)();
+                const oscillator = audio.createOscillator();
+                const gain = audio.createGain();
+                oscillator.frequency.value = 660;
+                gain.gain.setValueAtTime(0.035, audio.currentTime);
+                gain.gain.exponentialRampToValueAtTime(0.0001, audio.currentTime + 0.28);
+                oscillator.connect(gain); gain.connect(audio.destination);
+                oscillator.start(); oscillator.stop(audio.currentTime + 0.28);
+            } catch (e) { /* browser autoplay/accessibility policy wins */ }
+        }
+
+        function hideHandoffToast() {
+            const toast = document.getElementById('handoffToast');
+            if (toast) toast.style.display = 'none';
+            if (ownerNotificationToastTimer) clearTimeout(ownerNotificationToastTimer);
+        }
+
+        function showHandoffToast(item) {
+            const toast = document.getElementById('handoffToast');
+            if (!toast) return;
+            document.getElementById('handoffToastTitle').textContent = 'New handoff ' + (item.handoff_ref || '');
+            document.getElementById('handoffToastBody').textContent = (item.reason || 'Human assistance requested') + ' · WAITING_FOR_HUMAN';
+            toast.style.display = 'block';
+            if (ownerNotificationToastTimer) clearTimeout(ownerNotificationToastTimer);
+            ownerNotificationToastTimer = setTimeout(hideHandoffToast, 12000);
+        }
+
+        async function pollOwnerNotifications(initial = false) {
+            if (!adminAuthenticated) return;
+            try {
+                const response = await fetch('/admin/notification-status?limit=50', { headers: getAuthHeaders(), credentials: 'same-origin' });
+                if (!response.ok) return;
+                const data = await response.json();
+                const items = data.handoffs || [];
+                const badge = document.getElementById('handoffUnreadBadge');
+                if (badge) badge.textContent = data.unread_count || 0;
+                const list = document.getElementById('newHandoffsList');
+                if (list) {
+                    list.innerHTML = items.slice(0, 8).map(item => `<button type="button" onclick="markHandoffSeen('${escapeHtml(item.handoff_ref)}')" style="display:block;width:100%;text-align:left;border:1px solid var(--border);background:${item.seen_at ? '#fff' : '#FFFBEB'};border-radius:9px;padding:9px 11px;margin-top:7px;cursor:pointer;"><b>${escapeHtml(item.handoff_ref)}</b> · ${escapeHtml(item.reason || 'Human assistance requested')}<small style="display:block;color:var(--text-muted);margin-top:3px;">${escapeHtml(item.created_at || '')} · ${escapeHtml(item.status || 'WAITING_FOR_HUMAN')}</small></button>`).join('') || '<span style="color:var(--text-muted);font-size:.82rem;">No handoffs recorded yet.</span>';
+                }
+                if (initial || !ownerNotificationInitialized) {
+                    items.forEach(item => ownerNotificationRefs.add(item.handoff_ref));
+                    ownerNotificationInitialized = true;
+                    return;
+                }
+                const previouslyAlerted = JSON.parse(localStorage.getItem('camellia_alerted_handoffs') || '[]');
+                const alerted = new Set(previouslyAlerted.slice(-100));
+                const fresh = items.filter(item => item.handoff_ref && !ownerNotificationRefs.has(item.handoff_ref) && !item.seen_at && !alerted.has(item.handoff_ref));
+                items.forEach(item => ownerNotificationRefs.add(item.handoff_ref));
+                if (fresh.length) {
+                    const item = fresh[0];
+                    alerted.add(item.handoff_ref);
+                    localStorage.setItem('camellia_alerted_handoffs', JSON.stringify(Array.from(alerted).slice(-100)));
+                    showHandoffToast(item);
+                    playHandoffChime();
+                    if (document.hidden && 'Notification' in window && Notification.permission === 'granted') {
+                        new Notification('New Camellia handoff', { body: item.handoff_ref + ' · ' + (item.reason || 'Human assistance requested'), tag: item.handoff_ref });
+                    }
+                }
+            } catch (e) { /* polling is advisory; Admin remains usable */ }
+        }
+
+        function openNewHandoffs() {
+            hideHandoffToast();
+            const button = document.querySelector('.tab-btn[onclick*="tab-stats"]');
+            switchTab('tab-stats', button || null);
+            loadAnalytics();
+        }
+
+        async function markHandoffSeen(ref) {
+            if (!ref) return;
+            try { await fetch('/admin/notification-status/' + encodeURIComponent(ref) + '/seen', { method: 'POST', headers: getAuthHeaders(), credentials: 'same-origin' }); } catch (e) { }
+            pollOwnerNotifications(false);
+        }
+
+        function urlBase64ToUint8Array(value) {
+            const padding = '='.repeat((4 - value.length % 4) % 4);
+            const base64 = (value + padding).replace(/-/g, '+').replace(/_/g, '/');
+            return Uint8Array.from(atob(base64), c => c.charCodeAt(0));
+        }
+
+        async function loadOwnerNotificationConfig() {
+            try {
+                const response = await fetch('/admin/notifications/config', { headers: getAuthHeaders() });
+                if (!response.ok) return;
+                ownerPushConfig = await response.json();
+                const email = ownerPushConfig.email || {};
+                const push = ownerPushConfig.web_push || {};
+                const status = document.getElementById('ownerNotificationStatus');
+                if (status) status.textContent = 'Email: ' + (email.ready ? 'ready' : 'not configured') + ' · Admin: ready · Web Push: ' + (push.configured ? 'available' : 'awaiting VAPID setup');
+                const button = document.getElementById('pushOptInButton');
+                if (button) button.disabled = !push.configured;
+                if (button && push.configured && 'serviceWorker' in navigator) {
+                    const registration = await navigator.serviceWorker.getRegistration('/');
+                    const subscription = registration && await registration.pushManager.getSubscription();
+                    button.textContent = subscription ? 'Disable browser push' : 'Enable browser push';
+                    button.onclick = subscription ? disableOwnerPush : toggleOwnerPush;
+                }
+                const sound = document.getElementById('handoffSoundToggle');
+                if (sound) { sound.checked = ownerNotificationSoundEnabled(); sound.onchange = () => localStorage.setItem('camellia_handoff_sound', sound.checked ? 'true' : 'false'); }
+            } catch (e) { }
+        }
+
+        async function toggleOwnerPush() {
+            const button = document.getElementById('pushOptInButton');
+            const push = (ownerPushConfig || {}).web_push || {};
+            if (!push.configured || !push.public_key) return;
+            if (!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) { alert('This browser does not support Web Push.'); return; }
+            try {
+                const permission = await Notification.requestPermission();
+                if (permission !== 'granted') { alert('Browser notification permission was not granted.'); return; }
+                const registration = await navigator.serviceWorker.register('/camellia-push-sw.js');
+                let subscription = await registration.pushManager.getSubscription();
+                if (!subscription) subscription = await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlBase64ToUint8Array(push.public_key) });
+                const json = subscription.toJSON();
+                const response = await fetch('/admin/notifications/push-subscriptions', { method: 'POST', headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify(json) });
+                if (!response.ok) throw new Error('Server did not accept the subscription.');
+                button.textContent = 'Browser push enabled';
+                button.disabled = true;
+                loadOwnerNotificationConfig();
+            } catch (e) { alert(e.message || 'Could not enable browser push.'); }
+        }
+
+        async function disableOwnerPush() {
+            try {
+                const registration = await navigator.serviceWorker.getRegistration('/');
+                const subscription = registration && await registration.pushManager.getSubscription();
+                if (subscription) {
+                    await fetch('/admin/notifications/push-subscriptions', { method: 'DELETE', headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ endpoint: subscription.endpoint }) });
+                    await subscription.unsubscribe();
+                }
+                loadOwnerNotificationConfig();
+            } catch (e) { }
+        }
+
+        function startOwnerNotificationWatch() {
+            pollOwnerNotifications(true);
+            loadOwnerNotificationConfig();
+            if (ownerNotificationPoll) clearInterval(ownerNotificationPoll);
+            ownerNotificationPoll = setInterval(() => pollOwnerNotifications(false), 15000);
+        }
 
         function readCookie(name) {
             const prefix = name + '=';
@@ -7086,7 +7359,7 @@ THIS WEEK'S BENGAL SPECIALS
                 if (requestGeneration !== authRequestGeneration) return;
                 adminAuthenticated = true;
                 hideAuthOverlay();
-                loadActiveMenu(); loadAdRoutes(); loadAnalytics(); refreshCandidateBadge();
+                loadActiveMenu(); loadAdRoutes(); loadAnalytics(); refreshCandidateBadge(); startOwnerNotificationWatch();
             } catch (e) {
                 if (requestGeneration !== authRequestGeneration) return;
                 adminAuthenticated = false;
@@ -7182,6 +7455,7 @@ THIS WEEK'S BENGAL SPECIALS
                     loadAdRoutes();
                     loadAnalytics();
                     refreshCandidateBadge();
+                    startOwnerNotificationWatch();
                 } else {
                     const card = document.getElementById('authCard');
                     card.classList.add('shake');
