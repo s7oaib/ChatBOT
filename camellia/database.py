@@ -2829,6 +2829,32 @@ class Database:
             ).fetchall()
             return [dict(row) for row in rows]
 
+    def notification_channel_pulse(self) -> Dict[str, Dict[str, Any]]:
+        """Safe latest delivery state per channel for health/Admin diagnostics."""
+        with self.get_connection() as conn:
+            rows = conn.execute(
+                """SELECT channel, status, last_error, updated_at
+                FROM notification_deliveries ORDER BY id DESC LIMIT 300"""
+            ).fetchall()
+            pulse: Dict[str, Dict[str, Any]] = {}
+            for row in rows:
+                channel = str(row["channel"] or "").upper()
+                if channel and channel not in pulse:
+                    pulse[channel] = {
+                        "last_status": row["status"],
+                        "last_error": row["last_error"],
+                        "last_updated_at": row["updated_at"],
+                    }
+            for channel in ("EMAIL", "WEB_PUSH", "ADMIN"):
+                failures = conn.execute(
+                    """SELECT COUNT(*) AS count FROM notification_deliveries
+                    WHERE channel = ? AND status IN ('FAILED', 'RETRYING')
+                    AND updated_at >= datetime('now', '-24 hours')""",
+                    (channel,),
+                ).fetchone()["count"]
+                pulse.setdefault(channel, {})["failures_last_24h"] = int(failures or 0)
+            return pulse
+
     def complete_notification_delivery(
         self, delivery_id: int, *, status: str, error: Optional[str] = None,
         retry_after_seconds: int = 60,
