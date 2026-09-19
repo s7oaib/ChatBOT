@@ -2,7 +2,7 @@ name: Camellia Bot CI/CD Pipeline
 
 on:
   push:
-    branches: [ main, master, feature/**, fix/**, 'feature/*' ]
+    branches: [ main, master, 'feature/**', 'fix/**', 'maintenance/**', 'hotfix/**', 'codex/**' ]
   pull_request:
     branches: [ main, master ]
 
@@ -50,4 +50,4 @@ jobs:
           ENABLE_WEB_TESTER: "true"
           INSTAGRAM_ACCESS_TOKEN: "mock_test_token"
         run: |
-          python -m pytest tests/test_bot.py tests/test_admin_portal.py -v --tb=short
+          python -m pytest -q
