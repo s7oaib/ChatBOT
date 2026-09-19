@@ -39,6 +39,14 @@ from camellia.content_integrity import (
 log = get_logger("camellia.responder")
 
 
+def _safe_message_hash(message: str) -> str:
+    return hashlib.sha256(str(message or "").encode("utf-8")).hexdigest()[:12]
+
+
+def _safe_user_hash(user_id: str) -> str:
+    return hashlib.sha256(str(user_id or "").encode("utf-8")).hexdigest()[:12]
+
+
 def compose_topic_response(
     topic_title: str = "", topic_description: str = "", menu_text: str = "",
     response_order: str = "description_first", menu_mode: str = "SELECTED",
@@ -1226,21 +1234,27 @@ class DeterministicResponder:
             return None
 
         if not template_id:
-            log.info("Semantic router did not route %r (%s).", user_message[:80], detail)
+            log.info(
+                "Semantic router did not route message_hash=%s message_length=%d (%s).",
+                _safe_message_hash(user_message), len(user_message or ""), detail,
+            )
             return None
 
         template = next((t for t in templates if t.get("id") == template_id), None)
         if not template or template_id.startswith("GUARD_") or template.get("escalate") is True:
             log.warning(
-                "Semantic router proposed restricted template %r for %r; falling back.",
-                template_id, user_message[:80],
+                "Semantic router proposed restricted template %r for message_hash=%s; falling back.",
+                template_id, _safe_message_hash(user_message),
             )
             return None
 
         if not (template.get("response") or template.get("responses")):
             return None
 
-        log.info("Semantic router matched %r to approved template %s.", user_message[:80], template_id)
+        log.info(
+            "Semantic router matched message_hash=%s to approved template %s.",
+            _safe_message_hash(user_message), template_id,
+        )
         return template
 
     def _structured_nlu_response(
@@ -1583,8 +1597,8 @@ class DeterministicResponder:
             template_id = None
         if len(used_templates) > 1:
             log.info(
-                "STRUCTURED_ROUTE msg=%r intents=%s knowledge=%s actions=%s sufficient=%s",
-                user_message, intents, knowledge_ids, facts["last_actions"], knowledge_sufficient,
+                "STRUCTURED_ROUTE message_hash=%s intents=%s knowledge=%s actions=%s sufficient=%s",
+                _safe_message_hash(user_message), intents, knowledge_ids, facts["last_actions"], knowledge_sufficient,
             )
         return response_text, knowledge_sufficient, template_id, image_value
 
@@ -1651,7 +1665,7 @@ class DeterministicResponder:
 
         if self._should_send_slow_notice(user_id, channel, response_text, template_id):
             session_memory.get_facts(user_id, channel)["slow_notice_sent"] = True
-            log.info("Slow-reply notice sent to %s on %s.", user_id, channel)
+            log.info("Slow-reply notice sent to user_hash=%s on %s.", _safe_user_hash(user_id), channel)
             if was_matched:
                 response_text = f"{config.SLOW_REPLY_NOTICE_TEXT}\n\n{response_text}"
             else:
@@ -1751,7 +1765,10 @@ class DeterministicResponder:
 
         # 0. Instagram Ad-Gate Verification (Deliver strictly to Ad clickers unless bypassed)
         if channel == "instagram" and not config.BYPASS_AD_GATE and referral_source != "ADS":
-            log.info("Ad-Gate Block: Organic Instagram message from user %s blocked.", user_id)
+            log.info(
+                "Ad-Gate Block: Organic Instagram message from user_hash=%s blocked.",
+                _safe_user_hash(user_id),
+            )
             return "", False, "ad_gate_blocked", None
 
         if not user_message or not user_message.strip():
@@ -3120,8 +3137,8 @@ class DeterministicResponder:
         # Require a minimum matching threshold (score >= 4) in hybrid/deterministic mode
         if best_template is not None:
             log.debug(
-                "MATCH_SCORE msg=%r best=%s score=%s runner_up=%s",
-                user_message, best_template.get("id"), best_score,
+                "MATCH_SCORE message_hash=%s best=%s score=%s runner_up=%s",
+                _safe_message_hash(user_message), best_template.get("id"), best_score,
                 runner_up_template.get("id") if runner_up_template else None,
             )
 
@@ -3141,8 +3158,8 @@ class DeterministicResponder:
             and re.search(r'\b(and|also)\b|\?.*\?', lowered_text, re.IGNORECASE)
         ):
             log.info(
-                "COMPOUND_INTENT_CANDIDATE msg=%r answered=%s runner_up=%s (score %s)",
-                user_message,
+                "COMPOUND_INTENT_CANDIDATE message_hash=%s answered=%s runner_up=%s (score %s)",
+                _safe_message_hash(user_message),
                 best_template.get("id"),
                 runner_up_template.get("id"),
                 runner_up_composite,
@@ -3172,8 +3189,8 @@ class DeterministicResponder:
         # it needs no list of the topics we do not cover.
         if best_template and not self._answer_addresses_the_question(user_message, best_template):
             log.info(
-                "RELEVANCE_REJECT msg=%r template=%s score=%s",
-                user_message[:80], best_template.get("id"), best_score,
+                "RELEVANCE_REJECT message_hash=%s template=%s score=%s",
+                _safe_message_hash(user_message), best_template.get("id"), best_score,
             )
             best_template = None
             best_score = 0
@@ -3434,8 +3451,8 @@ class DeterministicResponder:
         ]
         if not retrieval_is_relevant and rag_res is not None and rag_res.source_chunks:
             log.info(
-                "RAG_RELEVANCE_REJECT msg=%r sources=%s",
-                user_message[:80], rag_res.retrieved_sources,
+                "RAG_RELEVANCE_REJECT message_hash=%s sources=%s",
+                _safe_message_hash(user_message), rag_res.retrieved_sources,
             )
         if (
             config.is_ai_enabled
@@ -3490,8 +3507,9 @@ class DeterministicResponder:
                         session_memory.add_turn(user_id, channel, user_message, ai_resp)
                         return ai_resp, True, "groq_grounded_answer", None
                     log.warning(
-                        "Discarded a Groq answer for %r: it stated a number the approved "
-                        "sources did not. Escalating instead.", user_message[:60],
+                        "Discarded a Groq answer for message_hash=%s: it stated a number "
+                        "the approved sources did not. Escalating instead.",
+                        _safe_message_hash(user_message),
                     )
             except Exception as e:
                 log.warning("AI RAG generation failed: %s", e)
@@ -3535,7 +3553,10 @@ class DeterministicResponder:
             )
             if intro_greeting_prefix:
                 clarifier = intro_greeting_prefix + clarifier
-            log.info("Asked %s to clarify a vague message instead of escalating.", user_id)
+            log.info(
+                "Asked user_hash=%s to clarify a vague message instead of escalating.",
+                _safe_user_hash(user_id),
+            )
             session_memory.add_turn(user_id, channel, user_message, clarifier)
             return clarifier, True, "clarify_request", None
 

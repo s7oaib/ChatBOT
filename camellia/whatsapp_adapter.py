@@ -1,3 +1,4 @@
+import hashlib
 import httpx
 from typing import Dict, Any, Tuple, Optional
 from camellia.config import config
@@ -8,6 +9,10 @@ from camellia.handoff import extract_reference, mark_whatsapp_connected
 from camellia.monitoring import get_logger, delivery_monitor
 
 log = get_logger("camellia.whatsapp")
+
+
+def _safe_recipient_hash(recipient: str) -> str:
+    return hashlib.sha256(str(recipient or "").encode("utf-8")).hexdigest()[:12]
 
 class WhatsAppAdapter:
     """
@@ -265,10 +270,12 @@ class WhatsAppAdapter:
 
         if config.WHATSAPP_MOCK_MODE:
             # Development / Mock Mode: never construct an outbound HTTP request.
-            safe_body = text_body[:60].encode("ascii", "backslashreplace").decode("ascii")
             btn_info = f" [Buttons: {', '.join(buttons)}]" if buttons else ""
             msg_type = f"IMAGE x{len(images)} ({', '.join(images)}){btn_info}" if images else f"TEXT{btn_info}"
-            log.info("[MOCK WHATSAPP OUTBOUND] [%s] To: %s | Body: %s...", msg_type, recipient_phone, safe_body)
+            log.info(
+                "[MOCK WHATSAPP OUTBOUND] [%s] recipient_hash=%s body_length=%d",
+                msg_type, _safe_recipient_hash(recipient_phone), len(text_body or ""),
+            )
             return {"mock": True, "status": "sent", "mode": "mock", "recipient": recipient_phone, "type": msg_type, "buttons": buttons}
 
         if not self.access_token or not self.phone_number_id:
@@ -369,10 +376,16 @@ class WhatsAppAdapter:
                 delivery_monitor.record_success("whatsapp")
                 return resp.json() if resp is not None else {"status": "no_content"}
         except Exception as e:
-            body = getattr(getattr(e, "response", None), "text", "")
-            delivery_monitor.record_failure("whatsapp", f"to {recipient_phone}: {e}")
-            if body:
-                log.error("Meta API error body: %s", body)
+            status_code = getattr(getattr(e, "response", None), "status_code", None)
+            delivery_monitor.record_failure(
+                "whatsapp",
+                f"recipient_hash={_safe_recipient_hash(recipient_phone)} "
+                f"exception_class={type(e).__name__} status={status_code}",
+            )
+            log.error(
+                "WhatsApp Meta send failed: recipient_hash=%s exception_class=%s status=%s",
+                _safe_recipient_hash(recipient_phone), type(e).__name__, status_code,
+            )
             return {"error": str(e), "status": "failed"}
 
 whatsapp_adapter = WhatsAppAdapter()

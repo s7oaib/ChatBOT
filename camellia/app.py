@@ -3727,7 +3727,10 @@ async def set_instagram_ice_breakers(
 
     if resp.status_code != 200:
         error = result.get("error", {}) if isinstance(result, dict) else {}
-        log.error("Meta rejected the ice breaker write: %s", error or resp.text[:200])
+        log.error(
+            "Meta rejected the ice breaker write: HTTP %s error_code=%s",
+            resp.status_code, error.get("code") if isinstance(error, dict) else None,
+        )
         raise HTTPException(
             status_code=502,
             detail=f"Meta rejected the change: {error.get('message') or resp.text[:200]}",
@@ -6194,6 +6197,7 @@ def get_admin_dashboard():
                     <button class="btn-secondary" type="button" onclick="openTopicModal()">+ Add Topic</button>
                     <button class="btn-secondary" id="igEditTopicButton" type="button" onclick="openTopicEditor()" disabled>Edit Topic</button>
                 </div>
+                <small id="igTopicEmptyHelp" class="ig-media-muted" style="display:none; margin-top:6px;">No active Topics are configured yet. Use + Add Topic to create one before saving Instagram routing.</small>
             </div>
 
             <div id="igTopicPreview" style="display:none; margin-top:14px; background:#FCFBF9; border:1px solid var(--border); border-radius:10px; padding:14px; font-size:0.85rem;">
@@ -6298,7 +6302,11 @@ def get_admin_dashboard():
                     </div>
                     <div>
                         <label class="field-label" for="igStoryTopicPicker">Topic</label>
-                        <select class="field-control" id="igStoryTopicPicker"><option value="">Select Topic</option></select>
+                        <div style="display:flex; gap:8px; align-items:flex-start; flex-wrap:wrap;">
+                            <select class="field-control" id="igStoryTopicPicker" style="flex:1; min-width:180px;"><option value="">Select Topic</option></select>
+                            <button class="btn-secondary" type="button" onclick="openTopicModal()">+ Add Topic</button>
+                        </div>
+                        <small id="igStoryTopicEmptyHelp" class="ig-media-muted" style="display:none; margin-top:6px;">No active Topics are configured yet. Create a Topic above, then choose it here.</small>
                     </div>
                     <div>
                         <label class="field-label" for="igStoryMenuMode">Menu behavior</label>
@@ -7589,15 +7597,19 @@ THIS WEEK'S BENGAL SPECIALS
                 igMenus = (menusData.menus || []).filter(m => m.active);
                 window.igMenuCategories = menusData.categories || [];
 
-                const topicOptions = '<option value="">Select Topic</option>' + igTopics.map(t =>
+                const activeTopics = igTopics.filter(t => t.active !== false);
+                const topicOptions = '<option value="">Select Topic</option>' + activeTopics.map(t =>
                     `<option value="${escapeHtml(t.topic_id)}">${escapeHtml(t.name)}</option>`).join('');
                 document.getElementById('igTopicPicker').innerHTML = topicOptions;
+                const emptyHelp = document.getElementById('igTopicEmptyHelp');
+                if (emptyHelp) emptyHelp.style.display = activeTopics.length ? 'none' : 'block';
 
                 const menuOptions = '<option value="">No menu — description only</option>' + igMenus.map(m =>
                     `<option value="${escapeHtml(m.menu_id)}">${escapeHtml(m.name)}</option>`).join('');
                 document.getElementById('igMenuPicker').innerHTML = menuOptions;
                 const topicDefaultMenuEl = document.getElementById('topicDefaultMenu');
                 if (topicDefaultMenuEl) topicDefaultMenuEl.innerHTML = menuOptions;
+                populateInstagramStoryPickers();
             } catch (err) { /* dropdowns just stay empty; the rest of the tab still works */ }
         }
 
@@ -8207,7 +8219,10 @@ THIS WEEK'S BENGAL SPECIALS
             const menus = document.getElementById('igStoryMenuPicker');
             const products = document.getElementById('igStoryPriorityPicker');
             const scopes = document.getElementById('igStoryKnowledgeScope');
-            if (topics) topics.innerHTML = '<option value="">Select Topic</option>' + igTopics.map(topic => `<option value="${escapeHtml(topic.topic_id)}">${escapeHtml(topic.name)}</option>`).join('');
+            const activeTopics = igTopics.filter(topic => topic.active !== false);
+            if (topics) topics.innerHTML = '<option value="">Select Topic</option>' + activeTopics.map(topic => `<option value="${escapeHtml(topic.topic_id)}">${escapeHtml(topic.name)}</option>`).join('');
+            const emptyHelp = document.getElementById('igStoryTopicEmptyHelp');
+            if (emptyHelp) emptyHelp.style.display = activeTopics.length ? 'none' : 'block';
             if (menus) menus.innerHTML = '<option value="">Select a menu…</option>' + igMenus.map(menu => `<option value="${escapeHtml(menu.menu_id)}">${escapeHtml(menu.name)}</option>`).join('');
             if (products) products.innerHTML = '<option value="">Choose an approved product…</option>' + igProducts.map(product => `<option value="${escapeHtml(product.id)}">${escapeHtml(product.label)}</option>`).join('');
             if (scopes) scopes.innerHTML = igStoryKnowledgeScopes.map(scope => `<option value="${escapeHtml(scope)}">${escapeHtml(scope)}</option>`).join('');

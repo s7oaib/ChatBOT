@@ -441,6 +441,20 @@ def test_instagram_routing_has_a_simple_client_first_default_view(page):
     assert "Advanced settings are normally filled automatically" in section
 
 
+def test_topic_selectors_explain_empty_catalogues_and_refresh_together(page):
+    """A fresh database must be configurable, and a new Topic reaches Stories too."""
+    assert 'id="igTopicEmptyHelp"' in page
+    assert "No active Topics are configured yet." in page
+    assert 'id="igStoryTopicEmptyHelp"' in page
+    assert 'onclick="openTopicModal()">+ Add Topic</button>' in page
+    load_topics = page[page.index("async function loadTopicsAndMenus"):page.index("function onIgTopicChange")]
+    assert "activeTopics = igTopics.filter" in load_topics
+    assert "populateInstagramStoryPickers();" in load_topics
+    story_pickers = page[page.index("function populateInstagramStoryPickers"):page.index("function onInstagramStoryTopicChange")]
+    assert "activeTopics = igTopics.filter" in story_pickers
+    assert "igStoryTopicEmptyHelp" in story_pickers
+
+
 def test_instagram_routing_keeps_client_friendly_cards_and_existing_actions(page):
     section = page[page.index('function renderInstagramMediaCard'):page.index('// Shared-post pairing')]
     assert "View Details" in section
