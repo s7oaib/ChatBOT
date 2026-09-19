@@ -5,6 +5,7 @@ python-dotenv>=1.0.0
 slowapi>=0.1.10
 argon2-cffi>=23.1.0
 python-multipart>=0.0.9
+pywebpush>=2.0.0
 # Downscales uploaded menu flyers before they go to the vision model:
 # a phone photo is ~5000 of the 8000 tokens/minute the free tier allows.
 Pillow>=10.0.0

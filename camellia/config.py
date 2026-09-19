@@ -297,6 +297,33 @@ class Config:
         "Please continue your enquiry using the link below.",
     )
 
+    # Owner notifications are independent of the customer channel.  The
+    # existing names are intentionally retained so a deployment can reuse an
+    # already-approved email destination/provider without adding credentials
+    # to application code.  SMTP is the dependency-free provider; a future
+    # provider adapter can use ADMIN_EMAIL_API_KEY without changing the
+    # durable event model.
+    ADMIN_EMAIL_PROVIDER: str = os.getenv("ADMIN_EMAIL_PROVIDER", "").strip().lower()
+    ADMIN_EMAIL_API_KEY: str = _env_secret("ADMIN_EMAIL_API_KEY")
+    ADMIN_EMAIL_FROM: str = os.getenv("ADMIN_EMAIL_FROM", "").strip()
+    ADMIN_RECOVERY_EMAIL: str = os.getenv("ADMIN_RECOVERY_EMAIL", "").strip()
+    HUMAN_ESCALATION_EMAIL: str = os.getenv("HUMAN_ESCALATION_EMAIL", "").strip()
+    ADMIN_EMAIL_SMTP_HOST: str = os.getenv("ADMIN_EMAIL_SMTP_HOST", "").strip()
+    try:
+        ADMIN_EMAIL_SMTP_PORT: int = max(1, min(65535, int(os.getenv("ADMIN_EMAIL_SMTP_PORT", "587"))))
+    except ValueError:
+        ADMIN_EMAIL_SMTP_PORT: int = 587
+    ADMIN_EMAIL_SMTP_USERNAME: str = os.getenv("ADMIN_EMAIL_SMTP_USERNAME", "").strip()
+    ADMIN_EMAIL_SMTP_PASSWORD: str = _env_secret("ADMIN_EMAIL_SMTP_PASSWORD")
+    ADMIN_EMAIL_SMTP_USE_TLS: bool = os.getenv("ADMIN_EMAIL_SMTP_USE_TLS", "true").lower() in ("true", "1", "yes", "on")
+
+    # Standards-based Web Push.  Private material is only read from the
+    # deployment secret store and is never returned by /health or Admin.
+    WEB_PUSH_VAPID_PUBLIC_KEY: str = os.getenv("WEB_PUSH_VAPID_PUBLIC_KEY", "").strip()
+    WEB_PUSH_VAPID_PRIVATE_KEY: str = _env_secret("WEB_PUSH_VAPID_PRIVATE_KEY")
+    WEB_PUSH_VAPID_SUBJECT: str = os.getenv("WEB_PUSH_VAPID_SUBJECT", "").strip()
+    WEB_PUSH_ENABLED: bool = os.getenv("WEB_PUSH_ENABLED", "true").lower() in ("true", "1", "yes", "on")
+
     # Slow-reply notice.
     # When the bot itself becomes slow to answer, the customer is sitting there
     # watching nothing happen. Rather than let them guess, we say so once per

@@ -2,6 +2,8 @@ import json
 from typing import Dict, Any, Optional
 from camellia.database import db
 from camellia.monitoring import get_logger
+from camellia.config import config
+from camellia import owner_notifications
 
 from camellia.session_memory import session_memory
 
@@ -47,7 +49,9 @@ class Escalator:
 
         # 2. Enqueue before attempting delivery. The escalation row and its
         # outbox event survive a process restart or provider outage.
-        event = db.enqueue_human_notification(escalation_id)
+        event = db.enqueue_human_notification(
+            escalation_id, handoff_ref=str(context.get("handoff_ref") or "") or None,
+        )
         self.process_pending_notifications(event_id=int(event["id"]))
         notification = db.get_human_notification_event(int(event["id"]))
         alert_sent = bool(notification and notification.get("status") == "SENT")
@@ -83,6 +87,7 @@ class Escalator:
                 result = self.send_human_alert(
                     int(escalation["id"]), escalation["user_id"], escalation["channel"],
                     escalation["user_message"], escalation["reason"], context,
+                    event_id=int(event["id"]),
                 )
             except Exception as exc:
                 log.exception("Durable human notification dispatch failed unexpectedly.")
@@ -91,12 +96,13 @@ class Escalator:
                     "error": type(exc).__name__,
                 }
             success = result.get("status") == "sent" or result.get("mock") is True
+            retryable = bool(result.get("retryable"))
             attempts = max(1, int(event.get("attempts") or 1))
             retry_delay = min(3600, 60 * (2 ** min(attempts - 1, 6)))
             db.complete_human_notification(
-                int(event["id"]), success=success,
-                skipped=str(result.get("status") or "").lower() == "skipped",
-                retryable=bool(result.get("retryable")),
+                int(event["id"]), success=success and not retryable,
+                skipped=str(result.get("status") or "").lower() == "skipped" and not retryable,
+                retryable=retryable,
                 error=result.get("error"), retry_after_seconds=retry_delay,
             )
             if success:
@@ -127,19 +133,75 @@ class Escalator:
         channel: str,
         user_message: str,
         reason: str,
-        context: Dict[str, Any]
+        context: Dict[str, Any],
+        event_id: Optional[int] = None,
     ) -> Dict[str, Any]:
-        """Record the escalation; customer and staff continuation are manual."""
-        log.info(
-            "Human escalation notification skipped: manual handoff only "
-            "(escalation_id=%s, channel=%s).",
-            escalation_id,
-            channel,
+        """Fan out one safe owner event to email, Web Push, and Admin."""
+        if event_id is None:
+            events = db.get_human_notification_events(limit=200)
+            matching = [e for e in events if int(e.get("escalation_id") or 0) == int(escalation_id)]
+            event_id = int(matching[0]["id"]) if matching else None
+        if event_id is None:
+            # Preserve the legacy direct-call contract used by diagnostics and
+            # older integrations. Normal production dispatch always supplies a
+            # durable event id from process_pending_notifications().
+            return {"status": "skipped", "retryable": False, "reason": "manual_handoff_only"}
+
+        handoff_ref = str(context.get("handoff_ref") or "").strip()
+        handoff = db.get_handoff_by_ref(handoff_ref) if handoff_ref else None
+        if not handoff:
+            # Legacy escalation rows can still be processed safely, but have no
+            # CAM payload for owner channels; retain the old manual-only state.
+            log.info("Skipping owner channels for escalation %s without a CAM handoff.", escalation_id)
+            for delivery in db.get_notification_deliveries(event_id):
+                db.complete_notification_delivery(
+                    int(delivery["id"]), status="SKIPPED", error="no CAM handoff reference",
+                )
+            return {"status": "skipped", "retryable": False, "reason": "no_handoff"}
+
+        payload = owner_notifications.safe_handoff_payload(
+            handoff, public_base_url=config.PUBLIC_BASE_URL,
         )
-        return {
-            "status": "skipped",
-            "retryable": False,
-            "reason": "manual_handoff_only",
-        }
+        outcomes = []
+        retry_after = 60
+        for delivery in db.get_notification_deliveries(event_id):
+            delivery_id = int(delivery["id"])
+            channel_name = delivery["channel"]
+            if delivery["status"] in {"SENT", "FAILED", "SKIPPED"}:
+                outcomes.append({"status": delivery["status"].lower(), "retryable": False})
+                continue
+            if channel_name == "ADMIN":
+                result = {"status": "sent"}
+            elif channel_name == "EMAIL":
+                result = owner_notifications.send_email(payload)
+            elif channel_name == "WEB_PUSH":
+                result = owner_notifications.send_web_push(payload, db)
+            else:
+                result = {"status": "failed", "retryable": False, "error": "unknown channel"}
+            normalized = str(result.get("status") or "failed").lower()
+            if normalized == "sent":
+                stored_status = "SENT"
+            elif normalized == "skipped":
+                stored_status = "SKIPPED"
+            elif result.get("retryable"):
+                stored_status = "RETRYING"
+            else:
+                stored_status = "FAILED"
+            attempts = max(1, int(delivery.get("attempts") or 1))
+            retry_after = min(3600, 60 * (2 ** min(attempts - 1, 6)))
+            db.complete_notification_delivery(
+                delivery_id, status=stored_status, error=result.get("error"),
+                retry_after_seconds=retry_after,
+            )
+            outcomes.append(result)
+
+        if any(str(item.get("status")).lower() == "sent" for item in outcomes):
+            log.info("Delivered owner notification for %s via configured channel(s).", handoff_ref)
+            return {"status": "sent", "retryable": any(item.get("retryable") for item in outcomes)}
+        if any(item.get("retryable") for item in outcomes):
+            return {"status": "failed", "retryable": True, "error": "temporary owner notification failure"}
+        if any(str(item.get("status")).lower() == "failed" for item in outcomes):
+            return {"status": "failed", "retryable": False, "error": "owner notification channel failed"}
+        return {"status": "skipped", "retryable": False, "reason": "no owner channel configured"}
 
 escalator = Escalator()

@@ -384,6 +384,45 @@ class Database:
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
             """)
+            # Keep the existing durable event as the parent and fan out to
+            # independently tracked owner channels through additive tables.
+            self._ensure_column(cursor, "human_notification_events", "handoff_ref", "TEXT")
+            self._ensure_column(cursor, "human_notification_events", "payload_version", "INTEGER DEFAULT 1")
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS notification_deliveries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_id INTEGER NOT NULL,
+                channel TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'PENDING',
+                attempts INTEGER NOT NULL DEFAULT 0,
+                next_attempt_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                locked_until TIMESTAMP,
+                last_error TEXT,
+                sent_at TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(event_id, channel)
+            );
+            """)
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS admin_notification_states (
+                handoff_ref TEXT PRIMARY KEY,
+                seen_at TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS web_push_subscriptions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                endpoint TEXT NOT NULL UNIQUE,
+                p256dh TEXT NOT NULL,
+                auth TEXT NOT NULL,
+                user_agent TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_used_at TIMESTAMP,
+                revoked_at TIMESTAMP
+            );
+            """)
 
             # Self-Healing Learned Knowledge base. This is the single live,
             # bot-servable answer store — Teach & Resolve, candidate approval,
@@ -2137,6 +2176,8 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_message_route_time ON message_route_audit(timestamp DESC);",
             "CREATE INDEX IF NOT EXISTS idx_handoffs_ref ON cross_channel_handoffs(handoff_ref);",
             "CREATE INDEX IF NOT EXISTS idx_handoffs_active ON cross_channel_handoffs(source_channel, source_user_id, status);",
+            "CREATE INDEX IF NOT EXISTS idx_notification_deliveries_due ON notification_deliveries(status, next_attempt_at);",
+            "CREATE INDEX IF NOT EXISTS idx_web_push_active ON web_push_subscriptions(revoked_at);",
         )
         for statement in statements:
             cursor.execute(statement)
@@ -2729,24 +2770,174 @@ class Database:
             conn.commit()
             return cursor.lastrowid
 
-    def enqueue_human_notification(self, escalation_id: int) -> Dict[str, Any]:
-        """Create one durable notification event for an escalation."""
+    def enqueue_human_notification(
+        self, escalation_id: int, handoff_ref: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Create one parent event and its idempotent channel deliveries."""
         event_key = f"escalation:{int(escalation_id)}"
         with self.get_connection() as conn:
             conn.execute(
                 """
                 INSERT OR IGNORE INTO human_notification_events
-                    (event_key, escalation_id)
-                VALUES (?, ?)
+                    (event_key, escalation_id, handoff_ref, payload_version)
+                VALUES (?, ?, ?, 1)
                 """,
-                (event_key, int(escalation_id)),
+                (event_key, int(escalation_id), handoff_ref),
             )
             row = conn.execute(
                 "SELECT * FROM human_notification_events WHERE event_key = ?",
                 (event_key,),
             ).fetchone()
+            resolved_handoff_ref = handoff_ref
+            if not resolved_handoff_ref:
+                try:
+                    context = json.loads(
+                        conn.execute(
+                            "SELECT context_data FROM escalations WHERE id = ?",
+                            (int(escalation_id),),
+                        ).fetchone()[0] or "{}"
+                    )
+                    resolved_handoff_ref = context.get("handoff_ref")
+                except (TypeError, ValueError, AttributeError):
+                    resolved_handoff_ref = None
+            if resolved_handoff_ref and not row["handoff_ref"]:
+                conn.execute(
+                    "UPDATE human_notification_events SET handoff_ref = ? WHERE id = ?",
+                    (resolved_handoff_ref, int(row["id"])),
+                )
+            for channel in ("EMAIL", "WEB_PUSH", "ADMIN"):
+                conn.execute(
+                    "INSERT OR IGNORE INTO notification_deliveries (event_id, channel) VALUES (?, ?)",
+                    (int(row["id"]), channel),
+                )
+            if resolved_handoff_ref:
+                conn.execute(
+                    "INSERT OR IGNORE INTO admin_notification_states (handoff_ref) VALUES (?)",
+                    (resolved_handoff_ref,),
+                )
+            conn.commit()
+            updated = conn.execute(
+                "SELECT * FROM human_notification_events WHERE id = ?", (int(row["id"]),)
+            ).fetchone()
+            return dict(updated)
+
+    def get_notification_deliveries(self, event_id: int) -> List[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM notification_deliveries WHERE event_id = ? ORDER BY id",
+                (int(event_id),),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def complete_notification_delivery(
+        self, delivery_id: int, *, status: str, error: Optional[str] = None,
+        retry_after_seconds: int = 60,
+    ) -> None:
+        allowed = {"SENT", "FAILED", "RETRYING", "SKIPPED"}
+        safe_status = status if status in allowed else "FAILED"
+        safe_error = str(error or "")[:500] or None
+        with self.get_connection() as conn:
+            if safe_status == "RETRYING":
+                conn.execute(
+                    """UPDATE notification_deliveries
+                    SET status = ?, next_attempt_at = datetime('now', ?),
+                        attempts = attempts + 1, locked_until = NULL, last_error = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?""",
+                    (safe_status, f"+{max(1, min(int(retry_after_seconds), 86400))} seconds", safe_error, int(delivery_id)),
+                )
+            else:
+                conn.execute(
+                    """UPDATE notification_deliveries
+                    SET status = ?, sent_at = CASE WHEN ? = 'SENT' THEN CURRENT_TIMESTAMP ELSE sent_at END,
+                        attempts = attempts + 1, locked_until = NULL, last_error = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?""",
+                    (safe_status, safe_status, safe_error, int(delivery_id)),
+                )
+            conn.commit()
+
+    def get_active_web_push_subscriptions(self) -> List[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM web_push_subscriptions WHERE revoked_at IS NULL ORDER BY id"
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def upsert_web_push_subscription(
+        self, *, endpoint: str, p256dh: str, auth: str, user_agent: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        endpoint = str(endpoint or "").strip()
+        p256dh = str(p256dh or "").strip()
+        auth = str(auth or "").strip()
+        if not endpoint or not p256dh or not auth or len(endpoint) > 2000:
+            raise ValueError("A valid Web Push subscription is required.")
+        with self.get_connection() as conn:
+            conn.execute(
+                """INSERT INTO web_push_subscriptions (endpoint, p256dh, auth, user_agent, revoked_at)
+                VALUES (?, ?, ?, ?, NULL)
+                ON CONFLICT(endpoint) DO UPDATE SET p256dh=excluded.p256dh,
+                    auth=excluded.auth, user_agent=excluded.user_agent, revoked_at=NULL""",
+                (endpoint, p256dh, auth, str(user_agent or "")[:300]),
+            )
+            row = conn.execute(
+                "SELECT id, endpoint, created_at, last_used_at FROM web_push_subscriptions WHERE endpoint = ?",
+                (endpoint,),
+            ).fetchone()
             conn.commit()
             return dict(row)
+
+    def revoke_web_push_subscription(self, subscription_id: int) -> None:
+        with self.get_connection() as conn:
+            conn.execute(
+                "UPDATE web_push_subscriptions SET revoked_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (int(subscription_id),),
+            )
+            conn.commit()
+
+    def revoke_web_push_endpoint(self, endpoint: str) -> None:
+        with self.get_connection() as conn:
+            conn.execute(
+                "UPDATE web_push_subscriptions SET revoked_at = CURRENT_TIMESTAMP WHERE endpoint = ?",
+                (str(endpoint or ""),),
+            )
+            conn.commit()
+
+    def mark_web_push_subscription_used(self, subscription_id: int) -> None:
+        with self.get_connection() as conn:
+            conn.execute(
+                "UPDATE web_push_subscriptions SET last_used_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (int(subscription_id),),
+            )
+            conn.commit()
+
+    def web_push_subscription_count(self) -> int:
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS count FROM web_push_subscriptions WHERE revoked_at IS NULL"
+            ).fetchone()
+            return int(row["count"] or 0)
+
+    def get_admin_notification_state(self, limit: int = 50) -> Dict[str, Any]:
+        with self.get_connection() as conn:
+            unread = conn.execute(
+                "SELECT COUNT(*) AS count FROM admin_notification_states WHERE seen_at IS NULL"
+            ).fetchone()["count"]
+            rows = conn.execute(
+                """SELECT h.handoff_ref, h.reason, h.source_channel, h.status,
+                    h.created_at, s.seen_at
+                    FROM admin_notification_states s
+                    JOIN cross_channel_handoffs h ON h.handoff_ref = s.handoff_ref
+                    ORDER BY h.id DESC LIMIT ?""",
+                (max(1, min(int(limit or 1), 100)),),
+            ).fetchall()
+            return {"unread_count": int(unread or 0), "handoffs": [dict(row) for row in rows]}
+
+    def mark_admin_notification_seen(self, handoff_ref: str) -> None:
+        with self.get_connection() as conn:
+            conn.execute(
+                "UPDATE admin_notification_states SET seen_at = COALESCE(seen_at, CURRENT_TIMESTAMP) WHERE handoff_ref = ?",
+                (str(handoff_ref or ""),),
+            )
+            conn.commit()
 
     def claim_human_notification_events(
         self, *, limit: int = 10, event_id: Optional[int] = None,
