@@ -22,6 +22,9 @@ observing decisions is still useful.
 
 ## Backup and restore
 
+The complete storage and recovery contract, including verified versus
+operator-only steps, is in [`PRODUCTION_BACKUP_RECOVERY.md`](PRODUCTION_BACKUP_RECOVERY.md).
+
 Before every schema migration, call authenticated `POST /admin/db-backup`.
 Record the returned `backup_path` and `size_bytes`, then verify the file exists
 and opens with `sqlite3 ... "PRAGMA integrity_check;"`. A restore is a manual,
