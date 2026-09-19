@@ -141,7 +141,9 @@ def test_reasoning_effort_is_caller_specific_and_serialized_for_groq():
     response.json.return_value = {
         "choices": [{"message": {"content": "ok"}}],
     }
-    with patch("camellia.ai_responder.httpx.Client") as client_cls:
+    with patch("camellia.ai_responder.httpx.Client") as client_cls, patch.object(
+        config, "GROQ_API_KEY", "test-key",
+    ):
         client = client_cls.return_value.__enter__.return_value
         client.post.return_value = response
         ai_responder._query_groq(
