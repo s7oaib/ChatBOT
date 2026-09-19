@@ -167,25 +167,19 @@ class Config:
     LLM_ASSISTED_RESOLUTION_ENABLED: bool = os.getenv("LLM_ASSISTED_RESOLUTION_ENABLED", "false").lower() in ("true", "1", "t", "yes")
     # The router runs on every message, so it is the call most likely to hit a
     # per-minute token ceiling — and it is a different job from writing a
-    # reply, so it gets its own model rather than sharing GROQ_MODEL.
-    #
-    # Measured on this account's key (x-ratelimit-limit-tokens):
-    #   openai/gpt-oss-20b    8,000 TPM     qwen/qwen3.8-27b     8,000 TPM
-    #   openai/gpt-oss-120b   8,000 TPM     groq/compound-mini  70,000 TPM
-    # At ~1,900 tokens a call that is ~4 router calls a minute against ~36,
-    # and the 8,000 is already shared with refinement and grounded answers.
-    # compound-mini picked slightly less well on a seven-case trial, which is
-    # far too small to decide on — the shadow table records the model behind
-    # every pick so the choice can be settled on real traffic instead.
-    GROQ_ROUTER_MODEL: str = os.getenv("GROQ_ROUTER_MODEL", "") or "groq/compound-mini"
+    # reply, so it gets its own production model rather than sharing GROQ_MODEL.
+    # GPT-OSS 120B is a current production model with JSON Object Mode support;
+    # the smaller GPT-OSS 20B remains the one-at-most fallback below.
+    GROQ_ROUTER_MODEL: str = os.getenv("GROQ_ROUTER_MODEL", "") or "openai/gpt-oss-120b"
     # Understanding runs on every substantive message, so it is the call that
-    # meets the per-day request ceiling first — and when it does, every
-    # customer drops to the deterministic path at once. One explicitly
-    # configured second model is tried, once, only for failures that a
-    # different model could actually survive (quota, rate limit, provider
-    # error). Never a retry of the same model, never a model the operator did
-    # not name, and the schema contract is identical for both.
-    STRUCTURED_NLU_FALLBACK_MODEL: str = os.getenv("STRUCTURED_NLU_FALLBACK_MODEL", "").strip()
+    # meets a request ceiling first — and when it does, every customer drops
+    # to the deterministic path unless the one bounded fallback survives.
+    # Never retry the same model, and never retry malformed/schema-invalid
+    # output. The schema contract is identical for both models.
+    STRUCTURED_NLU_FALLBACK_MODEL: str = (
+        os.getenv("STRUCTURED_NLU_FALLBACK_MODEL", "").strip()
+        or "openai/gpt-oss-20b"
+    )
     # A bounded, live semantic fallback for messages the deterministic trigger
     # matcher cannot confidently place (typos, Hinglish, and unusual wording).
     # The router selects only an existing approved template; it never writes
@@ -225,10 +219,10 @@ class Config:
     # Comma-separated category names are deliberately empty by default: a
     # future pilot must opt a single safe category in explicitly.
     LLM_AUTO_RESOLVE_ALLOWED_CATEGORIES: str = os.getenv("LLM_AUTO_RESOLVE_ALLOWED_CATEGORIES", "")
-    # Its own model for the same reason the router has one: a different job,
-    # a different rate-limit bucket, and freedom to change one without
-    # touching the other.
-    LLM_TRIAGE_MODEL: str = os.getenv("LLM_TRIAGE_MODEL", "") or "groq/compound-mini"
+    # Its own setting keeps this shadow-only workload independently tunable;
+    # the default stays on GPT-OSS 20B because triage never writes to a
+    # customer reply path.
+    LLM_TRIAGE_MODEL: str = os.getenv("LLM_TRIAGE_MODEL", "") or "openai/gpt-oss-20b"
     # How confident a grounded AUTO_RESOLVE call would need to be before any
     # future phase let it auto-send. Recorded on every shadow row now
     # (`would_auto_resolve`) so that threshold can be picked from real

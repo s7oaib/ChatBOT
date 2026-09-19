@@ -55,6 +55,7 @@ class _Outage(ExitStack):
     def __enter__(self):
         super().__enter__()
         self.enter_context(patch.object(ai_responder, "get_active_provider", return_value="groq"))
+        self.enter_context(patch.object(config, "STRUCTURED_NLU_FALLBACK_MODEL", ""))
         self.enter_context(patch.object(ai_responder, "_query_groq", return_value=self._failure))
         return self
 

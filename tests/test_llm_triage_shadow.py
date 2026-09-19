@@ -93,9 +93,9 @@ class TestClassify:
     def test_the_classifier_uses_its_own_model_not_the_reply_model(self):
         c, fake = self._classifier_replying(json.dumps({"category": "NON_ACTIONABLE", "confidence": 0.9, "reasoning": "x"}))
         with patch("camellia.ai_responder.ai_responder", fake), \
-             patch.object(config, "LLM_TRIAGE_MODEL", "groq/compound-mini"):
+             patch.object(config, "LLM_TRIAGE_MODEL", "test/triage-model"):
             c.classify("thanks!")
-        assert fake._query_groq.call_args.kwargs["model"] == "groq/compound-mini"
+        assert fake._query_groq.call_args.kwargs["model"] == "test/triage-model"
 
 
 class TestGrounding:
@@ -224,7 +224,7 @@ class TestReport:
             ok=True, detail="ok", matched_knowledge_id=None, matched_knowledge_source=None,
             matched_knowledge_preview=None, grounded=False, grounding_reason="no_matched_knowledge",
             would_auto_resolve=False, was_matched=False, template_id=None, latency_ms=500.0,
-            model="groq/compound-mini",
+            model="test/triage-model",
         )
         report = db.triage_shadow_report(days=3650, limit=50)
         assert report["classified"] >= 1
@@ -238,7 +238,7 @@ class TestReport:
             ok=True, detail="ok", matched_knowledge_id=3, matched_knowledge_source="staff_resolution",
             matched_knowledge_preview="We deliver across Delhi NCR.", grounded=True, grounding_reason="ok",
             would_auto_resolve=True, was_matched=False, template_id=None, latency_ms=450.0,
-            model="groq/compound-mini",
+            model="test/triage-model",
         )
         report = db.triage_shadow_report(days=3650, limit=50)
         assert report["would_auto_resolve"] >= 1
@@ -250,7 +250,7 @@ class TestReport:
             ok=False, detail="provider_error:groq_http_429", matched_knowledge_id=None,
             matched_knowledge_source=None, matched_knowledge_preview=None, grounded=False,
             grounding_reason="no_matched_knowledge", would_auto_resolve=False, was_matched=False,
-            template_id=None, latency_ms=300.0, model="groq/compound-mini",
+            template_id=None, latency_ms=300.0, model="test/triage-model",
         )
         report = db.triage_shadow_report(days=3650, limit=50)
         assert any(f["detail"].startswith("provider_error:") for f in report["failures"])
@@ -265,7 +265,7 @@ class TestHealthReportsShadowState:
 
     def test_health_shows_the_model_and_a_live_count_when_on(self):
         with patch.object(config, "LLM_TRIAGE_ENABLED", True), \
-             patch.object(config, "LLM_TRIAGE_MODEL", "groq/compound-mini"), \
+             patch.object(config, "LLM_TRIAGE_MODEL", "test/triage-model"), \
              patch.object(db, "triage_shadow_pulse", return_value={
                  "classified_recently": 9, "would_auto_resolve_recently": 2,
                  "last_classification_at": "2026-09-12 02:00:00", "window_hours": 24,
@@ -274,7 +274,7 @@ class TestHealthReportsShadowState:
 
         shadow = payload["llm_triage"]
         assert shadow["enabled"] is True
-        assert shadow["model"] == "groq/compound-mini"
+        assert shadow["model"] == "test/triage-model"
         assert shadow["classified_recently"] == 9
 
     def test_a_broken_pulse_query_never_takes_health_down_with_it(self):

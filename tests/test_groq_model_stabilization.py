@@ -1,0 +1,103 @@
+"""Groq model assignments and bounded structured-NLU fallback contracts."""
+
+import json
+from unittest.mock import patch
+
+from camellia.ai_responder import ai_responder
+from camellia.config import config
+from camellia.responder import responder
+from camellia.session_memory import session_memory
+from camellia.understanding import understanding_engine
+
+
+SUPPORTED_PRODUCTION_MODELS = {
+    "openai/gpt-oss-20b",
+    "openai/gpt-oss-120b",
+}
+
+
+def test_production_model_defaults_are_supported_and_separated():
+    assert config.GROQ_MODEL == "openai/gpt-oss-20b"
+    assert config.GROQ_ROUTER_MODEL in SUPPORTED_PRODUCTION_MODELS
+    assert config.LLM_TRIAGE_MODEL in SUPPORTED_PRODUCTION_MODELS
+    assert config.STRUCTURED_NLU_FALLBACK_MODEL in SUPPORTED_PRODUCTION_MODELS
+    assert config.GROQ_ROUTER_MODEL != config.GROQ_MODEL
+    assert config.STRUCTURED_NLU_FALLBACK_MODEL != config.GROQ_ROUTER_MODEL
+    assert "compound" not in config.GROQ_ROUTER_MODEL
+    assert "compound" not in config.LLM_TRIAGE_MODEL
+    assert "compound" not in config.STRUCTURED_NLU_FALLBACK_MODEL
+
+
+def test_structured_nlu_uses_primary_then_one_configured_fallback():
+    body = json.dumps({
+        "intents": ["menu_request"],
+        "entities": {},
+        "confidence": 0.93,
+        "requires_human": False,
+        "knowledge_gap": False,
+    })
+    with patch.object(
+        ai_responder, "get_active_provider", return_value="groq",
+    ), patch.object(
+        ai_responder, "_query_groq",
+        side_effect=[("", False, "groq_http_429"), (body, True, "groq_rag")],
+    ) as query:
+        result = understanding_engine.analyze("show me the menu")
+
+    assert result.available is True
+    assert result.intents == ["menu_request"]
+    assert isinstance(result.confidence, (int, float))
+    assert result.requires_human is False
+    assert result.knowledge_gap is False
+    assert query.call_count == 2
+    assert [call.kwargs["model"] for call in query.call_args_list] == [
+        config.GROQ_ROUTER_MODEL,
+        config.STRUCTURED_NLU_FALLBACK_MODEL,
+    ]
+    assert config.GROQ_ROUTER_MODEL != config.STRUCTURED_NLU_FALLBACK_MODEL
+
+
+def test_schema_invalid_output_is_not_retried_on_the_fallback_model():
+    malformed_schema = json.dumps({
+        "intents": ["menu_request"],
+        "entities": {},
+        "confidence": 0.93,
+        "requires_human": False,
+        "knowledge_gap": "false",
+    })
+    with patch.object(
+        ai_responder, "get_active_provider", return_value="groq",
+    ), patch.object(
+        ai_responder, "_query_groq",
+        return_value=(malformed_schema, True, "groq_rag"),
+    ) as query:
+        result = understanding_engine.analyze("show me the menu")
+
+    assert result.available is False
+    assert result.reason == "invalid_schema"
+    assert query.call_count == 1
+
+
+def test_both_model_failures_keep_the_deterministic_compound_route():
+    user_id = "groq-both-models-fail"
+    session_memory.clear_session(user_id, "whatsapp")
+    with patch.object(
+        ai_responder, "get_active_provider", return_value="groq",
+    ), patch.object(
+        ai_responder, "_query_groq",
+        side_effect=[
+            ("", False, "groq_http_429"),
+            ("", False, "groq_http_503"),
+        ],
+    ) as query:
+        text, matched, template_id, _images = responder.match_and_respond(
+            "Jolbhora price and do you deliver to Delhi?",
+            user_id=user_id,
+            channel="whatsapp",
+        )
+
+    assert query.call_count == 2
+    assert matched is True
+    assert template_id == "compound_product_price_delivery_query"
+    assert "Jolbhora" in text
+    assert "Delhi NCR" in text

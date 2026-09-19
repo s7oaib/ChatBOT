@@ -171,9 +171,9 @@ class TestRouterModelIsolation:
         fake.get_active_provider.return_value = "groq"
         fake._query_groq.return_value = ("delivery_area", True, "groq_rag")
         with patch("camellia.ai_responder.ai_responder", fake), \
-             patch.object(config, "GROQ_ROUTER_MODEL", "groq/compound-mini"):
+             patch.object(config, "GROQ_ROUTER_MODEL", "test/router-model"):
             r.classify("do you ship to noida", TEMPLATES)
-        assert fake._query_groq.call_args.kwargs["model"] == "groq/compound-mini"
+        assert fake._query_groq.call_args.kwargs["model"] == "test/router-model"
 
     def test_a_router_rate_limit_does_not_pause_the_model_that_writes_replies(self):
         # Rate limits on Groq are per model. A 429 on the router's model must
@@ -189,7 +189,7 @@ class TestRouterModelIsolation:
         with patch.object(config, "GROQ_API_KEY", "k"), \
              patch.object(config, "GROQ_MODEL", "openai/gpt-oss-20b"), \
              patch("camellia.ai_responder.httpx.Client", return_value=client):
-            responder_ai._query_groq("hi", model="groq/compound-mini")
+            responder_ai._query_groq("hi", model="test/router-model")
 
         assert responder_ai._groq_cooldown_until == 0.0
         assert responder_ai._last_call_ok is None
@@ -214,11 +214,11 @@ class TestRouterModelIsolation:
     def test_the_model_behind_each_pick_is_recorded_for_comparison(self):
         db.record_router_shadow(
             "whatsapp", "model attribution", "know_more", "know_more", "ok", 600.0,
-            model="groq/compound-mini",
+            model="test/router-model",
         )
         report = db.router_shadow_report(days=3650)
         models = {m["model"] for m in report["by_model"]}
-        assert "groq/compound-mini" in models
+        assert "test/router-model" in models
 
 
 class TestHealthReportsShadowState:
@@ -232,7 +232,7 @@ class TestHealthReportsShadowState:
 
     def test_health_shows_the_model_and_a_live_count_when_on(self):
         with patch.object(config, "ROUTER_SHADOW_ENABLED", True), \
-             patch.object(config, "GROQ_ROUTER_MODEL", "groq/compound-mini"), \
+             patch.object(config, "GROQ_ROUTER_MODEL", "test/router-model"), \
              patch.object(db, "router_shadow_pulse", return_value={
                  "compared_recently": 12, "agreement_rate": 0.75,
                  "last_comparison_at": "2026-09-08 02:00:00", "window_hours": 24,
@@ -241,7 +241,7 @@ class TestHealthReportsShadowState:
 
         shadow = payload["router_shadow"]
         assert shadow["enabled"] is True
-        assert shadow["model"] == "groq/compound-mini"
+        assert shadow["model"] == "test/router-model"
         assert shadow["compared_recently"] == 12
 
     def test_a_broken_pulse_query_never_takes_health_down_with_it(self):
