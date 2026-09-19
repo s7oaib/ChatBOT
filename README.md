@@ -2,7 +2,7 @@
 
 ![Python Version](https://img.shields.io/badge/Python-3.11%2B-blue.svg)
 ![Framework](https://img.shields.io/badge/FastAPI-0.110.0-green.svg)
-![Meta API](https://img.shields.io/badge/Meta%20Graph%20API-v19.0-0084FF.svg)
+![Meta API](https://img.shields.io/badge/Meta%20Graph%20API-v25.0-0084FF.svg)
 ![Database](https://img.shields.io/badge/SQLite-3.0-lightgrey.svg)
 ![License](https://img.shields.io/badge/License-MIT-yellow.svg)
 
@@ -19,10 +19,10 @@ Built to convert Meta Ad leads, filter out organic DM noise, send high-resolutio
 - **Targeted Auto-Replies**: Responds *only* to incoming messages from paid Instagram Ads.
 - **Organic DM Protection**: Organic (non-ad) DMs pass directly to the inbox for manual staff replies.
 
-> **The live deployment runs with the gate bypassed** (`BYPASS_AD_GATE=true`),
-> so the bot currently answers every Instagram DM, organic ones included. The
-> behaviour described above is what `BYPASS_AD_GATE=false` restores. See
-> [deployment guide](docs/deployment.md).
+> The production channel policy keeps Instagram AI enabled. Whether organic
+> Instagram DMs are answered is controlled by the explicitly configured
+> `BYPASS_AD_GATE` environment setting; verify the live setting before relying
+> on this behavior. See the [deployment guide](docs/deployment.md).
 
 ### 2. 🖼️ Visual Menu Photo Card Engine
 - Delivers high-resolution menu photo cards directly in Instagram DMs and WhatsApp chats instead of long text lists.
@@ -32,15 +32,15 @@ Built to convert Meta Ad leads, filter out organic DM noise, send high-resolutio
 - **Sondesh Collections**:
   - Sends `Signature Sondesh.jpeg` or `AAMAR MISHTI.jpeg` for Sondesh price inquiries.
 
-### 3. 🎯 100% Deterministic Keyword Q&A (PRD Requirement #5)
-- Uses keyword boundary regex matching against structured Q&A templates (`qa_templates.json`).
-- Eliminates AI hallucinations, incorrect pricing, and inaccurate delivery estimates.
-- Covers pricing, weekly menu items, dietary preferences (Veg/Non-Veg), delivery areas (Delhi NCR), minimum order rules, and payment methods.
+### 3. 🎯 Canonical-first response pipeline
+- Resolves deterministic and canonical approved knowledge before controlled structured NLU and semantic/RAG assistance.
+- Executes only approved templates and quarantines unconfirmed business facts, including dispatch-time claims.
+- Covers pricing, weekly menu items, dietary preferences, delivery boundaries, order rules, and payment policies from approved sources.
 
 ### 4. 🚨 Human Escalation Pipeline (PRD Requirement #4b)
 - **Out-of-Syllabus Protection**: Unmatched customer queries are never answered with guesses.
 - **Sensitive Trigger Guard**: Queries containing sensitive keywords (`refund`, `complaint`, `cancel order`, `custom order`, `bulk order`, `payment link`) immediately trigger human escalation.
-- **Owner Notification**: Logs customer IDs, channels, and message snippets in `camellia.db`, then alerts human staff via SMS/Email.
+- **Owner Notification**: Stores durable conversation/handoff state in `camellia.db` subject to retention, while normal logs use hashed identifiers and safe error metadata only.
 
 ### 5. 🔐 Kitchen & Menu Admin Portal (`/admin` / `/admin/dashboard`)
 - **Secure Admin Authentication**: Browser access uses `ADMIN_USERNAME` + an Argon2id `ADMIN_PASSWORD_HASH`, production TOTP MFA, durable rate limiting, CSRF-protected server sessions, and logout revocation. `ADMIN_API_KEY` remains a separate machine credential; legacy `ADMIN_PIN` is not accepted.
@@ -51,7 +51,7 @@ Built to convert Meta Ad leads, filter out organic DM noise, send high-resolutio
 - **📈 Analytics & Escalations**: Tracks real-time match rates, query totals, and unresolved human escalations.
 
 ### 6. 💬 Browser-Based Live Chat Tester (`/chat`)
-- Built-in WhatsApp/Instagram-style web chat interface for live testing in your browser (`http://localhost:8000/chat`).
+- Built-in WhatsApp/Instagram-style web chat interface for local testing in your browser (`http://localhost:8000/chat`); it is disabled in production.
 - Interactive memory badges, channel switcher, and direct link to the Kitchen Admin Portal.
 
 ---
@@ -60,10 +60,10 @@ Built to convert Meta Ad leads, filter out organic DM noise, send high-resolutio
 
 - **Backend Framework**: Python 3.11+, FastAPI, Uvicorn
 - **Deterministic Matcher & Parser**: Python Regex & Rule-Based Matchers ($0 Operating Cost)
-- **AI Replies & Multimodal OCR**: Groq (uses the client's own key under their own account)
+- **AI assistance**: Groq-compatible provider using `openai/gpt-oss-120b` for structured understanding and `openai/gpt-oss-20b` for responder/refinement by default; provider assistance never replaces canonical facts.
 - **HTTP Client**: `httpx` (Async Meta Graph API & WhatsApp Cloud API calls)
 - **Database**: SQLite3 (`camellia.db`)
-- **API Standards**: Meta Graph API v19.0 (Instagram Messaging API & WhatsApp Business Cloud API)
+- **API Standards**: Instagram Graph API v25.0 by default; WhatsApp Graph API v19.0 by default. Verify configured versions before deployment.
 
 ---
 
@@ -71,7 +71,7 @@ Built to convert Meta Ad leads, filter out organic DM noise, send high-resolutio
 
 ```
 Camellia.artisal/
-├── main.py                      # Process entrypoint (Docker, Railway, Render)
+├── main.py                      # Process entrypoint (Docker and Railway)
 ├── camellia/                    # Application package
 │   ├── app.py                   # FastAPI app, webhooks & /admin portal
 │   ├── responder.py             # Deterministic Q&A matcher & photo card engine
@@ -105,7 +105,12 @@ Camellia.artisal/
 ```
 
 See [docs/architecture.md](docs/architecture.md) for package ownership,
-[docs/deployment.md](docs/deployment.md) for hosting, and
+[docs/deployment.md](docs/deployment.md) for hosting,
+[docs/CLIENT_HANDOVER.md](docs/CLIENT_HANDOVER.md) for operator handover,
+[docs/PRODUCTION_BACKUP_RECOVERY.md](docs/PRODUCTION_BACKUP_RECOVERY.md) for
+recovery, [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md) for monitoring, and
+[docs/DEPENDENCY_MAINTENANCE.md](docs/DEPENDENCY_MAINTENANCE.md) for the
+dependency warning record, and
 [docs/conversation-benchmark.md](docs/conversation-benchmark.md) for quality
 evaluation.
 
@@ -131,13 +136,11 @@ pip install -r requirements.txt
 ```
 
 ### 2. Configure Environment Variables
-Copy `.env.example` to `.env`:
-```bash
-cp .env.example .env
-```
+Set the required environment variables in a local, uncommitted `.env` or in
+the hosting provider's secret manager:
 Fill in your Meta App Credentials:
 ```env
-META_VERIFY_TOKEN=camellia_verify_secret_2026
+META_VERIFY_TOKEN=your_meta_verify_token
 WHATSAPP_ACCESS_TOKEN=your_meta_access_token
 INSTAGRAM_PAGE_ID=your_instagram_page_id
 HUMAN_ESCALATION_PHONE=+918796551990
@@ -154,7 +157,7 @@ uvicorn camellia.app:app --reload --port 8000
 
 ## 💻 Test Web Interface (`/chat`)
 
-The bot comes with a built-in **Interactive Web Chat Tester** available at `/chat`, `/demo`, or `/test`. This provides a zero-setup visual environment to test bot responses, menu image cards, Ad-Gate filtering, and Ollama RAG locally in your browser without requiring live Meta developer credentials.
+The bot comes with a built-in **Interactive Web Chat Tester** available at `/chat`, `/demo`, or `/test`. It is a local-only diagnostic surface for testing approved responses, menu image cards, channel policy, and safe fallback behavior without requiring live Meta delivery.
 
 > **Off by default.** The tester writes real conversation rows and fires real escalation alerts to the owner's phone, so it returns `404` unless `ENABLE_WEB_TESTER=true` is set. Enable it in local development only — never on a public domain.
 
@@ -180,7 +183,7 @@ Then open the Web Chat Interface in your browser:
  ├────────────────────────────────────────────────────────────────────────┤
  │ Quick Test Chips:                                                      │
  │ [ 🍬 Sondesh Prices ] [ 🥬 Weekly Menu ] [ 🚚 Delivery Area ]          │
- │ [ 🦙 Ollama RAG Query ] [ 🚫 Out-of-Syllabus ] [ 🚨 Refund Escalation ]│
+ │ [ 🧠 Safe AI Fallback ] [ 🚫 Out-of-Syllabus ] [ 🚨 Refund Escalation ]│
  ├────────────────────────────────────────────────────────────────────────┤
  │ [Bot]: 👋 Hi! Welcome to Camellia Artisanal.                           │
  │ [User]: How much is Sondesh?                                           │
@@ -199,7 +202,7 @@ Then open the Web Chat Interface in your browser:
    - **🍬 Sondesh Prices**: Triggers Sondesh pricing matrix & dispatches `Signature Sondesh.jpeg` or `AAMAR MISHTI.jpeg`.
    - **🥬 Weekly Veg Menu**: Triggers dynamic day-of-week menu logic (`Till Thursday.jpeg` vs `From Friday.jpeg`).
    - **🚚 Delivery Areas**: Tests Delhi NCR coverage rules vs outside city notifications.
-   - **🦙 Ollama RAG Query**: Asks natural language questions resolved via local `llama3.2` model RAG.
+   - **🧠 Safe AI Fallback**: Exercises the controlled provider-assistance path; deterministic approved answers remain authoritative.
    - **🚫 Out-of-Syllabus Refusal**: Tests out-of-context queries (`"What is the capital of France?"`), verifying `OUT_OF_CONTEXT` refusal + human escalation.
    - **🚨 Sensitive Refund Escalation**: Tests complaint/refund guard (`"I want a refund"`), verifying human alert logging.
 
@@ -236,7 +239,7 @@ Run all 25 automated unit tests:
 ```bash
 python -m pytest tests/
 ```
-*Tests:* Ad-Gate inspection, webhook challenges (`GET /webhook/*`), webhook signature rejection, WhatsApp parsing, menu photo card logic, Ollama local RAG answers, refusals, offline fallbacks, SQLite logging, retention purge, per-user data deletion, legal pages, tester lockdown, and delivery-failure alerting.
+*Tests:* Ad-Gate inspection, webhook challenges (`GET /webhook/*`), webhook signature rejection, WhatsApp human-only behavior, menu photo card logic, controlled provider fallbacks, refusals, SQLite persistence, retention purge, per-user data deletion, legal pages, tester lockdown, delivery-failure alerting, human handoff, and Topic/source mapping.
 
 ### Method 3: Interactive CLI Terminal Simulator (`scripts/simulate_bot.py`)
 Run an interactive terminal chat session:

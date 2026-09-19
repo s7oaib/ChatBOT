@@ -408,7 +408,7 @@ class AIResponder:
                         f" code={provider_error_code}" if provider_error_code else "",
                     )
                     if not on_side_model:
-                        self._record_call(False, f"HTTP {resp.status_code}: {resp.text[:120]}")
+                        self._record_call(False, f"HTTP {resp.status_code}: provider_error")
                     if strict_json_failure:
                         return "", False, "groq_json_validate_failed"
                     return "", False, f"groq_http_{resp.status_code}"
@@ -434,8 +434,8 @@ class AIResponder:
         except Exception as e:
             if not on_side_model:
                 self._groq_cooldown_until = time.time() + TRANSIENT_COOLDOWN_SECONDS
-                self._record_call(False, f"{type(e).__name__}: {str(e)[:120]}")
-            log.warning("Groq API call failed (%s): %s", config.GROQ_MODEL, e)
+                self._record_call(False, f"exception_class={type(e).__name__}")
+            log.warning("Groq API call failed (%s): exception_class=%s", config.GROQ_MODEL, type(e).__name__)
             fallback = self.qa_data.get("escalation_triggers", {}).get(
                 "fallback_response",
                 "Thanks for reaching out! Let me connect you with our team — they'll get back to you shortly. 🙏"
@@ -455,7 +455,11 @@ class AIResponder:
             if learned_match:
                 ans = learned_match.get("verified_answer", "").strip()
                 if ans:
-                    log.info("Answered query via Learned Knowledge (%s): %s", learned_match.get("topic"), user_message[:60])
+                    message_hash = hashlib.sha256(str(user_message or "").encode("utf-8")).hexdigest()[:12]
+                    log.info(
+                        "Answered query via Learned Knowledge (%s): message_hash=%s message_length=%d",
+                        learned_match.get("topic"), message_hash, len(user_message or ""),
+                    )
                     return ans, True, "learned_knowledge"
         except Exception as e:
             log.debug("Error searching learned knowledge in AI responder: %s", e)

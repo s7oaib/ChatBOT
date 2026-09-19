@@ -515,9 +515,9 @@ class MenuParser:
                         else f"Vision model HTTP {resp.status_code}."
                     )
                     log.warning(
-                        "Groq vision HTTP %s on attempt %d/%d (model %r): %s",
+                        "Groq vision HTTP %s on attempt %d/%d (model %r)",
                         resp.status_code, attempt, _VISION_MAX_ATTEMPTS,
-                        config.GROQ_VISION_MODEL, body[:200],
+                        config.GROQ_VISION_MODEL,
                     )
                     if not _is_retryable_vision_failure(resp.status_code, body):
                         return {"status": "failed", "reason": last_reason}
