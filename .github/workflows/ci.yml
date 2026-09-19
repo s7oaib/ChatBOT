@@ -1,53 +1,73 @@
-name: Camellia Bot CI/CD Pipeline
+name: Camellia Bot CI
 
 on:
   push:
-    branches: [ main, master, feature/**, fix/**, 'feature/*' ]
+    branches:
+      - main
+      - master
+      - "feature/**"
+      - "fix/**"
+      - "hotfix/**"
+      - "maintenance/**"
   pull_request:
-    branches: [ main, master ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: camellia-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test-and-validate:
-    name: Test & Validate Schemas (Python ${{ matrix.python-version }})
+    name: Full regression (Python 3.11)
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ["3.10", "3.11"]
+    timeout-minutes: 30
+
+    env:
+      PYTHONHASHSEED: "0"
+      META_APP_SECRET: "test_secret_for_ci_pipeline"
+      ADMIN_API_KEY: "test_admin_api_key_ci"
+      ADMIN_PIN: "51990"
+      DB_PATH: "test_camellia_ci.db"
+      ENABLE_WEB_TESTER: "true"
+      WHATSAPP_MOCK_MODE: "true"
+      WHATSAPP_CHATBOT_ENABLED: "false"
+      WHATSAPP_CHATBOT_ENABLE_CONFIRM: "false"
+      INSTAGRAM_STORY_AUTO_SYNC_ENABLED: "false"
+      LLM_AUTO_RESOLVE_ENABLED: "false"
+      GEMINI_ENABLED: "false"
 
     steps:
-      - name: Checkout Code
+      - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Python ${{ matrix.python-version }}
+      - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
-          cache: "pip"
+          python-version: "3.11"
+          cache: pip
 
-      - name: Install Dependencies
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pytest pytest-asyncio flake8
+          python -m pip install -r requirements.txt
+          python -m pip install pytest pytest-asyncio flake8
 
-      - name: Syntax & Lint Check
+      - name: Syntax and undefined-name checks
         run: |
-          # Stop the build if there are Python syntax errors or undefined names
           flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics --exclude=.venv,venv,.git,__pycache__
-          # Exit-zero treats all warnings as warnings
-          flake8 . --count --exit-zero --max-complexity=15 --max-line-length=127 --statistics --exclude=.venv,venv,.git,__pycache__
 
-      - name: Validate Menu & QA Template Schemas
+      - name: Informational lint report
+        continue-on-error: true
+        run: |
+          flake8 . --count --max-complexity=15 --max-line-length=127 --statistics --exclude=.venv,venv,.git,__pycache__
+
+      - name: Validate menu and QA schemas
         run: |
           python scripts/validate_schemas.py
 
-      - name: Run Pytest Test Suite
-        env:
-          META_APP_SECRET: "test_secret_for_ci_pipeline"
-          ADMIN_API_KEY: "test_admin_api_key_ci"
-          ADMIN_PIN: "51990"
-          DB_PATH: "test_camellia.db"
-          ENABLE_WEB_TESTER: "true"
-          INSTAGRAM_ACCESS_TOKEN: "mock_test_token"
+      - name: Run full pytest suite
         run: |
-          python -m pytest tests/test_bot.py tests/test_admin_portal.py -v --tb=short
+          python -m pytest -q
