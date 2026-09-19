@@ -546,7 +546,7 @@ class TestCamelliaBot(unittest.TestCase):
         """Test /api/reset-session clears session memory correctly."""
         from camellia.session_memory import session_memory
         user_id = "user_reset_test"
-        channel = "whatsapp"
+        channel = "instagram"
 
         # 1. Set fact
         session_memory.extract_and_update_facts(user_id, channel, "My name is Shoaib")
