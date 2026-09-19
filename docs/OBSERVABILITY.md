@@ -22,6 +22,10 @@ is safe for operator use and includes:
 - `auto_resolve` and `language_understanding`: enabled/simulation state; and
 - `session_state` and retention configuration.
 
+The `human_escalation_notifications` health block reports whether the optional
+external WhatsApp notification gate is enabled and documents `SKIPPED` as the
+disabled status without exposing credentials.
+
 The normal production policy is Instagram AI enabled, WhatsApp human-only,
 web tester off, webhook signatures enforced, Story auto-sync off, and LLM Auto
 Resolve off. Confirm the actual environment through `/health` and the
@@ -42,6 +46,10 @@ Use the existing Admin endpoints for detailed state:
 - `/admin/auto-resolve/evaluation` and assisted-resolution evaluation for
   simulation/read-only state; and
 - `/admin/db-backup` for an authenticated, integrity-checked SQLite snapshot.
+
+The normal human handoff records a durable outbox event as `SKIPPED` when
+`HUMAN_ESCALATION_WHATSAPP_API_ENABLED` is unset or false. This is an
+intentional policy state, not a provider failure or a failed CAM handoff.
 
 ## Log safety contract
 

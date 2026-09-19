@@ -31,8 +31,12 @@ click-to-chat link (`WHATSAPP_BUSINESS_NUMBER`, manually configured — see the
 manual-configuration report), and the staff-facing summary — built from
 whatever Instagram's own structured understanding already extracted this
 session (`facts["last_entities"]`, order-draft slots), never re-asked of the
-customer. Staff notification continues to go through the existing
-`escalator.handle_escalation` mechanism unchanged.
+customer. Staff notification continues to go through the durable
+`escalator.handle_escalation` outbox. The normal handoff path does not call
+the WhatsApp Cloud API: `HUMAN_ESCALATION_WHATSAPP_API_ENABLED` defaults to
+false, and a disabled external notification is recorded as `SKIPPED` rather
+than as a delivery failure. A separately approved feature may enable the
+flag, subject to the existing credential checks.
 
 `INSTAGRAM_CHATBOT_ENABLED` (default true), `WHATSAPP_CHATBOT_ENABLED`
 (default false), and `WHATSAPP_HUMAN_HANDOFF_ENABLED` (default true) are the

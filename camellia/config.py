@@ -261,6 +261,12 @@ class Config:
     WHATSAPP_ACCESS_TOKEN: str = os.getenv("WHATSAPP_ACCESS_TOKEN", "")
     WHATSAPP_PHONE_NUMBER_ID: str = os.getenv("WHATSAPP_PHONE_NUMBER_ID", "")
     WHATSAPP_API_VERSION: str = os.getenv("WHATSAPP_API_VERSION", "v19.0")
+    # Staff escalation notifications must not use the WhatsApp Cloud API in
+    # the normal handoff path. Enable only as a separately approved feature;
+    # unset/false is the secure production default.
+    HUMAN_ESCALATION_WHATSAPP_API_ENABLED: bool = os.getenv(
+        "HUMAN_ESCALATION_WHATSAPP_API_ENABLED", "false"
+    ).lower() in ("true", "1", "t", "yes")
 
     # Instagram Config — uses its own Page token (may differ from WhatsApp token)
     # When set, webhook entries must belong to this exact Instagram account.

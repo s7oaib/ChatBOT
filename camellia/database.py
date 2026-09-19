@@ -2796,12 +2796,16 @@ class Database:
         event_id: int,
         *,
         success: bool,
+        skipped: bool = False,
         retryable: bool = False,
         error: Optional[str] = None,
         retry_after_seconds: int = 60,
     ) -> None:
         """Record an outbox result without retaining provider secrets."""
-        if success:
+        if skipped:
+            status = "SKIPPED"
+            modifier = None
+        elif success:
             status = "SENT"
             modifier = None
         elif retryable:

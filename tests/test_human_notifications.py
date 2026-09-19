@@ -5,6 +5,7 @@ from unittest.mock import patch
 import pytest
 
 from camellia import escalator as escalator_module
+from camellia.config import config
 
 
 @pytest.fixture
@@ -104,3 +105,24 @@ def test_handle_escalation_records_before_alert_and_returns_delivery_state(notif
     events = notification_db.get_human_notification_events()
     assert len(events) == 1
     assert events[0]["status"] == "SENT"
+
+
+def test_disabled_external_notification_is_skipped_without_failing_handoff(notification_db):
+    with patch.object(config, "HUMAN_ESCALATION_WHATSAPP_API_ENABLED", False), \
+         patch.object(config, "WHATSAPP_ACCESS_TOKEN", "token"), \
+         patch.object(config, "WHATSAPP_PHONE_NUMBER_ID", "phone-id"), \
+         patch("camellia.escalator.httpx.Client") as client:
+        result = escalator_module.escalator.handle_escalation(
+            user_id="notification-skipped",
+            channel="instagram",
+            user_message="Please connect me to a person",
+            reason="Explicit human request",
+            context_data={"handoff_ref": "CAM-54321"},
+        )
+
+    assert result["alert_sent"] is False
+    assert result["notification_status"] == "SKIPPED"
+    event = notification_db.get_human_notification_events()[0]
+    assert event["status"] == "SKIPPED"
+    assert event["last_error"] is None
+    client.assert_not_called()

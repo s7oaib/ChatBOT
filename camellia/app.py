@@ -2572,6 +2572,10 @@ def health_check():
             # participates in the overall healthy/degraded calculation.
             "instagram_outbound": instagram_outbound,
             "escalation_alerts_to": alert_destination,
+            "human_escalation_notifications": {
+                "external_whatsapp_api_enabled": config.HUMAN_ESCALATION_WHATSAPP_API_ENABLED,
+                "disabled_status": "SKIPPED",
+            },
             "router_shadow": router_shadow,
             "llm_triage": llm_triage,
             "auto_resolve": {

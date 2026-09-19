@@ -16,6 +16,7 @@ from camellia.escalator import escalator
 
 def test_alerts_go_to_the_configured_number():
     with patch.object(config, "HUMAN_ESCALATION_PHONE", "+919902181650"), \
+         patch.object(config, "HUMAN_ESCALATION_WHATSAPP_API_ENABLED", True), \
          patch.object(config, "WHATSAPP_ACCESS_TOKEN", "t"), \
          patch.object(config, "WHATSAPP_PHONE_NUMBER_ID", "1"):
         client = MagicMock()
@@ -27,6 +28,21 @@ def test_alerts_go_to_the_configured_number():
 
     payload = client.__enter__.return_value.post.call_args.kwargs["json"]
     assert payload["to"] == "919902181650"
+
+
+def test_alerts_do_not_call_meta_when_external_notification_is_disabled():
+    with patch.object(config, "HUMAN_ESCALATION_WHATSAPP_API_ENABLED", False), \
+         patch.object(config, "WHATSAPP_ACCESS_TOKEN", "t"), \
+         patch.object(config, "WHATSAPP_PHONE_NUMBER_ID", "1"), \
+         patch("camellia.escalator.httpx.Client") as client:
+        result = escalator.send_human_alert(1, "u1", "instagram", "help", "unmatched", {})
+
+    assert result["status"] == "skipped"
+    client.assert_not_called()
+
+
+def test_human_escalation_api_flag_defaults_off():
+    assert config.HUMAN_ESCALATION_WHATSAPP_API_ENABLED is False
 
 
 def test_changing_the_setting_takes_effect_without_a_restart():
@@ -71,3 +87,11 @@ class TestHealthShowsTheDestination:
         with patch.object(config, "HUMAN_ESCALATION_PHONE", ""):
             payload = json.loads(app_module.health_check().body)
         assert payload["escalation_alerts_to"]["configured"] is False
+
+    def test_health_reports_external_notification_gate_without_secrets(self):
+        with patch.object(config, "HUMAN_ESCALATION_WHATSAPP_API_ENABLED", False):
+            payload = json.loads(app_module.health_check().body)
+        assert payload["human_escalation_notifications"] == {
+            "external_whatsapp_api_enabled": False,
+            "disabled_status": "SKIPPED",
+        }

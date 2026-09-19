@@ -71,6 +71,7 @@ class Escalator:
             "status": "escalated",
             "handoff_brief": handoff_brief,
             "alert_sent": alert_sent,
+            "notification_status": notification.get("status") if notification else None,
         }
 
     def process_pending_notifications(
@@ -108,6 +109,7 @@ class Escalator:
             retry_delay = min(3600, 60 * (2 ** min(attempts - 1, 6)))
             db.complete_human_notification(
                 int(event["id"]), success=success,
+                skipped=str(result.get("status") or "").lower() == "skipped",
                 retryable=bool(result.get("retryable")),
                 error=result.get("error"), retry_after_seconds=retry_delay,
             )
@@ -141,7 +143,7 @@ class Escalator:
         reason: str,
         context: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """Sends WhatsApp/API alert notification to human team contact."""
+        """Queue result for a human alert; Cloud API use is explicitly gated."""
         handoff = context.get("handoff_brief", {})
         cust_name = handoff.get("customer_name", "Unknown")
         chat_history = "\n".join(handoff.get("recent_chat_history", []))
@@ -171,7 +173,17 @@ class Escalator:
             f"Please verify order details & send invoice via WhatsApp/Call to customer before cooking/dispatching."
         )
 
-        # In production, uses Meta WhatsApp API to alert the human phone number
+        if not config.HUMAN_ESCALATION_WHATSAPP_API_ENABLED:
+            log.info(
+                "Human escalation notification skipped: external WhatsApp API is disabled."
+            )
+            return {
+                "status": "skipped",
+                "reason": "HUMAN_ESCALATION_WHATSAPP_API_ENABLED is false",
+            }
+
+        # The separately approved feature uses Meta WhatsApp API only when the
+        # explicit gate and all required credentials are present.
         if config.WHATSAPP_ACCESS_TOKEN and config.WHATSAPP_PHONE_NUMBER_ID and self.human_phone:
             url = f"https://graph.facebook.com/{config.WHATSAPP_API_VERSION}/{config.WHATSAPP_PHONE_NUMBER_ID}/messages"
             headers = {
@@ -207,9 +219,15 @@ class Escalator:
                 log.error("Failed to send escalation alert to owner: %s", type(e).__name__)
                 return {"status": "failed", "retryable": False, "error": type(e).__name__}
         else:
-            # Development / Mock notification
             safe_alert = alert_body.encode("ascii", "backslashreplace").decode("ascii")
-            log.warning("HUMAN ESCALATION ALERT (WhatsApp credentials not configured)\n%s", safe_alert)
-            return {"mock": True, "status": "sent", "recipient": self.human_phone}
+            log.warning(
+                "HUMAN ESCALATION ALERT not sent: WhatsApp API is enabled but credentials are not configured\n%s",
+                safe_alert,
+            )
+            return {
+                "status": "failed",
+                "retryable": False,
+                "error": "WhatsApp escalation API credentials are not configured",
+            }
 
 escalator = Escalator()

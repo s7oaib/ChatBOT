@@ -25,6 +25,7 @@ only signal is the `warnings` array and the fields below it.
 | `PUBLIC_BASE_URL` | the service's own `https://` URL | Menu cards are stored as relative paths and Meta fetches them by URL. Unset, every card is dropped and customers get text-only replies with no menu photos. |
 | `BYPASS_AD_GATE` | `true` | `false` restores PRD #4: only ad-originated Instagram DMs (`referral.source == "ADS"`) get a reply and organic ones are left for a human. With it `true` the bot answers everyone, including complaints — the escalation triggers in `data/qa_templates.json` are then the only thing routing those to a human. |
 | `ENABLE_WEB_TESTER` | leave unset | Defaults off. Setting it `true` exposes `/chat` to anyone with the URL, and that tester writes real conversation rows and fires real escalation alerts at the manager's phone. |
+| `HUMAN_ESCALATION_WHATSAPP_API_ENABLED` | leave unset or `false` | The durable CAM handoff still records the escalation, but the external WhatsApp staff notification is recorded as `SKIPPED` and no Meta WhatsApp API request is made. Set `true` only for a separately approved notification feature with credentials. |
 
 ## Persistent storage (required)
 

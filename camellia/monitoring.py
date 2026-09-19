@@ -104,6 +104,15 @@ class DeliveryHealthMonitor:
         )
         log.critical(message)
 
+        # The log above is the monitoring record. Do not create a second
+        # WhatsApp Cloud API dependency unless the separately approved human
+        # escalation notification feature is explicitly enabled.
+        if not config.HUMAN_ESCALATION_WHATSAPP_API_ENABLED:
+            log.info(
+                "Owner delivery alert not sent: external WhatsApp API notification is disabled."
+            )
+            return
+
         # Best-effort WhatsApp alert. If the credential itself is what broke,
         # this cannot get through — the CRITICAL log line above is the fallback.
         if not (config.WHATSAPP_ACCESS_TOKEN and config.WHATSAPP_PHONE_NUMBER_ID):
