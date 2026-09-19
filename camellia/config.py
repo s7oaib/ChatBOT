@@ -20,6 +20,13 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
 load_dotenv(BASE_DIR / ".env", override=True)
 
+
+def _env_value_or_default(env_var: str, default: str) -> str:
+    """Use a default only when the variable is absent, not when it is empty."""
+    if env_var not in os.environ:
+        return default
+    return os.environ[env_var].strip()
+
 # Must come after the environment is loaded and before the paths below are
 # resolved: a volume starts empty, and `_resolve_path(must_exist=True)` would
 # quietly fall back to the image's own copy if the seeded file were not already
@@ -177,8 +184,9 @@ class Config:
     # Never retry the same model, and never retry malformed/schema-invalid
     # output. The schema contract is identical for both models.
     STRUCTURED_NLU_FALLBACK_MODEL: str = (
-        os.getenv("STRUCTURED_NLU_FALLBACK_MODEL", "").strip()
-        or "openai/gpt-oss-20b"
+        _env_value_or_default(
+            "STRUCTURED_NLU_FALLBACK_MODEL", "openai/gpt-oss-20b",
+        )
     )
     # A bounded, live semantic fallback for messages the deterministic trigger
     # matcher cannot confidently place (typos, Hinglish, and unusual wording).

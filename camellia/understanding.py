@@ -45,6 +45,59 @@ class Intent(str, Enum):
     UNKNOWN = "unknown"
 
 
+STRUCTURED_NLU_RESPONSE_FORMAT = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "camellia_structured_understanding",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "intents": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": [intent.value for intent in Intent],
+                    },
+                },
+                "entities": {
+                    "type": "object",
+                    "properties": {
+                        "product": {"type": ["string", "null"]},
+                        "location": {"type": ["string", "null"]},
+                        "quantity": {
+                            "anyOf": [
+                                {"type": "string"},
+                                {"type": "integer"},
+                                {"type": "null"},
+                            ],
+                        },
+                        "event": {"type": ["string", "null"]},
+                        "menu_type": {"type": ["string", "null"]},
+                        "pack_size": {"type": ["string", "null"]},
+                        "topic": {"type": ["string", "null"]},
+                        "subtopic": {"type": ["string", "null"]},
+                    },
+                    "required": [
+                        "product", "location", "quantity", "event",
+                        "menu_type", "pack_size", "topic", "subtopic",
+                    ],
+                    "additionalProperties": False,
+                },
+                "confidence": {"type": "number"},
+                "requires_human": {"type": "boolean"},
+                "knowledge_gap": {"type": "boolean"},
+            },
+            "required": [
+                "intents", "entities", "confidence", "requires_human",
+                "knowledge_gap",
+            ],
+            "additionalProperties": False,
+        },
+    },
+}
+
+
 class BusinessAction(str, Enum):
     SEND_RESPONSE = "SEND_RESPONSE"
     SEND_MENU = "SEND_MENU"
@@ -201,7 +254,7 @@ class UnderstandingEngine:
             prompt,
             is_refinement=True,
             model=config.GROQ_ROUTER_MODEL,
-            response_format={"type": "json_object"},
+            response_format=STRUCTURED_NLU_RESPONSE_FORMAT,
             max_tokens=300,
         )
         if not ok and self._another_model_could_survive(reason):
@@ -216,7 +269,7 @@ class UnderstandingEngine:
                     prompt,
                     is_refinement=True,
                     model=fallback_model,
-                    response_format={"type": "json_object"},
+                    response_format=STRUCTURED_NLU_RESPONSE_FORMAT,
                     max_tokens=300,
                 )
                 reason = f"{reason}>{fallback_reason}" if not ok else "ok_fallback_model"

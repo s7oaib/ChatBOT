@@ -8,7 +8,11 @@ from camellia.database import Database
 from camellia.rag_fallback import rag_fallback_engine
 from camellia.responder import _structured_nlu_enabled_for, responder
 from camellia.session_memory import session_memory
-from camellia.understanding import UnderstandingResult, understanding_engine
+from camellia.understanding import (
+    STRUCTURED_NLU_RESPONSE_FORMAT,
+    UnderstandingResult,
+    understanding_engine,
+)
 
 
 def _result(intents, entities=None, requires_human=False):
@@ -47,7 +51,9 @@ def test_llm_contract_is_structured_json_and_validated():
 
     assert result.intents == ["product_price", "delivery_query"]
     assert result.entities == {"product": "Jolbhora", "location": "Delhi"}
-    assert query.call_args.kwargs["response_format"] == {"type": "json_object"}
+    assert query.call_args.kwargs["response_format"] == STRUCTURED_NLU_RESPONSE_FORMAT
+    assert query.call_args.kwargs["response_format"]["type"] == "json_schema"
+    assert query.call_args.kwargs["response_format"]["json_schema"]["strict"] is True
     assert query.call_args.kwargs["max_tokens"] == 300
 
 
