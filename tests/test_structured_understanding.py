@@ -55,6 +55,7 @@ def test_llm_contract_is_structured_json_and_validated():
     assert query.call_args.kwargs["response_format"]["type"] == "json_schema"
     assert query.call_args.kwargs["response_format"]["json_schema"]["strict"] is True
     assert query.call_args.kwargs["max_tokens"] == 300
+    assert query.call_args.kwargs["reasoning_effort"] == "low"
 
 
 def test_llm_contract_rejects_non_boolean_gap_fields():

@@ -1,7 +1,7 @@
 """Groq model assignments and bounded structured-NLU fallback contracts."""
 
 import json
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from camellia.ai_responder import ai_responder
 from camellia.config import _env_value_or_default, config
@@ -83,6 +83,10 @@ def test_structured_nlu_uses_primary_then_one_configured_fallback():
         call.kwargs["response_format"] == STRUCTURED_NLU_RESPONSE_FORMAT
         for call in query.call_args_list
     )
+    assert all(
+        call.kwargs["reasoning_effort"] == "low"
+        for call in query.call_args_list
+    )
     assert STRUCTURED_NLU_RESPONSE_FORMAT["type"] == "json_schema"
     assert STRUCTURED_NLU_RESPONSE_FORMAT["json_schema"]["strict"] is True
 
@@ -112,6 +116,73 @@ def test_primary_500_uses_exactly_one_strict_schema_fallback_attempt():
     assert query.call_args_list[0].kwargs["response_format"] == (
         query.call_args_list[1].kwargs["response_format"]
     )
+    assert query.call_args_list[0].kwargs["reasoning_effort"] == "low"
+
+
+def test_structured_nlu_strict_failure_is_parked_without_repeated_requests(monkeypatch):
+    monkeypatch.setattr(understanding_engine, "_strict_format_disabled_until", 0.0)
+    with patch.object(
+        ai_responder, "get_active_provider", return_value="groq",
+    ), patch.object(
+        ai_responder, "_query_groq",
+        return_value=("", False, "groq_json_validate_failed"),
+    ) as query:
+        first = understanding_engine.analyze("show me the menu")
+        second = understanding_engine.analyze("what are your opening hours?")
+
+    assert first.reason == "groq_json_validate_failed"
+    assert second.reason == "structured_nlu_format_cooldown"
+    assert query.call_count == 1
+
+
+def test_reasoning_effort_is_caller_specific_and_serialized_for_groq():
+    response = MagicMock()
+    response.status_code = 200
+    response.json.return_value = {
+        "choices": [{"message": {"content": "ok"}}],
+    }
+    with patch("camellia.ai_responder.httpx.Client") as client_cls:
+        client = client_cls.return_value.__enter__.return_value
+        client.post.return_value = response
+        ai_responder._query_groq(
+            "probe",
+            is_refinement=True,
+            model="openai/gpt-oss-120b",
+            response_format=STRUCTURED_NLU_RESPONSE_FORMAT,
+            max_tokens=300,
+            reasoning_effort="low",
+        )
+
+    payload = client.post.call_args.kwargs["json"]
+    assert payload["reasoning_effort"] == "low"
+    assert payload["max_tokens"] == 300
+    assert payload["response_format"] == STRUCTURED_NLU_RESPONSE_FORMAT
+
+
+def test_json_validate_failed_strict_response_fails_closed_without_side_model_cooldown(monkeypatch):
+    monkeypatch.setattr(ai_responder, "_groq_cooldown_until", 0.0)
+    response = MagicMock()
+    response.status_code = 400
+    response.text = '{"error":{"code":"json_validate_failed"}}'
+    response.json.return_value = {
+        "error": {"code": "json_validate_failed"},
+    }
+    with patch("camellia.ai_responder.httpx.Client") as client_cls, patch.object(
+        config, "GROQ_API_KEY", "test-key",
+    ):
+        client = client_cls.return_value.__enter__.return_value
+        client.post.return_value = response
+        raw, ok, reason = ai_responder._query_groq(
+            "probe",
+            is_refinement=True,
+            model="openai/gpt-oss-120b",
+            response_format=STRUCTURED_NLU_RESPONSE_FORMAT,
+            max_tokens=300,
+            reasoning_effort="low",
+        )
+
+    assert (raw, ok, reason) == ("", False, "groq_json_validate_failed")
+    assert ai_responder._groq_cooldown_until == 0.0
 
 
 def test_schema_invalid_output_is_not_retried_on_the_fallback_model():
