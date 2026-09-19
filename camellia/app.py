@@ -3401,6 +3401,76 @@ def mark_admin_notification_seen(handoff_ref: str, x_admin_key: Optional[str] = 
     return {"status": "seen", "handoff_ref": handoff_ref}
 
 
+def _notification_test_payload(test_ref: str) -> Dict[str, Any]:
+    """Build a privacy-safe payload that is never persisted as a CAM event."""
+    base = str(config.PUBLIC_BASE_URL or "").rstrip("/")
+    return {
+        "title": "Camellia owner notification test",
+        "handoff_ref": test_ref,
+        "reason": "Owner notification transport test",
+        "source": "Admin",
+        "timestamp": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        "status": "TEST",
+        "admin_url": f"{base}/admin" if base else "/admin",
+    }
+
+
+def _safe_notification_test_result(result: Dict[str, Any], provider: str) -> Dict[str, Any]:
+    """Return only bounded delivery state; never return provider response data."""
+    status = str(result.get("status") or "failed").upper()
+    safe = {
+        "status": status if status in {"SENT", "FAILED", "SKIPPED"} else "FAILED",
+        "provider": provider,
+        "retryable": bool(result.get("retryable")),
+    }
+    if safe["status"] != "SENT":
+        error = str(result.get("error") or "")
+        if safe["status"] == "SKIPPED":
+            safe["error_class"] = "not_ready"
+        elif re.fullmatch(r"HTTP [1-5][0-9]{2}", error):
+            safe["error_class"] = error
+        elif re.fullmatch(r"OAuth (invalid_grant|invalid_client|unauthorized_client|invalid_scope)", error):
+            safe["error_class"] = error
+        elif error in {"NetworkError", "TimeoutException", "invalid OAuth token response", "pywebpush is not installed"}:
+            safe["error_class"] = error
+        else:
+            safe["error_class"] = "delivery_failed"
+    return safe
+
+
+@app.post("/admin/notifications/test-email")
+def test_owner_email(
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """Exercise the configured email transport without Instagram or a CAM."""
+    require_admin(x_admin_key, x_admin_pin)
+    if owner_notifications.email_readiness().get("provider") != "gmail_api":
+        return {
+            "status": "SKIPPED",
+            "provider": "gmail_api",
+            "retryable": False,
+            "error_class": "provider_not_gmail_api",
+        }
+    result = owner_notifications.send_email(_notification_test_payload("TEST-EMAIL"))
+    return _safe_notification_test_result(result, "gmail_api")
+
+
+@app.post("/admin/notifications/test-push")
+def test_owner_push(
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """Exercise Web Push for the Admin browser without creating a CAM."""
+    require_admin(x_admin_key, x_admin_pin)
+    result = owner_notifications.send_test_web_push(
+        _notification_test_payload("TEST-PUSH"), db,
+    )
+    response = _safe_notification_test_result(result, "web_push")
+    response["subscriber_count"] = db.web_push_subscription_count()
+    return response
+
+
 @app.get("/admin/notifications/config")
 def get_owner_notification_config(x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
     """Safe channel readiness plus the public VAPID key only."""
@@ -6560,6 +6630,10 @@ THIS WEEK'S BENGAL SPECIALS
                 <div style="flex:1; min-width:230px;"><b>Owner notifications</b><div id="ownerNotificationStatus" style="font-size:.8rem; color:#64748B; margin-top:3px;">Checking channel readiness…</div></div>
                 <label style="font-size:.82rem; display:flex; gap:6px; align-items:center;"><input type="checkbox" id="handoffSoundToggle"> Sound for new handoffs</label>
                 <button class="btn-secondary" type="button" id="pushOptInButton" onclick="toggleOwnerPush()">Enable browser push</button>
+                <button class="btn-secondary" type="button" id="testOwnerEmailButton"
+                        onclick="sendOwnerNotificationTest('email')">Send test email</button>
+                <button class="btn-secondary" type="button" id="testOwnerPushButton"
+                        onclick="sendOwnerNotificationTest('push')">Send test push</button>
             </div>
             <div style="margin-bottom:20px;"><b style="font-size:.92rem;">Recent CAM handoffs</b><div id="newHandoffsList" aria-live="polite"></div></div>
 
@@ -7321,6 +7395,28 @@ THIS WEEK'S BENGAL SPECIALS
                 button.disabled = true;
                 loadOwnerNotificationConfig();
             } catch (e) { alert(e.message || 'Could not enable browser push.'); }
+        }
+
+        async function sendOwnerNotificationTest(channel) {
+            const path = channel === 'push' ? '/admin/notifications/test-push' : '/admin/notifications/test-email';
+            const button = document.getElementById(channel === 'push' ? 'testOwnerPushButton' : 'testOwnerEmailButton');
+            const status = document.getElementById('ownerNotificationStatus');
+            if (button) button.disabled = true;
+            try {
+                const response = await fetch(path, { method: 'POST', headers: getAuthHeaders(), credentials: 'same-origin' });
+                const result = await response.json().catch(() => ({}));
+                const label = channel === 'push' ? 'Web Push test' : 'Email test';
+                if (response.ok && result.status === 'SENT') {
+                    if (status) status.textContent = label + ': sent';
+                } else {
+                    if (status) status.textContent = label + ': ' + (result.error_class || 'not sent');
+                }
+            } catch (e) {
+                if (status) status.textContent = (channel === 'push' ? 'Web Push' : 'Email') + ' test: request failed';
+            } finally {
+                if (button) button.disabled = false;
+                setTimeout(loadOwnerNotificationConfig, 5000);
+            }
         }
 
         async function disableOwnerPush() {

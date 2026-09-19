@@ -116,11 +116,12 @@ def safe_handoff_payload(handoff: Dict[str, Any], *, public_base_url: str = "") 
 
 def _email_message(payload: Dict[str, Any]) -> EmailMessage:
     message = EmailMessage()
-    message["Subject"] = f"New Camellia handoff {payload['handoff_ref']}"
+    title = str(payload.get("title") or f"New Camellia handoff {payload['handoff_ref']}")
+    message["Subject"] = title
     message["From"] = config.ADMIN_EMAIL_FROM
     message["To"] = _recipient()
     message.set_content(
-        "A new Camellia human handoff is waiting.\n\n"
+        f"{title}\n\n"
         f"CAM reference: {payload['handoff_ref']}\n"
         f"Reason: {payload['reason']}\n"
         f"Source: {payload['source']}\n"
@@ -218,9 +219,9 @@ def send_email(payload: Dict[str, Any]) -> Dict[str, Any]:
                 json={
                     "from": config.ADMIN_EMAIL_FROM,
                     "to": [_recipient()],
-                    "subject": f"New Camellia handoff {payload['handoff_ref']}",
+                    "subject": str(payload.get("title") or f"New Camellia handoff {payload['handoff_ref']}"),
                     "text": (
-                        "A new Camellia human handoff is waiting.\n\n"
+                        f"{str(payload.get('title') or 'A new Camellia human handoff is waiting.')}\n\n"
                         f"CAM reference: {payload['handoff_ref']}\n"
                         f"Reason: {payload['reason']}\n"
                         f"Source: {payload['source']}\n"
@@ -267,7 +268,7 @@ def _remove_subscription(database: Any, subscription_id: int) -> None:
         log.exception("Could not revoke an expired Web Push subscription.")
 
 
-def send_web_push(payload: Dict[str, Any], database: Any) -> Dict[str, Any]:
+def send_web_push(payload: Dict[str, Any], database: Any, *, test: bool = False) -> Dict[str, Any]:
     subscriptions = database.get_active_web_push_subscriptions()
     readiness = web_push_readiness(len(subscriptions))
     if not readiness["configured"] or not subscriptions:
@@ -277,13 +278,22 @@ def send_web_push(payload: Dict[str, Any], database: Any) -> Dict[str, Any]:
     except ImportError:
         return {"status": "failed", "retryable": False, "error": "pywebpush is not installed"}
 
-    body = json.dumps({
-        "title": payload["title"],
-        "body": f"{payload['handoff_ref']} · {payload['reason']}",
-        "url": payload["admin_url"],
-        "handoff_ref": payload["handoff_ref"],
-        "timestamp": payload["timestamp"],
-    }, separators=(",", ":"))
+    if test:
+        body_payload = {
+            "title": "Camellia owner notification test",
+            "body": f"Camellia owner notification test · {payload['timestamp']}",
+            "url": payload["admin_url"],
+            "timestamp": payload["timestamp"],
+        }
+    else:
+        body_payload = {
+            "title": payload["title"],
+            "body": f"{payload['handoff_ref']} · {payload['reason']}",
+            "url": payload["admin_url"],
+            "handoff_ref": payload["handoff_ref"],
+            "timestamp": payload["timestamp"],
+        }
+    body = json.dumps(body_payload, separators=(",", ":"))
     sent = 0
     retryable_failure = False
     permanent_failure = False
@@ -315,3 +325,8 @@ def send_web_push(payload: Dict[str, Any], database: Any) -> Dict[str, Any]:
     if retryable_failure:
         return {"status": "failed", "retryable": True, "error": "all Web Push subscriptions temporarily failed"}
     return {"status": "failed" if permanent_failure else "skipped", "retryable": False, "error": "all Web Push subscriptions rejected delivery" if permanent_failure else "no active subscriptions"}
+
+
+def send_test_web_push(payload: Dict[str, Any], database: Any) -> Dict[str, Any]:
+    """Send the isolated Admin transport test without creating a CAM event."""
+    return send_web_push(payload, database, test=True)
