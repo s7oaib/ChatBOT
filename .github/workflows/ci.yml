@@ -9,6 +9,7 @@ on:
       - "fix/**"
       - "hotfix/**"
       - "maintenance/**"
+      - "codex/**"
   pull_request:
   workflow_dispatch:
 
