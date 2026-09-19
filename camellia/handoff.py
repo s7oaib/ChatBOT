@@ -175,12 +175,6 @@ def get_or_create_handoff(
     day — an order they had not mentioned and might no longer want.
     """
     order_summary = verified_order_summary(facts) if include_order else None
-    existing = db.get_active_handoff(channel, user_id)
-    if existing:
-        existing["newly_created"] = False
-        existing["verified_order"] = order_summary
-        return existing
-
     known_entities = _known_entities(facts, include_order=include_order)
     if order_summary:
         known_entities["verified_order"] = order_summary
@@ -196,7 +190,7 @@ def get_or_create_handoff(
     ).strftime("%Y-%m-%d %H:%M:%S")
 
     reference = _generate_reference()
-    handoff = db.create_handoff(
+    handoff, newly_created = db.get_or_create_handoff(
         handoff_ref=reference,
         source_channel=channel,
         source_user_id=user_id,
@@ -207,8 +201,9 @@ def get_or_create_handoff(
         escalation_id=escalation_id,
         expires_at=expires_at,
     )
-    log.info("Created handoff %s for %s/%s (%s).", reference, channel, user_id, reason)
-    handoff["newly_created"] = True
+    if newly_created:
+        log.info("Created handoff %s for %s/%s (%s).", reference, channel, user_id, reason)
+    handoff["newly_created"] = newly_created
     handoff["verified_order"] = order_summary
     return handoff
 

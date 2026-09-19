@@ -2750,6 +2750,62 @@ class Database:
             conn.commit()
         return self.get_handoff_by_ref(handoff_ref)
 
+    def get_or_create_handoff(
+        self,
+        *,
+        handoff_ref: str,
+        source_channel: str,
+        source_user_id: str,
+        reason: Optional[str],
+        summary: Optional[str],
+        known_entities: Optional[Dict[str, Any]],
+        unresolved_topic: Optional[str],
+        escalation_id: Optional[int],
+        expires_at: Optional[str],
+    ) -> tuple[Dict[str, Any], bool]:
+        """Atomically reuse or create one active handoff for a customer.
+
+        The read and insert must share one write transaction. Otherwise two
+        duplicate webhook deliveries handled concurrently can both observe
+        no active handoff and mint two customer references before either
+        transaction commits.
+        """
+        with self.get_connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            existing = conn.execute(
+                """
+                SELECT * FROM cross_channel_handoffs
+                WHERE source_channel = ? AND source_user_id = ?
+                  AND status NOT IN ('RESOLVED', 'EXPIRED')
+                  AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
+                ORDER BY id DESC LIMIT 1
+                """,
+                (source_channel, source_user_id),
+            ).fetchone()
+            if existing:
+                conn.commit()
+                return dict(existing), False
+
+            conn.execute(
+                """
+                INSERT INTO cross_channel_handoffs (
+                    handoff_ref, source_channel, source_user_id, reason, summary,
+                    known_entities, unresolved_topic, status, escalation_id, expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'CREATED', ?, ?)
+                """,
+                (
+                    handoff_ref, source_channel, source_user_id, reason, summary,
+                    json.dumps(known_entities or {}, ensure_ascii=False), unresolved_topic,
+                    escalation_id, expires_at,
+                ),
+            )
+            created = conn.execute(
+                "SELECT * FROM cross_channel_handoffs WHERE handoff_ref = ?",
+                (handoff_ref,),
+            ).fetchone()
+            conn.commit()
+            return dict(created), True
+
     def get_handoff_by_ref(self, handoff_ref: str) -> Optional[Dict[str, Any]]:
         """Looks up a handoff by its customer-facing reference."""
         with self.get_connection() as conn:
