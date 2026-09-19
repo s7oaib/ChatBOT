@@ -193,4 +193,3 @@ def send_web_push(payload: Dict[str, Any], database: Any) -> Dict[str, Any]:
     if retryable_failure:
         return {"status": "failed", "retryable": True, "error": "all Web Push subscriptions temporarily failed"}
     return {"status": "failed" if permanent_failure else "skipped", "retryable": False, "error": "all Web Push subscriptions rejected delivery" if permanent_failure else "no active subscriptions"}
-
