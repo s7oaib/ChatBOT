@@ -261,6 +261,9 @@ class Config:
     WHATSAPP_API_VERSION: str = os.getenv("WHATSAPP_API_VERSION", "v19.0")
 
     # Instagram Config — uses its own Page token (may differ from WhatsApp token)
+    # When set, webhook entries must belong to this exact Instagram account.
+    # Leaving it blank preserves compatibility with existing integrations.
+    INSTAGRAM_ACCOUNT_ID: str = os.getenv("INSTAGRAM_ACCOUNT_ID", "").strip()
     INSTAGRAM_PAGE_ID: str = os.getenv("INSTAGRAM_PAGE_ID", "")
     INSTAGRAM_ACCESS_TOKEN: str = os.getenv("INSTAGRAM_ACCESS_TOKEN", "") or os.getenv("WHATSAPP_ACCESS_TOKEN", "")
     # Instagram Graph API version is independent of WhatsApp's — the two

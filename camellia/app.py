@@ -1306,7 +1306,12 @@ def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks
     log.info("Instagram Webhook Raw Payload:\n%s", json.dumps(payload, indent=2))
 
     results = []
+    configured_account_id = str(getattr(config, "INSTAGRAM_ACCOUNT_ID", "") or "").strip()
     for entry in payload.get("entry", []):
+        if configured_account_id and str(entry.get("id", "")) != configured_account_id:
+            log.info("Ignored Instagram webhook entry for a foreign account.")
+            continue
+
         events = list(entry.get("messaging", []))
         if "changes" in entry:
             for change in entry.get("changes", []):

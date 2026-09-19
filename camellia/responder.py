@@ -582,6 +582,12 @@ GENERIC_SAVOURY_DELIVERY_TIME_RE = re.compile(
     r'how soon can you deliver)\b',
     re.IGNORECASE,
 )
+OPENING_HOURS_RE = re.compile(
+    r'\b(?:opening hours?|opening times?|when are you open|when do you open|'
+    r'what time (?:do you|does the kitchen) open|what time are you open|'
+    r'kitchen opening hours?)\b',
+    re.IGNORECASE,
+)
 SUBSCRIPTION_DELIVERY_TIME_RE = re.compile(
     r'(?:\bsubscription\b.*\b(?:delivery|deliver|arrive|time)\b|'
     r'\b(?:delivery|deliver|arrive|time)\b.*\bsubscription\b)',
@@ -2409,6 +2415,24 @@ class DeterministicResponder:
                 response_text = intro_greeting_prefix + response_text
             session_memory.add_turn(user_id, channel, user_message, response_text)
             return response_text, True, "savoury_delivery_time", images
+
+        # Opening-hours questions are a deterministic part of the approved
+        # delivery-time answer. Resolve them before model NLU can classify the
+        # wording as an unsupported business question.
+        if (
+            not active_conversation_flow
+            and not facts.get("subscription_context")
+            and OPENING_HOURS_RE.search(lowered_text)
+        ):
+            template = self._template_by_id("delivery_time") or {}
+            response_text, images = self._format_dynamic_response(
+                "delivery_time", template.get("response") or self._generic_fallback(),
+                user_id=user_id, channel=channel, user_message=user_message,
+            )
+            if intro_greeting_prefix:
+                response_text = intro_greeting_prefix + response_text
+            session_memory.add_turn(user_id, channel, user_message, response_text)
+            return response_text, True, "delivery_time", images
 
         if (
             not active_conversation_flow
