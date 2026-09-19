@@ -2,14 +2,15 @@
 
 Status: maintenance documentation only. This file does not enable, create, restore, or deploy backups.
 
-## Frozen references
+## Stable recovery references
 
-- Accepted production SHA: `75642a2ef763bcf46e214487f5e6ded1538b8cdc`
-- Frozen release branch: `release/production-freeze-2026-09-19`
-- Railway production deployment: `7855239b-1116-4d0c-a98a-cfe48b1cd110`
-- Code rollback reference: `0ced6ed4050a2c295e25d4c2bc64dd1cbaec7804`
+- Production service branch: `feature/phase3c-instagram-story-auto-sync`
+- Runtime freeze branch: `release/production-freeze-2026-09-19`
+- Runtime freeze SHA: `75642a2ef763bcf46e214487f5e6ded1538b8cdc`
 - Production database path: `/app/var/camellia.db`
 - Railway volume mount: `/app/var`
+
+The runtime freeze branch is intentionally pinned to the last accepted application/runtime baseline. Later maintenance-only commits may advance the production branch without changing application behavior. Do not treat a hard-coded deployment ID or branch HEAD in this document as authoritative: confirm the active Git SHA and Railway deployment immediately before any recovery action.
 
 ## Recovery principle
 
@@ -112,11 +113,9 @@ Never wipe the production volume to solve an application defect.
 
 Use a code rollback only when persistent data is known to be compatible and the incident is caused by application code.
 
-Reference rollback SHA:
+The runtime freeze SHA `75642a2ef763bcf46e214487f5e6ded1538b8cdc` is a stable application/runtime reference. It may be runtime-equivalent to later releases that contain only CI, test, or documentation changes; verify the actual diff before using it as a rollback target.
 
-`0ced6ed4050a2c295e25d4c2bc64dd1cbaec7804`
-
-Before rolling back, verify that no intervening database migration makes the older code incompatible with current data. If compatibility is uncertain, treat the incident as a combined code/data recovery problem instead of assuming code rollback is safe.
+For an application incident, select the last known-good application SHA from the incident chronology rather than automatically rolling back to an older historical commit. Before rolling back, verify that no intervening database migration makes the older code incompatible with current data. If compatibility is uncertain, treat the incident as a combined code/data recovery problem instead of assuming code rollback is safe.
 
 ## Healthy-state rule
 
