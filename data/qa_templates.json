@@ -276,6 +276,24 @@
       "router_hint": "The customer is ready to place an order and needs to know what to share."
     },
     {
+      "id": "opening_hours",
+      "triggers": [
+        "opening hours",
+        "what are your opening hours",
+        "what are the opening hours",
+        "when are you open",
+        "when do you open",
+        "what time are you open",
+        "what time do you open",
+        "kitchen hours",
+        "kitchen opening hours",
+        "kitchen timings"
+      ],
+      "response": "Our kitchen is open 10:00 AM – 7:30 PM every day.",
+      "escalate": false,
+      "source_ref": "client Q&A script > HOURS"
+    },
+    {
       "id": "delivery_time",
       "triggers": [
         "how much time",
@@ -284,16 +302,6 @@
         "how soon",
         "when will it arrive",
         "dispatch time",
-        "kitchen timings",
-        "kitchen hours",
-        "what time do you open",
-        "opening hours",
-        "what are your opening hours",
-        "what are the opening hours",
-        "when are you open",
-        "when do you open",
-        "what time are you open",
-        "kitchen opening hours",
         "same day delivery",
         "delivery hours",
         "what are your delivery hours",

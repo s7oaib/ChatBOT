@@ -43,8 +43,13 @@ def _payload(entry_id=None, event=None):
     "What are your opening hours?",
     "What are the opening hours?",
     "When are you open?",
+    "When do you open?",
+    "What time are you open?",
+    "What time do you open?",
+    "kitchen hours",
+    "kitchen opening hours",
 ])
-def test_opening_hours_variants_use_the_approved_delivery_time_answer(message, monkeypatch):
+def test_opening_hours_variants_use_the_dedicated_approved_answer(message, monkeypatch):
     monkeypatch.setattr(config, "BYPASS_AD_GATE", True)
     user_id = "hours-" + uuid.uuid4().hex[:8]
     session_memory.clear_session(user_id, "instagram")
@@ -54,8 +59,9 @@ def test_opening_hours_variants_use_the_approved_delivery_time_answer(message, m
     )
 
     assert matched is True
-    assert template_id == "delivery_time"
+    assert template_id == "opening_hours"
     assert "Our kitchen is open 10:00 AM – 7:30 PM every day." in response
+    assert "Please share the item and order details" not in response
 
 
 def test_opening_hours_does_not_escalate():
@@ -64,11 +70,12 @@ def test_opening_hours_does_not_escalate():
 
     with patch.object(app_module, "send_instagram_reply") as send, patch.object(
         app_module.escalator, "handle_escalation"
-    ) as escalate:
+    ) as escalate, patch.object(app_module, "get_or_create_handoff") as handoff:
         app_module._process_instagram_event(user_id, "opening hours", None)
 
     assert send.called
     assert not escalate.called
+    assert not handoff.called
 
 
 def test_matching_instagram_account_entry_is_processed(monkeypatch):

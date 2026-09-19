@@ -585,7 +585,7 @@ GENERIC_SAVOURY_DELIVERY_TIME_RE = re.compile(
 OPENING_HOURS_RE = re.compile(
     r'\b(?:opening hours?|opening times?|when are you open|when do you open|'
     r'what time (?:do you|does the kitchen) open|what time are you open|'
-    r'kitchen opening hours?)\b',
+    r'kitchen hours?|kitchen opening hours?|kitchen timings?)\b',
     re.IGNORECASE,
 )
 SUBSCRIPTION_DELIVERY_TIME_RE = re.compile(
@@ -2424,15 +2424,15 @@ class DeterministicResponder:
             and not facts.get("subscription_context")
             and OPENING_HOURS_RE.search(lowered_text)
         ):
-            template = self._template_by_id("delivery_time") or {}
+            template = self._template_by_id("opening_hours") or {}
             response_text, images = self._format_dynamic_response(
-                "delivery_time", template.get("response") or self._generic_fallback(),
+                "opening_hours", template.get("response") or self._generic_fallback(),
                 user_id=user_id, channel=channel, user_message=user_message,
             )
             if intro_greeting_prefix:
                 response_text = intro_greeting_prefix + response_text
             session_memory.add_turn(user_id, channel, user_message, response_text)
-            return response_text, True, "delivery_time", images
+            return response_text, True, "opening_hours", images
 
         if (
             not active_conversation_flow
