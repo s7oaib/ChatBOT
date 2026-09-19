@@ -16,6 +16,7 @@ from camellia.content_integrity import (
 from camellia.knowledge import approved_knowledge
 from camellia.responder import DeterministicResponder, responder
 from camellia.session_memory import session_memory
+from camellia.understanding import Intent, UnderstandingResult
 
 
 OPENING_HOURS = "Our kitchen is open 10:00 AM – 7:30 PM every day."
@@ -89,6 +90,41 @@ def test_opening_hours_route_does_not_call_nlu_or_groq(monkeypatch):
     assert template_id == "opening_hours"
     assert text == OPENING_HOURS
     assert not analyze.called
+
+
+def _resolve_delivery_time(entities):
+    understood = UnderstandingResult(
+        intents=[Intent.DELIVERY_TIME_QUESTION.value],
+        entities=entities,
+        confidence=0.9,
+        available=True,
+        reason="test",
+    )
+    return approved_knowledge.resolve(
+        understood, responder.qa_data.get("templates", []),
+    )
+
+
+def test_generic_delivery_time_canonical_resolution_cannot_select_opening_hours():
+    resolution = _resolve_delivery_time({})
+
+    assert resolution.items
+    assert resolution.items[0].template_id != "opening_hours"
+
+
+def test_opening_hours_subtopic_selects_the_canonical_opening_hours_record():
+    resolution = _resolve_delivery_time({"subtopic": "opening_hours"})
+
+    assert [item.template_id for item in resolution.items] == ["opening_hours"]
+    assert resolution.items[0].approved_response == OPENING_HOURS
+
+
+def test_product_specific_delivery_time_records_remain_distinct():
+    savoury = _resolve_delivery_time({"product": "bengali bento"})
+    sondesh = _resolve_delivery_time({"product": "sondesh"})
+
+    assert savoury.items[0].template_id == "savoury_delivery_time"
+    assert sondesh.items[0].template_id == "sondesh_dispatch_time"
 
 
 def test_equal_seed_version_backfills_opening_hours_without_overwriting_live_edits(

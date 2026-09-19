@@ -214,7 +214,7 @@ CATALOGUE: Tuple[KnowledgeRecord, ...] = (
                     "delivery_area", (SEND,)),
     KnowledgeRecord("delivery:opening_hours", "opening_hours",
                     (Intent.DELIVERY_TIME_QUESTION.value,),
-                    "opening_hours", (SEND,), _no_product(), priority=30),
+                    "opening_hours", (SEND,), _subtopic("opening_hours"), priority=30),
     KnowledgeRecord("delivery:time_savoury", "delivery_time", (Intent.DELIVERY_TIME_QUESTION.value,),
                     "savoury_delivery_time", (SEND,),
                     lambda entities: "bento" in entities.get("product", "")
