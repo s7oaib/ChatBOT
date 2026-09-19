@@ -1650,10 +1650,10 @@ def send_instagram_reply(
 
     token = config.INSTAGRAM_ACCESS_TOKEN.strip()
     if token.startswith("IGAA"):
-        url = f"https://graph.instagram.com/{config.WHATSAPP_API_VERSION}/me/messages"
+        url = f"https://graph.instagram.com/{config.INSTAGRAM_API_VERSION}/me/messages"
     else:
         page_id = config.INSTAGRAM_PAGE_ID or "me"
-        url = f"https://graph.facebook.com/{config.WHATSAPP_API_VERSION}/{page_id}/messages"
+        url = f"https://graph.facebook.com/{config.INSTAGRAM_API_VERSION}/{page_id}/messages"
 
     headers = {
         "Authorization": f"Bearer {token}",
@@ -2268,12 +2268,12 @@ def _instagram_profile_url_and_identity() -> Tuple[str, str]:
     token = (config.INSTAGRAM_ACCESS_TOKEN or "").strip()
     if token.startswith("IGAA"):
         return (
-            f"https://graph.instagram.com/{config.WHATSAPP_API_VERSION}/me/messenger_profile",
+            f"https://graph.instagram.com/{config.INSTAGRAM_API_VERSION}/me/messenger_profile",
             "instagram_login_token (graph.instagram.com/me)",
         )
     page_id = config.INSTAGRAM_PAGE_ID or "me"
     return (
-        f"https://graph.facebook.com/{config.WHATSAPP_API_VERSION}/{page_id}/messenger_profile",
+        f"https://graph.facebook.com/{config.INSTAGRAM_API_VERSION}/{page_id}/messenger_profile",
         f"page_token (graph.facebook.com/{page_id})",
     )
 
