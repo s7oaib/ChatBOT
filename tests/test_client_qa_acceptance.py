@@ -129,3 +129,53 @@ def test_unsupported_event_after_home_table_context_hands_off(monkeypatch):
     assert "event_order" in facts["last_intents"]
     assert "ESCALATE_TO_TEAM" in facts["last_actions"]
     assert "bengali home table" not in response.lower()
+
+
+def test_sensitive_question_after_home_table_context_uses_safety_lane(monkeypatch):
+    monkeypatch.setattr("camellia.config.config.BYPASS_AD_GATE", True)
+    user_id = "client-qa-sensitive-after-story"
+    session_memory.clear_session(user_id, "instagram")
+    facts = session_memory.get_facts(user_id, "instagram")
+    facts["home_table_context"] = True
+    facts["source_route"] = {
+        "routing_id": 5,
+        "source_type": "story",
+        "active": True,
+        "routing_topic": "Bengali Home Table",
+        "priority_products": [],
+    }
+
+    response, matched, template_id, _images = responder.match_and_respond(
+        "my child has a severe nut allergy is it safe",
+        user_id=user_id,
+        channel="instagram",
+    )
+
+    assert matched is True
+    assert template_id == "GUARD_allergen_nutfree_glutenfree"
+    assert "Bengali Home Table" not in response
+
+
+def test_booking_help_after_home_table_context_uses_order_handoff(monkeypatch):
+    monkeypatch.setattr("camellia.config.config.BYPASS_AD_GATE", True)
+    user_id = "client-qa-booking-help-after-story"
+    session_memory.clear_session(user_id, "instagram")
+    facts = session_memory.get_facts(user_id, "instagram")
+    facts["home_table_context"] = True
+    facts["source_route"] = {
+        "routing_id": 5,
+        "source_type": "story",
+        "active": True,
+        "routing_topic": "Bengali Home Table",
+        "priority_products": [],
+    }
+
+    response, matched, template_id, _images = responder.match_and_respond(
+        "I am ready to place my order and need help booking.",
+        user_id=user_id,
+        channel="instagram",
+    )
+
+    assert matched is False
+    assert template_id == "order_next_steps"
+    assert "Bengali Home Table" not in response

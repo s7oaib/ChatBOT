@@ -2519,8 +2519,31 @@ class DeterministicResponder:
             r"aamar|signature|bento|meal|savoury|savory|curry|veg|non[ -]?veg)\b",
             lowered_text,
         )
+        # These are explicit current intents, not referential follow-ups to
+        # the last Story/Reel/Post. A source route must not turn a safety,
+        # handoff, or purchase request containing "this" into a stale product
+        # answer before the deterministic safety/intent handlers run.
+        explicit_sensitive_subject = bool(
+            _UNSUPPORTED_CUSTOMIZATION_RE.search(lowered_text)
+            or _HIGH_RISK_UNSUPPORTED_RE.search(lowered_text)
+            or re.search(
+                r"\b(?:allerg\w*|allergen\w*|nuts?|peanuts?|cashews?|pistachios?|"
+                r"gluten|dairy|cross[- ]contamination)\b",
+                lowered_text,
+                re.IGNORECASE,
+            )
+        )
+        explicit_current_intent = bool(
+            explicit_product
+            or explicit_sensitive_subject
+            or PURCHASE_ASSISTANCE_RE.search(lowered_text)
+            or (
+                semantic_fallback._ESCALATION_INTENT_RE.search(lowered_text)
+                and not semantic_fallback._IDENTITY_QUESTION_RE.search(lowered_text)
+            )
+        )
         source_route = facts.get("source_route") if isinstance(facts.get("source_route"), dict) else None
-        if explicit_product and (source_route or ad_product):
+        if explicit_current_intent and (source_route or ad_product):
             # A named product/topic is a new subject. Keep the prior route in
             # the conversation evidence, but do not let a later pronoun jump
             # back to that older reel/post/ad after this explicit change.
@@ -2591,6 +2614,7 @@ class DeterministicResponder:
             )
             and not source_context_available
             and not explicit_product
+            and not explicit_sensitive_subject
             # "now THAT you're moving to Kolkata" is a conjunction, not a
             # reference to a post/reel/product — has_explicit_source_reference
             # matches the bare word "that" with no grammatical awareness.
