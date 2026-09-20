@@ -62,3 +62,22 @@ def test_general_can_you_tell_me_more_uses_food_overview_after_stale_instagram_r
     assert "À LA CARTE" in response
     assert "BENGALI BENTO" in response
     assert "INSERT" not in response
+
+
+def test_instagram_prebook_question_beats_stale_subscription_context(monkeypatch):
+    monkeypatch.setattr("camellia.config.config.BYPASS_AD_GATE", True)
+    user_id = "client-qa-prebook-stale-subscription"
+    session_memory.clear_session(user_id, "instagram")
+    facts = session_memory.get_facts(user_id, "instagram")
+    facts["subscription_context"] = True
+    facts["awaiting_subscription_booking"] = False
+
+    response, matched, template_id, _images = responder.match_and_respond(
+        "WHAT ARE THE NEXT STEPS TO PRE BOOK?",
+        user_id=user_id,
+        channel="instagram",
+    )
+
+    assert matched is True
+    assert template_id == "alacarte_prebooking_steps"
+    assert "preferred day or meal slot" in response
