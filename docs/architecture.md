@@ -4,23 +4,27 @@
 
 Instagram is the only automated customer channel. When Instagram cannot
 answer, or a customer asks for a person, `camellia/handoff.py` creates a
-durable opaque CAM reference and a `wa.me` click-to-chat link. WhatsApp is the
+durable opaque CAM reference. Generic support handoffs do not include a
+WhatsApp link. Booking, order, payment, and purchase-related handoffs may
+include the separately approved manual `wa.me` continuation. WhatsApp is the
 human team's continuation surface: this service has no WhatsApp webhook, bot,
 Cloud API sender, AI/RAG/template path, or inbound message processing.
 
 ```
 Instagram DM -> approved AI response
             -> CAM handoff + deduplicated WAITING_FOR_HUMAN state
-            -> customer taps wa.me link -> human continues in WhatsApp
+            -> human resumes the conversation
+
+Booking/order/payment handoff -> optional manual wa.me continuation
 ```
 
-`camellia/handoff.py` owns the opaque reference, deduplication, the
-`WHATSAPP_BUSINESS_NUMBER` link target, and the staff-facing summary built
-from Instagram's existing structured state. The durable escalation outbox
-records the handoff for admin visibility and marks external notification as
-`SKIPPED`; no provider credential or network send is involved. Explicit admin
-resume remains idempotent and restores Instagram AI only after the handoff is
-closed.
+`camellia/handoff.py` owns the opaque reference, deduplication, the optional
+`WHATSAPP_BUSINESS_NUMBER` link target for purchase-related handoffs, and the
+staff-facing summary built from Instagram's existing structured state. The
+durable escalation outbox records the handoff for admin visibility and marks
+external notification as `SKIPPED`; no provider credential or network send is
+involved. Explicit admin resume remains idempotent and restores Instagram AI
+only after the handoff is closed.
 
 `INSTAGRAM_CHATBOT_ENABLED` is the only channel automation control. The
 WhatsApp business number is retained solely for the manual `wa.me` link.
