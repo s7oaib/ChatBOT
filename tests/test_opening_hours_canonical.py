@@ -116,6 +116,26 @@ def test_opening_hours_overrides_stale_home_table_story_context(monkeypatch):
     assert text == OPENING_HOURS
 
 
+def test_opening_hours_kitchen_paraphrase_overrides_stale_story_context(monkeypatch):
+    monkeypatch.setattr(config, "BYPASS_AD_GATE", True)
+    user_id = "opening-hours-kitchen-paraphrase"
+    session_memory.clear_session(user_id, "instagram")
+    facts = session_memory.get_facts(user_id, "instagram")
+    facts.update({
+        "home_table_context": True,
+        "last_topic": "bengali_home_table",
+        "source_route": {"active": True, "routing_topic": "Bengali Home Table"},
+    })
+
+    text, matched, template_id, _images = responder.match_and_respond(
+        "When is the kitchen open?", user_id=user_id, channel="instagram",
+    )
+
+    assert matched is True
+    assert template_id == "opening_hours"
+    assert text == OPENING_HOURS
+
+
 def _resolve_delivery_time(entities):
     understood = UnderstandingResult(
         intents=[Intent.DELIVERY_TIME_QUESTION.value],

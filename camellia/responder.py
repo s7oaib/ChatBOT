@@ -723,6 +723,7 @@ GENERIC_SAVOURY_DELIVERY_TIME_RE = re.compile(
 )
 OPENING_HOURS_RE = re.compile(
     r'\b(?:opening hours?|opening times?|when are you open|when do you open|'
+    r'when is (?:the )?(?:kitchen|your kitchen) open|'
     r'what time (?:do you|does the kitchen) open|what time are you open|'
     r'kitchen hours?|kitchen opening hours?|kitchen timings?)\b',
     re.IGNORECASE,
