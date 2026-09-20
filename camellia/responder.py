@@ -2089,8 +2089,48 @@ class DeterministicResponder:
             and not explicit_client_subject
         )
         client_qa_candidate = client_qa.match(user_message, facts)
+        relevant_active_state = bool(
+            facts.get("active_product_context")
+            or facts.get("subscription_context")
+            or facts.get("order_flow_context")
+            or (
+                isinstance(facts.get("source_route"), dict)
+                and facts["source_route"].get("active", True)
+                and not facts.get("source_context_superseded")
+            )
+            or str(facts.get("last_topic") or "").casefold() in {
+                "bento", "sondesh", "savoury", "subscription", "ordering",
+            }
+        )
+        if (
+            channel == "instagram"
+            and client_qa_candidate
+            and client_qa_candidate.entry is None
+            and client_qa_candidate.clarification
+            and not relevant_active_state
+        ):
+            facts.update({
+                "last_route_source": "ambiguity_resolver",
+                "last_intents": ["clarification_required"],
+                "last_entities": {},
+                "last_knowledge_ids": [],
+                "last_actions": [BusinessAction.SEND_RESPONSE.value],
+                "knowledge_sufficient": True,
+                "last_grounding": "clarification",
+                "decision_lane": "CLARIFICATION_REQUIRED",
+                "last_llm_called": False,
+                "last_fallback_used": False,
+                "client_qa_id": None,
+                "client_qa_match_kind": "clarification",
+            })
+            session_memory.add_turn(user_id, channel, user_message, client_qa_candidate.clarification)
+            # Keep the established public route ID for analytics and clients;
+            # the new lane/trace still records that this was a deterministic
+            # ambiguity clarification rather than an approved fact answer.
+            return client_qa_candidate.clarification, True, "price_clarify_product", None
         client_qa_flow_candidate = bool(
             client_qa_candidate
+            and client_qa_candidate.entry
             and client_qa_candidate.entry.qa_id in {"alacarte_prebook", "order_prebook"}
         )
         client_qa_excluded = bool(
@@ -2115,10 +2155,6 @@ class DeterministicResponder:
                 and not semantic_fallback._IDENTITY_QUESTION_RE.search(lowered_text)
             )
             or source_context_blocks_client_qa
-            or (
-                source_route_active
-                and explicit_client_subject
-            )
             or BULK_CONTEXT_RE.search(lowered_text)
             or (
                 facts.get("active_product_context")
@@ -2161,14 +2197,15 @@ class DeterministicResponder:
             facts.update({
                 "last_route_source": "client_approved_qa",
                 "last_intents": [entry.qa_id],
-                "last_entities": {"client_qa_id": entry.qa_id},
-                "last_knowledge_ids": [f"client_qa:{entry.qa_id}"],
+                "last_entities": {"client_qa_id": entry.qa_id, "canonical_id": entry.canonical_id, "entity": entry.entity},
+                "last_knowledge_ids": [f"client_qa:{entry.canonical_id}"],
                 "last_actions": [BusinessAction.SEND_RESPONSE.value],
                 "knowledge_sufficient": not bool(asset_missing),
                 "last_grounding": "asset-missing" if asset_missing else "exact_approved",
                 "last_llm_called": False,
                 "last_fallback_used": False,
                 "client_qa_id": entry.qa_id,
+                "client_qa_canonical_id": entry.canonical_id,
                 "client_qa_match_kind": client_match.match_kind,
                 "client_qa_asset_status": "ASSET-MISSING" if asset_missing else "available",
                 "client_qa_missing_assets": asset_missing,
@@ -2177,7 +2214,7 @@ class DeterministicResponder:
             client_topic = TOPIC_MAP.get(_CLIENT_QA_TEMPLATE_IDS.get(entry.qa_id, ""))
             if client_topic:
                 facts["last_topic"] = client_topic
-            if entry.qa_id in {"bento_details_client", "bento_price_client"}:
+            if entry.canonical_id in {"BENTO_DETAILS", "BENTO_PRICE"}:
                 facts["active_product_context"] = "bento"
             if entry.context == "home_table" and (
                 facts.get("source_route")
