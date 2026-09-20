@@ -1290,8 +1290,9 @@ class DeterministicResponder:
         )
         if alacarte_context and not facts.get("alacarte_sondesh_addon_sent"):
             # Adjacent Meta webhook events can race the in-memory session
-            # snapshot. A completed durable three-image bundle is authoritative
-            # and prevents a repeat from re-sending the pitch and images.
+            # snapshot. A prior durable à-la-carte turn is authoritative for
+            # the once-per-session contract and prevents a repeat from
+            # re-sending the pitch and images.
             try:
                 prior_rows = db.get_conversations(
                     limit=100,
@@ -1301,16 +1302,7 @@ class DeterministicResponder:
                 prior_bundle_sent = any(
                     _ALACARTE_ADDON_MARKER_RE.search(str(row.get("user_message") or ""))
                     and not _ALACARTE_ADDON_EXCLUSION_RE.search(str(row.get("user_message") or ""))
-                    and sum(
-                        1 for audit in db.get_instagram_outbound_audit(
-                            limit=20,
-                            success=True,
-                            inbound_message_id=int(row["id"]),
-                        )
-                        if audit.get("response_type") == "image"
-                    ) >= 3
                     for row in prior_rows
-                    if row.get("id") is not None
                 )
             except Exception as exc:
                 prior_bundle_sent = False
