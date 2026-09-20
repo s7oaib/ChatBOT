@@ -1,4 +1,5 @@
 import logging
+import hashlib
 import re
 import httpx
 from dataclasses import dataclass
@@ -113,14 +114,14 @@ def fetch_message_details_fallback(mid: str) -> Tuple[Optional[str], Optional[st
     GET https://graph.facebook.com/{version}/{mid}?fields=from,to,message&access_token={token}
     """
     token = config.INSTAGRAM_ACCESS_TOKEN
-    masked_token = f"{token[:6]}...{token[-4:]}" if token and len(token) > 10 else ("SET" if token else "EMPTY")
-    log.info("Graph API fallback for mid '%s' using INSTAGRAM_ACCESS_TOKEN (%s)", mid, masked_token)
+    mid_hash = hashlib.sha256(str(mid or "").encode("utf-8")).hexdigest()[:12] if mid else None
+    log.info("Graph API fallback for message_hash=%s token_configured=%s", mid_hash, bool(token))
 
     if not mid or not token:
-        log.warning("Graph API fallback skipped for mid '%s': missing mid or access token (fallback failed, unknown).", mid)
+        log.warning("Graph API fallback skipped for message_hash=%s: missing mid or access token.", mid_hash)
         return None, None
 
-    url = f"https://graph.facebook.com/{config.WHATSAPP_API_VERSION}/{mid}"
+    url = f"https://graph.facebook.com/{config.INSTAGRAM_API_VERSION}/{mid}"
     params = {
         "fields": "from,to,message",
         "access_token": token
@@ -135,15 +136,29 @@ def fetch_message_details_fallback(mid: str) -> Tuple[Optional[str], Optional[st
                 message_text = raw_msg.get("text") if isinstance(raw_msg, dict) else raw_msg
 
                 if sender_id and message_text:
-                    log.info("Graph API fallback succeeded for mid %s: sender_id=%s, text=%s", mid, sender_id, str(message_text)[:30])
+                    log.info(
+                        "Graph API fallback succeeded for message_hash=%s: "
+                        "sender_hash=%s text_present=true",
+                        mid_hash,
+                        hashlib.sha256(str(sender_id).encode("utf-8")).hexdigest()[:12],
+                    )
                     return sender_id, str(message_text)
                 else:
-                    log.info("Graph API fallback for mid %s returned HTTP 200 but no usable sender/message: %s (confirmed noise).", mid, data)
+                    log.info(
+                        "Graph API fallback for message_hash=%s returned HTTP 200 "
+                        "without usable sender/message.", mid_hash,
+                    )
                     return None, None
             else:
-                log.warning("Graph API fallback failed for mid %s with HTTP %s: %s (fallback failed, unknown).", mid, resp.status_code, resp.text)
+                log.warning(
+                    "Graph API fallback failed for message_hash=%s with HTTP %s.",
+                    mid_hash, resp.status_code,
+                )
     except Exception as e:
-        log.error("Graph API fallback failed for mid %s with exception: %s (fallback failed, unknown).", mid, str(e))
+        log.error(
+            "Graph API fallback failed for message_hash=%s with exception=%s.",
+            mid_hash, type(e).__name__,
+        )
 
     return None, None
 

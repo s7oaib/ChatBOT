@@ -314,6 +314,7 @@ class AIResponder:
         model: Optional[str] = None,
         response_format: Optional[Dict[str, str]] = None,
         max_tokens: Optional[int] = None,
+        reasoning_effort: Optional[str] = None,
     ) -> Tuple[str, bool, str]:
         """
         Queries Groq's OpenAI-compatible chat completions endpoint.
@@ -333,6 +334,8 @@ class AIResponder:
         }
         if response_format:
             payload["response_format"] = response_format
+        if reasoning_effort is not None:
+            payload["reasoning_effort"] = reasoning_effort
 
         headers = {
             "Authorization": f"Bearer {config.GROQ_API_KEY}",
@@ -379,6 +382,16 @@ class AIResponder:
                             if resp.status_code == 200:
                                 break
 
+                    provider_error_code = None
+                    try:
+                        provider_error_code = (resp.json().get("error") or {}).get("code")
+                    except (TypeError, ValueError):
+                        pass
+                    strict_json_failure = (
+                        response_format
+                        and response_format.get("type") == "json_schema"
+                        and provider_error_code == "json_validate_failed"
+                    )
                     cooldown = _cooldown_for_status(resp.status_code)
                     if cooldown and not on_side_model:
                         self._groq_cooldown_until = time.time() + cooldown
@@ -388,9 +401,16 @@ class AIResponder:
                                 "Pausing Groq calls for %.0fs — check GROQ_API_KEY and GROQ_MODEL.",
                                 resp.status_code, config.GROQ_MODEL, cooldown,
                             )
-                    log.warning("Groq HTTP %s (%s): %s", resp.status_code, payload["model"], resp.text[:200])
+                    log.warning(
+                        "Groq HTTP %s (%s)%s",
+                        resp.status_code,
+                        payload["model"],
+                        f" code={provider_error_code}" if provider_error_code else "",
+                    )
                     if not on_side_model:
-                        self._record_call(False, f"HTTP {resp.status_code}: {resp.text[:120]}")
+                        self._record_call(False, f"HTTP {resp.status_code}: provider_error")
+                    if strict_json_failure:
+                        return "", False, "groq_json_validate_failed"
                     return "", False, f"groq_http_{resp.status_code}"
 
                 data = resp.json()
@@ -414,8 +434,8 @@ class AIResponder:
         except Exception as e:
             if not on_side_model:
                 self._groq_cooldown_until = time.time() + TRANSIENT_COOLDOWN_SECONDS
-                self._record_call(False, f"{type(e).__name__}: {str(e)[:120]}")
-            log.warning("Groq API call failed (%s): %s", config.GROQ_MODEL, e)
+                self._record_call(False, f"exception_class={type(e).__name__}")
+            log.warning("Groq API call failed (%s): exception_class=%s", config.GROQ_MODEL, type(e).__name__)
             fallback = self.qa_data.get("escalation_triggers", {}).get(
                 "fallback_response",
                 "Thanks for reaching out! Let me connect you with our team — they'll get back to you shortly. 🙏"
@@ -435,7 +455,11 @@ class AIResponder:
             if learned_match:
                 ans = learned_match.get("verified_answer", "").strip()
                 if ans:
-                    log.info("Answered query via Learned Knowledge (%s): %s", learned_match.get("topic"), user_message[:60])
+                    message_hash = hashlib.sha256(str(user_message or "").encode("utf-8")).hexdigest()[:12]
+                    log.info(
+                        "Answered query via Learned Knowledge (%s): message_hash=%s message_length=%d",
+                        learned_match.get("topic"), message_hash, len(user_message or ""),
+                    )
                     return ans, True, "learned_knowledge"
         except Exception as e:
             log.debug("Error searching learned knowledge in AI responder: %s", e)

@@ -33,7 +33,9 @@ Capture the customer-visible reply, timestamp, and route/evidence for each step.
 ## Safety checks after the manual run
 
 - [ ] Auto Resolve remains simulation-only (`LLM_AUTO_RESOLVE_ENABLED=false`).
-- [ ] `/admin/auto-resolve/evaluation` shows zero WhatsApp AI activity, zero order/CAM interference, and zero source-routing overrides.
+- [ ] `/health` reports `whatsapp.automation=removed` and
+      `manual_handoff=available`; `/admin/auto-resolve/evaluation` still shows
+      zero order/CAM interference and zero source-routing overrides.
 - [ ] Any unexpected answer, route, or metric is captured as a screenshot and escalated before further customer testing.
 
 No Instagram action is performed by the automated acceptance run.

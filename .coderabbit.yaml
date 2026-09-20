@@ -27,8 +27,6 @@ reviews:
       instructions: "Check for FastAPI error handling, HMAC-SHA256 signature verification, and admin key protection."
     - path: "camellia/responder.py"
       instructions: "Ensure exact template matching logic, session memory integration, and image suppression behavior."
-    - path: "camellia/whatsapp_adapter.py"
-      instructions: "Verify Meta Cloud API payload formatting, interactive quick reply buttons, and error delivery tracking."
     - path: "camellia/order_calculator.py"
       instructions: "Check unit price lookups, itemized receipt formatting, and mathematical correctness."
     - path: "camellia/gemini_responder.py"

@@ -2,6 +2,7 @@
 
 import json
 import re
+import time
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional
@@ -43,6 +44,59 @@ class Intent(str, Enum):
     BUSINESS_POLICY_UNKNOWN = "unknown_business_query"
     ESCALATION = "escalation"
     UNKNOWN = "unknown"
+
+
+STRUCTURED_NLU_RESPONSE_FORMAT = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "camellia_structured_understanding",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "intents": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": [intent.value for intent in Intent],
+                    },
+                },
+                "entities": {
+                    "type": "object",
+                    "properties": {
+                        "product": {"type": ["string", "null"]},
+                        "location": {"type": ["string", "null"]},
+                        "quantity": {
+                            "anyOf": [
+                                {"type": "string"},
+                                {"type": "integer"},
+                                {"type": "null"},
+                            ],
+                        },
+                        "event": {"type": ["string", "null"]},
+                        "menu_type": {"type": ["string", "null"]},
+                        "pack_size": {"type": ["string", "null"]},
+                        "topic": {"type": ["string", "null"]},
+                        "subtopic": {"type": ["string", "null"]},
+                    },
+                    "required": [
+                        "product", "location", "quantity", "event",
+                        "menu_type", "pack_size", "topic", "subtopic",
+                    ],
+                    "additionalProperties": False,
+                },
+                "confidence": {"type": "number"},
+                "requires_human": {"type": "boolean"},
+                "knowledge_gap": {"type": "boolean"},
+            },
+            "required": [
+                "intents", "entities", "confidence", "requires_human",
+                "knowledge_gap",
+            ],
+            "additionalProperties": False,
+        },
+    },
+}
 
 
 class BusinessAction(str, Enum):
@@ -87,10 +141,15 @@ def _json_object(text: str) -> Optional[Dict[str, Any]]:
 class UnderstandingEngine:
     """Uses Groq for meaning only. Returned prose never reaches customers."""
 
+    _STRICT_FORMAT_FAILURE_COOLDOWN_SECONDS = 60.0
+
     _entity_keys = {
         "product", "location", "quantity", "event", "menu_type", "topic",
         "pack_size", "subtopic",
     }
+
+    def __init__(self):
+        self._strict_format_disabled_until = 0.0
 
     @staticmethod
     def should_analyze(user_message: str) -> bool:
@@ -170,6 +229,8 @@ class UnderstandingEngine:
 
         if ai_responder.get_active_provider() == "none":
             return UnderstandingResult(reason="provider_unavailable")
+        if time.monotonic() < self._strict_format_disabled_until:
+            return UnderstandingResult(reason="structured_nlu_format_cooldown")
 
         allowed = ", ".join(intent.value for intent in Intent)
         recent = "\n".join(
@@ -201,8 +262,9 @@ class UnderstandingEngine:
             prompt,
             is_refinement=True,
             model=config.GROQ_ROUTER_MODEL,
-            response_format={"type": "json_object"},
+            response_format=STRUCTURED_NLU_RESPONSE_FORMAT,
             max_tokens=300,
+            reasoning_effort="low",
         )
         if not ok and self._another_model_could_survive(reason):
             fallback_model = config.STRUCTURED_NLU_FALLBACK_MODEL
@@ -216,11 +278,21 @@ class UnderstandingEngine:
                     prompt,
                     is_refinement=True,
                     model=fallback_model,
-                    response_format={"type": "json_object"},
+                    response_format=STRUCTURED_NLU_RESPONSE_FORMAT,
                     max_tokens=300,
+                    reasoning_effort="low",
                 )
                 reason = f"{reason}>{fallback_reason}" if not ok else "ok_fallback_model"
         if not ok:
+            if reason == "groq_json_validate_failed":
+                self._strict_format_disabled_until = (
+                    time.monotonic() + self._STRICT_FORMAT_FAILURE_COOLDOWN_SECONDS
+                )
+                log.warning(
+                    "Structured NLU strict output failed; using deterministic fallback "
+                    "for %.0fs.",
+                    self._STRICT_FORMAT_FAILURE_COOLDOWN_SECONDS,
+                )
             return UnderstandingResult(reason=reason)
         parsed = _json_object(raw)
         if not parsed:

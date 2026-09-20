@@ -167,19 +167,12 @@ def test_webhook_audit_does_not_infer_url_or_shortcode():
     assert "referral.shortcode" not in source
 
 
-def test_general_handoff_is_two_messages_raw_link_and_minimal_cam():
+def test_general_handoff_is_one_callback_ack_and_minimal_cam():
     user_id = "route_general_" + uuid.uuid4().hex
     session_memory.clear_session(user_id, "instagram")
     with patch.object(app, "send_instagram_reply") as send, patch.object(app.escalator, "handle_escalation"), patch.object(config, "WHATSAPP_BUSINESS_NUMBER", "919800000000"):
         app._process_instagram_event(user_id, "I need an agent", "ad-source")
-    assert send.call_count == 2
-    notice, link = [call.args[1] for call in send.call_args_list]
-    assert notice == "Our team can assist you personally on WhatsApp. Please continue your enquiry using the link below."
-    assert "https://wa.me/" not in notice
-    assert link.count("https://wa.me/") == 1 and link.startswith("Continue on WhatsApp:\nhttps://wa.me/")
-    assert "[https://" not in link and "](https://" not in link and "**" not in link
-    decoded = urllib.parse.unquote(link)
-    assert re.search(r"Ref: CAM-\d{5,6}", decoded)
-    assert "Item:" not in decoded and "Total:" not in decoded
-    banned = ("share your number", "phone number", "i've notified our team", "they'll connect with you", "whatsapp/call shortly", "we'll contact you")
-    assert all(phrase not in (notice + link).lower() for phrase in banned)
+    assert send.call_count == 1
+    notice = send.call_args.args[1]
+    assert notice == "Of course. I’ve shared your message with our team and someone will get back to you shortly."
+    assert "wa.me/" not in notice

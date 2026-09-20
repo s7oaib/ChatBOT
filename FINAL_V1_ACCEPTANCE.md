@@ -48,10 +48,10 @@ overrides preserve provenance and make library, preview, dry-run and runtime
 copies consistent. Medical/diabetic/low-glycemic claims remain excluded.
 
 Production checks: three consecutive `/health` calls returned HTTP 200 with
-`status=healthy`, `answering.ready=true`, live delivery, seed `20/20`, no
-warnings, durable database, and a valid Instagram token. `ENABLE_WEB_TESTER=false`,
-`LLM_AUTO_RESOLVE_ENABLED=false`, `WHATSAPP_CHATBOT_ENABLED=false`, and
-`WHATSAPP_CHATBOT_ENABLE_CONFIRM=false`; WhatsApp remains HUMAN ONLY.
+`status=healthy`, `answering.ready=true`, Instagram delivery, seed `20/20`,
+durable database, and a valid Instagram token. `ENABLE_WEB_TESTER=false`,
+`LLM_AUTO_RESOLVE_ENABLED=false`; WhatsApp automation is removed and manual
+handoff remains available.
 
 ## Manual Instagram sign-off
 
@@ -83,5 +83,5 @@ runtime baseline. Follow `V1_PRODUCTION_RUNBOOK.md`.
 FastAPI webhook service with durable SQLite state, deterministic template and
 canonical-menu resolution, versioned Response Library overrides, Meta
 Instagram outbound auditing/chunking, source routing for Reel/Post/Ad, safe
-CAM/human handoff, and a hard WhatsApp human-only boundary. Auto Resolve is
+CAM/human handoff, and a removed WhatsApp automation boundary. Auto Resolve is
 simulation-only and sends no customer messages.

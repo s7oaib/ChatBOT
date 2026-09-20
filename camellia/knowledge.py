@@ -41,6 +41,7 @@ SOURCE_MAP: Dict[str, Dict[str, Any]] = {
     "pack_sizes": {"source": "data/qa_templates.json pack_size_* templates"},
     "bento": {"source": "data/qa_templates.json > bento_details"},
     "delivery": {"source": "data/qa_templates.json > delivery_area / delivery_out_of_area"},
+    "opening_hours": {"source": "data/qa_templates.json > opening_hours"},
     "delivery_time": {"source": "data/qa_templates.json > savoury_delivery_time / sondesh_dispatch_time"},
     "storage": {"source": "data/qa_templates.json > GUARD_shelf_life_storage"},
     "packaging": {"source": "data/qa_templates.json > packaging"},
@@ -211,6 +212,9 @@ CATALOGUE: Tuple[KnowledgeRecord, ...] = (
     # --- delivery, ordering, policies ------------------------------------
     KnowledgeRecord("delivery:area", "delivery", (Intent.DELIVERY_QUERY.value,),
                     "delivery_area", (SEND,)),
+    KnowledgeRecord("delivery:opening_hours", "opening_hours",
+                    (Intent.DELIVERY_TIME_QUESTION.value,),
+                    "opening_hours", (SEND,), _subtopic("opening_hours"), priority=30),
     KnowledgeRecord("delivery:time_savoury", "delivery_time", (Intent.DELIVERY_TIME_QUESTION.value,),
                     "savoury_delivery_time", (SEND,),
                     lambda entities: "bento" in entities.get("product", "")

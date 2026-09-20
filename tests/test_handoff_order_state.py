@@ -12,12 +12,15 @@ escalation rather than to order messages only, and nothing ever retired it
 once its contents had been handed to a human.
 """
 import os
+from concurrent.futures import ThreadPoolExecutor
+from unittest.mock import patch
 
 os.environ.setdefault("DB_PATH", "test_camellia.db")
 
 import pytest
 
 from camellia import handoff as handoff_module
+from camellia import escalator as escalator_module
 from camellia.handoff import (
     get_or_create_handoff,
     retire_order_state,
@@ -182,3 +185,47 @@ def test_an_incomplete_cart_is_still_ignored(clean_db):
         user_message="order", facts=facts, include_order=True,
     )
     assert result["verified_order"] is None
+
+
+def test_concurrent_duplicate_handoffs_reuse_one_durable_reference(clean_db):
+    """Concurrent duplicate webhook work cannot mint two active handoffs."""
+    uid = "ho_concurrent"
+    facts = _facts_with_cart(uid)
+
+    def create_one():
+        return get_or_create_handoff(
+            user_id=uid, channel="instagram", reason="Unmatched Instagram Query",
+            user_message="I need a human", facts=facts,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _unused: create_one(), range(2)))
+
+    assert len({result["handoff_ref"] for result in results}) == 1
+    assert sum(result["newly_created"] for result in results) == 1
+    rows = clean_db.get_handoffs(limit=20)
+    assert len([row for row in rows if row["source_user_id"] == uid]) == 1
+
+
+def test_notification_failure_preserves_the_durable_handoff(clean_db, monkeypatch):
+    """Staff-alert failure must not erase the customer handoff record."""
+    monkeypatch.setattr(escalator_module, "db", clean_db)
+    uid = "ho_notification_failure"
+    handoff = get_or_create_handoff(
+        user_id=uid, channel="instagram", reason="Unmatched Instagram Query",
+        user_message="I need a person", facts=_facts_with_cart(uid),
+    )
+
+    with patch.object(
+        escalator_module.escalator, "send_human_alert",
+        return_value={"status": "failed", "error": "provider timeout"},
+    ):
+        result = escalator_module.escalator.handle_escalation(
+            user_id=uid, channel="instagram", user_message="I need a person",
+            reason="Unmatched Instagram Query",
+            context_data={"handoff_ref": handoff["handoff_ref"]},
+        )
+
+    assert result["alert_sent"] is False
+    assert clean_db.get_handoff_by_ref(handoff["handoff_ref"])["status"] == "CREATED"
+    assert any(row["id"] == result["escalation_id"] for row in clean_db.get_escalations())

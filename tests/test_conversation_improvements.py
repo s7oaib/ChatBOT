@@ -56,10 +56,3 @@ def test_ad_gate_still_precedes_conversation_improvements():
     with patch.object(config, "BYPASS_AD_GATE", False):
         reply = responder.match_and_respond("menu and do you deliver to noida", "holdout", "instagram")
     assert reply[2] == "ad_gate_blocked"
-
-
-def test_whatsapp_does_not_reopen_sales_menu_after_closing_or_handoff():
-    from camellia.whatsapp_adapter import whatsapp_adapter
-    for tid in ("acknowledgement", "conversation_closing", "explicit_escalation"):
-        assert whatsapp_adapter._get_contextual_buttons(tid, tid != "explicit_escalation") is None
-    assert whatsapp_adapter._get_contextual_buttons("price_clarify_product", True) == ["Sondesh", "🍱 Meals"]

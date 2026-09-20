@@ -56,6 +56,7 @@ REQUIRED_QA_TEMPLATE_IDS = (
 
 _HOME_TABLE_BACKUP_SUFFIX = ".home-table-backfill"
 _SUBSCRIPTION_TEMPLATE_ID = "subscription_details"
+_OPENING_HOURS_TEMPLATE_ID = "opening_hours"
 _SUBSCRIPTION_BACKUP_SUFFIX = ".subscription-template-backfill"
 
 def seed_fingerprint(path: Path) -> str | None:
@@ -179,9 +180,10 @@ def _backfill_required_qa_templates(target: Path, seed: Path) -> str:
         seed_required_ids = REQUIRED_QA_TEMPLATE_IDS
         # Older isolated fixtures may intentionally contain only the original
         # structural requirements.  The shipped seed carries subscription_details,
-        # and only then is its durable reconciliation enabled.
-        if _SUBSCRIPTION_TEMPLATE_ID in seed_by_id:
-            seed_required_ids = (*seed_required_ids, _SUBSCRIPTION_TEMPLATE_ID)
+        # and opening_hours; only then are those durable reconciliations enabled.
+        for optional_template_id in (_SUBSCRIPTION_TEMPLATE_ID, _OPENING_HOURS_TEMPLATE_ID):
+            if optional_template_id in seed_by_id:
+                seed_required_ids = (*seed_required_ids, optional_template_id)
         missing_from_seed = tuple(
             template_id for template_id in seed_required_ids
             if template_id not in seed_by_id

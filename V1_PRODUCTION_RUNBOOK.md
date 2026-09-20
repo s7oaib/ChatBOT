@@ -13,7 +13,8 @@ sync, durable storage, and no warnings. Confirm
 ## Railway restart / rollback
 
 1. Record `/health`, deployment ID, and recent logs.
-2. Keep `LLM_AUTO_RESOLVE_ENABLED=false` and WhatsApp human-only flags.
+2. Keep `LLM_AUTO_RESOLVE_ENABLED=false`; WhatsApp automation is removed and
+   only the manual `wa.me` handoff remains.
 3. Use Railway's deployment rollback/redeploy action for the last known-good
    commit; do not reset or wipe the volume.
 4. Re-run health and the manual Instagram checklist.
@@ -43,10 +44,10 @@ completed handoffs do not leak stale order state into a new conversation.
 
 ## WhatsApp HUMAN ONLY
 
-Keep `WHATSAPP_CHATBOT_ENABLED=false` and
-`WHATSAPP_CHATBOT_ENABLE_CONFIRM=false`. WhatsApp inbound messages are read by
-staff; they must not invoke responder, RAG, Groq, QA templates, Assisted
-Resolution or Auto Resolve. Staff replies manually from the business account.
+WhatsApp automation has been removed. Confirm `/health` reports
+`whatsapp.automation=removed` and `manual_handoff=available`. There is no
+WhatsApp inbound webhook or server-side sender; staff reply manually from the
+business account after the customer taps the CAM-generated `wa.me` link.
 
 ## Auto Resolve kill switch
 
@@ -73,11 +74,9 @@ overwrite an earlier backup.
 - Backup size: `1,937,408` bytes; `PRAGMA integrity_check`: `ok`.
 - Live database remains `/app/var/camellia.db`; prior backups are retained.
 - Three consecutive production health checks: HTTP 200, healthy, answering
-  ready, live delivery, and no warnings/startup or migration errors.
-- Safety flags: `ENABLE_WEB_TESTER=false`,
-  `LLM_AUTO_RESOLVE_ENABLED=false`,
-  `WHATSAPP_CHATBOT_ENABLED=false`,
-  `WHATSAPP_CHATBOT_ENABLE_CONFIRM=false`; WhatsApp remains HUMAN ONLY.
+  ready, Instagram delivery, and no startup or migration errors.
+- Safety state: `ENABLE_WEB_TESTER=false`, `LLM_AUTO_RESOLVE_ENABLED=false`;
+  WhatsApp automation is removed and manual handoff remains available.
 - Full automated suite: **1,398 passed, 0 failed, 1 warning**.
 - Composite-intent hardening: leading greetings are parsed separately from
   meaningful remainder text; explicit intent takes precedence over source

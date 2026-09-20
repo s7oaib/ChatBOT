@@ -1,6 +1,5 @@
-import httpx
+import json
 from typing import Dict, Any, Optional
-from camellia.config import config
 from camellia.database import db
 from camellia.monitoring import get_logger
 
@@ -18,18 +17,6 @@ class Escalator:
     - Logs escalation details in database with Customer Handoff Briefs for full client visibility.
     - Sends automated alert message to owner/human contact.
     """
-
-    # Read from config on every use rather than captured once at import. This
-    # is a module-level singleton, so a captured copy would keep alerting the
-    # previous number for the life of the process after the setting changed —
-    # the failure would look exactly like the change not having been made.
-    @property
-    def human_phone(self) -> str:
-        return config.HUMAN_ESCALATION_PHONE
-
-    @property
-    def human_email(self) -> str:
-        return config.HUMAN_ESCALATION_EMAIL
 
     def handle_escalation(
         self,
@@ -58,15 +45,63 @@ class Escalator:
             context_data=context
         )
 
-        # 2. Dispatch human alert notification
-        alert_result = self.send_human_alert(escalation_id, user_id, channel, user_message, reason, context)
+        # 2. Enqueue before attempting delivery. The escalation row and its
+        # outbox event survive a process restart or provider outage.
+        event = db.enqueue_human_notification(escalation_id)
+        self.process_pending_notifications(event_id=int(event["id"]))
+        notification = db.get_human_notification_event(int(event["id"]))
+        alert_sent = bool(notification and notification.get("status") == "SENT")
 
         return {
             "escalation_id": escalation_id,
             "status": "escalated",
             "handoff_brief": handoff_brief,
-            "alert_sent": alert_result.get("status") == "sent" or alert_result.get("mock") is True
+            "alert_sent": alert_sent,
+            "notification_status": notification.get("status") if notification else None,
         }
+
+    def process_pending_notifications(
+        self, *, limit: int = 10, event_id: Optional[int] = None,
+    ) -> int:
+        """Deliver due durable staff events once, with bounded retry state."""
+        delivered = 0
+        for event in db.claim_human_notification_events(limit=limit, event_id=event_id):
+            escalation = db.get_escalation_by_id(int(event["escalation_id"]))
+            if not escalation:
+                db.complete_human_notification(
+                    int(event["id"]), success=False, retryable=False,
+                    error="escalation record is missing",
+                )
+                continue
+            try:
+                context = json.loads(escalation.get("context_data") or "{}")
+                if not isinstance(context, dict):
+                    context = {}
+            except (TypeError, ValueError):
+                context = {}
+            try:
+                result = self.send_human_alert(
+                    int(escalation["id"]), escalation["user_id"], escalation["channel"],
+                    escalation["user_message"], escalation["reason"], context,
+                )
+            except Exception as exc:
+                log.exception("Durable human notification dispatch failed unexpectedly.")
+                result = {
+                    "status": "failed", "retryable": False,
+                    "error": type(exc).__name__,
+                }
+            success = result.get("status") == "sent" or result.get("mock") is True
+            attempts = max(1, int(event.get("attempts") or 1))
+            retry_delay = min(3600, 60 * (2 ** min(attempts - 1, 6)))
+            db.complete_human_notification(
+                int(event["id"]), success=success,
+                skipped=str(result.get("status") or "").lower() == "skipped",
+                retryable=bool(result.get("retryable")),
+                error=result.get("error"), retry_after_seconds=retry_delay,
+            )
+            if success:
+                delivered += 1
+        return delivered
 
     def _evaluate_order_verification(self, user_message: str, chat_history: str) -> str:
         """Inspects message & history for phone number & address to flag potential fake/unverified orders."""
@@ -94,61 +129,17 @@ class Escalator:
         reason: str,
         context: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """Sends WhatsApp/API alert notification to human team contact."""
-        handoff = context.get("handoff_brief", {})
-        cust_name = handoff.get("customer_name", "Unknown")
-        chat_history = "\n".join(handoff.get("recent_chat_history", []))
-
-        verif_status = self._evaluate_order_verification(user_message, chat_history)
-
-        # A cross-channel handoff (camellia/handoff.py) attaches its own
-        # CAM-XXXXX reference and known-entities summary here so staff see, in
-        # the same alert, the reference the customer will quote on WhatsApp —
-        # not a second, disconnected notification.
-        handoff_ref = context.get("handoff_ref")
-        handoff_block = f"\n🔗 *Handoff Reference:* {handoff_ref}\n" if handoff_ref else ""
-        handoff_summary = context.get("handoff_summary")
-        summary_block = f"\n{handoff_summary}\n" if handoff_summary else ""
-
-        alert_body = (
-            f"🚨 *NEW CAMELLIA BOT ORDER / ESCALATION #{escalation_id}*\n"
-            f"{handoff_block}"
-            f"• *Verification Status:* {verif_status}\n"
-            f"• *Channel:* {channel.upper()}\n"
-            f"• *Customer ID/Phone:* {user_id}\n"
-            f"• *Customer Name:* {cust_name}\n"
-            f"• *Reason:* {reason}\n"
-            f"• *Last Message:* \"{user_message}\"\n\n"
-            f"📋 *Recent Conversation History:*\n{chat_history or 'None'}\n"
-            f"{summary_block}\n"
-            f"Please verify order details & send invoice via WhatsApp/Call to customer before cooking/dispatching."
+        """Record the escalation; customer and staff continuation are manual."""
+        log.info(
+            "Human escalation notification skipped: manual handoff only "
+            "(escalation_id=%s, channel=%s).",
+            escalation_id,
+            channel,
         )
-
-        # In production, uses Meta WhatsApp API to alert the human phone number
-        if config.WHATSAPP_ACCESS_TOKEN and config.WHATSAPP_PHONE_NUMBER_ID and self.human_phone:
-            url = f"https://graph.facebook.com/{config.WHATSAPP_API_VERSION}/{config.WHATSAPP_PHONE_NUMBER_ID}/messages"
-            headers = {
-                "Authorization": f"Bearer {config.WHATSAPP_ACCESS_TOKEN}",
-                "Content-Type": "application/json"
-            }
-            payload = {
-                "messaging_product": "whatsapp",
-                "to": self.human_phone.lstrip("+"),
-                "type": "text",
-                "text": {"body": alert_body}
-            }
-            try:
-                with httpx.Client(timeout=10.0) as client:
-                    resp = client.post(url, headers=headers, json=payload)
-                    resp.raise_for_status()
-                    return {"status": "sent", "api_response": resp.json()}
-            except Exception as e:
-                log.error("Failed to send escalation alert to owner: %s", e)
-                return {"status": "failed", "error": str(e)}
-        else:
-            # Development / Mock notification
-            safe_alert = alert_body.encode("ascii", "backslashreplace").decode("ascii")
-            log.warning("HUMAN ESCALATION ALERT (WhatsApp credentials not configured)\n%s", safe_alert)
-            return {"mock": True, "status": "sent", "recipient": self.human_phone}
+        return {
+            "status": "skipped",
+            "retryable": False,
+            "reason": "manual_handoff_only",
+        }
 
 escalator = Escalator()

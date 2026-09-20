@@ -1,18 +1,19 @@
-"""Instagram -> WhatsApp human handoff.
+"""Instagram human handoff with an explicit support/order destination.
 
 Channel policy: Instagram is the only AI chatbot channel. When Instagram
 cannot answer (an unsupported question), or the customer asks for a person,
 or the request is order/event/complaint-shaped, this module creates an opaque
-reference ("CAM-48371") and a WhatsApp click-to-chat link so the customer can
-continue with a human on WhatsApp. It never answers the customer itself, and
-it never sends the conversation contents anywhere public — the reference
-resolves context server-side, through this module and the existing
-`escalator` staff-notification path.
+reference ("CAM-48371") and a durable owner handoff. Purchase-related
+requests may receive the approved WhatsApp click-to-chat continuation; generic
+support requests receive a callback acknowledgement with no WhatsApp link. It
+never sends the conversation contents anywhere public — the reference resolves
+context server-side through the existing `escalator` staff-notification path.
 
 A repeated "human please" from the same customer reuses the active handoff
 (`db.get_active_handoff`) instead of minting a new reference every time.
 """
 
+import hashlib
 import random
 import re
 import urllib.parse
@@ -26,9 +27,94 @@ from camellia.session_memory import session_memory
 
 log = get_logger("camellia.handoff")
 
-# The reference is opaque by design: no database id, no phone number, no
-# sequential counter a competitor could use to estimate order volume.
-_REF_RE = re.compile(r"\bCAM-(\d{5,6})\b", re.IGNORECASE)
+
+# A WhatsApp continuation is a purchase-flow tool, not a generic support
+# inbox. Keep this decision explicit and deterministic so a CAM can never gain
+# a WhatsApp link merely because it was escalated.
+_PURCHASE_HANDOFF_RE = re.compile(
+    r"\b(?:book(?:ing)?|order|ordering|purchase|buy|payment|pay|invoice|"
+    r"pre[- ]?order|pre[- ]?book|checkout|reserve|reservation|seat|"
+    r"place\s+(?:an?\s+)?order|ready\s+to\s+place|bulk\s+order|"
+    r"custom\s+order|\d+\s*(?:boxes?|pieces?|guests?|people|kg)\b|"
+    r"event\s+(?:order|catering))\b",
+    re.IGNORECASE,
+)
+_HUMAN_HELP_RE = re.compile(
+    r"\b(?:human\s+help|human|a\s+person|people|an?\s+agent|"
+    r"someone|somebody|your\s+team|support|staff)\b|"
+    r"\b(?:talk|speak|connect|put|reach|get)\s+(?:to|me|back|through)\b|"
+    r"\b(?:can|could|would|will)\s+(?:someone|somebody|your\s+team|"
+    r"a\s+person|an?\s+agent|staff)\b|\bget\s+back\s+to\s+me\b",
+    re.IGNORECASE,
+)
+_MANAGER_CONTACT_RE = re.compile(
+    r"\b(?:who\s+can\s+i\s+speak\s+to\s+directly|"
+    r"how\s+can\s+i\s+contact\s+(?:your|the)\s+manager|"
+    r"who\s+(?:do|should)\s+i\s+contact|"
+    r"manager(?:'s)?\s+(?:contact|email|details?))\b",
+    re.IGNORECASE,
+)
+
+
+def normalize_instagram_username(value: Any) -> Optional[str]:
+    """Keep a supplied Instagram handle, never substituting a Meta ID."""
+    candidate = str(value or "").strip().lstrip("@").strip()
+    if not candidate or len(candidate) > 100 or candidate.isdigit():
+        return None
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", candidate):
+        return None
+    return candidate
+
+
+def handoff_contact_mode(user_message: str, *, template_id: Optional[str] = None) -> str:
+    """Return the customer-facing continuation allowed for this request."""
+    if template_id in {"order_draft_receipt", "order_next_steps"}:
+        return "whatsapp_order"
+    if _PURCHASE_HANDOFF_RE.search(str(user_message or "")):
+        return "whatsapp_order"
+    return "support_callback"
+
+
+def is_human_help_request(user_message: str) -> bool:
+    """Recognize explicit requests for a person, including short probes."""
+    text = " ".join(str(user_message or "").lower().split()).strip(" .?!")
+    # These are approved informational manager-contact questions. They must
+    # continue to use the canonical contact record rather than becoming a
+    # generic callback handoff merely because they contain "speak" or
+    # "contact".
+    if _MANAGER_CONTACT_RE.search(text):
+        return False
+    return bool(
+        text in {"human", "person", "people", "agent", "staff", "support"}
+        or _HUMAN_HELP_RE.search(text)
+    )
+
+
+def customer_query_summary(
+    user_message: str,
+    *,
+    contact_mode: str,
+    reason: str,
+) -> str:
+    """Create a bounded, privacy-safe owner-facing description of the need."""
+    if contact_mode == "whatsapp_order":
+        return "Help with a booking, order, purchase, payment, or invoice."
+    if is_human_help_request(user_message):
+        return "A team member to respond."
+
+    value = " ".join(str(user_message or "").split()).strip()
+    # Keep only a short operational excerpt and remove the most common
+    # credential/contact shapes before it reaches email or Admin.
+    value = re.sub(r"https?://\S+|www\.\S+", "[link removed]", value, flags=re.IGNORECASE)
+    value = re.sub(r"\b[6-9]\d{9}\b|\+?91[\s-]*[6-9]\d{9}\b", "[phone removed]", value)
+    value = re.sub(r"[^\s@]+@[^\s@]+\.[^\s@]+", "[email removed]", value)
+    value = re.sub(r"\b(?:upi|ifsc|account(?: number)?|card|token|password|secret)\b[^.?!\n]{0,80}", "[payment detail removed]", value, flags=re.IGNORECASE)
+    value = " ".join(value.split())[:180].rstrip(" .,;:")
+    return f"Asks: {value}" if value else "Human assistance."
+
+
+def _user_hash(user_id: str) -> str:
+    return hashlib.sha256(str(user_id or "").encode("utf-8")).hexdigest()[:12]
 
 # Entity keys worth surfacing to staff when present — the ones the responder
 # already extracts (see camellia/understanding.py's entity schema) plus the
@@ -107,12 +193,6 @@ def _generate_reference() -> str:
     return f"CAM-{random.randint(100000, 999999)}"
 
 
-def extract_reference(text: str) -> Optional[str]:
-    """Pulls a "CAM-48371"-shaped reference out of free text, if present."""
-    match = _REF_RE.search(text or "")
-    return f"CAM-{match.group(1)}" if match else None
-
-
 def _known_entities(facts: Dict[str, Any], *, include_order: bool = False) -> Dict[str, Any]:
     """Whatever Instagram's own understanding already extracted this session.
 
@@ -159,6 +239,9 @@ def get_or_create_handoff(
     facts: Dict[str, Any],
     escalation_id: Optional[int] = None,
     include_order: bool = False,
+    instagram_username: Optional[str] = None,
+    query_summary: Optional[str] = None,
+    contact_mode: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Returns the customer's active handoff, creating one only if needed.
 
@@ -175,17 +258,18 @@ def get_or_create_handoff(
     day — an order they had not mentioned and might no longer want.
     """
     order_summary = verified_order_summary(facts) if include_order else None
-    existing = db.get_active_handoff(channel, user_id)
-    if existing:
-        existing["newly_created"] = False
-        existing["verified_order"] = order_summary
-        return existing
-
     known_entities = _known_entities(facts, include_order=include_order)
     if order_summary:
         known_entities["verified_order"] = order_summary
     unresolved_topic = str((facts.get("last_entities") or {}).get("topic") or "").strip() or None
-    summary_lines = [f"Reason: {reason}"]
+    effective_mode = contact_mode or handoff_contact_mode(user_message)
+    safe_username = normalize_instagram_username(instagram_username)
+    effective_query_summary = query_summary or customer_query_summary(
+        user_message, contact_mode=effective_mode, reason=reason,
+    )
+    summary_lines = [f"Reason: {reason}", f"Customer wants: {effective_query_summary}"]
+    if safe_username:
+        summary_lines.append(f"Instagram username: @{safe_username}")
     summary_lines.extend(_summarize_known_entities(known_entities))
     if unresolved_topic:
         summary_lines.append(f"Needs human confirmation: {unresolved_topic}")
@@ -196,7 +280,7 @@ def get_or_create_handoff(
     ).strftime("%Y-%m-%d %H:%M:%S")
 
     reference = _generate_reference()
-    handoff = db.create_handoff(
+    handoff, newly_created = db.get_or_create_handoff(
         handoff_ref=reference,
         source_channel=channel,
         source_user_id=user_id,
@@ -206,9 +290,13 @@ def get_or_create_handoff(
         unresolved_topic=unresolved_topic,
         escalation_id=escalation_id,
         expires_at=expires_at,
+        instagram_username=safe_username,
+        query_summary=effective_query_summary,
+        contact_mode=effective_mode,
     )
-    log.info("Created handoff %s for %s/%s (%s).", reference, channel, user_id, reason)
-    handoff["newly_created"] = True
+    if newly_created:
+        log.info("Created handoff %s for channel=%s user_hash=%s (%s).", reference, channel, _user_hash(user_id), reason)
+    handoff["newly_created"] = newly_created
     handoff["verified_order"] = order_summary
     return handoff
 
@@ -273,12 +361,7 @@ def customer_facing_notice(*, order_receipt: bool = False, finalized_order: bool
         )
     if order_receipt:
         return "Continue on WhatsApp to send this order draft to our team."
-    # Keep the customer promise deterministic even if an older deployment
-    # still carries legacy callback wording in INSTAGRAM_HANDOFF_MESSAGE.
-    return (
-        "Our team can assist you personally on WhatsApp. "
-        "Please continue your enquiry using the link below."
-    )
+    return "Of course. I’ve shared your message with our team and someone will get back to you shortly."
 
 
 def customer_facing_link_message(
@@ -309,13 +392,17 @@ def staff_summary(handoff: Dict[str, Any]) -> str:
         lines.extend(_order_item_lines(handoff["verified_order"]))
         lines.append("Pending: Delivery address verification; final invoice")
     lines.append("")
-    lines.append("Customer moved to: WhatsApp")
+    lines.append(
+        "Customer continuation: WhatsApp order handoff"
+        if handoff.get("contact_mode") == "whatsapp_order"
+        else "Customer continuation: Camellia team callback"
+    )
     return "\n".join(lines)
 
 
 def mark_referred(handoff_ref: str) -> None:
-    """Called once the WhatsApp continuation link has actually been sent."""
-    db.update_handoff_status(handoff_ref, "REFERRED_TO_WHATSAPP")
+    """Put the customer into the explicit waiting-for-human state."""
+    db.update_handoff_status(handoff_ref, "WAITING_FOR_HUMAN")
 
 
 def retire_order_state(user_id: str, channel: str) -> None:
@@ -333,14 +420,4 @@ def retire_order_state(user_id: str, channel: str) -> None:
     reel and then ordered is still in that reel's context afterwards.
     """
     session_memory.clear_order_draft(user_id, channel)
-    log.info("Retired Instagram order state for %s/%s after WhatsApp referral.", channel, user_id)
-
-
-def mark_whatsapp_connected(handoff_ref: str) -> Optional[Dict[str, Any]]:
-    """Called when the reference shows up in an inbound WhatsApp message."""
-    handoff = db.get_handoff_by_ref(handoff_ref)
-    if not handoff:
-        return None
-    db.update_handoff_status(handoff_ref, "WHATSAPP_CONNECTED")
-    log.info("Handoff %s connected on WhatsApp.", handoff_ref)
-    return handoff
+    log.info("Retired Instagram order state for channel=%s user_hash=%s after WhatsApp referral.", channel, _user_hash(user_id))

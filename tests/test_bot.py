@@ -6,7 +6,7 @@ import inspect
 import sqlite3
 import time
 import unittest
-from unittest.mock import patch, MagicMock, PropertyMock
+from unittest.mock import patch, MagicMock
 from fastapi.testclient import TestClient
 
 # Use temp database for testing
@@ -17,7 +17,6 @@ from camellia.config import config
 from camellia.database import db, Database
 from camellia.ad_gate import ad_gate
 from camellia.responder import responder
-from camellia.whatsapp_adapter import whatsapp_adapter
 from camellia.escalator import escalator
 from camellia.app import app
 
@@ -303,64 +302,6 @@ class TestCamelliaBot(unittest.TestCase):
             )
             self.assertEqual(resp4, expected_fallback, "Deterministic fallback message must match exact fallback_response text")
 
-    def test_whatsapp_adapter_flow(self):
-        """
-        OLD REQUIREMENT (PRD #2): WhatsApp ran the same chatbot as every other
-        channel — a price question there was matched and answered like an
-        Instagram or web-tester message.
-
-        NEW REQUIREMENT: the client decided WhatsApp must be human-only.
-        Instagram is the only AI chatbot channel; WhatsApp customers reach a
-        person, never a bot reply. Webhook parsing is unchanged and still
-        tested here — that part of the pipeline is shared infrastructure —
-        but process_incoming_message no longer matches or answers.
-
-        WHY CHANGED: explicit client channel-policy requirement, not a
-        regression. See camellia/whatsapp_adapter.py and camellia/handoff.py.
-        """
-        payload = {
-            "entry": [{
-                "changes": [{
-                    "value": {
-                        "messages": [{
-                            "from": "919876543210",
-                            "id": "wamid.HBgLMTIzNDU2Nzg5MA==",
-                            "type": "text",
-                            "text": {"body": "Hi, what is the price of Sondesh?"}
-                        }]
-                    }
-                }]
-            }]
-        }
-        res = whatsapp_adapter.parse_webhook_message(payload)
-        self.assertIsNotNone(res)
-        sender, msg_id, body = res
-        self.assertEqual(sender, "919876543210")
-        self.assertEqual(msg_id, "wamid.HBgLMTIzNDU2Nzg5MA==")
-        self.assertEqual(body, "Hi, what is the price of Sondesh?")
-
-        # Process through adapter — human-only by default, no bot reply.
-        with patch.object(whatsapp_adapter, "send_message") as send_message, patch(
-            "camellia.whatsapp_adapter.responder.match_and_respond"
-        ) as match_and_respond:
-            result = whatsapp_adapter.process_incoming_message(sender, body)
-        self.assertEqual(result["status"], "human_only")
-        self.assertFalse(result["was_matched"])
-        self.assertFalse(result["bot_replied"])
-        self.assertIsNone(result["response_text"])
-        match_and_respond.assert_not_called()
-        send_message.assert_not_called()
-
-        initial = db.get_analytics()
-        # Log 1 matched and 1 escalated
-        db.log_conversation("user_test_1", "instagram", "sondesh price", "response", True, "sondesh_price_detailed")
-        db.log_conversation("user_test_2", "instagram", "random question", "fallback", False, None)
-
-        analytics = db.get_analytics()
-        self.assertEqual(analytics["total_messages"] - initial["total_messages"], 2)
-        self.assertEqual(analytics["matched_responses"] - initial["matched_responses"], 1)
-        self.assertEqual(analytics["escalations_count"] - initial["escalations_count"], 1)
-
     def test_fastapi_instagram_webhook_endpoints(self):
         """FastAPI Webhook Verification & POST Event Handler Tests."""
         # 1. GET Verify
@@ -605,7 +546,7 @@ class TestCamelliaBot(unittest.TestCase):
         """Test /api/reset-session clears session memory correctly."""
         from camellia.session_memory import session_memory
         user_id = "user_reset_test"
-        channel = "whatsapp"
+        channel = "instagram"
 
         # 1. Set fact
         session_memory.extract_and_update_facts(user_id, channel, "My name is Shoaib")
@@ -752,7 +693,6 @@ class TestCamelliaBot(unittest.TestCase):
     def test_order_confirmation_escalation_and_verification(self):
         """Verify order confirmation triggers staff alert with verification status."""
         from camellia.escalator import escalator
-        from camellia.whatsapp_adapter import whatsapp_adapter
 
         # 1. Test missing address/phone -> flags PENDING VERIFICATION
         res1 = escalator._evaluate_order_verification("I want 2 boxes of Nolen Gur", "no previous history")
@@ -763,21 +703,6 @@ class TestCamelliaBot(unittest.TestCase):
             "Here is my order: 250g Nolen Gur. Address: Flat 402, Sector 56 Gurgaon, Phone: 9876543210", ""
         )
         self.assertIn("READY FOR VERIFICATION & INVOICING", res2)
-
-        # 3. OLD REQUIREMENT: confirming an order over WhatsApp triggered a
-        #    staff escalation alert from inside the WhatsApp chatbot flow.
-        #    NEW REQUIREMENT: WhatsApp is human-only, so there is no bot flow
-        #    left to trigger an escalation from — a human is already reading
-        #    every WhatsApp message directly. The verification-status helper
-        #    itself (tested above) is unchanged and still used by the
-        #    Instagram-originated escalation path.
-        #    WHY CHANGED: explicit client channel-policy requirement.
-        with patch.object(escalator, "handle_escalation") as mock_esc, patch.object(
-            whatsapp_adapter, "send_message"
-        ), patch("camellia.whatsapp_adapter.responder.match_and_respond") as match_and_respond:
-            whatsapp_adapter.process_incoming_message("919999888877", "confirm my order here is my address Sector 43 Gurgaon")
-            self.assertFalse(mock_esc.called)
-            match_and_respond.assert_not_called()
 
     def test_order_calculator_integration(self):
         """Verify OrderCalculator correctly parses quantities and generates itemized draft receipts."""
@@ -869,45 +794,6 @@ class TestCamelliaBot(unittest.TestCase):
         resp2, match2, tmpl2, _ = responder.match_and_respond("Who is the President of US?", user_id="test_ooc_user", channel="whatsapp")
         self.assertNotEqual(tmpl2, "order_draft_receipt")
         self.assertNotIn("ORDER DRAFT RECEIPT", resp2)
-
-    def test_whatsapp_quick_reply_buttons(self):
-        """
-        OLD REQUIREMENT: a WhatsApp greeting got the same quick-reply buttons
-        Instagram/the web tester show ("See Menu", "Place Order").
-
-        NEW REQUIREMENT: WhatsApp sends no automated reply at all, so it
-        sends no buttons either. The button-selection logic itself
-        (_get_contextual_buttons) is unchanged and still exercised by the
-        chatbot-enabled escape hatch, covered separately below.
-
-        WHY CHANGED: explicit client channel-policy requirement — WhatsApp
-        is human-only.
-        """
-        from camellia.whatsapp_adapter import whatsapp_adapter
-        with patch.object(whatsapp_adapter, "send_message") as mock_send:
-            result = whatsapp_adapter.process_incoming_message("919876543210", "Hi")
-            mock_send.assert_not_called()
-            self.assertFalse(result["bot_replied"])
-
-    def test_whatsapp_chatbot_escape_hatch_still_sends_buttons_when_explicitly_enabled(self):
-        """The old auto-reply behaviour survives, but only behind the explicit
-        WHATSAPP_CHATBOT_ENABLED flag — off by default, and this test turns it
-        on deliberately to prove the code path was not deleted, only gated.
-        WHATSAPP_CHATBOT_ENABLE_CONFIRM must also be set: a single flipped
-        boolean is treated as an accident, not a decision."""
-        from camellia.whatsapp_adapter import whatsapp_adapter
-        with patch.object(config, "WHATSAPP_CHATBOT_ENABLED", True), patch.object(
-            config, "WHATSAPP_CHATBOT_ENABLE_CONFIRM", True,
-        ), patch.object(
-            whatsapp_adapter, "send_message"
-        ) as mock_send:
-            whatsapp_adapter.process_incoming_message("919876543210", "Hi")
-            self.assertTrue(mock_send.called)
-            _, kwargs = mock_send.call_args
-            buttons = kwargs.get("buttons")
-            self.assertIsNotNone(buttons)
-            self.assertIn("See Menu", buttons)
-            self.assertIn("🛍️ Place Order", buttons)
 
     def test_parse_raw_menu_text(self):
         """Test MenuParser regex extraction of items, quantities, prices, and categories from unstructured text."""
@@ -1710,83 +1596,6 @@ class TestCamelliaBot(unittest.TestCase):
         self.assertIn("Classic Sondesh", resp2)
         self.assertIn("₹1,200", resp2)
 
-    def test_whatsapp_webhook_parsing(self):
-        """Tests parsing of WhatsApp webhook payloads for text and interactive replies."""
-        from camellia.whatsapp_adapter import whatsapp_adapter
-
-        # 1. Text payload
-        text_payload = {
-            "entry": [{
-                "changes": [{
-                    "value": {
-                        "messages": [{
-                            "from": "919876543210",
-                            "id": "wamid.HBgL",
-                            "type": "text",
-                            "text": {"body": "Hi, what are your sondesh flavours?"}
-                        }]
-                    }
-                }]
-            }]
-        }
-        sender, msg_id, text = whatsapp_adapter.parse_webhook_message(text_payload)
-        self.assertEqual(sender, "919876543210")
-        self.assertEqual(msg_id, "wamid.HBgL")
-        self.assertEqual(text, "Hi, what are your sondesh flavours?")
-
-        # 2. Interactive button reply payload
-        btn_payload = {
-            "entry": [{
-                "changes": [{
-                    "value": {
-                        "messages": [{
-                            "from": "919876543210",
-                            "id": "wamid.BTN1",
-                            "type": "interactive",
-                            "interactive": {
-                                "button_reply": {"id": "quick_btn_1", "title": "See Menu"}
-                            }
-                        }]
-                    }
-                }]
-            }]
-        }
-        sender_btn, msg_id_btn, text_btn = whatsapp_adapter.parse_webhook_message(btn_payload)
-        self.assertEqual(sender_btn, "919876543210")
-        self.assertEqual(text_btn, "See Menu")
-
-        # 3. Invalid/empty payload
-        self.assertIsNone(whatsapp_adapter.parse_webhook_message({}))
-
-    @patch("camellia.whatsapp_adapter.WhatsAppAdapter.send_message")
-    def test_whatsapp_process_incoming_message(self, mock_send):
-        """
-        OLD REQUIREMENT: WhatsApp end-to-end processed a greeting and a
-        pricing query the same way Instagram does, replying with contextual
-        quick-reply buttons for each.
-
-        NEW REQUIREMENT: WhatsApp is human-only. Neither message gets an
-        automated reply or buttons — a human reads both directly. The
-        underlying responder/template matching this used to exercise is
-        unchanged and covered on its own throughout this file with
-        channel="whatsapp" as a label; what changed is that the WhatsApp
-        *adapter* no longer calls it.
-
-        WHY CHANGED: explicit client channel-policy requirement.
-        """
-        mock_send.return_value = {"mock": True, "status": "sent"}
-        from camellia.whatsapp_adapter import whatsapp_adapter
-
-        result = whatsapp_adapter.process_incoming_message("919876543210", "Hello")
-        self.assertEqual(result["status"], "human_only")
-        self.assertFalse(result["was_matched"])
-        self.assertFalse(result["bot_replied"])
-
-        pricing_res = whatsapp_adapter.process_incoming_message("919876543210", "How much is nolen gur sondesh?")
-        self.assertFalse(pricing_res["was_matched"])
-        self.assertFalse(pricing_res["bot_replied"])
-        mock_send.assert_not_called()
-
     def test_greeting_variations_do_not_repeat_immediately(self):
         """Greeting replies rotate randomly without leaving the approved response bank."""
         from camellia.session_memory import session_memory
@@ -1855,50 +1664,6 @@ class TestCamelliaBot(unittest.TestCase):
             self.assertEqual(response, answer)
         finally:
             db.delete_learned_knowledge(knowledge_id)
-
-    @patch("camellia.whatsapp_adapter.WhatsAppAdapter.access_token", new_callable=PropertyMock)
-    def test_whatsapp_mock_outbound_and_buttons(self, mock_token):
-        """Tests mock WhatsApp outbound message dispatch with image and buttons."""
-        mock_token.return_value = ""
-        from camellia.whatsapp_adapter import whatsapp_adapter
-
-        send_res = whatsapp_adapter.send_message(
-            recipient_phone="919876543210",
-            text_body="Here is our signature menu 🌸",
-            image_url="/images/signature_card.jpeg",
-            buttons=["See Menu", "🛍️ Place Order"]
-        )
-        self.assertTrue(send_res.get("mock"))
-        self.assertEqual(send_res.get("status"), "sent")
-        self.assertEqual(send_res.get("recipient"), "919876543210")
-        self.assertEqual(len(send_res.get("buttons", [])), 2)
-
-    def test_whatsapp_mock_mode_never_calls_meta(self):
-        """Mock mode remains safe even if placeholder credentials are present."""
-        from camellia.whatsapp_adapter import whatsapp_adapter
-
-        with patch.object(config, "WHATSAPP_MOCK_MODE", True), \
-             patch.object(config, "WHATSAPP_ACCESS_TOKEN", "placeholder-token"), \
-             patch.object(config, "WHATSAPP_PHONE_NUMBER_ID", "placeholder-number"), \
-             patch("camellia.whatsapp_adapter.httpx.Client") as mock_client:
-            result = whatsapp_adapter.send_message("919876543210", "Mock delivery test")
-
-        self.assertTrue(result["mock"])
-        self.assertEqual(result["mode"], "mock")
-        mock_client.assert_not_called()
-
-    def test_whatsapp_live_mode_requires_credentials_before_http(self):
-        """Live mode fails closed when credentials are not configured."""
-        from camellia.whatsapp_adapter import whatsapp_adapter
-
-        with patch.object(config, "WHATSAPP_MOCK_MODE", False), \
-             patch.object(config, "WHATSAPP_ACCESS_TOKEN", ""), \
-             patch.object(config, "WHATSAPP_PHONE_NUMBER_ID", ""), \
-             patch("camellia.whatsapp_adapter.httpx.Client") as mock_client:
-            result = whatsapp_adapter.send_message("919876543210", "Should not send")
-
-        self.assertEqual(result["status"], "not_configured")
-        mock_client.assert_not_called()
 
     def test_tiered_fuzzy_matching_3letter_words(self):
         """Tests that 3-letter food terms with minor typos (e.g. gurr) match correctly while unrelated noise is rejected."""
@@ -2141,14 +1906,12 @@ class TestCamelliaBot(unittest.TestCase):
         self.assertIsNotNone(imgs)
         image_urls = [i.get("url") if isinstance(i, dict) else i for i in imgs]
         self.assertTrue(any("Thursday" in i or "Friday" in i for i in image_urls))
-        # First savoury message gets savoury cross-sell nudge, plus its own
-        # three approved Sondesh photos alongside the weekly one.
-        self.assertIn("We also make & send Bengali mishti", resp)
-        self.assertIn("WE ALSO OFFER SONDESH", resp)
-        self.assertIn("subtle natural flavours", resp)
-        self.assertTrue(any("Sondesh%20Norom%20Pak" in i for i in image_urls))
-        self.assertTrue(any("Sondesh%20Handcrafted" in i for i in image_urls))
-        self.assertTrue(any("Sondesh%20Gift%20Platter" in i for i in image_urls))
+        # The new client-approved add-on is limited to meal/menu interest and
+        # uses the three uploaded Sondesh assets in stable order.
+        self.assertIn("handcrafted Norom Pak Sondesh", resp)
+        self.assertTrue(any("sondesh_addon_01" in i for i in image_urls))
+        self.assertTrue(any("sondesh_addon_02" in i for i in image_urls))
+        self.assertTrue(any("sondesh_addon_03" in i for i in image_urls))
         self.assertTrue(isinstance(imgs[0], dict) and imgs[0].get("text_first"))
 
     def test_phase_b_bento_details_answers_with_confirmed_tiers(self):
@@ -2254,12 +2017,10 @@ class TestCamelliaBot(unittest.TestCase):
         msg1 = "Show me the lunch options"
         resp1, matched1, tmpl1, imgs1 = responder.match_and_respond(msg1, user_id=uid, channel="whatsapp")
         self.assertTrue(matched1)
-        self.assertIn("WE ALSO OFFER SONDESH", resp1)
-        self.assertIn("We also make & send Bengali mishti", resp1)
-        self.assertIn("subtle natural flavours", resp1)
+        self.assertIn("handcrafted Norom Pak Sondesh", resp1)
         crosssell_urls = [i.get("url") if isinstance(i, dict) else i for i in imgs1]
-        self.assertEqual(sum("/images/Sondesh%20" in i for i in crosssell_urls), 3)
-        self.assertTrue(session_memory.get_facts(uid, "whatsapp").get("savoury_crosssell_sent"))
+        self.assertEqual(sum("/images/sondesh_addon_" in i for i in crosssell_urls), 3)
+        self.assertTrue(session_memory.get_facts(uid, "whatsapp").get("alacarte_sondesh_addon_sent"))
 
         # Turn 2: Second savoury query -> NO duplicate cross-sell nudge
         msg2 = "How to order item from menu?"
@@ -2267,15 +2028,14 @@ class TestCamelliaBot(unittest.TestCase):
         self.assertTrue(matched2)
         self.assertEqual(tmpl2, "alacarte_prebooking_steps")
         self.assertNotIn("P.S.", resp2)
-        self.assertNotIn("We also make & send Bengali mishti", resp2)
+        self.assertNotIn("handcrafted Norom Pak Sondesh", resp2)
 
         # Direct inquiry for cross-sell template
         msg3 = "Do you have sweets along with meal?"
         resp3, matched3, tmpl3, imgs3 = responder.match_and_respond(msg3, user_id=uid, channel="whatsapp")
         self.assertTrue(matched3)
         self.assertEqual(tmpl3, "savoury_crosssell_sondesh")
-        self.assertIn("We also make & send Bengali mishti", resp3)
-        self.assertIn("subtle natural flavours", resp3)
+        self.assertIn("Sondesh", resp3)
         self.assertEqual(len(imgs3), 3)
 
     def test_phase_e_sondesh_crosssell_savoury_nudge_and_template(self):
@@ -2709,12 +2469,6 @@ class TestClarifyBeforeEscalating(unittest.TestCase):
             self.assertFalse(matched, f"{msg!r} should escalate")
             self.assertNotEqual(tmpl, "clarify_request")
 
-    def test_clarifier_buttons_match_the_options_offered(self):
-        from camellia.whatsapp_adapter import whatsapp_adapter
-        buttons = whatsapp_adapter._get_contextual_buttons("clarify_request", True)
-        self.assertEqual(buttons, ["Sondesh", "🍱 Meals", "🚚 Delivery"])
-
-
 class TestInteractiveMenuFlow(unittest.TestCase):
     """
     A menu question shows the card with a short teaser and invites a choice,
@@ -2737,14 +2491,6 @@ class TestInteractiveMenuFlow(unittest.TestCase):
             self.assertTrue(images, "Menu reply should still send the photo card")
             self.assertRegex(text, r"(?i)sondesh")
             self.assertRegex(text, r"(?i)meal")
-
-    def test_menu_buttons_continue_the_choice_offered(self):
-        from camellia.whatsapp_adapter import whatsapp_adapter
-        for tmpl in ("know_more", "product_overview"):
-            buttons = whatsapp_adapter._get_contextual_buttons(tmpl, True)
-            self.assertNotIn("See Menu", buttons, "Offers the menu to someone who just got it")
-            self.assertIn("Sondesh", buttons)
-            self.assertIn("🍱 Meals", buttons)
 
     def test_every_menu_button_leads_somewhere_real(self):
         from camellia.session_memory import session_memory
@@ -2916,7 +2662,7 @@ class TestInstagramMenuCards(unittest.TestCase):
 
     Cards are stored as relative paths and Meta fetches them by URL, so they
     have to be made absolute before being sent. Instagram was skipping that
-    conversion — the WhatsApp adapter always did it — and the failure was
+        conversion — the old channel adapter used to do it — and the failure was
     silent in two different ways depending on whether the template captioned
     its cards.
     """

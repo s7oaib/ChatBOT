@@ -80,7 +80,7 @@ story = []
 # ── HEADER ──────────────────────────────────────────────────────────────────
 story.append(Spacer(1, 0.4*cm))
 story.append(Paragraph("camellia.artisanal", subtitle_style))
-story.append(Paragraph("WhatsApp &amp; Instagram Chatbot", subtitle_style))
+story.append(Paragraph("Instagram AI with manual WhatsApp handoff", subtitle_style))
 story.append(HRFlowable(width="100%", thickness=1.5, color=BROWN))
 story.append(Spacer(1, 0.3*cm))
 story.append(Paragraph("Why We Don't Use RAG", title_style))

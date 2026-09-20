@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 from pathlib import Path
 from dotenv import load_dotenv
@@ -18,6 +19,13 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # directory because Docker mounts a volume there, which would hide these files.
 DATA_DIR = BASE_DIR / "data"
 load_dotenv(BASE_DIR / ".env", override=True)
+
+
+def _env_value_or_default(env_var: str, default: str) -> str:
+    """Use a default only when the variable is absent, not when it is empty."""
+    if env_var not in os.environ:
+        return default
+    return os.environ[env_var].strip()
 
 # Must come after the environment is loaded and before the paths below are
 # resolved: a volume starts empty, and `_resolve_path(must_exist=True)` would
@@ -84,6 +92,18 @@ def _resolve_path(env_var: str, default: Path, must_exist: bool = False) -> str:
     return str(resolved)
 
 
+_GRAPH_API_VERSION_RE = re.compile(r"^v\d+\.\d+$")
+_DEFAULT_INSTAGRAM_API_VERSION = "v25.0"
+
+
+def _resolve_graph_api_version(env_var: str, default: str) -> str:
+    """Validate a configured Graph API version, falling back to default on malformed input."""
+    raw = os.getenv(env_var, default).strip()
+    if _GRAPH_API_VERSION_RE.match(raw):
+        return raw
+    return default
+
+
 class Config:
     CONVERSATION_IMPROVEMENTS_ENABLED: bool = os.getenv("CONVERSATION_IMPROVEMENTS_ENABLED", "true").lower() in ("true", "1", "yes")
     # Meta & Webhook Config
@@ -106,25 +126,12 @@ class Config:
     # Machine authentication for trusted tools. Never use this as a browser
     # password and never inject it into the Admin Portal JavaScript.
     ADMIN_API_KEY: str = _env_secret("ADMIN_API_KEY")
-    # Browser authentication is username + Argon2id password, followed by MFA
-    # in production. ADMIN_PIN remains readable only for deprecation telemetry;
-    # it is never accepted by the browser or require_admin().
+    # Browser authentication is username + Argon2id password. ADMIN_PIN remains
+    # readable only for deprecation telemetry; it is never accepted by the
+    # browser or require_admin().
     ADMIN_PIN: str = _env_secret("ADMIN_PIN")
     ADMIN_USERNAME: str = _env_secret("ADMIN_USERNAME")
     ADMIN_PASSWORD_HASH: str = _env_secret("ADMIN_PASSWORD_HASH")
-    ADMIN_RECOVERY_EMAIL: str = _env_secret("ADMIN_RECOVERY_EMAIL")
-    ADMIN_EMAIL_PROVIDER: str = os.getenv("ADMIN_EMAIL_PROVIDER", "").strip().lower()
-    ADMIN_EMAIL_FROM: str = _env_secret("ADMIN_EMAIL_FROM")
-    ADMIN_EMAIL_API_KEY: str = _env_secret("ADMIN_EMAIL_API_KEY")
-    ADMIN_EMAIL_API_URL: str = os.getenv("ADMIN_EMAIL_API_URL", "https://api.resend.com/emails").strip()
-    ADMIN_PUBLIC_BASE_URL: str = os.getenv("ADMIN_PUBLIC_BASE_URL", "").strip().rstrip("/")
-    try:
-        ADMIN_RESET_TOKEN_TTL_SECONDS: int = max(300, int(os.getenv("ADMIN_RESET_TOKEN_TTL_SECONDS", "900")))
-    except ValueError:
-        ADMIN_RESET_TOKEN_TTL_SECONDS: int = 900
-    ADMIN_MFA_TOTP_SECRET: str = _env_secret("ADMIN_MFA_TOTP_SECRET")
-    ADMIN_MFA_RECOVERY_CODE_HASHES: str = _env_secret("ADMIN_MFA_RECOVERY_CODE_HASHES")
-    ADMIN_MFA_REQUIRED: bool = os.getenv("ADMIN_MFA_REQUIRED", "true").lower() in ("true", "1", "t", "yes")
     ADMIN_REQUIRE_HTTPS: bool = os.getenv("ADMIN_REQUIRE_HTTPS", "true").lower() in ("true", "1", "t", "yes")
     try:
         ADMIN_SESSION_IDLE_SECONDS: int = max(300, int(os.getenv("ADMIN_SESSION_IDLE_SECONDS", "1800")))
@@ -164,25 +171,20 @@ class Config:
     LLM_ASSISTED_RESOLUTION_ENABLED: bool = os.getenv("LLM_ASSISTED_RESOLUTION_ENABLED", "false").lower() in ("true", "1", "t", "yes")
     # The router runs on every message, so it is the call most likely to hit a
     # per-minute token ceiling — and it is a different job from writing a
-    # reply, so it gets its own model rather than sharing GROQ_MODEL.
-    #
-    # Measured on this account's key (x-ratelimit-limit-tokens):
-    #   openai/gpt-oss-20b    8,000 TPM     qwen/qwen3.8-27b     8,000 TPM
-    #   openai/gpt-oss-120b   8,000 TPM     groq/compound-mini  70,000 TPM
-    # At ~1,900 tokens a call that is ~4 router calls a minute against ~36,
-    # and the 8,000 is already shared with refinement and grounded answers.
-    # compound-mini picked slightly less well on a seven-case trial, which is
-    # far too small to decide on — the shadow table records the model behind
-    # every pick so the choice can be settled on real traffic instead.
-    GROQ_ROUTER_MODEL: str = os.getenv("GROQ_ROUTER_MODEL", "") or "groq/compound-mini"
+    # reply, so it gets its own production model rather than sharing GROQ_MODEL.
+    # GPT-OSS 120B is a current production model with JSON Object Mode support;
+    # the smaller GPT-OSS 20B remains the one-at-most fallback below.
+    GROQ_ROUTER_MODEL: str = os.getenv("GROQ_ROUTER_MODEL", "") or "openai/gpt-oss-120b"
     # Understanding runs on every substantive message, so it is the call that
-    # meets the per-day request ceiling first — and when it does, every
-    # customer drops to the deterministic path at once. One explicitly
-    # configured second model is tried, once, only for failures that a
-    # different model could actually survive (quota, rate limit, provider
-    # error). Never a retry of the same model, never a model the operator did
-    # not name, and the schema contract is identical for both.
-    STRUCTURED_NLU_FALLBACK_MODEL: str = os.getenv("STRUCTURED_NLU_FALLBACK_MODEL", "").strip()
+    # meets a request ceiling first — and when it does, every customer drops
+    # to the deterministic path unless the one bounded fallback survives.
+    # Never retry the same model, and never retry malformed/schema-invalid
+    # output. The schema contract is identical for both models.
+    STRUCTURED_NLU_FALLBACK_MODEL: str = (
+        _env_value_or_default(
+            "STRUCTURED_NLU_FALLBACK_MODEL", "openai/gpt-oss-20b",
+        )
+    )
     # A bounded, live semantic fallback for messages the deterministic trigger
     # matcher cannot confidently place (typos, Hinglish, and unusual wording).
     # The router selects only an existing approved template; it never writes
@@ -222,10 +224,10 @@ class Config:
     # Comma-separated category names are deliberately empty by default: a
     # future pilot must opt a single safe category in explicitly.
     LLM_AUTO_RESOLVE_ALLOWED_CATEGORIES: str = os.getenv("LLM_AUTO_RESOLVE_ALLOWED_CATEGORIES", "")
-    # Its own model for the same reason the router has one: a different job,
-    # a different rate-limit bucket, and freedom to change one without
-    # touching the other.
-    LLM_TRIAGE_MODEL: str = os.getenv("LLM_TRIAGE_MODEL", "") or "groq/compound-mini"
+    # Its own setting keeps this shadow-only workload independently tunable;
+    # the default stays on GPT-OSS 20B because triage never writes to a
+    # customer reply path.
+    LLM_TRIAGE_MODEL: str = os.getenv("LLM_TRIAGE_MODEL", "") or "openai/gpt-oss-20b"
     # How confident a grounded AUTO_RESOLVE call would need to be before any
     # future phase let it auto-send. Recorded on every shadow row now
     # (`would_auto_resolve`) so that threshold can be picked from real
@@ -250,34 +252,24 @@ class Config:
     BUSINESS_LEGAL_NAME: str = os.getenv("BUSINESS_LEGAL_NAME", "Camellia Artisanal")
     PRIVACY_CONTACT_EMAIL: str = os.getenv("PRIVACY_CONTACT_EMAIL", "")
     
-    # WhatsApp Cloud API Config
-    # Mock mode is deliberately enabled by default so local/test runs never call Meta.
-    WHATSAPP_MOCK_MODE: bool = os.getenv("WHATSAPP_MOCK_MODE", "true").lower() in ("true", "1", "t", "yes")
-    WHATSAPP_ACCESS_TOKEN: str = os.getenv("WHATSAPP_ACCESS_TOKEN", "")
-    WHATSAPP_PHONE_NUMBER_ID: str = os.getenv("WHATSAPP_PHONE_NUMBER_ID", "")
-    WHATSAPP_API_VERSION: str = os.getenv("WHATSAPP_API_VERSION", "v19.0")
-
-    # Instagram Config — uses its own Page token (may differ from WhatsApp token)
+    # Instagram Config. Instagram owns the only automated customer channel and
+    # therefore has its own token; it must never inherit a WhatsApp credential.
+    # When set, webhook entries must belong to this exact Instagram account.
+    # Leaving it blank preserves compatibility with existing integrations.
+    INSTAGRAM_ACCOUNT_ID: str = os.getenv("INSTAGRAM_ACCOUNT_ID", "").strip()
     INSTAGRAM_PAGE_ID: str = os.getenv("INSTAGRAM_PAGE_ID", "")
-    INSTAGRAM_ACCESS_TOKEN: str = os.getenv("INSTAGRAM_ACCESS_TOKEN", "") or os.getenv("WHATSAPP_ACCESS_TOKEN", "")
+    INSTAGRAM_ACCESS_TOKEN: str = os.getenv("INSTAGRAM_ACCESS_TOKEN", "")
+    INSTAGRAM_API_VERSION: str = _resolve_graph_api_version(
+        "INSTAGRAM_API_VERSION", _DEFAULT_INSTAGRAM_API_VERSION
+    )
+    # Story inventory sync is deliberately opt-in.  The manual Admin action
+    # is always available; automatic polling is enabled only after the Meta
+    # account has been verified for the documented owned-Stories edge.
+    INSTAGRAM_STORY_AUTO_SYNC_ENABLED: bool = os.getenv("INSTAGRAM_STORY_AUTO_SYNC_ENABLED", "false").lower() in ("true", "1", "t", "yes")
+    INSTAGRAM_STORY_SYNC_INTERVAL_SECONDS: int = max(300, int(os.getenv("INSTAGRAM_STORY_SYNC_INTERVAL_SECONDS", "900")))
 
     # --- Channel policy: Instagram is the only AI chatbot channel -----------
-    # The client does not want customers talking to an AI on WhatsApp at all.
-    # WHATSAPP_CHATBOT_ENABLED defaults false and is the one flag that would
-    # restore the old auto-reply behaviour; camellia/whatsapp_adapter.py only
-    # consults it as an explicit, logged escape hatch for a future policy
-    # change — the code path that calls the understanding/RAG/template stack
-    # for WhatsApp does not run by default, and nothing else in this file
-    # turns it on implicitly.
     INSTAGRAM_CHATBOT_ENABLED: bool = os.getenv("INSTAGRAM_CHATBOT_ENABLED", "true").lower() in ("true", "1", "t", "yes")
-    WHATSAPP_CHATBOT_ENABLED: bool = os.getenv("WHATSAPP_CHATBOT_ENABLED", "false").lower() in ("true", "1", "t", "yes")
-    # A single flipped boolean (a copy-pasted .env, a typo'd override) must not
-    # be enough to put the AI back on WhatsApp. Restoring the old behaviour
-    # requires this second, differently-named flag as well — whatsapp_adapter
-    # treats WHATSAPP_CHATBOT_ENABLED alone as a misconfiguration and fails
-    # safe to human-only, logging an error instead of guessing intent.
-    WHATSAPP_CHATBOT_ENABLE_CONFIRM: bool = os.getenv("WHATSAPP_CHATBOT_ENABLE_CONFIRM", "false").lower() in ("true", "1", "t", "yes")
-    WHATSAPP_HUMAN_HANDOFF_ENABLED: bool = os.getenv("WHATSAPP_HUMAN_HANDOFF_ENABLED", "true").lower() in ("true", "1", "t", "yes")
     # The client's own WhatsApp Business number that customers are sent to,
     # digits only with country code (e.g. "9198XXXXXXXX") — NOT the Meta Cloud
     # API sender number above, which never faces the customer directly here.
@@ -301,12 +293,6 @@ class Config:
         "Our team can assist you personally on WhatsApp. "
         "Please continue your enquiry using the link below.",
     )
-
-    # Human Escalation Contact
-    # Where the bot sends its internal escalation alerts. It is never printed
-    # in the customer reply; customers use the configured wa.me continuation.
-    HUMAN_ESCALATION_PHONE: str = os.getenv("HUMAN_ESCALATION_PHONE", "+919902181650")
-    HUMAN_ESCALATION_EMAIL: str = os.getenv("HUMAN_ESCALATION_EMAIL", "")
 
     # Slow-reply notice.
     # When the bot itself becomes slow to answer, the customer is sitting there

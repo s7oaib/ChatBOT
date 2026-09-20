@@ -1,5 +1,5 @@
 """
-Consolidating Customers/Answers into AI Resolution & Answers.
+Admin navigation consolidation and additive candidate read paths.
 
 This is a navigation change, not a data or workflow change: candidate_
 templates, escalations, knowledge_gaps and learned_knowledge keep their
@@ -31,19 +31,20 @@ def _auth():
 class TestNavigationConsolidation:
     def test_customers_button_is_gone_from_normal_navigation(self):
         page = client.get("/admin").text
-        nav = page[page.index('<div class="tabs-nav">'):page.index('</div>', page.index('<div class="tabs-nav">'))]
+        nav = page[page.index('<aside class="admin-sidebar"'):page.index('</aside>', page.index('<aside class="admin-sidebar"'))]
         assert "Customers" not in nav
 
     def test_answers_button_is_gone_from_normal_navigation(self):
         page = client.get("/admin").text
-        nav = page[page.index('<div class="tabs-nav">'):page.index('</div>', page.index('<div class="tabs-nav">'))]
-        assert '✅ Answers' not in nav
+        nav = page[page.index('<aside class="admin-sidebar"'):page.index('</aside>', page.index('<aside class="admin-sidebar"'))]
+        assert 'Answers' not in nav
         assert 'candidateBadge' not in nav
 
     def test_ai_resolution_and_answers_is_still_the_primary_tab(self):
         page = client.get("/admin").text
-        nav = page[page.index('<div class="tabs-nav">'):page.index('</div>', page.index('<div class="tabs-nav">'))]
-        assert "AI Resolution" in nav
+        nav = page[page.index('<aside class="admin-sidebar"'):page.index('</aside>', page.index('<aside class="admin-sidebar"'))]
+        assert "Dashboard" in nav
+        assert "QA Templates" in nav
 
     def test_legacy_panels_still_exist_in_the_dom_for_regression_comparison(self):
         page = client.get("/admin").text
