@@ -215,6 +215,20 @@ _CLIENT_QA_TEMPLATE_IDS = {
     "minimum_sondesh_quantity_client": "minimum_sondesh_quantity",
 }
 
+# Existing deterministic routes carry additional state, media, dynamic-menu,
+# handoff, and source-evidence semantics.  They must claim these messages
+# before the compact client-QA registry is consulted.
+_CANONICAL_ROUTE_HINT_RE = re.compile(
+    r"\b(?:this|that|it|above|reel|post|video|item|one|"
+    r"bengali\s+home\s+table|home\s+table|home\s+lunch|"
+    r"subscription|meal\s+plan|bento|sondesh|sandesh|mishti|mithai|"
+    r"aamar|signature|jolbhora|kanchagolla|mangsho|chicken\s+kosha|"
+    r"price|cost|rate|how\s+much|payment|pay|delivery|deliver|"
+    r"pre\s*[- ]?book|pre\s*[- ]?order|book|order|confirm|finali[sz]e|"
+    r"reserve|best\s+time)\b",
+    re.IGNORECASE,
+)
+
 
 # The flower strip lives in text_rules so database.py can use it too — the
 # reply path is not the only place text reaches the client's people.
@@ -2024,6 +2038,9 @@ class DeterministicResponder:
                 semantic_fallback._ESCALATION_INTENT_RE.search(lowered_text)
                 and not semantic_fallback._IDENTITY_QUESTION_RE.search(lowered_text)
             )
+            or facts.get("source_route")
+            or facts.get("ad_product")
+            or _CANONICAL_ROUTE_HINT_RE.search(lowered_text)
         )
         client_match = (
             None

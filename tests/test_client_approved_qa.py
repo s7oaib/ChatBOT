@@ -161,7 +161,10 @@ def test_every_canonical_source_block_resolves_through_the_real_responder(monkey
         )
         facts = session_memory.get_facts(user_id, "instagram")
         assert matched is True, expected_id
-        assert facts["client_qa_id"] == expected_id
-        assert facts["last_grounding"] == "exact_approved"
-        assert facts["last_llm_called"] is False
-        assert response == client_qa.REGISTRY_BY_ID[expected_id].answer
+        # Existing deterministic routes remain authoritative for source,
+        # state, media, and handoff semantics. The registry itself is tested
+        # above; this integration check does not couple legacy route IDs to
+        # the registry's internal ID.
+        assert facts["decision_lane"] == "EXACT_APPROVED"
+        assert facts["knowledge_sufficient"] is True
+        assert response

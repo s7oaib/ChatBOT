@@ -179,7 +179,7 @@ def _home_context(message: str, facts: Dict[str, Any]) -> bool:
 
 
 def _generic_price(message: str) -> bool:
-    return bool(re.search(r"\b(?:what(?:'s| is)|whats|how much|price|cost|rate)\b", message, re.I)) and not bool(
+    return bool(re.search(r"\b(?:how much|price|cost|rate)\b", message, re.I)) and not bool(
         re.search(r"\b(?:sondesh|bento|chicken|kosha|subscription|home\s+table|meal\s+plan|mutton|mangsho|jolbhora|kanchagolla)\b", message, re.I)
     )
 
