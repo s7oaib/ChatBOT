@@ -241,6 +241,23 @@ def test_bare_price_question_with_no_topic_asks_which_product_instead_of_guessin
     assert "sondesh_price_detailed" != reply[2]
 
 
+def test_instagram_bare_price_after_source_route_uses_client_food_overview(monkeypatch):
+    monkeypatch.setattr(config, "BYPASS_AD_GATE", True)
+    user_id = "client_instagram_general_price"
+    session_memory.clear_session(user_id, "instagram")
+    facts = session_memory.get_facts(user_id, "instagram")
+    facts["source_route"] = {"routing_id": 1, "source_type": "story", "active": True}
+    facts["source_context_superseded"] = True
+
+    reply = responder.match_and_respond("whats the price", user_id=user_id, channel="instagram")
+
+    assert reply[2] == "savoury_food_intro"
+    assert "À LA CARTE" in reply[0]
+    assert "BENGALI BENTO" in reply[0]
+    assert "INSERT" not in reply[0]
+    assert facts["source_context_used"] is False
+
+
 def test_bare_price_question_after_meals_topic_still_asks_about_the_weekly_menu():
     user_id = "client_meals_then_price"
     session_memory.clear_session(user_id, "whatsapp")
