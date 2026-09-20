@@ -1282,6 +1282,8 @@ class DeterministicResponder:
         image_url: Any,
         facts: Dict[str, Any],
         user_message: str = "",
+        user_id: Optional[str] = None,
+        channel: Optional[str] = None,
     ) -> Tuple[str, Any]:
         """Apply the approved Sondesh add-on without broad food-flow spam."""
         # The expired-menu fallback ("kitchen is finalising this week's menu")
@@ -1294,10 +1296,9 @@ class DeterministicResponder:
             and bool(_ALACARTE_ADDON_MARKER_RE.search(lowered_message))
             and not _ALACARTE_ADDON_EXCLUSION_RE.search(lowered_message)
         )
-        session_key = (
-            str(facts.get("_session_user_id") or ""),
-            str(facts.get("_session_channel") or "instagram"),
-        )
+        lookup_user_id = user_id or facts.get("_session_user_id")
+        lookup_channel = channel or facts.get("_session_channel") or "instagram"
+        session_key = (str(lookup_user_id or ""), str(lookup_channel))
         addon_already_sent = (
             bool(facts.get("alacarte_sondesh_addon_sent"))
             or session_key in _ALACARTE_ADDON_SENT_USERS
@@ -1310,8 +1311,8 @@ class DeterministicResponder:
             try:
                 prior_rows = db.get_conversations(
                     limit=100,
-                    channel="instagram",
-                    user_id=facts.get("_session_user_id"),
+                    channel=lookup_channel,
+                    user_id=lookup_user_id,
                 )
                 prior_bundle_sent = any(
                     _ALACARTE_ADDON_MARKER_RE.search(str(row.get("user_message") or ""))
@@ -2335,6 +2336,7 @@ class DeterministicResponder:
             facts["last_topic"] = "savoury"
             response_text, images = self._apply_crosssell_nudges(
                 "know_more", response_text, images, facts, user_message,
+                user_id=user_id, channel=channel,
             )
             session_memory.add_turn(user_id, channel, user_message, response_text)
             return response_text, True, "know_more", images
