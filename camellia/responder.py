@@ -2124,6 +2124,26 @@ class DeterministicResponder:
         )
         source_intent = detected_source_intent if source_context_available else None
         facts["source_referential_intent"] = source_intent
+        # This exact client-approved wording asks for the general Camellia
+        # food overview. Resolve it before the unavailable-source clarifier so
+        # a stale Story route cannot turn it into a request to identify a post.
+        if (
+            channel == "instagram"
+            and " ".join(user_message.lower().split()).strip(" .?!")
+            == "can you tell me more about this"
+        ):
+            template_id = "savoury_food_intro"
+            template = self._template_by_id(template_id) or {}
+            response_text, images = self._format_dynamic_response(
+                template_id,
+                template.get("response") or self._generic_fallback(),
+                user_id=user_id,
+                channel=channel,
+                user_message=user_message,
+            )
+            facts["last_topic"] = "savoury"
+            session_memory.add_turn(user_id, channel, user_message, response_text)
+            return response_text, True, template_id, images
         has_explicit_source_reference = bool(re.search(
             r"\b(this|that|it|above|reel|post|video|item|one)\b", lowered_text,
         ))
