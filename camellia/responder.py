@@ -1922,6 +1922,30 @@ class DeterministicResponder:
         if ad_product:
             facts["ad_product"] = ad_product
 
+        # An explicit à la carte question is a new subject, even when the
+        # session still carries a previous Story/Post topic. Resolve it before
+        # source-topic handling so stale campaign context cannot answer the
+        # customer's new menu question.
+        if (
+            _ALACARTE_DIRECT_QUERY_RE.search(lowered_text)
+            and not MEAL_PREORDER_QUERY_RE.search(lowered_text)
+            and not _ALACARTE_ADDON_EXCLUSION_RE.search(lowered_text)
+        ):
+            facts["source_context_superseded"] = True
+            facts["home_table_context"] = False
+            facts["last_route_source"] = "canonical_alacarte"
+            template = self._template_by_id("know_more") or {}
+            response_text, images = self._format_dynamic_response(
+                "know_more", template.get("response") or self._generic_fallback(),
+                user_id=user_id, channel=channel, user_message=user_message,
+            )
+            facts["last_topic"] = "savoury"
+            response_text, images = self._apply_crosssell_nudges(
+                "know_more", response_text, images, facts, user_message,
+            )
+            session_memory.add_turn(user_id, channel, user_message, response_text)
+            return response_text, True, "know_more", images
+
         # Bengali Home Table is a live Kolkata campaign and must be resolved
         # before the broad ``kolkata_expansion_info`` matcher.  The campaign has
         # four separate deterministic trigger paths; the ambiguous bare-price
@@ -2427,26 +2451,6 @@ class DeterministicResponder:
             response_text = template.get("response") or self._generic_fallback()
             session_memory.add_turn(user_id, channel, user_message, response_text)
             return response_text, True, "GUARD_pickup_address_hours", None
-
-        # These are explicit individual-meal/menu questions. Resolve them to
-        # the existing approved menu cards before model routing so the
-        # add-on cannot depend on an LLM paraphrase decision.
-        if (
-            _ALACARTE_DIRECT_QUERY_RE.search(lowered_text)
-            and not MEAL_PREORDER_QUERY_RE.search(lowered_text)
-            and not _ALACARTE_ADDON_EXCLUSION_RE.search(lowered_text)
-        ):
-            template = self._template_by_id("know_more") or {}
-            response_text, images = self._format_dynamic_response(
-                "know_more", template.get("response") or self._generic_fallback(),
-                user_id=user_id, channel=channel, user_message=user_message,
-            )
-            facts["last_topic"] = "savoury"
-            response_text, images = self._apply_crosssell_nudges(
-                "know_more", response_text, images, facts, user_message,
-            )
-            session_memory.add_turn(user_id, channel, user_message, response_text)
-            return response_text, True, "know_more", images
 
         if MEAL_PREORDER_QUERY_RE.search(lowered_text):
             template = self._template_by_id("alacarte_prebooking_steps") or {}
