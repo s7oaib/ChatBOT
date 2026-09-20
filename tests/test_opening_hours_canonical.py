@@ -167,7 +167,7 @@ def test_equal_seed_version_backfills_opening_hours_without_overwriting_live_edi
     assert opening_hours["response"] == OPENING_HOURS
     assert delivery_time["response"] == "CLIENT OPERATOR DELIVERY COPY"
     assert greeting["response"] == "CLIENT OPERATOR GREETING COPY"
-    assert after["seed_version"] == 21
+    assert after["seed_version"] == _seed_data()["seed_version"]
     assert after["seeded_from_hash"] == "old-hash"
     assert after["operator_meta"] == "keep"
     assert any("opening_hours" in action for action in actions)
