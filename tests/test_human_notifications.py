@@ -104,3 +104,22 @@ def test_handle_escalation_records_before_alert_and_returns_delivery_state(notif
     events = notification_db.get_human_notification_events()
     assert len(events) == 1
     assert events[0]["status"] == "SENT"
+
+
+def test_admin_handoff_seen_state_is_durable_and_does_not_change_lifecycle(notification_db):
+    handoff = notification_db.create_handoff(
+        handoff_ref="CAM-98765",
+        source_channel="instagram",
+        source_user_id="meta-user-should-never-be-rendered",
+        reason="Explicit human request",
+        summary="Customer needs help with a menu question.",
+        known_entities={},
+        unresolved_topic=None,
+        escalation_id=None,
+        expires_at=None,
+    )
+
+    assert notification_db.get_admin_handoff_seen_refs([handoff["handoff_ref"]]) == set()
+    assert notification_db.mark_admin_handoff_seen(handoff["handoff_ref"]) is True
+    assert notification_db.get_admin_handoff_seen_refs([handoff["handoff_ref"]]) == {"CAM-98765"}
+    assert notification_db.get_handoff_by_ref("CAM-98765")["status"] == "CREATED"

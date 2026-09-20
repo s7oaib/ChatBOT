@@ -3326,6 +3326,81 @@ def get_escalations_list(limit: int = 50, status: Optional[str] = None, x_admin_
     escalations = db.get_escalations(limit, status)
     return {"count": len(escalations), "escalations": escalations}
 
+
+def _safe_admin_handoff_label(handoff: Dict[str, Any]) -> str:
+    """Choose an operator-friendly label without ever falling back to Meta ID."""
+    try:
+        known = json.loads(handoff.get("known_entities") or "{}")
+    except (TypeError, ValueError):
+        known = {}
+    if not isinstance(known, dict):
+        known = {}
+    for key in ("instagram_username", "username", "display_name", "customer_name"):
+        value = str(known.get(key) or "").strip()
+        if value and value != str(handoff.get("source_user_id") or ""):
+            return value
+    return "Instagram customer"
+
+
+@app.get("/admin/handoffs")
+def get_admin_handoffs(
+    limit: int = 50,
+    status: Optional[str] = None,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """Return safe, durable handoff notifications for the Admin shell.
+
+    The raw Instagram sender identifier is intentionally omitted. CAM status
+    remains read-only here; lifecycle changes continue through the existing
+    resume endpoint.
+    """
+    require_admin(x_admin_key, x_admin_pin)
+    requested_status = str(status or "").strip().upper() or None
+    rows = db.get_handoffs(limit=max(1, min(int(limit or 50), 200)), status=requested_status)
+    refs = [str(row.get("handoff_ref") or "") for row in rows]
+    seen_refs = db.get_admin_handoff_seen_refs(refs)
+    handoffs = []
+    for row in rows:
+        row_status = str(row.get("status") or "CREATED").upper()
+        # CREATED is included because the accepted flow promotes it to
+        # WAITING_FOR_HUMAN after notification delivery; neither state should
+        # make the operator miss a fresh CAM.
+        if requested_status is None and row_status not in {"CREATED", "WAITING_FOR_HUMAN"}:
+            continue
+        handoff_ref = str(row.get("handoff_ref") or "")
+        handoffs.append({
+            "handoff_ref": handoff_ref,
+            "customer_display_name": _safe_admin_handoff_label(row),
+            "source_channel": row.get("source_channel"),
+            "reason": row.get("reason") or "Human support requested",
+            "summary": row.get("summary") or "",
+            "unresolved_topic": row.get("unresolved_topic"),
+            "status": row_status,
+            "created_at": row.get("created_at"),
+            "updated_at": row.get("updated_at"),
+            "expires_at": row.get("expires_at"),
+            "seen": handoff_ref in seen_refs,
+        })
+    unread_count = sum(
+        1 for item in handoffs
+        if item["status"] in {"CREATED", "WAITING_FOR_HUMAN"} and not item["seen"]
+    )
+    return {"count": len(handoffs), "unread_count": unread_count, "handoffs": handoffs}
+
+
+@app.post("/admin/handoffs/{handoff_ref}/seen")
+def mark_admin_handoff_seen(
+    handoff_ref: str,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """Persist notification read state without changing the CAM lifecycle."""
+    require_admin(x_admin_key, x_admin_pin)
+    if not db.mark_admin_handoff_seen(handoff_ref):
+        raise HTTPException(status_code=404, detail="Handoff not found")
+    return {"status": "seen", "handoff_ref": handoff_ref}
+
 @app.get("/admin/notifications")
 def get_human_notifications_list(limit: int = 50, status: Optional[str] = None, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
     """Returns durable staff-notification delivery status, without payloads."""
@@ -5821,6 +5896,83 @@ def get_admin_dashboard():
             .ad-route-row { grid-template-columns: 1fr auto; }
             .ad-route-id { grid-column: 1 / -1; }
         }
+
+        /* Admin product shell: the older workflow panels remain available,
+           but the operator now enters them through one persistent hierarchy. */
+        body { background: #f5f6f8; }
+        .admin-header { background: #171b24; min-height: 72px; padding: 14px 28px; }
+        .admin-header .brand-text h1 { font-size: 1.08rem; }
+        .admin-header .brand-text p { color: #b8c0cf; }
+        .admin-app-shell { display: grid; grid-template-columns: 248px minmax(0, 1fr); min-height: calc(100vh - 132px); }
+        .admin-sidebar { background: #202631; color: #e7ebf2; padding: 22px 14px; border-right: 1px solid #303847; }
+        .admin-sidebar-label { color: #8e99aa; font-size: .68rem; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; padding: 14px 12px 7px; }
+        .admin-sidebar .tabs-nav { display: flex; flex-direction: column; gap: 4px; background: transparent; padding: 0; margin: 0; }
+        .admin-sidebar .tab-btn { width: 100%; min-height: 42px; justify-content: flex-start; color: #b8c0cf; padding: 10px 12px; border-radius: 10px; font-size: .83rem; }
+        .admin-sidebar .tab-btn.active, .admin-sidebar .tab-btn:hover:not(.active) { background: #303a4b; color: #fff; box-shadow: none; }
+        .admin-sidebar .tab-btn.active { box-shadow: inset 3px 0 0 #d6b98c; }
+        .admin-nav-badge { margin-left: auto; min-width: 20px; padding: 2px 6px; border-radius: 999px; background: #d97706; color: #fff; font-size: .68rem; text-align: center; }
+        .admin-main { min-width: 0; }
+        .admin-main .main-container { max-width: 1280px; margin: 0 auto; padding: 28px 32px 48px; }
+        .admin-main .panel-card { border-radius: 16px; padding: 26px; }
+        .admin-page-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; margin-bottom: 22px; }
+        .admin-page-heading h2 { margin-bottom: 5px; }
+        .admin-page-heading p { color: var(--text-muted); font-size: .86rem; max-width: 760px; line-height: 1.5; }
+        .admin-kpi-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; margin-bottom: 18px; }
+        .admin-kpi { background: #fff; border: 1px solid var(--border); border-radius: 14px; padding: 17px; }
+        .admin-kpi-label { color: var(--text-muted); font-size: .72rem; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; }
+        .admin-kpi-value { color: var(--primary); font-family: 'Outfit', sans-serif; font-size: 1.8rem; margin-top: 5px; }
+        .admin-kpi-note { color: var(--text-muted); font-size: .76rem; margin-top: 4px; }
+        .instagram-gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(245px, 1fr)); gap: 16px; margin-top: 18px; }
+        .instagram-gallery .ig-media-card { display: flex; flex-direction: column; gap: 12px; height: 100%; padding: 0 0 14px; overflow: hidden; background: #fff; border: 1px solid #e1e5eb; border-radius: 14px; box-shadow: 0 4px 12px rgba(24,32,45,.05); cursor: pointer; transition: transform .18s, box-shadow .18s, border-color .18s; }
+        .instagram-gallery .ig-media-card:hover, .instagram-gallery .ig-media-card:focus-visible { transform: translateY(-2px); border-color: #b9c5d5; box-shadow: 0 8px 20px rgba(24,32,45,.10); outline: none; }
+        .instagram-gallery .ig-media-preview { width: 100%; height: 190px; border-radius: 0; }
+        .instagram-gallery .ig-media-thumb { object-fit: cover; }
+        .instagram-gallery .ig-media-main { padding: 0 14px; }
+        .instagram-gallery .ig-media-title { margin-bottom: 7px; }
+        .instagram-gallery .ig-media-topic { font-size: .92rem; }
+        .instagram-gallery .ig-media-summary { min-height: 2.2em; }
+        .instagram-gallery .ig-media-facts { padding: 0 14px; }
+        .instagram-gallery .ig-media-actions { padding: 0 14px; justify-content: flex-start; margin-top: auto; }
+        .instagram-gallery .ig-media-details { display: none; }
+        .instagram-table { width: 100%; border-collapse: collapse; margin-top: 18px; }
+        .instagram-table th, .instagram-table td { padding: 11px 10px; border-bottom: 1px solid var(--border); text-align: left; font-size: .8rem; vertical-align: top; }
+        .instagram-table th { color: var(--text-muted); font-size: .7rem; text-transform: uppercase; letter-spacing: .05em; }
+        .gallery-toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+        .gallery-toolbar .field-control { flex: 1 1 240px; min-width: 180px; }
+        .gallery-view-toggle { padding: 8px 11px; border: 1px solid var(--border); background: #fff; color: var(--text-muted); border-radius: 8px; font-size: .76rem; font-weight: 700; cursor: pointer; }
+        .gallery-view-toggle.active { background: var(--primary); border-color: var(--primary); color: #fff; }
+        .content-drawer-backdrop { display: none; position: fixed; inset: 0; z-index: 1200; background: rgba(18,24,34,.38); }
+        .content-drawer { position: fixed; z-index: 1201; top: 0; right: 0; width: min(460px, 94vw); height: 100vh; overflow-y: auto; background: #fff; box-shadow: -12px 0 35px rgba(19,27,40,.18); transform: translateX(105%); transition: transform .2s ease; padding: 26px; }
+        .content-drawer.open { transform: translateX(0); }
+        .content-drawer-backdrop.open { display: block; }
+        .content-drawer-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 18px; }
+        .content-drawer-close { border: 0; background: #f2f4f7; border-radius: 8px; width: 34px; height: 34px; font-size: 1.3rem; cursor: pointer; }
+        .drawer-preview { width: 100%; height: 250px; border-radius: 12px; overflow: hidden; background: #edeff3; margin-bottom: 18px; display: flex; align-items: center; justify-content: center; }
+        .drawer-preview img { width: 100%; height: 100%; object-fit: cover; }
+        .drawer-facts { display: grid; gap: 12px; margin: 18px 0; }
+        .drawer-fact { border-bottom: 1px solid #eef0f3; padding-bottom: 10px; }
+        .drawer-fact-label { display: block; color: var(--text-muted); font-size: .68rem; font-weight: 800; text-transform: uppercase; letter-spacing: .05em; margin-bottom: 3px; }
+        .drawer-fact-value { color: var(--text-dark); font-size: .84rem; overflow-wrap: anywhere; }
+        .handoff-list { display: grid; gap: 10px; margin-top: 16px; }
+        .handoff-card { background: #fff; border: 1px solid var(--border); border-radius: 12px; padding: 15px; display: grid; gap: 9px; cursor: pointer; }
+        .handoff-card.unseen { border-left: 4px solid #d97706; background: #fffaf1; }
+        .handoff-card:hover, .handoff-card:focus-visible { border-color: #aebaca; outline: none; }
+        .handoff-card-top { display: flex; justify-content: space-between; gap: 10px; align-items: flex-start; }
+        .handoff-name { font-weight: 800; color: var(--primary); }
+        .handoff-ref { color: var(--text-muted); font: .72rem ui-monospace, SFMono-Regular, Consolas, monospace; }
+        .handoff-meta { color: var(--text-muted); font-size: .76rem; }
+        .handoff-summary { color: #514943; font-size: .82rem; white-space: pre-line; line-height: 1.45; }
+        .notification-popover { display: none; position: absolute; right: 0; top: 46px; width: min(380px, 90vw); background: #fff; color: var(--text-dark); border: 1px solid var(--border); border-radius: 12px; padding: 12px; box-shadow: 0 12px 28px rgba(0,0,0,.18); z-index: 1100; }
+        .notification-popover.open { display: block; }
+        .notification-wrap { position: relative; }
+        .toast-stack { position: fixed; right: 20px; bottom: 20px; z-index: 1300; display: grid; gap: 8px; width: min(360px, calc(100vw - 40px)); }
+        .handoff-toast { background: #202631; color: #fff; border-radius: 10px; padding: 13px 15px; box-shadow: 0 8px 22px rgba(0,0,0,.2); font-size: .8rem; }
+        .admin-status-bar { background: #fff; }
+        .main-container { max-width: none; width: 100%; margin: 0; padding: 28px 32px 48px; display: grid; grid-template-columns: 248px minmax(0, 1fr); align-items: start; gap: 0; }
+        .main-container > .panel-card, .main-container > details { grid-column: 2; min-width: 0; }
+        .main-container > .admin-sidebar { grid-column: 1; grid-row: 1 / span 20; position: sticky; top: 0; min-height: calc(100vh - 132px); }
+        @media (max-width: 980px) { .admin-app-shell { grid-template-columns: 82px minmax(0,1fr); } .admin-sidebar-label, .admin-sidebar .tab-btn span.nav-label { display:none; } .admin-sidebar .tab-btn { justify-content:center; padding:10px 6px; font-size: 1.05rem; } .admin-nav-badge { position:absolute; margin: -22px 0 0 18px; } .admin-sidebar .tab-btn { position:relative; } .admin-kpi-grid { grid-template-columns: repeat(2,minmax(0,1fr)); } }
+        @media (max-width: 660px) { .main-container { display:block; padding: 18px 14px 36px; } .main-container > .admin-sidebar { min-height:0; margin: -18px -14px 18px; position: sticky; top:0; z-index:800; padding: 6px; border-right:0; border-bottom:1px solid #303847; } .admin-sidebar .tabs-nav { flex-direction:row; overflow-x:auto; } .admin-sidebar .tab-btn { min-width:48px; flex:0 0 48px; } .admin-kpi-grid { grid-template-columns: 1fr 1fr; gap: 9px; } .admin-kpi { padding: 12px; } .admin-kpi-value { font-size: 1.4rem; } .instagram-gallery { grid-template-columns: 1fr 1fr; gap: 9px; } .instagram-gallery .ig-media-preview { height: 140px; } .instagram-gallery .ig-media-main, .instagram-gallery .ig-media-facts, .instagram-gallery .ig-media-actions { padding-left: 10px; padding-right: 10px; } }
         
         /* Main Layout */
         .main-container { max-width: 1100px; width: 100%; margin: 24px auto; padding: 0 20px 40px; flex: 1; }
@@ -6009,7 +6161,7 @@ def get_admin_dashboard():
     </div>
 
     <!-- Main Navigation Header -->
-    <header>
+    <header class="admin-header">
         <div class="brand-box">
             <span class="brand-logo">C</span>
             <div class="brand-text">
@@ -6018,13 +6170,20 @@ def get_admin_dashboard():
             </div>
         </div>
         <div class="header-actions">
+            <div class="notification-wrap">
+                <button class="header-btn" id="handoffBell" type="button" aria-label="Open handoff notifications" aria-expanded="false" onclick="toggleHandoffPopover()">🔔 <span id="handoffBellBadge" class="admin-nav-badge" style="display:none;">0</span></button>
+                <div id="handoffPopover" class="notification-popover" role="dialog" aria-label="Recent handoffs">
+                    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px;"><b>Recent handoffs</b><button class="btn-secondary" type="button" onclick="switchTab('tab-handoffs', null); toggleHandoffPopover(false);" style="padding:5px 8px;font-size:.7rem;">View all</button></div>
+                    <div id="handoffPopoverList"><span class="ig-media-muted">No new handoffs.</span></div>
+                </div>
+            </div>
             <a href="/chat" target="_blank" class="header-btn">💬 Customer Chat Tester</a>
             <button class="header-btn" onclick="lockPortal()">🔒 Lock Portal</button>
         </div>
     </header>
 
     <!-- Live Status Bar -->
-    <div class="status-bar">
+    <div class="status-bar admin-status-bar">
         <div class="status-items">
             <span class="status-pill"><span class="dot gold" id="ocrDot"></span> Menu reader: <b id="ocrStatus">checking…</b></span>
             <span class="status-pill">Dishes live: <b id="activeCountBadge">Loading...</b></span>
@@ -6036,13 +6195,61 @@ def get_admin_dashboard():
 
     <!-- Main Workspace -->
     <div class="main-container">
-        <!-- Tab Navigation Bar -->
-        <div class="tabs-nav">
-            <button class="tab-btn active" onclick="switchTab('tab-image', this)">🍱 Menu</button>
-            <button class="tab-btn" onclick="switchTab('tab-menu-manager', this)">📋 Menu Manager</button>
-            <button class="tab-btn" onclick="switchTab('tab-instagram-stories', this)">📖 Instagram Stories</button>
-            <button class="tab-btn" onclick="switchTab('tab-ai-resolution', this)">🤖 AI Resolution &amp; Answers <span id="aiResolutionBadge" style="display:none; background: var(--danger); color: #fff; border-radius: 10px; padding: 1px 7px; font-size: 0.72rem; margin-left: 4px;"></span></button>
-            <button class="tab-btn" onclick="switchTab('tab-custom-qa', this)">🗂️ Custom Q&amp;A</button>
+        <aside class="admin-sidebar" aria-label="Admin navigation">
+            <div class="admin-sidebar-label">Workspace</div>
+            <nav class="tabs-nav" aria-label="Primary">
+                <button class="tab-btn active" onclick="switchTab('tab-dashboard', this)">⌂ <span class="nav-label">Dashboard</span></button>
+                <button class="tab-btn" onclick="switchTab('tab-image', this)">🍱 <span class="nav-label">Menu</span></button>
+                <button class="tab-btn" onclick="switchTab('tab-instagram-stories', this)">▣ <span class="nav-label">Instagram Stories</span></button>
+                <button class="tab-btn" onclick="switchTab('tab-instagram-content', this)">◉ <span class="nav-label">Posts &amp; Reels</span></button>
+                <button class="tab-btn" onclick="switchTab('tab-handoffs', this)">↗ <span class="nav-label">Handoffs</span><span id="handoffSidebarBadge" class="admin-nav-badge" style="display:none;">0</span></button>
+            </nav>
+            <div class="admin-sidebar-label">More</div>
+            <nav class="tabs-nav" aria-label="Secondary">
+                <button class="tab-btn" onclick="switchTab('tab-custom-qa', this)">▤ <span class="nav-label">QA Templates</span></button>
+                <button class="tab-btn" onclick="switchTab('tab-stats', this)">⌁ <span class="nav-label">Analytics</span></button>
+                <button class="tab-btn" onclick="switchTab('tab-candidates', this)">✓ <span class="nav-label">Candidates</span></button>
+                <button class="tab-btn" onclick="switchTab('tab-settings', this)">⚙ <span class="nav-label">Settings / Health</span></button>
+            </nav>
+        </aside>
+
+        <div id="tab-dashboard" class="panel-card" data-group="dashboard">
+            <div class="admin-page-heading"><div><h2>Good morning, Camellia team</h2><p>A calm overview of the work that needs attention today. Open a primary workspace from the sidebar to manage details.</p></div><button class="btn-secondary" type="button" onclick="loadDashboardOverview()">↻ Refresh</button></div>
+            <div class="admin-kpi-grid">
+                <div class="admin-kpi"><div class="admin-kpi-label">Unresolved handoffs</div><div class="admin-kpi-value" id="dashHandoffs">—</div><div class="admin-kpi-note">Waiting for human support</div></div>
+                <div class="admin-kpi"><div class="admin-kpi-label">Current menu</div><div class="admin-kpi-value" id="dashMenuStatus">—</div><div class="admin-kpi-note">Live customer view</div></div>
+                <div class="admin-kpi"><div class="admin-kpi-label">Active Stories</div><div class="admin-kpi-value" id="dashStories">—</div><div class="admin-kpi-note">Exact-ID sources</div></div>
+                <div class="admin-kpi"><div class="admin-kpi-label">Unmapped content</div><div class="admin-kpi-value" id="dashUnmapped">—</div><div class="admin-kpi-note">Stories, Posts &amp; Reels</div></div>
+            </div>
+            <div class="dashboard-subcard" style="margin:0;background:#fbfcfd;border:1px solid var(--border);border-radius:14px;padding:18px;"><div class="admin-page-heading" style="margin-bottom:12px;"><div><h3 style="color:var(--primary);">System pulse</h3><p>Recent routing activity and health stay lightweight here; operational detail lives in the dedicated workspaces.</p></div><span class="ig-media-status" id="dashHealthStatus">Checking</span></div><div id="dashRecentActivity" class="handoff-list"><span class="ig-media-muted">Loading recent activity…</span></div></div>
+        </div>
+
+        <div id="tab-instagram-content" class="panel-card" data-group="instagram_content" style="display:none;">
+            <div class="admin-page-heading"><div><h2>Instagram Posts &amp; Reels</h2><p>Visual routing gallery for exact Meta content IDs. Click a card to inspect the mapping without losing your place.</p></div><button class="btn-secondary" type="button" onclick="loadInstagramContentGallery()">↻ Refresh</button></div>
+            <div class="gallery-toolbar" aria-label="Post and Reel filters">
+                <input class="field-control" id="igContentSearch" type="search" placeholder="Search exact ID, topic, or route" autocomplete="off">
+                <button class="ig-media-filter active" data-content-filter="all" type="button" onclick="setInstagramContentFilter('all')">All</button>
+                <button class="ig-media-filter" data-content-filter="post" type="button" onclick="setInstagramContentFilter('post')">Posts</button>
+                <button class="ig-media-filter" data-content-filter="reel" type="button" onclick="setInstagramContentFilter('reel')">Reels</button>
+                <button class="ig-media-filter" data-content-filter="ACTIVE" type="button" onclick="setInstagramContentFilter('ACTIVE')">Active</button>
+                <button class="ig-media-filter" data-content-filter="UNMAPPED" type="button" onclick="setInstagramContentFilter('UNMAPPED')">Unmapped</button>
+                <button class="ig-media-filter" data-content-filter="ARCHIVED" type="button" onclick="setInstagramContentFilter('ARCHIVED')">Archived</button>
+                <button class="gallery-view-toggle active" id="igContentGalleryView" type="button" onclick="setInstagramContentView('gallery')">Gallery</button><button class="gallery-view-toggle" id="igContentTableView" type="button" onclick="setInstagramContentView('table')">List</button>
+            </div>
+            <div id="igContentGallery" class="instagram-gallery"><span class="ig-media-muted">Open Posts &amp; Reels to load content.</span></div>
+        </div>
+
+        <div id="tab-handoffs" class="panel-card" data-group="handoffs" style="display:none;">
+            <div class="admin-page-heading"><div><h2>Handoffs</h2><p>Owner notifications for conversations waiting on a human. Opening an item marks only the notification as seen; CAM lifecycle remains unchanged.</p></div><button class="btn-secondary" type="button" onclick="loadHandoffs()">↻ Refresh</button></div>
+            <div id="handoffPageSummary" class="result-box" role="status"></div>
+            <div id="handoffList" class="handoff-list"><span class="ig-media-muted">Loading handoffs…</span></div>
+        </div>
+
+        <div id="tab-settings" class="panel-card" data-group="settings" style="display:none;">
+            <div class="admin-page-heading"><div><h2>Settings / Health</h2><p>Operational checks and guarded links for the existing Admin configuration. Authentication, CSRF, sessions, and production controls are unchanged.</p></div></div>
+            <div class="admin-kpi-grid" style="grid-template-columns:repeat(2,minmax(0,1fr));"><div class="admin-kpi"><div class="admin-kpi-label">Admin session</div><div class="admin-kpi-value" style="font-size:1.2rem;">Protected</div><div class="admin-kpi-note">Username/password session with CSRF protection</div></div><div class="admin-kpi"><div class="admin-kpi-label">Story auto sync</div><div class="admin-kpi-value" style="font-size:1.2rem;">Existing setting</div><div class="admin-kpi-note">No new sync behavior is enabled by this redesign</div></div></div>
+            <div id="settingsHealthResult" class="result-box" role="status">Health status will be checked when this view opens.</div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;"><button class="btn-secondary" type="button" onclick="loadSettingsHealth()">Check health</button><button class="btn-secondary" type="button" onclick="lockPortal()">Lock portal</button></div>
         </div>
 
         <!-- Customers and Answers used to be their own top-level tabs. Every
@@ -6067,6 +6274,15 @@ def get_admin_dashboard():
 
         <!-- MENU tab, panel 2 of 4: same job, for when there is no photo -->
         <div id="tab-image" class="panel-card" data-group="menu">
+            <div class="admin-page-heading">
+                <div><h2>Menu</h2><p>Your first-class home for the live menu, menu assets, and publishing controls. The chatbot keeps its existing data model and publish safeguards.</p></div>
+                <div style="display:flex;gap:8px;flex-wrap:wrap;"><button class="btn-secondary" type="button" onclick="switchTab('tab-menu-manager', null)">Manage catalogue</button><button class="btn-secondary" type="button" onclick="switchTab('tab-active', null)">View live menu</button></div>
+            </div>
+            <div class="admin-kpi-grid" style="grid-template-columns:repeat(3,minmax(0,1fr));">
+                <div class="admin-kpi"><div class="admin-kpi-label">Live menu</div><div class="admin-kpi-value" style="font-size:1.25rem;">Active</div><div class="admin-kpi-note">Current customer-facing menu</div></div>
+                <div class="admin-kpi"><div class="admin-kpi-label">Assets</div><div class="admin-kpi-value" style="font-size:1.25rem;">Managed</div><div class="admin-kpi-note">Preview, publish, archive, restore</div></div>
+                <div class="admin-kpi"><div class="admin-kpi-label">Publishing</div><div class="admin-kpi-value" style="font-size:1.25rem;">Guarded</div><div class="admin-kpi-note">Draft review stays in place</div></div>
+            </div>
             <div class="panel-header">
                 <h2>📸 Upload this week's menu</h2>
                 <p>Upload a photo of your printed menu card, packaging flyer, or Instagram story. The image is read and the dishes hot-reload into the live bot.</p>
@@ -6277,7 +6493,7 @@ def get_admin_dashboard():
                     </div>
                 </div>
             </div>
-            <div id="igStoryList" class="ad-route-list"><p style="color:var(--text-muted);font-size:0.84rem;">Open this tab to load captured Stories.</p></div>
+            <div id="igStoryList" class="instagram-gallery"><p style="color:var(--text-muted);font-size:0.84rem;">Open this tab to load captured Stories.</p></div>
         </div>
 
         <!-- MENU tab, panel 3 of 4: same job again, from a shared sheet -->
@@ -7045,6 +7261,15 @@ THIS WEEK'S BENGAL SPECIALS
         </div>
     </div>
 
+    <div id="contentDetailsBackdrop" class="content-drawer-backdrop" aria-hidden="true"></div>
+    <aside id="contentDetailsDrawer" class="content-drawer" aria-hidden="true" aria-labelledby="contentDetailsTitle" role="dialog">
+        <div class="content-drawer-header"><div><div class="ig-media-muted" id="contentDetailsType">Instagram content</div><h2 id="contentDetailsTitle" style="margin:4px 0 0;color:var(--primary);">Details</h2></div><button class="content-drawer-close" id="contentDetailsClose" type="button" aria-label="Close details">&times;</button></div>
+        <div id="contentDetailsPreview" class="drawer-preview"><span class="ig-media-muted">Preview unavailable</span></div>
+        <div id="contentDetailsFacts" class="drawer-facts"></div>
+        <div id="contentDetailsActions" style="display:flex;gap:8px;flex-wrap:wrap;"></div>
+    </aside>
+    <div id="adminToastStack" class="toast-stack" aria-live="polite" aria-atomic="true"></div>
+
     <script>
         // Authentication state lives in an HttpOnly server cookie. JavaScript
         // sees only the short-lived CSRF token, never the session token,
@@ -7086,7 +7311,7 @@ THIS WEEK'S BENGAL SPECIALS
                 if (requestGeneration !== authRequestGeneration) return;
                 adminAuthenticated = true;
                 hideAuthOverlay();
-                loadActiveMenu(); loadAdRoutes(); loadAnalytics(); refreshCandidateBadge();
+                loadActiveMenu(); loadAdRoutes(); loadAnalytics(); refreshCandidateBadge(); loadDashboardOverview(); loadHandoffs(); loadInstagramContentGallery();
             } catch (e) {
                 if (requestGeneration !== authRequestGeneration) return;
                 adminAuthenticated = false;
@@ -7131,7 +7356,7 @@ THIS WEEK'S BENGAL SPECIALS
             // The default tab is already marked active in the markup, so its
             // whole group has to be on screen to match — otherwise only the
             // leading panel shows and the rest look like they do not exist.
-            showGroup('menu');
+            showGroup('dashboard');
             refreshReaderStatus();
             checkAdminSession();
             setupDragAndDrop();
@@ -7147,6 +7372,10 @@ THIS WEEK'S BENGAL SPECIALS
             document.getElementById('igStoryAddPriorityButton')?.addEventListener('click', addInstagramStoryPriorityProduct);
             document.getElementById('igStorySaveButton')?.addEventListener('click', saveInstagramStoryMapping);
             document.getElementById('igStoryCancelButton')?.addEventListener('click', cancelInstagramStoryMapping);
+            document.getElementById('igContentSearch')?.addEventListener('input', renderInstagramContentGallery);
+            document.getElementById('contentDetailsClose')?.addEventListener('click', closeContentDetails);
+            document.getElementById('contentDetailsBackdrop')?.addEventListener('click', closeContentDetails);
+            document.addEventListener('keydown', event => { if (event.key === 'Escape') { closeContentDetails(); toggleHandoffPopover(false); } });
         });
 
         async function loginAdmin() {
@@ -7182,6 +7411,7 @@ THIS WEEK'S BENGAL SPECIALS
                     loadAdRoutes();
                     loadAnalytics();
                     refreshCandidateBadge();
+                    loadDashboardOverview(); loadHandoffs(); loadInstagramContentGallery();
                 } else {
                     const card = document.getElementById('authCard');
                     card.classList.add('shake');
@@ -7219,17 +7449,25 @@ THIS WEEK'S BENGAL SPECIALS
             return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
         }
 
-        // Eight tabs needed 1655px of nav on a 347px phone, so six of them were
-        // simply invisible to a kitchen working off a handset. Panels are now
-        // grouped three ways and a tab shows its whole group stacked. Each tab
-        // is named after the panel it leads with, so the panels themselves did
-        // not have to move.
+        // The sidebar names the daily workspaces. Legacy panel entry points
+        // remain mapped below so existing in-page actions keep working.
         const TAB_GROUPS = {
+            'tab-dashboard': 'dashboard',
             'tab-image': 'menu',
+            'tab-ad-routing': 'menu',
+            'tab-paste': 'menu',
+            'tab-sheets': 'menu',
+            'tab-active': 'menu',
             'tab-menu-manager': 'menu_manager',
             'tab-instagram-stories': 'instagram_stories',
+            'tab-instagram-content': 'instagram_content',
+            'tab-handoffs': 'handoffs',
+            'tab-settings': 'settings',
             'tab-stats': 'customers',
+            'tab-conversations': 'customers',
             'tab-candidates': 'answers',
+            'tab-write': 'answers',
+            'tab-knowledge': 'answers',
             'tab-ai-resolution': 'ai_resolution',
             'tab-custom-qa': 'custom_qa'
         };
@@ -7257,6 +7495,242 @@ THIS WEEK'S BENGAL SPECIALS
             if (group === 'ai_resolution') { loadAiResolution(); loadTriageShadow(); }
             if (group === 'custom_qa') { loadCustomQa(); loadAssistedEvaluation(); }
             if (group === 'instagram_stories') { loadInstagramStories(); }
+            if (group === 'instagram_content') { loadInstagramContentGallery(); }
+            if (group === 'handoffs') { loadHandoffs(); }
+            if (group === 'dashboard') { loadDashboardOverview(); }
+            if (group === 'settings') { loadSettingsHealth(); }
+        }
+
+        let adminHandoffs = [];
+        let handoffPollTimer = null;
+        let handoffSnapshotReady = false;
+        let igContentRoutes = [];
+        let igContentFilter = 'all';
+        let igContentView = 'gallery';
+
+        function setDashboardValue(id, value) {
+            const element = document.getElementById(id);
+            if (element) element.innerText = value == null || value === '' ? '—' : String(value);
+        }
+
+        async function loadDashboardOverview() {
+            if (!adminAuthenticated) return;
+            try {
+                const responses = await Promise.all([
+                    fetch('/admin/handoffs?limit=100', { headers: getAuthHeaders() }),
+                    fetch('/admin/menu/active', { headers: getAuthHeaders() }),
+                    fetch('/admin/instagram-story-sources', { headers: getAuthHeaders() }),
+                    fetch('/admin/instagram-routes', { headers: getAuthHeaders() }),
+                    fetch('/admin/analytics', { headers: getAuthHeaders() }),
+                    fetch('/health'),
+                ]);
+                const [handoffResp, menuResp, storyResp, routeResp, analyticsResp, healthResp] = responses;
+                const [handoffData, menuData, storyData, routeData, analyticsData, healthData] = await Promise.all(responses.map(response => response.json().catch(() => ({}))));
+                if (handoffResp.ok) setDashboardValue('dashHandoffs', handoffData.unread_count ?? handoffData.count ?? 0);
+                if (menuResp.ok) setDashboardValue('dashMenuStatus', menuData.menu ? 'Live' : 'Check');
+                if (storyResp.ok) {
+                    const stories = storyData.story_sources || [];
+                    setDashboardValue('dashStories', stories.filter(item => String(item.story_status || 'ACTIVE').toUpperCase() === 'ACTIVE' && !Number(item.admin_deleted || 0)).length);
+                    setDashboardValue('dashUnmapped', stories.filter(item => String(item.mapping_status || item.status || 'UNMAPPED').toUpperCase() === 'UNMAPPED').length);
+                }
+                if (routeResp.ok) {
+                    const routes = (routeData.routes || []).filter(route => ['post', 'reel'].includes(route.source_type));
+                    const unmapped = routes.filter(route => !route.routing_topic && !route.topic_id).length;
+                    const current = Number(document.getElementById('dashUnmapped')?.innerText || 0);
+                    setDashboardValue('dashUnmapped', current + unmapped);
+                }
+                const health = document.getElementById('dashHealthStatus');
+                if (health) { health.innerText = healthResp.ok && healthData.status !== 'unhealthy' ? 'Healthy' : 'Needs attention'; health.className = `ig-media-status ${healthResp.ok && healthData.status !== 'unhealthy' ? '' : 'waiting'}`; }
+                const activity = document.getElementById('dashRecentActivity');
+                if (activity) activity.innerHTML = `<span class="ig-media-muted">${analyticsResp.ok ? 'Analytics and routing services are responding.' : 'Analytics is unavailable; open Analytics for details.'}</span>`;
+            } catch (error) {
+                const health = document.getElementById('dashHealthStatus');
+                if (health) { health.innerText = 'Unknown'; health.className = 'ig-media-status waiting'; }
+            }
+        }
+
+        function formatAdminTimestamp(value) {
+            if (!value) return 'Time unavailable';
+            const parsed = new Date(String(value).replace(' ', 'T') + (String(value).includes('Z') ? '' : 'Z'));
+            return Number.isNaN(parsed.getTime()) ? String(value) : parsed.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
+        }
+
+        function renderHandoffCard(item, compact = false) {
+            const unseenClass = item.seen ? '' : ' unseen';
+            return `<article class="handoff-card${unseenClass}" tabindex="0" data-handoff-ref="${escapeHtml(item.handoff_ref || '')}">
+                <div class="handoff-card-top"><div><div class="handoff-name">${escapeHtml(item.customer_display_name || 'Instagram customer')}</div><div class="handoff-ref">${escapeHtml(item.handoff_ref || 'CAM')}</div></div><span class="ig-media-status waiting">${escapeHtml(item.status || 'WAITING_FOR_HUMAN')}</span></div>
+                <div class="handoff-summary">${escapeHtml(item.reason || 'Human support requested')}${item.summary && !compact ? `\n${escapeHtml(item.summary)}` : ''}</div>
+                <div class="handoff-meta">${escapeHtml(formatAdminTimestamp(item.created_at))}${item.unresolved_topic ? ` · ${escapeHtml(item.unresolved_topic)}` : ''}</div>
+            </article>`;
+        }
+
+        function renderHandoffs() {
+            const list = document.getElementById('handoffList');
+            const popover = document.getElementById('handoffPopoverList');
+            if (list) list.innerHTML = adminHandoffs.length ? adminHandoffs.map(item => renderHandoffCard(item)).join('') : '<span class="ig-media-muted">No active handoffs waiting for a human.</span>';
+            if (popover) popover.innerHTML = adminHandoffs.length ? adminHandoffs.slice(0, 4).map(item => renderHandoffCard(item, true)).join('') : '<span class="ig-media-muted">No new handoffs.</span>';
+            document.querySelectorAll('[data-handoff-ref]').forEach(card => {
+                card.addEventListener('click', () => openHandoffDetails(card.dataset.handoffRef));
+                card.addEventListener('keydown', event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openHandoffDetails(card.dataset.handoffRef); } });
+            });
+        }
+
+        function updateHandoffBadges(unreadCount) {
+            ['handoffBellBadge', 'handoffSidebarBadge'].forEach(id => { const badge = document.getElementById(id); if (badge) { badge.innerText = String(unreadCount || 0); badge.style.display = unreadCount ? 'inline-block' : 'none'; } });
+        }
+
+        async function loadHandoffs() {
+            if (!adminAuthenticated) return;
+            try {
+                const response = await fetch('/admin/handoffs?limit=100', { headers: getAuthHeaders() });
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok) throw new Error(data.detail || 'Could not load handoffs.');
+                const previousRefs = new Set(adminHandoffs.filter(item => !item.seen).map(item => item.handoff_ref));
+                adminHandoffs = data.handoffs || [];
+                const newItems = handoffSnapshotReady ? adminHandoffs.filter(item => !item.seen && !previousRefs.has(item.handoff_ref)) : [];
+                handoffSnapshotReady = true;
+                updateHandoffBadges(Number(data.unread_count || 0));
+                renderHandoffs();
+                const summary = document.getElementById('handoffPageSummary');
+                if (summary) { summary.style.display = 'block'; summary.className = 'result-box info'; summary.innerText = `${Number(data.unread_count || 0)} unread · ${adminHandoffs.length} active handoff(s)`; }
+                newItems.slice(0, 2).forEach(item => showHandoffToast(item));
+            } catch (error) {
+                const summary = document.getElementById('handoffPageSummary');
+                if (summary) { summary.style.display = 'block'; summary.className = 'result-box error'; summary.innerText = error.message || 'Could not load handoffs.'; }
+            }
+            if (!handoffPollTimer) handoffPollTimer = setInterval(() => { if (adminAuthenticated && document.visibilityState !== 'hidden') loadHandoffs(); }, 20000);
+        }
+
+        function showHandoffToast(item) {
+            const stack = document.getElementById('adminToastStack');
+            if (!stack) return;
+            const toast = document.createElement('div'); toast.className = 'handoff-toast'; toast.innerHTML = `<b>New handoff</b><br>${escapeHtml(item.customer_display_name || 'Instagram customer')} · ${escapeHtml(item.reason || 'Human support requested')}`;
+            toast.addEventListener('click', () => { openHandoffDetails(item.handoff_ref); toast.remove(); });
+            stack.appendChild(toast); setTimeout(() => toast.remove(), 8000);
+        }
+
+        function toggleHandoffPopover(force) {
+            const popover = document.getElementById('handoffPopover');
+            const bell = document.getElementById('handoffBell');
+            if (!popover) return;
+            const open = typeof force === 'boolean' ? force : !popover.classList.contains('open');
+            popover.classList.toggle('open', open); if (bell) bell.setAttribute('aria-expanded', String(open));
+            if (open) loadHandoffs();
+        }
+
+        async function markHandoffSeen(ref) {
+            if (!ref) return;
+            try { await fetch(`/admin/handoffs/${encodeURIComponent(ref)}/seen`, { method: 'POST', headers: getAuthHeaders() }); } catch (error) { /* next refresh can retry */ }
+            const item = adminHandoffs.find(entry => entry.handoff_ref === ref); if (item) item.seen = true;
+            updateHandoffBadges(adminHandoffs.filter(entry => !entry.seen).length); renderHandoffs();
+        }
+
+        function openHandoffDetails(ref) {
+            const item = adminHandoffs.find(entry => entry.handoff_ref === ref); if (!item) return;
+            markHandoffSeen(ref);
+            const drawer = document.getElementById('contentDetailsDrawer'); const backdrop = document.getElementById('contentDetailsBackdrop');
+            document.getElementById('contentDetailsType').innerText = 'Customer handoff';
+            document.getElementById('contentDetailsTitle').innerText = item.customer_display_name || 'Instagram customer';
+            document.getElementById('contentDetailsPreview').innerHTML = '<div style="font-size:3rem;color:#8b97a8;">↗</div>';
+            document.getElementById('contentDetailsFacts').innerHTML = [['CAM reference', item.handoff_ref], ['Status', item.status || 'WAITING_FOR_HUMAN'], ['Reason', item.reason], ['Summary', item.summary || '—'], ['Created', formatAdminTimestamp(item.created_at)]].map(([label, value]) => `<div class="drawer-fact"><span class="drawer-fact-label">${escapeHtml(label)}</span><span class="drawer-fact-value">${escapeHtml(value)}</span></div>`).join('');
+            document.getElementById('contentDetailsActions').innerHTML = `<button class="btn-secondary" type="button" onclick="resumeAdminHandoff('${escapeHtml(item.handoff_ref)}')">Resume CAM</button><button class="btn-secondary" type="button" onclick="switchTab('tab-handoffs', null); closeContentDetails();">Open Handoffs</button>`;
+            drawer.classList.add('open'); backdrop.classList.add('open'); drawer.setAttribute('aria-hidden', 'false'); backdrop.setAttribute('aria-hidden', 'false'); document.getElementById('contentDetailsClose').focus();
+        }
+
+        async function resumeAdminHandoff(ref) {
+            if (!confirm('Resume this handoff and release the human-support gate?')) return;
+            const response = await fetch(`/admin/handoffs/${encodeURIComponent(ref)}/resume`, { method: 'POST', headers: getAuthHeaders() });
+            if (!response.ok) { alert('Could not resume this handoff.'); return; }
+            closeContentDetails(); loadHandoffs(); loadDashboardOverview();
+        }
+
+        function closeContentDetails() {
+            const drawer = document.getElementById('contentDetailsDrawer'); const backdrop = document.getElementById('contentDetailsBackdrop');
+            if (!drawer || !backdrop) return; drawer.classList.remove('open'); backdrop.classList.remove('open'); drawer.setAttribute('aria-hidden', 'true'); backdrop.setAttribute('aria-hidden', 'true');
+        }
+
+        function instagramContentStatus(route) {
+            if (route.archived_at) return 'ARCHIVED';
+            if (!route.routing_topic && !route.topic_id) return 'UNMAPPED';
+            return route.active === false ? 'ARCHIVED' : 'ACTIVE';
+        }
+
+        function setInstagramContentFilter(filter) {
+            igContentFilter = filter || 'all';
+            document.querySelectorAll('[data-content-filter]').forEach(button => button.classList.toggle('active', button.dataset.contentFilter === igContentFilter));
+            renderInstagramContentGallery();
+        }
+
+        function setInstagramContentView(view) {
+            igContentView = view === 'table' ? 'table' : 'gallery';
+            document.getElementById('igContentGalleryView')?.classList.toggle('active', igContentView === 'gallery');
+            document.getElementById('igContentTableView')?.classList.toggle('active', igContentView === 'table');
+            renderInstagramContentGallery();
+        }
+
+        function openAdminRoute(route) {
+            closeContentDetails(); switchTab('tab-image', null); setTimeout(() => editInstagramRoute(Number(route.routing_id)), 0);
+        }
+
+        function renderInstagramContentCard(route) {
+            const status = instagramContentStatus(route); const label = route.source_type === 'reel' ? 'REEL' : 'POST'; const image = route.preview_url || route.admin_preview_url;
+            const preview = image ? `<img class="ig-media-thumb" src="${escapeHtml(image)}" alt="${label} preview" onerror="this.style.display='none';this.nextElementSibling.style.display='flex';"><div class="ig-media-placeholder" style="display:none;"><span class="ig-media-placeholder-icon">◎</span><span>${label}</span></div>` : `<div class="ig-media-placeholder"><span class="ig-media-placeholder-icon">◎</span><span>${label}</span></div>`;
+            return `<article class="ig-media-card" tabindex="0" data-content-route-id="${escapeHtml(String(route.routing_id || ''))}"><div class="ig-media-preview">${preview}<span class="ig-media-badge">${label}</span></div><div class="ig-media-main"><div class="ig-media-title"><b class="ig-media-topic">${escapeHtml(route.routing_topic || 'Unmapped content')}</b><span class="ig-media-status ${status === 'ARCHIVED' || status === 'UNMAPPED' ? 'disabled' : ''}">${status}</span></div><div class="ig-media-summary">Meta ID: ${escapeHtml(route.media_id || 'Not connected')}</div><div class="ig-media-facts"><span><b>Route:</b> ${escapeHtml(route.menu_id || route.routing_topic || '—')}</span><span><b>Published:</b> ${escapeHtml(route.published_at || route.created_at || '—')}</span></div></div><div class="ig-media-actions"><button class="btn-secondary" type="button" data-content-action="details">View details</button></div></article>`;
+        }
+
+        function renderInstagramContentGallery() {
+            const list = document.getElementById('igContentGallery'); if (!list) return;
+            const query = (document.getElementById('igContentSearch')?.value || '').trim().toLowerCase();
+            const filtered = igContentRoutes.filter(route => {
+                const status = instagramContentStatus(route);
+                if (igContentFilter === 'post' || igContentFilter === 'reel') { if (route.source_type !== igContentFilter) return false; }
+                else if (igContentFilter !== 'all' && status !== igContentFilter) return false;
+                if (!query) return true;
+                return [route.media_id, route.routing_id, route.routing_topic, route.topic_description, route.menu_id, route.canonical_url].filter(Boolean).join(' ').toLowerCase().includes(query);
+            });
+            if (!filtered.length) { list.innerHTML = '<span class="ig-media-muted">No Posts or Reels match this filter.</span>'; return; }
+            if (igContentView === 'table') {
+                list.className = ''; list.innerHTML = `<table class="instagram-table"><thead><tr><th>Type</th><th>Exact Meta ID</th><th>Topic / intent</th><th>Route</th><th>Status</th><th></th></tr></thead><tbody>${filtered.map(route => `<tr><td>${route.source_type === 'reel' ? 'Reel' : 'Post'}</td><td><code>${escapeHtml(route.media_id || 'Not connected')}</code></td><td>${escapeHtml(route.routing_topic || 'Unmapped')}</td><td>${escapeHtml(route.menu_id || '—')}</td><td>${instagramContentStatus(route)}</td><td><button class="btn-secondary" type="button" data-content-table-id="${escapeHtml(String(route.routing_id || ''))}" style="padding:6px 9px;font-size:.72rem;">Details</button></td></tr>`).join('')}</tbody></table>`;
+                list.querySelectorAll('[data-content-table-id]').forEach(button => button.addEventListener('click', () => openContentDetails('content', igContentRoutes.find(route => String(route.routing_id) === button.dataset.contentTableId))));
+                return;
+            }
+            list.className = 'instagram-gallery'; list.innerHTML = filtered.map(renderInstagramContentCard).join('');
+            list.querySelectorAll('[data-content-route-id]').forEach(card => { const route = igContentRoutes.find(item => String(item.routing_id) === card.dataset.contentRouteId); card.addEventListener('click', event => { if (event.target.closest('button,a')) return; openContentDetails('content', route); }); card.querySelector('[data-content-action="details"]')?.addEventListener('click', event => { event.stopPropagation(); openContentDetails('content', route); }); });
+        }
+
+        async function loadInstagramContentGallery() {
+            if (!adminAuthenticated) return;
+            const list = document.getElementById('igContentGallery'); if (!list) return;
+            try {
+                const responses = await Promise.all([fetch('/admin/instagram-routes', { headers: getAuthHeaders() }), fetch('/admin/instagram-routes?include_archived=true', { headers: getAuthHeaders() })]);
+                const payloads = await Promise.all(responses.map(response => response.json().catch(() => ({}))));
+                if (!responses[0].ok) throw new Error(payloads[0].detail || 'Could not load Instagram content.');
+                const map = new Map(); payloads.forEach(payload => [...(payload.routes || [])].filter(route => ['post', 'reel'].includes(route.source_type)).forEach(route => map.set(String(route.routing_id || `${route.source_type}:${route.media_id}`), route)));
+                igContentRoutes = [...map.values()]; window.igContentRoutes = igContentRoutes; renderInstagramContentGallery();
+            } catch (error) { list.innerHTML = `<span style="color:var(--danger);">${escapeHtml(error.message || 'Could not load Instagram content.')}</span>`; }
+        }
+
+        function openContentDetails(kind, item) {
+            if (!item) return;
+            const isStory = kind === 'story'; const route = isStory ? item : item; const drawer = document.getElementById('contentDetailsDrawer'); const backdrop = document.getElementById('contentDetailsBackdrop');
+            const typeLabel = isStory ? 'Instagram Story' : (item.source_type === 'reel' ? 'Instagram Reel' : 'Instagram Post');
+            document.getElementById('contentDetailsType').innerText = typeLabel; document.getElementById('contentDetailsTitle').innerText = isStory ? (item.routing_topic || 'Unmapped Story') : (item.routing_topic || 'Unmapped content');
+            const image = !isStory && (item.preview_url || item.admin_preview_url); document.getElementById('contentDetailsPreview').innerHTML = image ? `<img src="${escapeHtml(image)}" alt="${escapeHtml(typeLabel)} preview">` : `<div style="font-size:3rem;color:#8b97a8;">${isStory ? '▣' : '◎'}</div>`;
+            const status = isStory ? (storyIsAdminDeleted(item) ? 'DELETED' : String(item.mapping_status || item.status || 'UNMAPPED').toUpperCase()) : instagramContentStatus(item);
+            const id = item.story_media_id || item.media_id || 'Not supplied';
+            const routeHealth = status === 'ACTIVE' || status === 'MAPPED' ? 'Healthy mapping' : status === 'UNMAPPED' ? 'Needs mapping' : 'Inactive';
+            const auditSummary = [item.source || 'Existing Admin record', item.first_seen ? `first seen ${item.first_seen}` : '', item.updated_at ? `updated ${item.updated_at}` : ''].filter(Boolean).join(' · ');
+            document.getElementById('contentDetailsFacts').innerHTML = [['Exact Meta ID', id], ['Content type', typeLabel], ['Status', status], ['Route health', routeHealth], ['Topic / intent', item.routing_topic || 'Unmapped'], ['Route destination', item.menu_id || item.canonical_url || 'Not mapped'], ['Published', item.published_at || item.created_at || 'Not supplied'], ['Expiry / last seen', item.expires_at || item.last_seen || 'Not supplied'], ['Routing history / audit', auditSummary || 'No additional history supplied']].map(([label, value]) => `<div class="drawer-fact"><span class="drawer-fact-label">${escapeHtml(label)}</span><span class="drawer-fact-value">${escapeHtml(value)}</span></div>`).join('');
+            const actions = [];
+            if (isStory) { if (item.story_media_id && !storyIsAdminDeleted(item)) actions.push(`<button class="btn-secondary" type="button" onclick="closeContentDetails(); openInstagramStoryMapping('${escapeHtml(item.story_media_id)}')">Edit route</button>`); if (item.routing_id && status === 'MAPPED') actions.push(`<button class="btn-danger" type="button" onclick="archiveInstagramStory(${Number(item.routing_id)}); closeContentDetails();">Archive</button>`); }
+            else if (item.routing_id) { actions.push(`<button class="btn-secondary" type="button" onclick="openAdminRoute(igContentRoutes.find(route => Number(route.routing_id) === ${Number(item.routing_id)}))">Edit route</button>`); if (item.archived_at) actions.push(`<button class="btn-secondary" type="button" onclick="restoreInstagramRoute(${Number(item.routing_id)}); closeContentDetails();">Unarchive</button>`); else actions.push(`<button class="btn-danger" type="button" onclick="archiveInstagramRoute(${Number(item.routing_id)}); closeContentDetails();">Archive</button>`); }
+            actions.push(`<button class="btn-secondary" type="button" onclick="switchTab('tab-image', null); closeContentDetails();">Open full details</button>`);
+            document.getElementById('contentDetailsActions').innerHTML = actions.join(''); drawer.classList.add('open'); backdrop.classList.add('open'); drawer.setAttribute('aria-hidden', 'false'); backdrop.setAttribute('aria-hidden', 'false'); document.getElementById('contentDetailsClose').focus();
+        }
+
+        async function loadSettingsHealth() {
+            const box = document.getElementById('settingsHealthResult'); if (!box) return;
+            try { const response = await fetch('/health'); const data = await response.json().catch(() => ({})); box.className = response.ok ? 'result-box success' : 'result-box error'; box.innerText = response.ok ? `Healthy · ${data.status || 'ok'}` : 'Health check needs attention.'; } catch (error) { box.className = 'result-box error'; box.innerText = 'Health check unavailable.'; }
         }
 
         // MENU MANAGER tab: every menu is edited as a draft (server-side, in
@@ -8393,7 +8867,7 @@ THIS WEEK'S BENGAL SPECIALS
                 // mapping always use the exact story_media_id shown below.
                 const sequenceDisplay = source.story_sequence_display || 'Story — sequence unavailable';
                 const details = `<details class="ig-media-details"><summary style="cursor:pointer;">View details</summary><div>Meta Story ID: ${escapeHtml(source.story_media_id || '—')}<br>Routing ID: ${escapeHtml(String(routeId || '—'))}<br>Preview metadata: <span class="ig-story-preview-meta">${escapeHtml(storyPreviewMetadata(source.temporary_url))}</span><br>Media type: ${escapeHtml(source.media_type || 'Not supplied')}<br>Published: ${escapeHtml(source.published_at || 'Not supplied')}<br>Meta Story status: ${escapeHtml(lifecycle)}<br>Inventory source: ${escapeHtml(source.source || 'WEBHOOK_STORY_REPLY')}<br>First seen: ${escapeHtml(source.first_seen || '—')}<br>Last seen: ${escapeHtml(source.last_seen || '—')}</div></details>`;
-                return `<article class="ig-media-card ig-story-card"><div class="ig-media-preview"><div class="ig-media-placeholder"><span class="ig-media-placeholder-icon">📖</span><span>STORY</span></div><span class="ig-media-badge">STORY</span></div><div class="ig-media-main"><div class="ig-media-title"><b class="ig-media-topic">${escapeHtml(topic)}</b><span class="ig-media-status ${storyStatusClass(status)}">${escapeHtml(status)}</span>${isNewUnmapped ? '<span class="ig-media-status">NEW / UNMAPPED</span>' : ''}</div><div class="ig-media-summary">${escapeHtml(sequenceDisplay)}</div><div class="ig-media-facts"><span><b>Last seen:</b> ${escapeHtml(source.last_seen || '—')}</span><span><b>Meta status:</b> ${escapeHtml(lifecycle)}</span><span><b>Source:</b> ${escapeHtml(source.source || 'WEBHOOK_STORY_REPLY')}</span></div></div><div class="ig-media-actions">${actions}</div>${details}</article>`;
+                return `<article class="ig-media-card ig-story-card" tabindex="0" data-story-media-id="${escapeHtml(source.story_media_id || '')}"><div class="ig-media-preview"><div class="ig-media-placeholder"><span class="ig-media-placeholder-icon">📖</span><span>STORY</span></div><span class="ig-media-badge">STORY</span></div><div class="ig-media-main"><div class="ig-media-title"><b class="ig-media-topic">${escapeHtml(topic)}</b><span class="ig-media-status ${storyStatusClass(status)}">${escapeHtml(status)}</span>${isNewUnmapped ? '<span class="ig-media-status">NEW / UNMAPPED</span>' : ''}</div><div class="ig-media-summary">${escapeHtml(sequenceDisplay)}</div><div class="ig-media-facts"><span><b>Exact ID:</b> ${escapeHtml(source.story_media_id || '—')}</span><span><b>Last seen:</b> ${escapeHtml(source.last_seen || '—')}</span><span><b>Meta status:</b> ${escapeHtml(lifecycle)}</span></div></div><div class="ig-media-actions">${actions}</div>${details}</article>`;
             }).join('');
             list.querySelectorAll('[data-story-action]').forEach(button => button.addEventListener('click', () => {
                 const action = button.dataset.storyAction;
@@ -8405,6 +8879,11 @@ THIS WEEK'S BENGAL SPECIALS
                 else if (action === 'restore') restoreInstagramStory(routingId);
                 else if (action === 'delete') deleteInstagramStory(button.dataset.storyMediaId || '');
                 else if (action === 'restore-source') restoreInstagramStorySource(button.dataset.storyMediaId || '', button);
+            }));
+            list.querySelectorAll('[data-story-media-id]').forEach(card => card.addEventListener('click', event => {
+                if (event.target.closest('button,a,summary')) return;
+                const source = igStorySources.find(item => String(item.story_media_id || '') === String(card.dataset.storyMediaId || ''));
+                openContentDetails('story', source);
             }));
         }
 

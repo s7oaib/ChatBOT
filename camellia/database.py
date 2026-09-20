@@ -655,6 +655,16 @@ class Database:
             );
             """)
 
+            # Admin notification state is deliberately separate from the
+            # handoff lifecycle. Reading a notification must never mutate a
+            # CAM, and marking it seen must never change WAITING_FOR_HUMAN.
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS admin_handoff_views (
+                handoff_ref TEXT PRIMARY KEY,
+                seen_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+
             # Canonical missing-information queue. Unlike candidate_templates,
             # this records what fact/action is absent rather than teaching one
             # more spelling of the customer's question.
@@ -3036,6 +3046,39 @@ class Database:
                     "SELECT * FROM cross_channel_handoffs ORDER BY id DESC LIMIT ?", (limit,)
                 ).fetchall()
             return [dict(row) for row in rows]
+
+    def get_admin_handoff_seen_refs(self, handoff_refs: Optional[List[str]] = None) -> set[str]:
+        """Return durable operator-seen state without exposing source IDs."""
+        with self.get_connection() as conn:
+            if handoff_refs:
+                placeholders = ",".join("?" for _ in handoff_refs)
+                rows = conn.execute(
+                    f"SELECT handoff_ref FROM admin_handoff_views WHERE handoff_ref IN ({placeholders})",
+                    tuple(handoff_refs),
+                ).fetchall()
+            else:
+                rows = conn.execute("SELECT handoff_ref FROM admin_handoff_views").fetchall()
+            return {str(row["handoff_ref"]) for row in rows}
+
+    def mark_admin_handoff_seen(self, handoff_ref: str) -> bool:
+        """Persist that an operator opened a handoff notification."""
+        reference = str(handoff_ref or "").strip()
+        if not reference:
+            return False
+        with self.get_connection() as conn:
+            exists = conn.execute(
+                "SELECT 1 FROM cross_channel_handoffs WHERE handoff_ref = ?",
+                (reference,),
+            ).fetchone()
+            if not exists:
+                return False
+            conn.execute(
+                "INSERT INTO admin_handoff_views (handoff_ref, seen_at) VALUES (?, CURRENT_TIMESTAMP) "
+                "ON CONFLICT(handoff_ref) DO UPDATE SET seen_at = CURRENT_TIMESTAMP",
+                (reference,),
+            )
+            conn.commit()
+            return True
 
     def get_conversations(self, limit: int = 50, offset: int = 0, channel: Optional[str] = None, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """Retrieve paginated conversation logs."""
