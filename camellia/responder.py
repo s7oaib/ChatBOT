@@ -2501,6 +2501,22 @@ class DeterministicResponder:
             and GENERIC_DETAIL_WRAPPER_RE.search(semantic_resolution_text)
         )
 
+        # This client-approved wording is the general food pre-order question,
+        # not a subscription follow-up. Resolve it before stale subscription
+        # state can route it to the subscription booking steps.
+        if (
+            channel == "instagram"
+            and " ".join(user_message.lower().split()).strip(" .?!")
+            == "what are the next steps to pre book"
+        ):
+            template = self._template_by_id("alacarte_prebooking_steps") or {}
+            response_text = template.get("response") or self._generic_fallback()
+            response_text, images = self._apply_crosssell_nudges(
+                "alacarte_prebooking_steps", response_text, None, facts,
+            )
+            session_memory.add_turn(user_id, channel, user_message, response_text)
+            return response_text, True, "alacarte_prebooking_steps", images
+
         # Keep the client-confirmed subscription area, pickup contact, and
         # savoury pre-order answers deterministic when the wording is explicit.
         # These are approved template replies, not new facts or model guesses.
