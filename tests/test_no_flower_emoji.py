@@ -161,8 +161,13 @@ def test_the_duplicate_guard_works_now_that_both_sides_match():
     assert first_images, "the first ask should still send the menu cards"
     assert second_text != first_text, "the identical reply was sent twice"
     assert "handcrafted Norom Pak Sondesh" not in second_text
-    # Documented intent: the add-on bundle is one-time per active flow.
-    assert not second_images
+    # Documented intent: the add-on bundle is one-time per active flow, while
+    # the primary menu cards remain part of the repeated menu answer.
+    second_urls = [
+        image.get("url") if isinstance(image, dict) else image
+        for image in (second_images or [])
+    ]
+    assert not any("sondesh_addon_" in url for url in second_urls)
 
 
 def test_removing_the_flowers_left_no_sentence_running_into_the_next():
