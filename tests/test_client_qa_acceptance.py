@@ -80,7 +80,8 @@ def test_instagram_prebook_question_beats_stale_subscription_context(monkeypatch
 
     assert matched is True
     assert template_id == "alacarte_prebooking_steps"
-    assert "preferred day or meal slot" in response
+    from camellia.client_qa import REGISTRY_BY_ID
+    assert response == REGISTRY_BY_ID["alacarte_prebook"].answer
 
 
 def test_instagram_bengali_bento_details_beats_stale_story_context(monkeypatch):

@@ -795,7 +795,7 @@ def _process_instagram_event(
                     },
                 )
             order_summary = handoff.get("verified_order")
-            if template_id in ("order_draft_receipt", "client_approved_order_ready_handoff"):
+            if template_id in ("order_draft_receipt", "client_approved_order_ready_handoff") or facts.get("client_qa_handoff_exact"):
                 response_text = response_text.rstrip()
             else:
                 response_text = customer_facing_notice(

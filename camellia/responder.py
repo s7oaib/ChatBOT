@@ -213,6 +213,7 @@ _CLIENT_QA_TEMPLATE_IDS = {
     "order_prebook": "alacarte_prebooking_steps",
     "general_payment_client": "GUARD_payment_method",
     "minimum_sondesh_quantity_client": "minimum_sondesh_quantity",
+    "order_ready_handoff": "order_next_steps",
 }
 
 # Existing deterministic routes carry additional state, media, dynamic-menu,
@@ -2044,6 +2045,11 @@ class DeterministicResponder:
             and not HOME_TABLE_RE.search(source_topic_text)
             and not explicit_client_subject
         )
+        client_qa_candidate = client_qa.match(user_message, facts)
+        client_qa_flow_candidate = bool(
+            client_qa_candidate
+            and client_qa_candidate.entry.qa_id in {"alacarte_prebook", "order_prebook"}
+        )
         client_qa_excluded = bool(
             _UNSUPPORTED_CUSTOMIZATION_RE.search(lowered_text)
             or _HIGH_RISK_UNSUPPORTED_RE.search(lowered_text)
@@ -2059,21 +2065,27 @@ class DeterministicResponder:
             or (
                 channel == "instagram"
                 and PURCHASE_ASSISTANCE_RE.search(lowered_text)
+                and not client_qa_flow_candidate
             )
             or (
                 semantic_fallback._ESCALATION_INTENT_RE.search(lowered_text)
                 and not semantic_fallback._IDENTITY_QUESTION_RE.search(lowered_text)
             )
             or source_context_blocks_client_qa
-            or facts.get("source_route")
-            or facts.get("ad_product")
-            or facts.get("active_product_context")
-            or _CANONICAL_ROUTE_HINT_RE.search(lowered_text)
+            or (
+                facts.get("active_product_context")
+                and not explicit_client_subject
+            )
+            or (
+                facts.get("ad_product")
+                and not explicit_client_subject
+                and bool(_CANONICAL_ROUTE_HINT_RE.search(lowered_text))
+            )
         )
         client_match = (
             None
             if channel != "instagram" or client_qa_excluded
-            else client_qa.match(user_message, facts)
+            else client_qa_candidate
         )
         if client_match:
             entry = client_match.entry
@@ -2112,6 +2124,7 @@ class DeterministicResponder:
                 "client_qa_match_kind": client_match.match_kind,
                 "client_qa_asset_status": "ASSET-MISSING" if asset_missing else "available",
                 "client_qa_missing_assets": asset_missing,
+                "client_qa_handoff_exact": entry.qa_id == "order_ready_handoff",
             })
             client_topic = TOPIC_MAP.get(_CLIENT_QA_TEMPLATE_IDS.get(entry.qa_id, ""))
             if client_topic:
@@ -2148,7 +2161,12 @@ class DeterministicResponder:
             template_id = _CLIENT_QA_TEMPLATE_IDS.get(entry.qa_id)
             response_text = entry.answer
             session_memory.add_turn(user_id, channel, user_message, response_text)
-            return response_text, True, template_id or f"client_approved_{entry.qa_id}", asset_urls or None
+            return (
+                response_text,
+                False if entry.qa_id == "order_ready_handoff" else True,
+                template_id or f"client_approved_{entry.qa_id}",
+                asset_urls or None,
+            )
 
         # A decline closes only this active add-on flow. It is session-scoped,
         # so a later conversation can offer the add-on again.
@@ -4773,7 +4791,20 @@ class DeterministicResponder:
         text, matched, template_id, image_url = self._match_and_respond_raw(
             user_message, user_id, channel, referral_source, referral_ad_id, referral_ad_title
         )
-        if runtime_quarantine_enabled(getattr(db, "db_path", "")):
+        facts_after_route = session_memory.get_facts(
+            user_id or "default_user", channel or "default_channel",
+        )
+        client_exact_route = bool(
+            facts_after_route.get("client_qa_id")
+            and facts_after_route.get("last_grounding") == "exact_approved"
+        )
+        if client_exact_route:
+            # The client-QA registry is itself the authoritative, versioned
+            # source copy.  Replacing it with the older template quarantine
+            # would reintroduce precisely the manual/live mismatch this path
+            # exists to prevent.
+            safe_text, safe_images = text or "", image_url
+        elif runtime_quarantine_enabled(getattr(db, "db_path", "")):
             addon_suffix = "\n\n" + ALACARTE_SONDESH_ADDON_COPY
             if (
                 session_memory.get_facts(user_id or "default_user", channel or "default_channel").get(
