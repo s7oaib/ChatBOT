@@ -2018,6 +2018,32 @@ class DeterministicResponder:
         # grounded calculation, a fail-closed safety handoff, a purchase
         # handoff, or an explicit out-of-area delivery question.
         bento_template_for_precedence = self._template_by_id("bento_details") or {}
+        source_route = facts.get("source_route") if isinstance(facts.get("source_route"), dict) else None
+        source_route_active = bool(
+            source_route
+            and source_route.get("active", True)
+            and not facts.get("source_context_superseded")
+        )
+        explicit_client_subject = bool(re.search(
+            r"\b(?:sondesh|sandesh|mishti|mithai|bengali\s+bento|bento|"
+            r"chicken\s+kosha|subscription|meal\s+plan|home\s+table|"
+            r"aamar|signature|jolbhora|kanchagolla|mangsho)\b",
+            lowered_text,
+            re.I,
+        ))
+        source_topic_text = " ".join(
+            str(source_route.get(key) or "")
+            for key in ("routing_topic", "topic_name", "name")
+        ) if source_route else ""
+        # A non-Home-Table Story/Reel is authoritative for a vague follow-up
+        # such as "what is this" or "what's the price".  An explicit named
+        # subject is a new customer intent and must be allowed to select its
+        # own canonical FAQ, even when stale source state is present.
+        source_context_blocks_client_qa = bool(
+            source_route_active
+            and not HOME_TABLE_RE.search(source_topic_text)
+            and not explicit_client_subject
+        )
         client_qa_excluded = bool(
             _UNSUPPORTED_CUSTOMIZATION_RE.search(lowered_text)
             or _HIGH_RISK_UNSUPPORTED_RE.search(lowered_text)
@@ -2038,8 +2064,10 @@ class DeterministicResponder:
                 semantic_fallback._ESCALATION_INTENT_RE.search(lowered_text)
                 and not semantic_fallback._IDENTITY_QUESTION_RE.search(lowered_text)
             )
+            or source_context_blocks_client_qa
             or facts.get("source_route")
             or facts.get("ad_product")
+            or facts.get("active_product_context")
             or _CANONICAL_ROUTE_HINT_RE.search(lowered_text)
         )
         client_match = (
@@ -2085,6 +2113,11 @@ class DeterministicResponder:
                 "client_qa_asset_status": "ASSET-MISSING" if asset_missing else "available",
                 "client_qa_missing_assets": asset_missing,
             })
+            client_topic = TOPIC_MAP.get(_CLIENT_QA_TEMPLATE_IDS.get(entry.qa_id, ""))
+            if client_topic:
+                facts["last_topic"] = client_topic
+            if entry.qa_id in {"bento_details_client", "bento_price_client"}:
+                facts["active_product_context"] = "bento"
             if entry.context == "home_table" and (
                 facts.get("source_route")
                 or facts.get("last_topic") == "bengali_home_table"
@@ -2102,6 +2135,7 @@ class DeterministicResponder:
                     )
                     facts["source_context_used"] = bool(
                         re.search(r"bengali\s+home\s+table|home\s+table|kolkata\s+home", source_topic, re.I)
+                        and not re.search(r"\b(?:bengali\s+home\s+table|home\s+table|kolkata\s+home)\b", lowered_text, re.I)
                     )
             if asset_missing:
                 handoff, _ = self.build_handover_response(user_message)

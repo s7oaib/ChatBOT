@@ -150,6 +150,10 @@ def parse_source(source_text: Optional[str] = None) -> Tuple[ApprovedQA, ...]:
                     break
         raw_answer = lines[start + 1:end]
         answer, assets = _clean_answer(raw_answer)
+        if qa_id in {"bento_details_client", "bento_price_client"} and re.search(
+            r"sharing our full menu for the week below", answer, re.I,
+        ):
+            assets = tuple(dict.fromkeys((*assets, "weekly_menu")))
         entries.append(ApprovedQA(qa_id, question, answer, context, assets))
     return tuple(entries)
 
@@ -179,6 +183,10 @@ def _home_context(message: str, facts: Dict[str, Any]) -> bool:
 
 
 def _generic_price(message: str) -> bool:
+    if re.fullmatch(r"(?:how much|price|cost|rate)[?!., ]*", message.strip(), re.I):
+        return False
+    if re.search(r"\b(?:this|that|it)\b", message, re.I):
+        return False
     return bool(re.search(r"\b(?:how much|price|cost|rate)\b", message, re.I)) and not bool(
         re.search(r"\b(?:sondesh|bento|chicken|kosha|subscription|home\s+table|meal\s+plan|mutton|mangsho|jolbhora|kanchagolla)\b", message, re.I)
     )
