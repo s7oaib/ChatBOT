@@ -52,6 +52,30 @@ def test_alacarte_primary_answer_then_exact_addon_bundle_once():
     assert session_memory.get_facts(user_id, "instagram")["alacarte_sondesh_addon_sent"]
 
 
+def test_alacarte_interrupts_stale_home_table_story_context():
+    user_id = f"addon-stale-story-{uuid.uuid4().hex}"
+    session_memory.clear_session(user_id, "instagram")
+    facts = session_memory.get_facts(user_id, "instagram")
+    facts["home_table_context"] = True
+    facts["source_route"] = {
+        "active": True,
+        "routing_topic": "Bengali Home Table",
+        "topic_id": "bengali_home_table",
+        "source_type": "story",
+    }
+
+    text, matched, template_id, images = _ask(
+        "Can you show me the à la carte menu?", user_id
+    )
+
+    assert matched is True
+    assert template_id == "know_more"
+    assert "Bengali Home Table" not in text
+    assert ADDON_COPY in text
+    assert _urls(images)[-3:] == ADDON_ASSETS
+    assert session_memory.get_facts(user_id, "instagram")["source_context_superseded"]
+
+
 def test_repeat_alacarte_turn_has_no_duplicate_pitch_or_bundle():
     user_id = f"addon-repeat-{uuid.uuid4().hex}"
     session_memory.clear_session(user_id, "instagram")
