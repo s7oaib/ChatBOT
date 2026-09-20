@@ -2309,7 +2309,19 @@ class DeterministicResponder:
         # numeric answer that the supplied golden text does not specify.
         has_home_table_context = bool(facts.get("home_table_context"))
         has_home_table_subject = bool(HOME_TABLE_RE.search(lowered_text))
-        if has_home_table_subject or has_home_table_context:
+        home_table_context_followup = bool(
+            HOME_TABLE_BOOKING_RE.search(lowered_text)
+            or HOME_TABLE_PAYMENT_RE.search(lowered_text)
+            or HOME_TABLE_DETAILED_PRICING_RE.search(lowered_text)
+            or HOME_TABLE_BARE_PRICE_RE.fullmatch(lowered_text)
+        )
+        # An active Story context may answer a recognized campaign follow-up,
+        # but it must not turn an unrelated or unsupported new question into
+        # another Story-details response. Let structured NLU and the existing
+        # fail-closed handoff path handle those messages.
+        if has_home_table_subject or (
+            has_home_table_context and home_table_context_followup
+        ):
             if HOME_TABLE_BOOKING_RE.search(lowered_text):
                 order_template = self._template_by_id("order_next_steps") or {}
                 order_response = order_template.get("response") or self._generic_fallback()

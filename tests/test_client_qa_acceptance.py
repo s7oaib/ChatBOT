@@ -100,3 +100,32 @@ def test_instagram_bengali_bento_details_beats_stale_story_context(monkeypatch):
     assert template_id == "bento_details"
     assert "Vegetarian Bento" in response
     assert "₹350" in response
+
+
+def test_unsupported_event_after_home_table_context_hands_off(monkeypatch):
+    monkeypatch.setattr("camellia.config.config.BYPASS_AD_GATE", True)
+    user_id = "client-qa-unsupported-event-after-story"
+    session_memory.clear_session(user_id, "instagram")
+    facts = session_memory.get_facts(user_id, "instagram")
+    facts["home_table_context"] = True
+    facts["source_route"] = {
+        "routing_id": 5,
+        "source_type": "story",
+        "active": True,
+        "routing_topic": "Bengali Home Table",
+        "priority_products": [],
+    }
+
+    response, matched, template_id, _images = responder.match_and_respond(
+        "Can you cater a wedding in Mumbai?",
+        user_id=user_id,
+        channel="instagram",
+    )
+
+    facts = session_memory.get_facts(user_id, "instagram")
+    assert matched is False
+    assert template_id == "groq_structured_event_escalation"
+    assert facts["knowledge_sufficient"] is False
+    assert "event_order" in facts["last_intents"]
+    assert "ESCALATE_TO_TEAM" in facts["last_actions"]
+    assert "bengali home table" not in response.lower()
