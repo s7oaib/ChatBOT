@@ -2074,6 +2074,11 @@ class DeterministicResponder:
             )
             or source_context_blocks_client_qa
             or (
+                source_route_active
+                and explicit_client_subject
+            )
+            or BULK_CONTEXT_RE.search(lowered_text)
+            or (
                 facts.get("active_product_context")
                 and not explicit_client_subject
             )
@@ -2309,7 +2314,18 @@ class DeterministicResponder:
         # numeric answer that the supplied golden text does not specify.
         has_home_table_context = bool(facts.get("home_table_context"))
         has_home_table_subject = bool(HOME_TABLE_RE.search(lowered_text))
-        if has_home_table_subject or has_home_table_context:
+        # An exact Story follow-up may reuse the active Home Table context,
+        # but a newly named product or explicit subject must win over stale
+        # campaign state.  Otherwise "What is the price of Jolbhora?" (or an
+        # unsupported new request) can be swallowed by the Story template.
+        stale_home_table_can_answer = (
+            has_home_table_context
+            and not explicit_client_subject
+            and not BULK_CONTEXT_RE.search(lowered_text)
+            and not _UNSUPPORTED_CUSTOMIZATION_RE.search(lowered_text)
+            and not _HIGH_RISK_UNSUPPORTED_RE.search(lowered_text)
+        )
+        if has_home_table_subject or stale_home_table_can_answer:
             if HOME_TABLE_BOOKING_RE.search(lowered_text):
                 order_template = self._template_by_id("order_next_steps") or {}
                 order_response = order_template.get("response") or self._generic_fallback()
