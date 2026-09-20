@@ -1303,6 +1303,14 @@ class DeterministicResponder:
             bool(facts.get("alacarte_sondesh_addon_sent"))
             or session_key in _ALACARTE_ADDON_SENT_USERS
         )
+        log.info(
+            "ALACARTE_GUARD context=%s template=%s sender_hash=%s session_sent=%s "
+            "process_sent=%s",
+            bool(alacarte_context), template_id,
+            _safe_user_hash(str(lookup_user_id or "")),
+            bool(facts.get("alacarte_sondesh_addon_sent")),
+            session_key in _ALACARTE_ADDON_SENT_USERS,
+        )
         if alacarte_context and not addon_already_sent:
             # Adjacent Meta webhook events can race the in-memory session
             # snapshot. A prior durable à-la-carte turn is authoritative for
@@ -1322,6 +1330,11 @@ class DeterministicResponder:
             except Exception as exc:
                 prior_bundle_sent = False
                 log.debug("Could not inspect durable add-on history: %s", exc)
+            log.info(
+                "ALACARTE_GUARD durable_rows=%s prior_bundle=%s sender_hash=%s",
+                len(prior_rows) if 'prior_rows' in locals() else -1,
+                bool(prior_bundle_sent), _safe_user_hash(str(lookup_user_id or "")),
+            )
             if prior_bundle_sent:
                 facts["alacarte_sondesh_addon_sent"] = True
                 addon_already_sent = True
