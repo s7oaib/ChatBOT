@@ -1288,6 +1288,35 @@ class DeterministicResponder:
             and bool(_ALACARTE_ADDON_MARKER_RE.search(lowered_message))
             and not _ALACARTE_ADDON_EXCLUSION_RE.search(lowered_message)
         )
+        if alacarte_context and not facts.get("alacarte_sondesh_addon_sent"):
+            # Adjacent Meta webhook events can race the in-memory session
+            # snapshot. A completed durable three-image bundle is authoritative
+            # and prevents a repeat from re-sending the pitch and images.
+            try:
+                prior_rows = db.get_conversations(
+                    limit=100,
+                    channel="instagram",
+                    user_id=facts.get("_session_user_id"),
+                )
+                prior_bundle_sent = any(
+                    _ALACARTE_ADDON_MARKER_RE.search(str(row.get("user_message") or ""))
+                    and not _ALACARTE_ADDON_EXCLUSION_RE.search(str(row.get("user_message") or ""))
+                    and sum(
+                        1 for audit in db.get_instagram_outbound_audit(
+                            limit=20,
+                            success=True,
+                            inbound_message_id=int(row["id"]),
+                        )
+                        if audit.get("response_type") == "image"
+                    ) >= 3
+                    for row in prior_rows
+                    if row.get("id") is not None
+                )
+            except Exception as exc:
+                prior_bundle_sent = False
+                log.debug("Could not inspect durable add-on history: %s", exc)
+            if prior_bundle_sent:
+                facts["alacarte_sondesh_addon_sent"] = True
         if (
             alacarte_context
             and not facts.get("alacarte_sondesh_addon_sent")
@@ -1987,6 +2016,10 @@ class DeterministicResponder:
             lowered_text
         )
         facts = session_memory.get_facts(user_id, channel)
+        # Keep the durable conversation key available to the once-per-session
+        # add-on guard. It is metadata only and never reaches customer text.
+        facts["_session_user_id"] = user_id
+        facts["_session_channel"] = channel
         facts.update({
             "last_intents": [],
             "last_entities": {},

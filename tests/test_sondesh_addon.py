@@ -103,6 +103,36 @@ def test_repeat_alacarte_turn_has_no_duplicate_pitch_or_bundle():
     assert not any(asset in _urls(images) for asset in ADDON_ASSETS)
 
 
+def test_durable_prior_addon_bundle_suppresses_stale_session_repeat(monkeypatch):
+    user_id = f"addon-durable-repeat-{uuid.uuid4().hex}"
+    session_memory.clear_session(user_id, "instagram")
+
+    monkeypatch.setattr(
+        "camellia.responder.db.get_conversations",
+        lambda **kwargs: [{
+            "id": 777,
+            "user_id": user_id,
+            "channel": "instagram",
+            "user_message": "What meals do you offer à la carte?",
+        }],
+    )
+    monkeypatch.setattr(
+        "camellia.responder.db.get_instagram_outbound_audit",
+        lambda **kwargs: [
+            {"response_type": "image", "success": 1},
+            {"response_type": "image", "success": 1},
+            {"response_type": "image", "success": 1},
+        ],
+    )
+
+    text, _matched, _template_id, images = _ask(
+        "What meals do you offer à la carte?", user_id
+    )
+
+    assert ADDON_COPY not in text
+    assert not any(asset in _urls(images) for asset in ADDON_ASSETS)
+
+
 def test_non_alacarte_and_direct_sondesh_questions_do_not_trigger_addon():
     for message in (
         "How do I pay?",
