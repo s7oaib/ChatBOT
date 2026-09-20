@@ -266,6 +266,12 @@ _ALACARTE_ADDON_DECLINE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Last-mile duplicate guard for adjacent webhook deliveries in one process.
+# The durable session flag remains the source of truth across restarts; this
+# set closes the window where two inbound requests read the same stale
+# snapshot before either request persists its updated session.
+_ALACARTE_ADDON_SENT_USERS: set[tuple[str, str]] = set()
+
 
 def _quarantine_image_claims(images: Any) -> Any:
     """Apply content-integrity quarantine to card captions as well as text."""
@@ -1288,7 +1294,15 @@ class DeterministicResponder:
             and bool(_ALACARTE_ADDON_MARKER_RE.search(lowered_message))
             and not _ALACARTE_ADDON_EXCLUSION_RE.search(lowered_message)
         )
-        if alacarte_context and not facts.get("alacarte_sondesh_addon_sent"):
+        session_key = (
+            str(facts.get("_session_user_id") or ""),
+            str(facts.get("_session_channel") or "instagram"),
+        )
+        addon_already_sent = (
+            bool(facts.get("alacarte_sondesh_addon_sent"))
+            or session_key in _ALACARTE_ADDON_SENT_USERS
+        )
+        if alacarte_context and not addon_already_sent:
             # Adjacent Meta webhook events can race the in-memory session
             # snapshot. A prior durable à-la-carte turn is authoritative for
             # the once-per-session contract and prevents a repeat from
@@ -1309,14 +1323,16 @@ class DeterministicResponder:
                 log.debug("Could not inspect durable add-on history: %s", exc)
             if prior_bundle_sent:
                 facts["alacarte_sondesh_addon_sent"] = True
+                addon_already_sent = True
         if (
             alacarte_context
-            and not facts.get("alacarte_sondesh_addon_sent")
+            and not addon_already_sent
             and not facts.get("alacarte_sondesh_addon_declined")
             and not menu_is_being_updated
         ):
             facts["alacarte_sondesh_addon_sent"] = True
             facts["savoury_crosssell_sent"] = True
+            _ALACARTE_ADDON_SENT_USERS.add(session_key)
             response_text = response_text.rstrip() + "\n\n" + ALACARTE_SONDESH_ADDON_COPY
             image_url = self._append_sondesh_crosssell_images(image_url)
         elif template_id == "savoury_crosssell_sondesh":
