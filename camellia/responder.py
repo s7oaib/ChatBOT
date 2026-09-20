@@ -2284,6 +2284,23 @@ class DeterministicResponder:
             session_memory.add_turn(user_id, channel, user_message, response_text)
             return response_text, True, "know_more", images
 
+        # Explicit current intent outranks stale Story/Reel/Post context and
+        # any conversational slot.  Opening hours is a canonical fact, so it
+        # must be resolved before the Home Table branch can reinterpret the
+        # question as a campaign follow-up.
+        if channel == "instagram" and OPENING_HOURS_RE.search(lowered_text):
+            template = self._template_by_id("opening_hours") or {}
+            response_text, images = self._format_dynamic_response(
+                "opening_hours", template.get("response") or self._generic_fallback(),
+                user_id=user_id, channel=channel, user_message=user_message,
+            )
+            facts["last_route_source"] = "explicit_rule"
+            facts["last_intents"] = ["opening_hours"]
+            facts["last_knowledge_ids"] = ["delivery:opening_hours"]
+            facts["last_grounding"] = "grounded_approved"
+            session_memory.add_turn(user_id, channel, user_message, response_text)
+            return response_text, True, "opening_hours", images
+
         # Bengali Home Table is a live Kolkata campaign and must be resolved
         # before the broad ``kolkata_expansion_info`` matcher.  The campaign has
         # four separate deterministic trigger paths; the ambiguous bare-price
@@ -2582,6 +2599,7 @@ class DeterministicResponder:
             "awaiting_subscription_booking", "awaiting_menu_choice", "awaiting_product_price",
             "awaiting_area_confirmation",
         ))
+
         source_product = priorities[0] if priorities else ad_product
         route_menu_mode = str((source_route or {}).get("menu_mode") or "INHERIT").strip().upper()
         menu_attached = route_menu_mode != "NONE"
@@ -3012,24 +3030,6 @@ class DeterministicResponder:
                 response_text = intro_greeting_prefix + response_text
             session_memory.add_turn(user_id, channel, user_message, response_text)
             return response_text, True, "savoury_delivery_time", images
-
-        # Opening-hours questions are a deterministic part of the approved
-        # delivery-time answer. Resolve them before model NLU can classify the
-        # wording as an unsupported business question.
-        if (
-            not active_conversation_flow
-            and not facts.get("subscription_context")
-            and OPENING_HOURS_RE.search(lowered_text)
-        ):
-            template = self._template_by_id("opening_hours") or {}
-            response_text, images = self._format_dynamic_response(
-                "opening_hours", template.get("response") or self._generic_fallback(),
-                user_id=user_id, channel=channel, user_message=user_message,
-            )
-            if intro_greeting_prefix:
-                response_text = intro_greeting_prefix + response_text
-            session_memory.add_turn(user_id, channel, user_message, response_text)
-            return response_text, True, "opening_hours", images
 
         if (
             not active_conversation_flow

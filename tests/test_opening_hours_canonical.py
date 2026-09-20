@@ -92,6 +92,30 @@ def test_opening_hours_route_does_not_call_nlu_or_groq(monkeypatch):
     assert not analyze.called
 
 
+def test_opening_hours_overrides_stale_home_table_story_context(monkeypatch):
+    monkeypatch.setattr(config, "BYPASS_AD_GATE", True)
+    user_id = "opening-hours-stale-story"
+    session_memory.clear_session(user_id, "instagram")
+    facts = session_memory.get_facts(user_id, "instagram")
+    facts.update({
+        "home_table_context": True,
+        "last_topic": "bengali_home_table",
+        "source_route": {
+            "active": True,
+            "routing_topic": "Bengali Home Table",
+            "source_type": "story",
+        },
+    })
+
+    text, matched, template_id, _images = responder.match_and_respond(
+        "What are your opening hours?", user_id=user_id, channel="instagram",
+    )
+
+    assert matched is True
+    assert template_id == "opening_hours"
+    assert text == OPENING_HOURS
+
+
 def _resolve_delivery_time(entities):
     understood = UnderstandingResult(
         intents=[Intent.DELIVERY_TIME_QUESTION.value],
