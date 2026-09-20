@@ -620,16 +620,31 @@ class Database:
                 knowledge_gap INTEGER DEFAULT 0,
                 escalation_status TEXT,
                 route_source TEXT,
+                decision_lane TEXT,
+                state_context_used INTEGER DEFAULT 0,
+                source_context_influenced INTEGER DEFAULT 0,
+                handoff_reason TEXT,
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
             """)
             # An existing deployment's table predates route_source; add it
             # without disturbing rows already written.
             cursor.execute("PRAGMA table_info(message_route_audit)")
-            if "route_source" not in {row[1] for row in cursor.fetchall()}:
+            route_audit_columns = {row[1] for row in cursor.fetchall()}
+            if "route_source" not in route_audit_columns:
                 cursor.execute(
                     "ALTER TABLE message_route_audit ADD COLUMN route_source TEXT"
                 )
+            for column, declaration in (
+                ("decision_lane", "TEXT"),
+                ("state_context_used", "INTEGER DEFAULT 0"),
+                ("source_context_influenced", "INTEGER DEFAULT 0"),
+                ("handoff_reason", "TEXT"),
+            ):
+                if column not in route_audit_columns:
+                    cursor.execute(
+                        f"ALTER TABLE message_route_audit ADD COLUMN {column} {declaration}"
+                    )
 
             # Instagram -> WhatsApp handoff references. handoff_ref is the
             # opaque customer-facing token ("CAM-48371"); nothing else in this
@@ -649,11 +664,28 @@ class Database:
                 unresolved_topic TEXT,
                 status TEXT NOT NULL DEFAULT 'CREATED',
                 escalation_id INTEGER,
+                instagram_username TEXT,
+                query_summary TEXT,
+                contact_mode TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 expires_at TIMESTAMP
             );
             """)
+            # These fields make the generic-callback versus purchase-handoff
+            # contract durable.  Add them for existing volumes without
+            # rewriting or deleting handoff history.
+            cursor.execute("PRAGMA table_info(cross_channel_handoffs)")
+            handoff_columns = {row[1] for row in cursor.fetchall()}
+            for column, declaration in (
+                ("instagram_username", "TEXT"),
+                ("query_summary", "TEXT"),
+                ("contact_mode", "TEXT"),
+            ):
+                if column not in handoff_columns:
+                    cursor.execute(
+                        f"ALTER TABLE cross_channel_handoffs ADD COLUMN {column} {declaration}"
+                    )
 
             # Canonical missing-information queue. Unlike candidate_templates,
             # this records what fact/action is absent rather than teaching one
@@ -2887,6 +2919,9 @@ class Database:
         unresolved_topic: Optional[str],
         escalation_id: Optional[int],
         expires_at: Optional[str],
+        instagram_username: Optional[str] = None,
+        query_summary: Optional[str] = None,
+        contact_mode: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Records a new opaque handoff reference. Never overwrites one."""
         with self.get_connection() as conn:
@@ -2894,13 +2929,14 @@ class Database:
                 """
                 INSERT INTO cross_channel_handoffs (
                     handoff_ref, source_channel, source_user_id, reason, summary,
-                    known_entities, unresolved_topic, status, escalation_id, expires_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'CREATED', ?, ?)
+                    known_entities, unresolved_topic, status, escalation_id,
+                    instagram_username, query_summary, contact_mode, expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'CREATED', ?, ?, ?, ?, ?)
                 """,
                 (
                     handoff_ref, source_channel, source_user_id, reason, summary,
                     json.dumps(known_entities or {}, ensure_ascii=False), unresolved_topic,
-                    escalation_id, expires_at,
+                    escalation_id, instagram_username, query_summary, contact_mode, expires_at,
                 ),
             )
             conn.commit()
@@ -2918,6 +2954,9 @@ class Database:
         unresolved_topic: Optional[str],
         escalation_id: Optional[int],
         expires_at: Optional[str],
+        instagram_username: Optional[str] = None,
+        query_summary: Optional[str] = None,
+        contact_mode: Optional[str] = None,
     ) -> tuple[Dict[str, Any], bool]:
         """Atomically reuse or create one active handoff for a customer.
 
@@ -2946,13 +2985,14 @@ class Database:
                 """
                 INSERT INTO cross_channel_handoffs (
                     handoff_ref, source_channel, source_user_id, reason, summary,
-                    known_entities, unresolved_topic, status, escalation_id, expires_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'CREATED', ?, ?)
+                    known_entities, unresolved_topic, status, escalation_id,
+                    instagram_username, query_summary, contact_mode, expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'CREATED', ?, ?, ?, ?, ?)
                 """,
                 (
                     handoff_ref, source_channel, source_user_id, reason, summary,
                     json.dumps(known_entities or {}, ensure_ascii=False), unresolved_topic,
-                    escalation_id, expires_at,
+                    escalation_id, instagram_username, query_summary, contact_mode, expires_at,
                 ),
             )
             created = conn.execute(
@@ -3913,6 +3953,10 @@ class Database:
         knowledge_gap: bool,
         escalation_status: Optional[str],
         route_source: Optional[str] = None,
+        decision_lane: Optional[str] = None,
+        state_context_used: bool = False,
+        source_context_influenced: bool = False,
+        handoff_reason: Optional[str] = None,
     ) -> int:
         """Records why a customer-facing route was selected.
 
@@ -3927,14 +3971,17 @@ class Database:
                 INSERT INTO message_route_audit (
                     user_id, channel, user_message, route, intents, entities,
                     confidence, knowledge_ids, actions, llm_called, fallback_used,
-                    grounding_result, knowledge_gap, escalation_status, route_source
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    grounding_result, knowledge_gap, escalation_status, route_source,
+                    decision_lane, state_context_used, source_context_influenced, handoff_reason
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 str(user_id), str(channel), user_message, route,
                 json.dumps(intents or []), json.dumps(entities or {}, ensure_ascii=False),
                 confidence, json.dumps(knowledge_ids or []), json.dumps(actions or []),
                 int(bool(llm_called)), int(bool(fallback_used)), grounding_result,
                 int(bool(knowledge_gap)), escalation_status, route_source,
+                decision_lane, int(bool(state_context_used)),
+                int(bool(source_context_influenced)), handoff_reason,
             ))
             conn.commit()
             return int(cursor.lastrowid)

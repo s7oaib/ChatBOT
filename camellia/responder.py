@@ -24,10 +24,12 @@ from camellia.database import db
 from camellia.trigger_index import trigger_index
 from camellia import weekly_flyer
 from camellia import menu_dates
+from camellia import client_qa
 from camellia.menu_images import current_url as current_menu_image
 from camellia import semantic_fallback
 from camellia.understanding import BusinessAction, Intent, understanding_engine
 from camellia.knowledge import HUMAN_ONLY_INTENTS, approved_knowledge
+from camellia.route_contract import build_trace, classify_lane
 from camellia.content_integrity import (
     ALACARTE_SONDESH_ADDON_COPY,
     quarantine_template_response,
@@ -142,6 +144,48 @@ _CONFIRMED_BENTO_SUBSTITUTION_RE = re.compile(
     r"|\b(bento|aloo\s+dom)\b(?=.*\bchholar\s+daa?l\b)",
     re.IGNORECASE,
 )
+
+_UNSUPPORTED_CUSTOMIZATION_RE = re.compile(
+    r"\b(?:can|could|would|do)\s+you\s+(?:make|prepare|do|customi[sz]e|modify)\b.*"
+    r"\b(?:without|no|remove|replace|substitute|change)\b|"
+    r"\b(?:make|prepare|customi[sz]e|modify)\b.*\b(?:without|no|remove|replace|substitute)\b",
+    re.IGNORECASE,
+)
+_HIGH_RISK_UNSUPPORTED_RE = re.compile(
+    r"\b(?:severe|serious|strict)\s+(?:milk|dairy|food)?\s*allerg\w*\b|"
+    r"\b(?:milk|dairy)\s+allerg\w*\b|\b(?:medical|life-threatening)\s+(?:allerg\w*|requirement)\b",
+    re.IGNORECASE,
+)
+
+
+def _bento_grounded_comparison(question: str, approved_response: str) -> Optional[str]:
+    """Answer only comparisons whose numbers are present in approved Bento copy."""
+    prices = {
+        match.group(1).lower(): int(match.group(2))
+        for match in re.finditer(
+            r"\b(Vegetarian|Chicken|Mangsho)\s+Bento\s*[—-]\s*₹\s*(\d+)",
+            approved_response,
+            re.IGNORECASE,
+        )
+    }
+    if len(prices) != 3:
+        return None
+    text = " ".join(question.lower().split())
+    if "cheapest" in text or "lowest price" in text:
+        name, price = min(prices.items(), key=lambda item: item[1])
+        return f"The cheapest Bento is the {name.title()} Bento at ₹{price}."
+    difference = re.search(
+        r"how much more is (?:the\s+)?(vegetarian|chicken|mangsho)\s+bento\s+than\s+"
+        r"(?:the\s+)?(vegetarian|chicken|mangsho)(?:\s+bento)?",
+        text,
+    )
+    if difference and difference.group(1) != difference.group(2):
+        higher, lower = difference.groups()
+        return (
+            f"The {higher.title()} Bento is ₹{abs(prices[higher] - prices[lower])} more "
+            f"than the {lower.title()} Bento."
+        )
+    return None
 
 
 # The flower strip lives in text_rules so database.py can use it too — the
@@ -721,6 +765,15 @@ OUT_OF_AREA_GENERIC_RE = re.compile(
     r'internationally|international shipping|abroad|overseas|'
     r'outside india|another state|other states|worldwide|world[\s-]?wide|'
     r'outside the country|ship (it |this )?internationally)\b',
+    re.IGNORECASE,
+)
+NON_NCR_DESTINATION_RE = re.compile(
+    r"\b(?:bangalore|bengaluru|mumbai|pune|kolkata|hyderabad|chennai|"
+    r"jaipur|ahmedabad|chandigarh|lucknow)\b",
+    re.IGNORECASE,
+)
+DELIVERY_ACTION_RE = re.compile(
+    r"\b(?:deliver(?:y|ing)?|ship(?:ping)?|courier|send|order)\b",
     re.IGNORECASE,
 )
 
@@ -1770,6 +1823,15 @@ class DeterministicResponder:
         try:
             audit_facts = session_memory.get_facts(user_id, channel)
             self._record_answer_sufficiency(audit_facts, template_id, was_matched)
+            decision_lane = classify_lane(
+                was_matched=was_matched,
+                template_id=template_id,
+                facts=audit_facts,
+            )
+            audit_facts["decision_lane"] = decision_lane
+            audit_facts["route_trace"] = build_trace(
+                lane=decision_lane, facts=audit_facts,
+            ).as_dict()
             # Anything that answered before understanding ran did so from
             # conversation state. Recording which layer decided lets the
             # benchmark measure how much wording-driven routing is left.
@@ -1819,6 +1881,12 @@ class DeterministicResponder:
                 knowledge_gap=knowledge_gap,
                 escalation_status=escalation_status,
                 route_source=audit_facts.get("last_route_source"),
+                decision_lane=decision_lane,
+                state_context_used=bool(audit_facts["route_trace"].get("state_influenced")),
+                source_context_influenced=bool(
+                    audit_facts["route_trace"].get("source_context_influenced")
+                ),
+                handoff_reason=audit_facts["route_trace"].get("handoff_reason"),
             )
             log.info(
                 "MESSAGE_ROUTE route=%s source=%s intents=%s entities=%s knowledge=%s actions=%s "
@@ -1886,6 +1954,9 @@ class DeterministicResponder:
             "last_llm_called": False,
             "last_fallback_used": False,
             "last_grounding": None,
+            "decision_lane": None,
+            "route_trace": {},
+            "last_handoff_reason": None,
             "structured_nlu_provider_failed": False,
             "last_route_source": None,
         })
@@ -1894,6 +1965,64 @@ class DeterministicResponder:
         # turn's decision is reset here.
         facts["source_context_used"] = False
         facts["source_referential_intent"] = None
+
+        # Client-approved QA is the hard deterministic fast path.  The
+        # matcher may understand a paraphrase, but the response itself is
+        # loaded from the source block and never sent through Groq, RAG,
+        # response-library overrides, or cross-sell rewriting.
+        client_match = client_qa.match(user_message, facts)
+        if client_match:
+            entry = client_match.entry
+            asset_urls: List[str] = []
+            asset_missing: List[str] = []
+            asset_map = {
+                "sondesh_addon_images": [
+                    "/images/sondesh_addon_01.jpeg",
+                    "/images/sondesh_addon_02.jpeg",
+                    "/images/sondesh_addon_03.jpeg",
+                ],
+                "subscription_rate_chart": [
+                    "/images/Everyday%20Meal%20Subscription%20Rate%20Chart.jpeg",
+                ],
+                "aamar_menu": ["/images/AAMAR%20MISHTI.jpeg"],
+                "signature_menu": ["/images/Signature%20Sondesh.jpeg"],
+                "weekly_menu": [current_menu_image("weekly_vegetarian", "/images/From%20Friday.jpeg")],
+            }
+            for asset_key in client_match.asset_keys:
+                values = [value for value in asset_map.get(asset_key, []) if value]
+                if not values:
+                    asset_missing.append(asset_key)
+                else:
+                    asset_urls.extend(values)
+            facts.update({
+                "last_route_source": "client_approved_qa",
+                "last_intents": [entry.qa_id],
+                "last_entities": {"client_qa_id": entry.qa_id},
+                "last_knowledge_ids": [f"client_qa:{entry.qa_id}"],
+                "last_actions": [BusinessAction.SEND_RESPONSE.value],
+                "knowledge_sufficient": not bool(asset_missing),
+                "last_grounding": "asset-missing" if asset_missing else "exact_approved",
+                "last_llm_called": False,
+                "last_fallback_used": False,
+                "client_qa_id": entry.qa_id,
+                "client_qa_match_kind": client_match.match_kind,
+                "client_qa_asset_status": "ASSET-MISSING" if asset_missing else "available",
+                "client_qa_missing_assets": asset_missing,
+            })
+            if entry.context == "home_table":
+                facts["home_table_context"] = True
+                facts["last_topic"] = "bengali_home_table"
+            if asset_missing:
+                handoff, _ = self.build_handover_response(user_message)
+                facts["last_actions"] = [
+                    BusinessAction.ESCALATE_TO_TEAM.value,
+                    BusinessAction.SEND_RESPONSE.value,
+                ]
+                session_memory.add_turn(user_id, channel, user_message, handoff)
+                return handoff, False, "client_approved_asset_missing", None
+            response_text = entry.answer
+            session_memory.add_turn(user_id, channel, user_message, response_text)
+            return response_text, True, f"client_approved_{entry.qa_id}", asset_urls or None
 
         # A decline closes only this active add-on flow. It is session-scoped,
         # so a later conversation can offer the add-on again.
@@ -2091,6 +2220,83 @@ class DeterministicResponder:
             facts["source_context_used"] = False
             session_memory.add_turn(user_id, channel, user_message, order_response)
             return order_response, False, "order_next_steps", None
+
+        # Safety-sensitive and customisation requests need their own approved
+        # fact, not the nearest product/menu answer.  Keep the one confirmed
+        # Bento substitution above the gate; every other unsupported variant
+        # becomes a durable knowledge gap and human handoff.
+        unsupported_reason = None
+        if (
+            _UNSUPPORTED_CUSTOMIZATION_RE.search(lowered_text)
+            and not _CONFIRMED_BENTO_SUBSTITUTION_RE.search(lowered_text)
+        ):
+            unsupported_reason = "unsupported_customisation"
+        elif _HIGH_RISK_UNSUPPORTED_RE.search(lowered_text):
+            unsupported_reason = "unsupported_sensitive_allergy_or_medical_requirement"
+        if unsupported_reason:
+            facts["last_route_source"] = "explicit_rule"
+            facts["last_handoff_reason"] = unsupported_reason
+            facts["last_intents"] = [Intent.BUSINESS_POLICY_UNKNOWN.value]
+            facts["last_knowledge_sufficiency"] = {
+                Intent.BUSINESS_POLICY_UNKNOWN.value: False,
+            }
+            facts["knowledge_sufficient"] = False
+            facts["last_actions"] = [
+                BusinessAction.ESCALATE_TO_TEAM.value,
+                BusinessAction.SEND_RESPONSE.value,
+            ]
+            fallback, _intent = self.build_handover_response(user_message)
+            try:
+                db.record_knowledge_gap(
+                    user_message=user_message,
+                    intents=[Intent.BUSINESS_POLICY_UNKNOWN.value],
+                    entities={"reason": unsupported_reason},
+                    reason=unsupported_reason,
+                )
+            except Exception as exc:
+                log.warning("Could not record sensitive knowledge gap: %s", exc)
+            session_memory.add_turn(user_id, channel, user_message, fallback)
+            return fallback, False, None, None
+
+        # Simple arithmetic/comparison is allowed only when every number is
+        # parsed from the approved Bento response itself.
+        bento_template = self._template_by_id("bento_details") or {}
+        grounded_bento = _bento_grounded_comparison(
+            user_message, str(bento_template.get("response") or "")
+        )
+        if grounded_bento:
+            facts["last_route_source"] = "grounded_approved"
+            facts["last_grounding"] = "grounded_approved"
+            facts["last_knowledge_ids"] = ["approved:bento_details"]
+            facts["last_knowledge_sufficiency"] = {
+                Intent.PRODUCT_PRICE.value: True,
+            }
+            facts["knowledge_sufficient"] = True
+            facts["last_intents"] = [Intent.PRODUCT_PRICE.value]
+            facts["last_source_ref"] = "qa_templates.json#bento_details"
+            session_memory.add_turn(user_id, channel, user_message, grounded_bento)
+            return grounded_bento, True, "bento_grounded_comparison", None
+
+        # A Sondesh delivery question naming a non-NCR city is a complete
+        # approved out-of-area answer. Resolve it before compound NLU can
+        # combine a generic product overview with a delivery-area prompt.
+        if (
+            re.search(r"\b(?:sondesh|sandesh|mishti|sweets?)\b", lowered_text)
+            and DELIVERY_ACTION_RE.search(lowered_text)
+            and NON_NCR_DESTINATION_RE.search(lowered_text)
+        ):
+            template = self._template_by_id("delivery_out_of_area") or {}
+            response_text = template.get("response") or self._generic_fallback()
+            facts["last_route_source"] = "canonical_delivery_out_of_area"
+            facts["last_topic"] = "delivery"
+            facts["last_knowledge_ids"] = ["approved:delivery_out_of_area"]
+            facts["last_knowledge_sufficiency"] = {
+                Intent.DELIVERY_QUERY.value: True,
+            }
+            facts["knowledge_sufficient"] = True
+            facts["last_intents"] = [Intent.DELIVERY_QUERY.value]
+            session_memory.add_turn(user_id, channel, user_message, response_text)
+            return response_text, True, "delivery_out_of_area", None
 
         # A referral is a preference only for genuinely vague openings. It
         # runs before conversational shorthand (such as a bare "price"), so

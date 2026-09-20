@@ -42,7 +42,10 @@ from camellia.escalator import escalator
 from camellia.handoff import (
     customer_facing_link_message,
     customer_facing_notice,
+    customer_query_summary,
+    handoff_contact_mode,
     get_or_create_handoff,
+    is_human_help_request,
     mark_referred,
     retire_order_state,
     staff_summary,
@@ -526,6 +529,7 @@ def _process_instagram_event(
     shared_reel: Optional[Dict[str, str]] = None,
     shared_post_id: Optional[str] = None,
     shared_source_type: Optional[str] = None,
+    instagram_username: Optional[str] = None,
 ) -> None:
     """
     Matches, logs, escalates and replies for one Instagram DM.
@@ -715,7 +719,12 @@ def _process_instagram_event(
             "bengali_home_table_payment",
             "GUARD_staff_names_manager_contact",
         }
-        informational_answer = template_id in informational_templates
+        client_approved_answer = bool(
+            template_id and template_id.startswith("client_approved_")
+            and template_id != "client_approved_order_ready_handoff"
+        )
+        informational_answer = template_id in informational_templates or client_approved_answer
+        explicit_human_help = is_human_help_request(customer_message)
         needs_escalation = (
             (not was_matched and not informational_answer)
             or (
@@ -726,7 +735,9 @@ def _process_instagram_event(
                 "explicit_escalation",
                 "order_draft_receipt",
                 "order_next_steps",
+                "client_approved_order_ready_handoff",
             )
+            or explicit_human_help
         )
         log.info(
             "INSTAGRAM_OUTPUT_POLICY template=%s matched=%s informational=%s "
@@ -738,8 +749,14 @@ def _process_instagram_event(
             bool(needs_escalation),
         )
         if needs_escalation:
+            contact_mode = handoff_contact_mode(
+                customer_message, template_id=template_id,
+            )
             reason = (
-                "Order Confirmation & Intake Request" if was_matched
+                "Order Confirmation & Intake Request"
+                if contact_mode == "whatsapp_order"
+                else "Generic Human Support"
+                if explicit_human_help
                 else "Unmatched Instagram Query / Sensitive Request"
             )
             # Created before the staff alert (not after) so the alert can name
@@ -749,11 +766,18 @@ def _process_instagram_event(
             # cart into the handoff. "Talk to human" is not one of those, and
             # treating it as one is what attached a days-old Jolbhora order to
             # a plain request to speak to somebody.
-            is_order_handoff = template_id in ("order_draft_receipt", "order_next_steps")
+            is_order_handoff = template_id in (
+                "order_draft_receipt", "order_next_steps", "client_approved_order_ready_handoff",
+            )
             handoff = get_or_create_handoff(
                 user_id=sender_id, channel="instagram", reason=reason,
                 user_message=customer_message, facts=facts,
                 include_order=is_order_handoff,
+                instagram_username=instagram_username,
+                query_summary=customer_query_summary(
+                    customer_message, contact_mode=contact_mode, reason=reason,
+                ),
+                contact_mode=contact_mode,
             )
             # A repeated "human"/"can someone help" against an already-active
             # handoff reuses the reference (above) and must not re-alert
@@ -771,20 +795,27 @@ def _process_instagram_event(
                     },
                 )
             order_summary = handoff.get("verified_order")
-            if template_id == "order_draft_receipt":
+            if template_id in ("order_draft_receipt", "client_approved_order_ready_handoff"):
                 response_text = response_text.rstrip()
             else:
                 response_text = customer_facing_notice(
                     finalized_order=template_id == "order_next_steps"
                 )
-            link_message = customer_facing_link_message(handoff["handoff_ref"], order_summary)
+            link_message = (
+                customer_facing_link_message(handoff["handoff_ref"], order_summary)
+                if contact_mode == "whatsapp_order" else None
+            )
             mark_referred(handoff["handoff_ref"])
             if is_order_handoff and order_summary:
                 # The order is now on its way to a human, prefilled in the
                 # link above. Instagram's copy has done its job; keeping it
                 # would make it luggage for every later enquiry.
                 retire_order_state(sender_id, "instagram")
-            template_id = "instagram_whatsapp_handoff"
+            template_id = (
+                "instagram_whatsapp_handoff"
+                if contact_mode == "whatsapp_order"
+                else "instagram_support_handoff"
+            )
             image_url = None
 
         trace["source_context_used"] = bool(facts.get("source_context_used"))
@@ -793,7 +824,7 @@ def _process_instagram_event(
         )
         trace["source_referential_intent"] = facts.get("source_referential_intent")
         logged_response = response_text
-        if needs_escalation:
+        if needs_escalation and link_message:
             logged_response = f"{response_text}\n\n{link_message}"
         conversation_id = db.log_conversation(
             sender_id, "instagram", customer_message, logged_response, was_matched,
@@ -804,7 +835,7 @@ def _process_instagram_event(
             sender_id, response_text, image_url=image_url,
             inbound_message_id=conversation_id, response_type="reply",
         )
-        if needs_escalation:
+        if needs_escalation and link_message:
             send_instagram_reply(
                 sender_id, link_message,
                 inbound_message_id=conversation_id, response_type="handoff",

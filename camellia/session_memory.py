@@ -75,6 +75,9 @@ class SessionMemoryManager:
                 "last_llm_called": False,
                 "last_fallback_used": False,
                 "last_grounding": None,
+                "decision_lane": None,
+                "route_trace": {},
+                "last_handoff_reason": None,
                 "last_escalation_status": None,
                 "cart": [],
                 "order_draft": {
@@ -134,7 +137,8 @@ class SessionMemoryManager:
             "clarify_sent", "last_topic",
             "last_intents", "last_entities", "last_actions", "knowledge_sufficient",
             "last_knowledge_sufficiency", "last_knowledge_ids", "last_llm_called",
-            "last_fallback_used", "last_grounding", "last_escalation_status",
+            "last_fallback_used", "last_grounding", "decision_lane", "route_trace",
+            "last_handoff_reason", "last_escalation_status",
             "last_nlu_confidence", "last_nlu_reason",
             "cart", "order_draft",
         }
