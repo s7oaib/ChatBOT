@@ -47,6 +47,7 @@ from camellia.handoff import (
     get_or_create_handoff,
     is_human_help_request,
     mark_referred,
+    normalize_instagram_username,
     retire_order_state,
     staff_summary,
 )
@@ -3327,6 +3328,11 @@ def get_escalations_list(limit: int = 50, status: Optional[str] = None, x_admin_
 
 def _safe_admin_handoff_label(handoff: Dict[str, Any]) -> str:
     """Choose an operator-friendly label without ever falling back to Meta ID."""
+    source_user_id = str(handoff.get("source_user_id") or "")
+    for value in (handoff.get("instagram_username"),):
+        candidate = normalize_instagram_username(value)
+        if candidate and candidate != source_user_id:
+            return candidate
     try:
         known = json.loads(handoff.get("known_entities") or "{}")
     except (TypeError, ValueError):
@@ -3334,9 +3340,9 @@ def _safe_admin_handoff_label(handoff: Dict[str, Any]) -> str:
     if not isinstance(known, dict):
         known = {}
     for key in ("instagram_username", "username", "display_name", "customer_name"):
-        value = str(known.get(key) or "").strip()
-        if value and value != str(handoff.get("source_user_id") or ""):
-            return value
+        candidate = normalize_instagram_username(known.get(key))
+        if candidate and candidate != source_user_id:
+            return candidate
     return "Instagram customer"
 
 
@@ -7552,9 +7558,10 @@ THIS WEEK'S BENGAL SPECIALS
             if (button) button.classList.add('active');
         }
 
-        function showGroup(group) {
+        function showGroup(group, selectedTabId = null) {
             document.querySelectorAll('.panel-card').forEach(panel => {
                 let visible = panel.dataset.group === group;
+                if (group === 'menu' && selectedTabId) visible = visible && panel.id === selectedTabId;
                 if (group === 'instagram_content' && panel.id === 'tab-ad-routing') visible = visible && instagramContentSubview === 'routing';
                 if (group === 'instagram_content' && panel.id === 'tab-instagram-content') visible = visible && instagramContentSubview !== 'routing';
                 panel.style.display = visible ? 'block' : 'none';
@@ -7567,7 +7574,7 @@ THIS WEEK'S BENGAL SPECIALS
             if (!group) return;
             if (el) { document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active')); el.classList.add('active'); }
             else activatePrimaryNav(group);
-            showGroup(group);
+            showGroup(group, group === 'menu' ? tabId : null);
             if (options.updateHistory !== false) setTabUrl(tabId);
 
             // Everything in the group is on screen at once, so everything in it
@@ -7661,12 +7668,19 @@ THIS WEEK'S BENGAL SPECIALS
             const unseenClass = item.seen ? '' : ' unseen';
             const status = String(item.status || 'WAITING_FOR_HUMAN').toUpperCase();
             const statusClass = status === 'RESUMED' ? '' : ' waiting';
+            const customer = handoffCustomerIdentity(item);
             return `<article class="handoff-card${unseenClass}" tabindex="0" data-handoff-ref="${escapeHtml(item.handoff_ref || '')}">
-                <div class="handoff-card-top"><div><div class="handoff-name">${escapeHtml(item.customer_display_name || 'Instagram customer')}</div><div class="handoff-ref">${escapeHtml(item.handoff_ref || 'CAM')}</div></div><span class="ig-media-status${statusClass}">${escapeHtml(status)}</span></div>
+                <div class="handoff-card-top"><div><div class="handoff-name">Customer: ${escapeHtml(customer)}</div><div class="handoff-ref">${escapeHtml(item.handoff_ref || 'CAM')}</div></div><span class="ig-media-status${statusClass}">${escapeHtml(status)}</span></div>
                 <div class="handoff-summary">${escapeHtml(item.reason || 'Human support requested')}${item.summary && !compact ? `\n${escapeHtml(item.summary)}` : ''}</div>
                 <div class="handoff-meta">${escapeHtml(formatAdminTimestamp(item.created_at))}${item.unresolved_topic ? ` · ${escapeHtml(item.unresolved_topic)}` : ''}</div>
                 <button class="btn-secondary" type="button" data-handoff-open="${escapeHtml(item.handoff_ref || '')}" style="justify-self:start;padding:7px 10px;font-size:.74rem;">Open handoff</button>
             </article>`;
+        }
+
+        function handoffCustomerIdentity(item) {
+            const value = String(item?.customer_display_name || '').trim();
+            if (!value || value === 'Instagram customer') return 'Instagram customer';
+            return `@${value.replace(/^@+/, '')}`;
         }
 
         function renderHandoffs() {
@@ -7712,7 +7726,7 @@ THIS WEEK'S BENGAL SPECIALS
         function showHandoffToast(item) {
             const stack = document.getElementById('adminToastStack');
             if (!stack) return;
-            const toast = document.createElement('div'); toast.className = 'handoff-toast'; toast.innerHTML = `<b>New handoff</b><br>${escapeHtml(item.customer_display_name || 'Instagram customer')} · ${escapeHtml(item.reason || 'Human support requested')}`;
+            const toast = document.createElement('div'); toast.className = 'handoff-toast'; toast.innerHTML = `<b>New handoff</b><br>Customer: ${escapeHtml(handoffCustomerIdentity(item))} · ${escapeHtml(item.reason || 'Human support requested')}`;
             toast.addEventListener('click', () => { openHandoffDetails(item.handoff_ref); toast.remove(); });
             stack.appendChild(toast); setTimeout(() => toast.remove(), 8000);
         }
@@ -7739,9 +7753,9 @@ THIS WEEK'S BENGAL SPECIALS
             const drawer = document.getElementById('contentDetailsDrawer'); const backdrop = document.getElementById('contentDetailsBackdrop');
             const status = String(item.status || 'WAITING_FOR_HUMAN').toUpperCase();
             document.getElementById('contentDetailsType').innerText = 'Customer handoff';
-            document.getElementById('contentDetailsTitle').innerText = item.customer_display_name || 'Instagram customer';
+            document.getElementById('contentDetailsTitle').innerText = `Customer: ${handoffCustomerIdentity(item)}`;
             document.getElementById('contentDetailsPreview').innerHTML = '<div style="font-size:3rem;color:#8b97a8;">↗</div>';
-            document.getElementById('contentDetailsFacts').innerHTML = [['CAM reference', item.handoff_ref], ['Status', status], ['Reason', item.reason], ['Summary', item.summary || '—'], ['Created', formatAdminTimestamp(item.created_at)], ['Updated', formatAdminTimestamp(item.updated_at || item.created_at)]].map(([label, value]) => `<div class="drawer-fact"><span class="drawer-fact-label">${escapeHtml(label)}</span><span class="drawer-fact-value">${escapeHtml(value)}</span></div>`).join('');
+            document.getElementById('contentDetailsFacts').innerHTML = [['Customer', handoffCustomerIdentity(item)], ['CAM reference', item.handoff_ref], ['Status', status], ['Reason', item.reason], ['Summary', item.summary || '—'], ['Created', formatAdminTimestamp(item.created_at)], ['Updated', formatAdminTimestamp(item.updated_at || item.created_at)]].map(([label, value]) => `<div class="drawer-fact"><span class="drawer-fact-label">${escapeHtml(label)}</span><span class="drawer-fact-value">${escapeHtml(value)}</span></div>`).join('');
             const resumeAction = status === 'WAITING_FOR_HUMAN' || status === 'CREATED'
                 ? `<button class="btn-secondary" type="button" onclick="resumeAdminHandoff('${escapeHtml(item.handoff_ref)}')">Resume CAM</button>`
                 : '<span class="ig-media-muted">Read-only history — this CAM is already resumed.</span>';

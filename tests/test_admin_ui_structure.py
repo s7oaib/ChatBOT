@@ -621,6 +621,19 @@ def test_handoff_notifications_are_global_and_persistent(page):
     assert "Read-only history" in page
 
 
+def test_handoff_identity_and_current_menu_actions_are_wired(page):
+    assert "Customer: ${escapeHtml(customer)}" in page
+    assert "function handoffCustomerIdentity" in page
+    assert "function showGroup(group, selectedTabId = null)" in page
+    assert "panel.id === selectedTabId" in page
+    assert "showGroup(group, group === 'menu' ? tabId : null)" in page
+    assert "onclick=\"switchTab('tab-active', null)\"" in page
+    assert "fetch('/admin/menu/active'" in page
+    assert "No published menu is currently serving customers" in page
+    assert "Could not load the current menu" in page
+    assert "← Back to Menu" in page
+
+
 def test_story_cards_open_the_shared_details_drawer(page):
     assert 'class="instagram-gallery"' in page
     assert 'data-story-media-id' in page
