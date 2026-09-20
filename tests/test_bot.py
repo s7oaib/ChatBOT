@@ -18,6 +18,7 @@ from camellia.database import db, Database
 from camellia.ad_gate import ad_gate
 from camellia.responder import responder
 from camellia.escalator import escalator
+from camellia import app as app_module
 from camellia.app import app
 
 class TestCamelliaBot(unittest.TestCase):
@@ -388,6 +389,9 @@ class TestCamelliaBot(unittest.TestCase):
 
         self.assertEqual(res.status_code, 200)
         mock_log.assert_called_once()
+        log_message, log_value = mock_log.call_args.args
+        self.assertNotIn("ig_boom_user", log_message)
+        self.assertEqual(log_value, app_module._safe_identifier_hash("ig_boom_user"))
 
     def test_webhook_rejects_unsigned_payload(self):
         """An unsigned POST must be refused whenever META_APP_SECRET is configured."""

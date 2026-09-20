@@ -841,7 +841,10 @@ def _process_instagram_event(
     except Exception:
         # A background task that raises disappears silently, and the customer
         # is left with no reply and nothing in the logs explaining why.
-        log.exception("Failed to process Instagram message from %s.", sender_id)
+        log.exception(
+            "Failed to process Instagram message from user_hash=%s.",
+            _safe_identifier_hash(sender_id),
+        )
 
 
 # Webhook events the bot received and did not answer. Kept in memory and
