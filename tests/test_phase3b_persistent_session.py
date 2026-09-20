@@ -138,8 +138,8 @@ def test_confirmed_template_is_canonicalized_before_instagram_last_mile(tmp_path
         )
         row = _send(database, user_id, "how long to deliver sondesh")
         assert row["template_id"] == "sondesh_dispatch_time"
-            from camellia.client_qa import REGISTRY_BY_ID
-            assert sent[-1]["text"] == REGISTRY_BY_ID["sondesh_delivery_time"].answer
+        from camellia.client_qa import REGISTRY_BY_ID
+        assert sent[-1]["text"] == REGISTRY_BY_ID["sondesh_delivery_time"].answer
         assert "Trusted dairies" not in sent[-1]["text"]
         assert not escalated
 
