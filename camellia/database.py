@@ -2,8 +2,10 @@ import os
 import re
 import sqlite3
 import json
+import time
 from difflib import SequenceMatcher
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from typing import Dict, Any, List, Optional, Tuple
 from camellia.config import config
 from camellia.text_rules import strip_flower_emoji
@@ -14,6 +16,72 @@ from camellia.candidate_safety import (
     normalize_question,
     validate_candidate_answer,
 )
+
+_KOLKATA_TZ = ZoneInfo("Asia/Kolkata")
+
+
+def _parse_trustworthy_datetime(value: Optional[str]) -> Optional[datetime]:
+    """Parse an ISO-8601 timestamp into a timezone-aware UTC datetime.
+
+    Returns None for anything empty or unparseable — callers must treat that
+    as "age unknown", never as a proxy for "old" or "young". Accepts ``Z``,
+    and explicit ``+00:00``-style offsets. A timezone-naive external timestamp
+    is deliberately rejected: the caller has no evidence for which timezone
+    Meta meant. Comparison must always happen on the resulting datetime
+    instant, never on the raw string, so a non-UTC offset compares correctly
+    against a UTC cutoff.
+    """
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(timezone.utc)
+
+
+def _story_publication_date_kolkata(published_at: Optional[str]) -> Optional[str]:
+    """Derive the Asia/Kolkata publication date (YYYY-MM-DD) from a trustworthy
+    ``published_at`` timestamp, or None if it cannot be parsed. Never guesses."""
+    raw = str(published_at or "").strip()
+    if not raw:
+        return None
+    trustworthy = _parse_trustworthy_datetime(raw)
+    if trustworthy is None:
+        return None
+    return trustworthy.astimezone(_KOLKATA_TZ).strftime("%Y-%m-%d")
+
+
+def _ordinal_suffix(number: int) -> str:
+    if 10 <= (number % 100) <= 20:
+        return "th"
+    return {1: "st", 2: "nd", 3: "rd"}.get(number % 10, "th")
+
+
+def format_story_sequence_label(number: Optional[int]) -> Optional[str]:
+    """Admin-facing ordinal label, e.g. '2nd Story'. Never used for routing."""
+    if number is None:
+        return None
+    try:
+        value = int(number)
+    except (TypeError, ValueError):
+        return None
+    return f"{value}{_ordinal_suffix(value)} Story"
+
+
+def format_story_sequence_date_display(date_value: Optional[str]) -> Optional[str]:
+    """Human-facing date, e.g. '17 Sep 2026', from a stored YYYY-MM-DD."""
+    raw = str(date_value or "").strip()
+    if not raw:
+        return None
+    try:
+        return datetime.strptime(raw, "%Y-%m-%d").strftime("%d %b %Y")
+    except ValueError:
+        return None
+
 
 class Database:
     def __init__(self, db_path: str = None):
@@ -186,40 +254,6 @@ class Database:
             );
             """)
             cursor.execute("""
-            CREATE TABLE IF NOT EXISTS admin_recovery_codes (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                code_hash TEXT NOT NULL UNIQUE,
-                created_at REAL NOT NULL,
-                used_at REAL
-            );
-            """)
-            cursor.execute("""
-            CREATE TABLE IF NOT EXISTS admin_credentials (
-                id INTEGER PRIMARY KEY CHECK (id = 1),
-                username TEXT NOT NULL,
-                password_hash TEXT NOT NULL,
-                created_at REAL NOT NULL,
-                updated_at REAL NOT NULL
-            );
-            """)
-            cursor.execute("""
-            CREATE TABLE IF NOT EXISTS admin_password_reset_tokens (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                username TEXT NOT NULL,
-                token_hash TEXT NOT NULL UNIQUE,
-                created_at REAL NOT NULL,
-                expires_at REAL NOT NULL,
-                used_at REAL,
-                cancelled_at REAL,
-                requested_ip_hash TEXT,
-                status TEXT NOT NULL DEFAULT 'ACTIVE'
-            );
-            """)
-            cursor.execute(
-                "CREATE INDEX IF NOT EXISTS idx_admin_reset_tokens_active "
-                "ON admin_password_reset_tokens(username, status, expires_at)"
-            )
-            cursor.execute("""
             CREATE TABLE IF NOT EXISTS admin_security_audit (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 event_type TEXT NOT NULL,
@@ -319,6 +353,27 @@ class Database:
                 context_data TEXT,
                 status TEXT DEFAULT 'pending',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+
+            # Durable staff notification outbox. The escalation row is the
+            # source of truth for the payload; this table tracks one delivery
+            # attempt per escalation without putting customer work on an
+            # in-memory callback that disappears on restart.
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS human_notification_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_key TEXT NOT NULL UNIQUE,
+                event_type TEXT NOT NULL DEFAULT 'ESCALATION_CREATED',
+                escalation_id INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'PENDING',
+                attempts INTEGER NOT NULL DEFAULT 0,
+                next_attempt_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                locked_until TIMESTAMP,
+                last_error TEXT,
+                sent_at TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
             """)
 
@@ -557,16 +612,31 @@ class Database:
                 knowledge_gap INTEGER DEFAULT 0,
                 escalation_status TEXT,
                 route_source TEXT,
+                decision_lane TEXT,
+                state_context_used INTEGER DEFAULT 0,
+                source_context_influenced INTEGER DEFAULT 0,
+                handoff_reason TEXT,
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
             """)
             # An existing deployment's table predates route_source; add it
             # without disturbing rows already written.
             cursor.execute("PRAGMA table_info(message_route_audit)")
-            if "route_source" not in {row[1] for row in cursor.fetchall()}:
+            route_audit_columns = {row[1] for row in cursor.fetchall()}
+            if "route_source" not in route_audit_columns:
                 cursor.execute(
                     "ALTER TABLE message_route_audit ADD COLUMN route_source TEXT"
                 )
+            for column, declaration in (
+                ("decision_lane", "TEXT"),
+                ("state_context_used", "INTEGER DEFAULT 0"),
+                ("source_context_influenced", "INTEGER DEFAULT 0"),
+                ("handoff_reason", "TEXT"),
+            ):
+                if column not in route_audit_columns:
+                    cursor.execute(
+                        f"ALTER TABLE message_route_audit ADD COLUMN {column} {declaration}"
+                    )
 
             # Instagram -> WhatsApp handoff references. handoff_ref is the
             # opaque customer-facing token ("CAM-48371"); nothing else in this
@@ -586,9 +656,36 @@ class Database:
                 unresolved_topic TEXT,
                 status TEXT NOT NULL DEFAULT 'CREATED',
                 escalation_id INTEGER,
+                instagram_username TEXT,
+                query_summary TEXT,
+                contact_mode TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 expires_at TIMESTAMP
+            );
+            """)
+            # These fields make the generic-callback versus purchase-handoff
+            # contract durable.  Add them for existing volumes without
+            # rewriting or deleting handoff history.
+            cursor.execute("PRAGMA table_info(cross_channel_handoffs)")
+            handoff_columns = {row[1] for row in cursor.fetchall()}
+            for column, declaration in (
+                ("instagram_username", "TEXT"),
+                ("query_summary", "TEXT"),
+                ("contact_mode", "TEXT"),
+            ):
+                if column not in handoff_columns:
+                    cursor.execute(
+                        f"ALTER TABLE cross_channel_handoffs ADD COLUMN {column} {declaration}"
+                    )
+
+            # Admin notification state is deliberately separate from the
+            # handoff lifecycle. Reading a notification must never mutate a
+            # CAM, and marking it seen must never change WAITING_FOR_HUMAN.
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS admin_handoff_views (
+                handoff_ref TEXT PRIMARY KEY,
+                seen_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
             """)
 
@@ -692,6 +789,18 @@ class Database:
             );
             """)
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_instagram_story_sources_seen ON instagram_story_sources(last_seen)")
+            # Story sync metadata is additive.  The webhook evidence fields
+            # above remain the source of truth for existing captured Stories;
+            # these fields let the opt-in Meta inventory keep its own safe
+            # lifecycle data without changing route identity or mappings.
+            for column, declaration in (
+                ("media_type", "TEXT"),
+                ("temporary_url", "TEXT"),
+                ("permalink", "TEXT"),
+                ("published_at", "TIMESTAMP"),
+                ("source", "TEXT NOT NULL DEFAULT 'WEBHOOK_STORY_REPLY'"),
+            ):
+                self._ensure_column(cursor, "instagram_story_sources", column, declaration)
             # Admin deletion is a local tombstone, never a hard delete. Keep
             # existing captured evidence and allow a later webhook to update
             # last-seen metadata without silently restoring visibility.
@@ -700,6 +809,31 @@ class Database:
             self._ensure_column(cursor, "instagram_story_sources", "deleted_by", "TEXT")
             self._ensure_column(cursor, "instagram_story_sources", "restored_at", "TIMESTAMP")
             self._ensure_column(cursor, "instagram_story_sources", "restored_by", "TEXT")
+
+            # Phase 3C-A.1 lifecycle: distinguishes a Story that naturally
+            # expired from one that disappeared from Meta's inventory before
+            # its normal lifetime — the latter only after two consecutive
+            # COMPLETE successful syncs confirm it absent (see
+            # reconcile_instagram_story_lifecycle). Never a hard delete.
+            self._ensure_column(cursor, "instagram_story_sources", "sync_miss_count", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(cursor, "instagram_story_sources", "last_confirmed_active_at", "TIMESTAMP")
+            self._ensure_column(cursor, "instagram_story_sources", "removed_at", "TIMESTAMP")
+            self._ensure_column(cursor, "instagram_story_sources", "removed_reason", "TEXT")
+            # Phase 3C-A.1 sequence: an admin-facing ordinal ("2nd Story"),
+            # never a routing identity. Assigned once and never renumbered —
+            # see backfill_instagram_story_sequence_numbers.
+            self._ensure_column(cursor, "instagram_story_sources", "story_sequence_number", "INTEGER")
+            self._ensure_column(cursor, "instagram_story_sources", "story_sequence_date", "TEXT")
+
+            # One short-lived lease protects an idempotent sync when more than
+            # one process is serving the same durable SQLite volume.
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS instagram_story_sync_locks (
+                lock_name TEXT PRIMARY KEY,
+                owner TEXT,
+                locked_until REAL NOT NULL DEFAULT 0
+            );
+            """)
 
             # A shared post carries no shortcode/URL Meta will put in a
             # webhook, and its messaging-attachment id has not been shown to
@@ -912,6 +1046,11 @@ class Database:
         # answers after the base schema is committed. This keeps startup
         # migration-safe and leaves current Kolkata/business knowledge intact.
         self._retire_outdated_home_table_knowledge()
+
+        # Existing Phase 3C-A rows predate sequence numbering; backfill them
+        # deterministically once the schema above is committed. Uses its own
+        # connection, so it must run after the migration transaction closes.
+        self.backfill_instagram_story_sequence_numbers()
 
     def set_ad_product_route(self, ad_id: str, product: str) -> Dict[str, Any]:
         """Creates or updates the product shown first for one Meta ad ID."""
@@ -1285,7 +1424,7 @@ class Database:
         media_id = str(story_media_id or "").strip()
         if not media_id:
             return None
-        now = seen_at or datetime.utcnow().isoformat()
+        now = seen_at or datetime.now(timezone.utc).isoformat()
         metadata = json.dumps(event_metadata or {}, ensure_ascii=False, sort_keys=True)
         with self.get_connection() as conn:
             conn.execute(
@@ -1308,6 +1447,220 @@ class Database:
                 "SELECT * FROM instagram_story_sources WHERE story_media_id = ?", (media_id,)
             ).fetchone()
         return dict(row) if row else None
+
+    def upsert_instagram_story_sync(
+        self,
+        story_media_id: str,
+        *,
+        media_type: Optional[str] = None,
+        temporary_url: Optional[str] = None,
+        permalink: Optional[str] = None,
+        published_at: Optional[str] = None,
+        event_metadata: Optional[Dict[str, Any]] = None,
+        seen_at: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Upsert one exact Story returned by Meta's owned-Stories edge.
+
+        This method deliberately never touches admin tombstones or routes.
+        A sync can refresh Meta metadata, but mapping, archive, disable and
+        restore decisions remain operator-owned.
+        """
+        media_id = str(story_media_id or "").strip()
+        if not media_id:
+            return None
+        now = seen_at or datetime.now(timezone.utc).isoformat()
+        metadata = json.dumps(event_metadata or {}, ensure_ascii=False, sort_keys=True)
+        with self.get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO instagram_story_sources
+                    (story_media_id, temporary_url, story_status, first_seen,
+                     last_seen, last_event_metadata, media_type, permalink,
+                     published_at, source, sync_miss_count, last_confirmed_active_at)
+                VALUES (?, ?, 'ACTIVE', ?, ?, ?, ?, ?, ?, 'META_STORY_SYNC', 0, ?)
+                ON CONFLICT(story_media_id) DO UPDATE SET
+                    temporary_url=COALESCE(excluded.temporary_url, instagram_story_sources.temporary_url),
+                    story_status='ACTIVE',
+                    sync_miss_count=0,
+                    last_confirmed_active_at=excluded.last_confirmed_active_at,
+                    last_seen=excluded.last_seen,
+                    last_event_metadata=excluded.last_event_metadata,
+                    media_type=COALESCE(excluded.media_type, instagram_story_sources.media_type),
+                    permalink=COALESCE(excluded.permalink, instagram_story_sources.permalink),
+                    published_at=COALESCE(excluded.published_at, instagram_story_sources.published_at),
+                    source='META_STORY_SYNC'
+                """,
+                (media_id, temporary_url, now, now, metadata,
+                 media_type, permalink, published_at, now),
+            )
+            conn.commit()
+            row = conn.execute(
+                "SELECT * FROM instagram_story_sources WHERE story_media_id = ?", (media_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def reconcile_instagram_story_lifecycle(
+        self, active_story_ids: List[str], *, expired_before: str, now: Optional[str] = None,
+    ) -> Dict[str, int]:
+        """Apply Story lifecycle rules after one COMPLETE successful Meta fetch.
+
+        Only call this once ``active_story_ids`` reflects everything Meta's
+        owned-Stories edge returned in a fully successful (non-partial, non-
+        failed) fetch — a failure, timeout, rate limit, or malformed/partial
+        page must never reach here, since only a complete successful fetch is
+        trustworthy evidence that an ACTIVE Story is actually absent.
+
+        A sync-owned ACTIVE Story absent from this fetch is classified only
+        when its ``published_at`` parses into a trustworthy timezone-aware
+        instant (see ``_parse_trustworthy_datetime`` — never a raw string
+        comparison, so a non-UTC offset compares correctly against the UTC
+        cutoff):
+        - marked EXPIRED if that instant is at/before ``expired_before``
+          (it lived out its normal lifetime), regardless of miss count;
+        - otherwise, on its first complete miss, only has ``sync_miss_count``
+          incremented and stays ACTIVE (never hidden after one miss);
+        - marked REMOVED only on its second consecutive complete miss, with
+          ``removed_at``/``removed_reason`` set.
+
+        ``REMOVED`` is a claim that a Story went missing *before* its normal
+        expiry — a claim this code cannot make without knowing its age. So a
+        Story with a missing or malformed ``published_at`` is never marked
+        EXPIRED or REMOVED, no matter how many complete misses accumulate:
+        ``sync_miss_count`` still advances as pending/unknown-age evidence,
+        but the row stays ACTIVE. Age is never guessed from first_seen,
+        last_seen, the Story ID, Meta's array order, or the sequence number.
+
+        Admin-deleted rows and rows already EXPIRED/REMOVED are left alone —
+        this never restores an admin tombstone and never re-litigates a
+        terminal lifecycle state. A Story returned by Meta again (including a
+        previously REMOVED one) is reactivated exclusively through
+        ``upsert_instagram_story_sync``, which resets ``sync_miss_count`` and
+        preserves mapping, routes, and admin_deleted untouched.
+        """
+        ids = [str(value or "").strip() for value in active_story_ids if str(value or "").strip()]
+        now = now or datetime.now(timezone.utc).isoformat()
+        expired_before_dt = _parse_trustworthy_datetime(expired_before)
+        counts = {"expired": 0, "removed": 0, "miss_pending": 0}
+        with self.get_connection() as conn:
+            params: List[Any] = []
+            where = "source='META_STORY_SYNC' AND admin_deleted=0 AND story_status='ACTIVE'"
+            if ids:
+                where += f" AND story_media_id NOT IN ({','.join('?' for _ in ids)})"
+                params.extend(ids)
+            missing_rows = conn.execute(
+                f"SELECT story_media_id, published_at, sync_miss_count FROM instagram_story_sources WHERE {where}",
+                tuple(params),
+            ).fetchall()
+            for row in missing_rows:
+                story_id = row["story_media_id"]
+                published_dt = _parse_trustworthy_datetime(row["published_at"])
+                miss_count = int(row["sync_miss_count"] or 0)
+                if published_dt is not None and expired_before_dt is not None and published_dt <= expired_before_dt:
+                    conn.execute(
+                        "UPDATE instagram_story_sources SET story_status='EXPIRED' WHERE story_media_id=?",
+                        (story_id,),
+                    )
+                    counts["expired"] += 1
+                elif published_dt is not None and miss_count >= 1:
+                    conn.execute(
+                        """
+                        UPDATE instagram_story_sources
+                        SET story_status='REMOVED', removed_at=?, removed_reason='missing_from_two_complete_meta_syncs'
+                        WHERE story_media_id=?
+                        """,
+                        (now, story_id),
+                    )
+                    counts["removed"] += 1
+                else:
+                    # Either still within its first miss with a trustworthy
+                    # timestamp, or the timestamp is missing/malformed —
+                    # either way, age cannot justify hiding it yet.
+                    conn.execute(
+                        "UPDATE instagram_story_sources SET sync_miss_count=sync_miss_count+1 WHERE story_media_id=?",
+                        (story_id,),
+                    )
+                    counts["miss_pending"] += 1
+            conn.commit()
+        return counts
+
+    def backfill_instagram_story_sequence_numbers(self) -> int:
+        """Assign a stable admin-facing sequence number/date to Stories missing one.
+
+        Numbering is derived only from ``published_at`` (Asia/Kolkata
+        publication date) and ``story_media_id`` as a deterministic tie-
+        breaker — never Meta's array order, the numeric Story ID, first/last
+        seen, or any content signal. Already-assigned rows are never
+        renumbered: a new row for an existing date is appended after the
+        current maximum for that date. Rows without a trustworthy
+        ``published_at`` are left unassigned rather than guessed. Touches
+        only ``story_sequence_number``/``story_sequence_date`` — never
+        mapping, routes, topic, admin tombstone, history, or the Story ID.
+        """
+        with self.get_connection() as conn:
+            unassigned = conn.execute(
+                "SELECT story_media_id, published_at FROM instagram_story_sources "
+                "WHERE story_sequence_number IS NULL AND published_at IS NOT NULL"
+            ).fetchall()
+            by_date: Dict[str, List[Tuple[datetime, str]]] = {}
+            for row in unassigned:
+                pub_date = _story_publication_date_kolkata(row["published_at"])
+                if not pub_date:
+                    continue
+                parsed = _parse_trustworthy_datetime(row["published_at"])
+                if parsed is None:
+                    continue
+                by_date.setdefault(pub_date, []).append((parsed, row["story_media_id"]))
+            updated = 0
+            for pub_date, items in by_date.items():
+                items.sort(key=lambda pair: (pair[0], pair[1]))
+                existing_max = conn.execute(
+                    "SELECT COALESCE(MAX(story_sequence_number), 0) FROM instagram_story_sources "
+                    "WHERE story_sequence_date = ?",
+                    (pub_date,),
+                ).fetchone()[0]
+                next_number = int(existing_max or 0) + 1
+                for _, story_media_id in items:
+                    conn.execute(
+                        "UPDATE instagram_story_sources SET story_sequence_number=?, story_sequence_date=? "
+                        "WHERE story_media_id=?",
+                        (next_number, pub_date, story_media_id),
+                    )
+                    next_number += 1
+                    updated += 1
+            conn.commit()
+        return updated
+
+    def try_acquire_instagram_story_sync_lock(
+        self, owner: str, lease_seconds: float = 120.0,
+    ) -> bool:
+        """Atomically acquire the shared sync lease, or report it is busy."""
+        now = time.time()
+        lease_until = now + max(1.0, float(lease_seconds))
+        lock_name = "story_inventory"
+        with self.get_connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT owner, locked_until FROM instagram_story_sync_locks WHERE lock_name=?",
+                (lock_name,),
+            ).fetchone()
+            if row and float(row["locked_until"] or 0) > now and row["owner"] != owner:
+                conn.rollback()
+                return False
+            conn.execute(
+                "INSERT INTO instagram_story_sync_locks(lock_name, owner, locked_until) "
+                "VALUES (?, ?, ?) ON CONFLICT(lock_name) DO UPDATE SET owner=excluded.owner, locked_until=excluded.locked_until",
+                (lock_name, str(owner)[:128], lease_until),
+            )
+            conn.commit()
+        return True
+
+    def release_instagram_story_sync_lock(self, owner: str) -> None:
+        with self.get_connection() as conn:
+            conn.execute(
+                "UPDATE instagram_story_sync_locks SET locked_until=0 WHERE lock_name=? AND owner=?",
+                ("story_inventory", str(owner)[:128]),
+            )
+            conn.commit()
 
     def list_instagram_story_sources(self, include_deleted: bool = False) -> List[Dict[str, Any]]:
         """Return captured Stories with exact mapping status for admin.
@@ -1349,6 +1702,17 @@ class Database:
                 item["routing_id"] = route["routing_id"] if route else None
                 item["topic_id"] = route["topic_id"] if route else None
                 item["routing_topic"] = route["routing_topic"] if route else None
+                # Admin-only ordinal convenience label — never a routing
+                # identity. story_media_id above remains what any reply/
+                # webhook or mapping actually matches against.
+                sequence_label = format_story_sequence_label(item.get("story_sequence_number"))
+                sequence_date_display = format_story_sequence_date_display(item.get("story_sequence_date"))
+                item["story_sequence_label"] = sequence_label
+                item["story_sequence_date_display"] = sequence_date_display
+                if sequence_label and sequence_date_display:
+                    item["story_sequence_display"] = f"{sequence_label} • {sequence_date_display}"
+                else:
+                    item["story_sequence_display"] = "Story — sequence unavailable"
                 output.append(item)
         return output
 
@@ -1790,6 +2154,8 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_escalations_status_id ON escalations(status, id DESC);",
             "CREATE INDEX IF NOT EXISTS idx_escalations_user ON escalations(user_id);",
             "CREATE INDEX IF NOT EXISTS idx_escalations_created ON escalations(created_at);",
+            "CREATE INDEX IF NOT EXISTS idx_human_notification_due "
+            "ON human_notification_events(status, next_attempt_at, id);",
             # sessions already has a UNIQUE(user_id, channel) index, which
             # serves the per-user lookup; this one serves the dashboard's
             # channel filter with its updated_at ordering and the purge.
@@ -2397,6 +2763,139 @@ class Database:
             conn.commit()
             return cursor.lastrowid
 
+    def enqueue_human_notification(self, escalation_id: int) -> Dict[str, Any]:
+        """Create one durable notification event for an escalation."""
+        event_key = f"escalation:{int(escalation_id)}"
+        with self.get_connection() as conn:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO human_notification_events
+                    (event_key, escalation_id)
+                VALUES (?, ?)
+                """,
+                (event_key, int(escalation_id)),
+            )
+            row = conn.execute(
+                "SELECT * FROM human_notification_events WHERE event_key = ?",
+                (event_key,),
+            ).fetchone()
+            conn.commit()
+            return dict(row)
+
+    def claim_human_notification_events(
+        self, *, limit: int = 10, event_id: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """Lease due outbox events so concurrent workers cannot double-send."""
+        limit = max(1, min(int(limit or 1), 50))
+        with self.get_connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            clauses = [
+                "status IN ('PENDING', 'RETRY')",
+                "next_attempt_at <= CURRENT_TIMESTAMP",
+                "(locked_until IS NULL OR locked_until <= CURRENT_TIMESTAMP)",
+            ]
+            params: List[Any] = []
+            if event_id is not None:
+                clauses.append("id = ?")
+                params.append(int(event_id))
+            params.append(limit)
+            rows = conn.execute(
+                "SELECT * FROM human_notification_events WHERE "
+                + " AND ".join(clauses)
+                + " ORDER BY id LIMIT ?",
+                tuple(params),
+            ).fetchall()
+            claimed = []
+            for row in rows:
+                conn.execute(
+                    """
+                    UPDATE human_notification_events
+                    SET status = 'SENDING', attempts = attempts + 1,
+                        locked_until = datetime('now', '+5 minutes'),
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    """,
+                    (int(row["id"]),),
+                )
+                updated = conn.execute(
+                    "SELECT * FROM human_notification_events WHERE id = ?",
+                    (int(row["id"]),),
+                ).fetchone()
+                claimed.append(dict(updated))
+            conn.commit()
+            return claimed
+
+    def complete_human_notification(
+        self,
+        event_id: int,
+        *,
+        success: bool,
+        skipped: bool = False,
+        retryable: bool = False,
+        error: Optional[str] = None,
+        retry_after_seconds: int = 60,
+    ) -> None:
+        """Record an outbox result without retaining provider secrets."""
+        if skipped:
+            status = "SKIPPED"
+            modifier = None
+        elif success:
+            status = "SENT"
+            modifier = None
+        elif retryable:
+            status = "RETRY"
+            modifier = f"+{max(1, min(int(retry_after_seconds), 86400))} seconds"
+        else:
+            status = "FAILED"
+            modifier = None
+        safe_error = str(error or "")[:500] or None
+        with self.get_connection() as conn:
+            if modifier:
+                conn.execute(
+                    """
+                    UPDATE human_notification_events
+                    SET status = ?, next_attempt_at = datetime('now', ?),
+                        locked_until = NULL, last_error = ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    """,
+                    (status, modifier, safe_error, int(event_id)),
+                )
+            else:
+                conn.execute(
+                    """
+                    UPDATE human_notification_events
+                    SET status = ?, sent_at = CASE WHEN ? = 'SENT' THEN CURRENT_TIMESTAMP ELSE sent_at END,
+                        locked_until = NULL, last_error = ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    """,
+                    (status, status, safe_error, int(event_id)),
+                )
+            conn.commit()
+
+    def get_human_notification_events(
+        self, *, limit: int = 50, status: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Return safe outbox audit metadata for operators."""
+        with self.get_connection() as conn:
+            params: List[Any] = []
+            query = "SELECT * FROM human_notification_events"
+            if status:
+                query += " WHERE status = ?"
+                params.append(status)
+            query += " ORDER BY id DESC LIMIT ?"
+            params.append(max(1, min(int(limit or 1), 200)))
+            return [dict(row) for row in conn.execute(query, tuple(params)).fetchall()]
+
+    def get_human_notification_event(self, event_id: int) -> Optional[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM human_notification_events WHERE id = ?",
+                (int(event_id),),
+            ).fetchone()
+            return dict(row) if row else None
+
     def get_escalations(self, limit: int = 50, status: Optional[str] = None) -> List[Dict[str, Any]]:
         """Retrieve recorded escalations."""
         with self.get_connection() as conn:
@@ -2422,6 +2921,9 @@ class Database:
         unresolved_topic: Optional[str],
         escalation_id: Optional[int],
         expires_at: Optional[str],
+        instagram_username: Optional[str] = None,
+        query_summary: Optional[str] = None,
+        contact_mode: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Records a new opaque handoff reference. Never overwrites one."""
         with self.get_connection() as conn:
@@ -2429,17 +2931,78 @@ class Database:
                 """
                 INSERT INTO cross_channel_handoffs (
                     handoff_ref, source_channel, source_user_id, reason, summary,
-                    known_entities, unresolved_topic, status, escalation_id, expires_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'CREATED', ?, ?)
+                    known_entities, unresolved_topic, status, escalation_id,
+                    instagram_username, query_summary, contact_mode, expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'CREATED', ?, ?, ?, ?, ?)
                 """,
                 (
                     handoff_ref, source_channel, source_user_id, reason, summary,
                     json.dumps(known_entities or {}, ensure_ascii=False), unresolved_topic,
-                    escalation_id, expires_at,
+                    escalation_id, instagram_username, query_summary, contact_mode, expires_at,
                 ),
             )
             conn.commit()
         return self.get_handoff_by_ref(handoff_ref)
+
+    def get_or_create_handoff(
+        self,
+        *,
+        handoff_ref: str,
+        source_channel: str,
+        source_user_id: str,
+        reason: Optional[str],
+        summary: Optional[str],
+        known_entities: Optional[Dict[str, Any]],
+        unresolved_topic: Optional[str],
+        escalation_id: Optional[int],
+        expires_at: Optional[str],
+        instagram_username: Optional[str] = None,
+        query_summary: Optional[str] = None,
+        contact_mode: Optional[str] = None,
+    ) -> tuple[Dict[str, Any], bool]:
+        """Atomically reuse or create one active handoff for a customer.
+
+        The read and insert must share one write transaction. Otherwise two
+        duplicate webhook deliveries handled concurrently can both observe
+        no active handoff and mint two customer references before either
+        transaction commits.
+        """
+        with self.get_connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            existing = conn.execute(
+                """
+                SELECT * FROM cross_channel_handoffs
+                WHERE source_channel = ? AND source_user_id = ?
+                  AND status NOT IN ('RESOLVED', 'EXPIRED', 'RESUMED')
+                  AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
+                ORDER BY id DESC LIMIT 1
+                """,
+                (source_channel, source_user_id),
+            ).fetchone()
+            if existing:
+                conn.commit()
+                return dict(existing), False
+
+            conn.execute(
+                """
+                INSERT INTO cross_channel_handoffs (
+                    handoff_ref, source_channel, source_user_id, reason, summary,
+                    known_entities, unresolved_topic, status, escalation_id,
+                    instagram_username, query_summary, contact_mode, expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'CREATED', ?, ?, ?, ?, ?)
+                """,
+                (
+                    handoff_ref, source_channel, source_user_id, reason, summary,
+                    json.dumps(known_entities or {}, ensure_ascii=False), unresolved_topic,
+                    escalation_id, instagram_username, query_summary, contact_mode, expires_at,
+                ),
+            )
+            created = conn.execute(
+                "SELECT * FROM cross_channel_handoffs WHERE handoff_ref = ?",
+                (handoff_ref,),
+            ).fetchone()
+            conn.commit()
+            return dict(created), True
 
     def get_handoff_by_ref(self, handoff_ref: str) -> Optional[Dict[str, Any]]:
         """Looks up a handoff by its customer-facing reference."""
@@ -2462,7 +3025,7 @@ class Database:
                 """
                 SELECT * FROM cross_channel_handoffs
                 WHERE source_channel = ? AND source_user_id = ?
-                  AND status NOT IN ('RESOLVED', 'EXPIRED')
+                  AND status NOT IN ('RESOLVED', 'EXPIRED', 'RESUMED')
                   AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
                 ORDER BY id DESC LIMIT 1
                 """,
@@ -2479,6 +3042,29 @@ class Database:
             )
             conn.commit()
 
+    def resume_handoff(self, handoff_ref: str) -> Optional[Dict[str, Any]]:
+        """Close the waiting gate through an explicit operator action."""
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM cross_channel_handoffs WHERE handoff_ref = ?",
+                (handoff_ref,),
+            ).fetchone()
+            if not row:
+                return None
+            if row["status"] in {"RESUMED", "RESOLVED", "EXPIRED"}:
+                return dict(row)
+            conn.execute(
+                "UPDATE cross_channel_handoffs SET status = 'RESUMED', "
+                "updated_at = CURRENT_TIMESTAMP WHERE handoff_ref = ?",
+                (handoff_ref,),
+            )
+            conn.commit()
+            updated = conn.execute(
+                "SELECT * FROM cross_channel_handoffs WHERE handoff_ref = ?",
+                (handoff_ref,),
+            ).fetchone()
+            return dict(updated)
+
     def get_handoffs(self, limit: int = 50, status: Optional[str] = None) -> List[Dict[str, Any]]:
         """Staff-facing listing, newest first."""
         with self.get_connection() as conn:
@@ -2492,6 +3078,39 @@ class Database:
                     "SELECT * FROM cross_channel_handoffs ORDER BY id DESC LIMIT ?", (limit,)
                 ).fetchall()
             return [dict(row) for row in rows]
+
+    def get_admin_handoff_seen_refs(self, handoff_refs: Optional[List[str]] = None) -> set[str]:
+        """Return durable operator-seen state without exposing source IDs."""
+        with self.get_connection() as conn:
+            if handoff_refs:
+                placeholders = ",".join("?" for _ in handoff_refs)
+                rows = conn.execute(
+                    f"SELECT handoff_ref FROM admin_handoff_views WHERE handoff_ref IN ({placeholders})",
+                    tuple(handoff_refs),
+                ).fetchall()
+            else:
+                rows = conn.execute("SELECT handoff_ref FROM admin_handoff_views").fetchall()
+            return {str(row["handoff_ref"]) for row in rows}
+
+    def mark_admin_handoff_seen(self, handoff_ref: str) -> bool:
+        """Persist that an operator opened a handoff notification."""
+        reference = str(handoff_ref or "").strip()
+        if not reference:
+            return False
+        with self.get_connection() as conn:
+            exists = conn.execute(
+                "SELECT 1 FROM cross_channel_handoffs WHERE handoff_ref = ?",
+                (reference,),
+            ).fetchone()
+            if not exists:
+                return False
+            conn.execute(
+                "INSERT INTO admin_handoff_views (handoff_ref, seen_at) VALUES (?, CURRENT_TIMESTAMP) "
+                "ON CONFLICT(handoff_ref) DO UPDATE SET seen_at = CURRENT_TIMESTAMP",
+                (reference,),
+            )
+            conn.commit()
+            return True
 
     def get_conversations(self, limit: int = 50, offset: int = 0, channel: Optional[str] = None, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """Retrieve paginated conversation logs."""
@@ -3203,6 +3822,11 @@ class Database:
             cursor = conn.cursor()
             cursor.execute(f"DELETE FROM conversations WHERE {older_than('timestamp')}", (cutoff,))
             removed_conversations = cursor.rowcount
+            cursor.execute(
+                "DELETE FROM human_notification_events WHERE escalation_id IN "
+                "(SELECT id FROM escalations WHERE " + older_than("created_at") + ")",
+                (cutoff,),
+            )
             cursor.execute(f"DELETE FROM escalations WHERE {older_than('created_at')}", (cutoff,))
             removed_escalations = cursor.rowcount
             cursor.execute(f"DELETE FROM sessions WHERE {older_than('updated_at')}", (cutoff,))
@@ -3224,6 +3848,11 @@ class Database:
             cursor = conn.cursor()
             cursor.execute("DELETE FROM conversations WHERE user_id = ?", (user_id,))
             removed_conversations = cursor.rowcount
+            cursor.execute(
+                "DELETE FROM human_notification_events WHERE escalation_id IN "
+                "(SELECT id FROM escalations WHERE user_id = ?)",
+                (user_id,),
+            )
             cursor.execute("DELETE FROM escalations WHERE user_id = ?", (user_id,))
             removed_escalations = cursor.rowcount
             cursor.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
@@ -3359,6 +3988,10 @@ class Database:
         knowledge_gap: bool,
         escalation_status: Optional[str],
         route_source: Optional[str] = None,
+        decision_lane: Optional[str] = None,
+        state_context_used: bool = False,
+        source_context_influenced: bool = False,
+        handoff_reason: Optional[str] = None,
     ) -> int:
         """Records why a customer-facing route was selected.
 
@@ -3373,14 +4006,17 @@ class Database:
                 INSERT INTO message_route_audit (
                     user_id, channel, user_message, route, intents, entities,
                     confidence, knowledge_ids, actions, llm_called, fallback_used,
-                    grounding_result, knowledge_gap, escalation_status, route_source
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    grounding_result, knowledge_gap, escalation_status, route_source,
+                    decision_lane, state_context_used, source_context_influenced, handoff_reason
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 str(user_id), str(channel), user_message, route,
                 json.dumps(intents or []), json.dumps(entities or {}, ensure_ascii=False),
                 confidence, json.dumps(knowledge_ids or []), json.dumps(actions or []),
                 int(bool(llm_called)), int(bool(fallback_used)), grounding_result,
                 int(bool(knowledge_gap)), escalation_status, route_source,
+                decision_lane, int(bool(state_context_used)),
+                int(bool(source_context_influenced)), handoff_reason,
             ))
             conn.commit()
             return int(cursor.lastrowid)
@@ -3991,160 +4627,6 @@ class Database:
         with self.get_connection() as conn:
             conn.execute("UPDATE admin_sessions SET revoked_at=? WHERE username=? AND revoked_at IS NULL", (now, username))
             conn.commit()
-
-    def seed_admin_recovery_codes(self, code_hashes: List[str], now: float) -> None:
-        if not code_hashes:
-            return
-        with self.get_connection() as conn:
-            conn.executemany(
-                "INSERT OR IGNORE INTO admin_recovery_codes (code_hash, created_at) VALUES (?, ?)",
-                ((code_hash, now) for code_hash in code_hashes if code_hash),
-            )
-            conn.commit()
-
-    def consume_admin_recovery_code(self, code: str, verify_hash, now: float) -> bool:
-        with self.get_connection() as conn:
-            rows = conn.execute(
-                "SELECT id, code_hash FROM admin_recovery_codes WHERE used_at IS NULL ORDER BY id"
-            ).fetchall()
-            for row in rows:
-                if verify_hash(code, row["code_hash"]):
-                    updated = conn.execute(
-                        "UPDATE admin_recovery_codes SET used_at=? WHERE id=? AND used_at IS NULL",
-                        (now, row["id"]),
-                    )
-                    conn.commit()
-                    return updated.rowcount == 1
-        return False
-
-    def add_admin_recovery_code(self, code_hash: str, now: float) -> None:
-        with self.get_connection() as conn:
-            conn.execute(
-                "INSERT INTO admin_recovery_codes (code_hash, created_at) VALUES (?, ?)",
-                (code_hash, now),
-            )
-            conn.commit()
-
-    def get_admin_credential(self) -> Optional[Dict[str, Any]]:
-        with self.get_connection() as conn:
-            row = conn.execute(
-                "SELECT id, username, password_hash, created_at, updated_at "
-                "FROM admin_credentials WHERE id=1"
-            ).fetchone()
-        return dict(row) if row else None
-
-    def bootstrap_admin_credential(self, username: str, password_hash: str, now: float) -> bool:
-        """Seed the mutable credential exactly once from deployment config."""
-        if not username or not password_hash:
-            return False
-        with self.get_connection() as conn:
-            cursor = conn.execute(
-                "INSERT OR IGNORE INTO admin_credentials "
-                "(id, username, password_hash, created_at, updated_at) "
-                "VALUES (1, ?, ?, ?, ?)",
-                (username, password_hash, now, now),
-            )
-            conn.commit()
-        return cursor.rowcount == 1
-
-    def update_admin_password(self, username: str, password_hash: str, now: float) -> None:
-        with self.get_connection() as conn:
-            conn.execute(
-                "UPDATE admin_credentials SET username=?, password_hash=?, updated_at=? WHERE id=1",
-                (username, password_hash, now),
-            )
-            conn.commit()
-
-    def issue_admin_password_reset_token(
-        self,
-        username: str,
-        token_hash_value: str,
-        created_at: float,
-        expires_at: float,
-        requested_ip_hash: str,
-    ) -> None:
-        with self.get_connection() as conn:
-            conn.execute(
-                "UPDATE admin_password_reset_tokens SET status='CANCELLED', cancelled_at=? "
-                "WHERE username=? AND status='ACTIVE' AND used_at IS NULL AND cancelled_at IS NULL",
-                (created_at, username),
-            )
-            conn.execute(
-                "INSERT INTO admin_password_reset_tokens "
-                "(username, token_hash, created_at, expires_at, requested_ip_hash, status) "
-                "VALUES (?, ?, ?, ?, ?, 'ACTIVE')",
-                (username, token_hash_value, created_at, expires_at, requested_ip_hash),
-            )
-            conn.commit()
-
-    def get_active_admin_password_reset_token(self, token_hash_value: str, now: float) -> Optional[Dict[str, Any]]:
-        with self.get_connection() as conn:
-            row = conn.execute(
-                "SELECT * FROM admin_password_reset_tokens "
-                "WHERE token_hash=? AND status='ACTIVE' AND used_at IS NULL AND cancelled_at IS NULL",
-                (token_hash_value,),
-            ).fetchone()
-            if not row:
-                return None
-            if float(row["expires_at"]) <= now:
-                conn.execute(
-                    "UPDATE admin_password_reset_tokens SET status='EXPIRED' WHERE id=? AND status='ACTIVE'",
-                    (row["id"],),
-                )
-                conn.commit()
-                return None
-        return dict(row)
-
-    def complete_admin_password_reset(
-        self,
-        token_hash_value: str,
-        password_hash: str,
-        now: float,
-    ) -> Optional[Dict[str, Any]]:
-        """Atomically consume the token, update the credential, and revoke sessions."""
-        with self.get_connection() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            row = conn.execute(
-                "SELECT * FROM admin_password_reset_tokens "
-                "WHERE token_hash=? AND status='ACTIVE' AND used_at IS NULL AND cancelled_at IS NULL",
-                (token_hash_value,),
-            ).fetchone()
-            if not row or float(row["expires_at"]) <= now:
-                if row and float(row["expires_at"]) <= now:
-                    conn.execute(
-                        "UPDATE admin_password_reset_tokens SET status='EXPIRED' WHERE id=? AND status='ACTIVE'",
-                        (row["id"],),
-                    )
-                conn.commit()
-                return None
-            credential_update = conn.execute(
-                "UPDATE admin_credentials SET password_hash=?, updated_at=? WHERE id=1",
-                (password_hash, now),
-            )
-            if credential_update.rowcount != 1:
-                conn.rollback()
-                return None
-            conn.execute(
-                "UPDATE admin_password_reset_tokens SET status='USED', used_at=? "
-                "WHERE id=? AND status='ACTIVE' AND used_at IS NULL",
-                (now, row["id"]),
-            )
-            conn.execute(
-                "UPDATE admin_sessions SET revoked_at=? WHERE username=? AND revoked_at IS NULL",
-                (now, row["username"]),
-            )
-            conn.commit()
-        return dict(row)
-
-    def cancel_admin_password_reset_token(self, token_hash_value: str, now: float) -> bool:
-        with self.get_connection() as conn:
-            cursor = conn.execute(
-                "UPDATE admin_password_reset_tokens SET status='CANCELLED', cancelled_at=? "
-                "WHERE token_hash=? AND status='ACTIVE' AND used_at IS NULL AND cancelled_at IS NULL",
-                (now, token_hash_value),
-            )
-            conn.commit()
-        return cursor.rowcount == 1
 
     def record_admin_security_event(
         self,

@@ -211,6 +211,59 @@ def test_topic_response_order_defaults_and_persists(catalogue_db):
     assert instagram_routing.decode_topic(catalogue_db.get_instagram_topic(topic["topic_id"]))["response_order"] == "menu_first"
 
 
+def test_topic_and_exact_source_mappings_survive_database_reopen(tmp_path, monkeypatch):
+    """A Topic and Story/Post/Reel mappings must survive a process restart."""
+    db_path = str(tmp_path / "topic-restart.db")
+    first = Database(db_path)
+    monkeypatch.setattr(db_module, "db", first)
+    monkeypatch.setattr(app_module, "db", first)
+    monkeypatch.setattr(instagram_routing, "db", first, raising=False)
+    monkeypatch.setattr(responder_module, "db", first)
+
+    topic = create_topic("Restart Topic", "Persisted Topic description.")
+    common = {
+        "topic_id": topic["topic_id"],
+        "routing_topic": topic["name"],
+        "priority_products": ["jolbhora"],
+        "knowledge_scope": [],
+        "menu_mode": "NONE",
+        "active": True,
+    }
+    first.save_instagram_source_route({
+        **common, "source_type": "story", "media_id": "story-meta-exact",
+    })
+    first.save_instagram_source_route({
+        **common, "source_type": "post", "media_id": "post-meta-exact",
+        "canonical_url": "https://www.instagram.com/p/PostExact123/",
+        "shortcode": "PostExact123",
+    })
+    first.save_instagram_source_route({
+        **common, "source_type": "reel", "canonical_url": "https://www.instagram.com/reel/ReelExact123/",
+        "shortcode": "ReelExact123",
+    })
+
+    second = Database(db_path)
+    monkeypatch.setattr(db_module, "db", second)
+    monkeypatch.setattr(app_module, "db", second)
+    monkeypatch.setattr(instagram_routing, "db", second, raising=False)
+    monkeypatch.setattr(responder_module, "db", second)
+
+    persisted_topic = second.get_instagram_topic(topic["topic_id"])
+    assert persisted_topic["name"] == "Restart Topic"
+    assert len(second.list_instagram_topics()) == 1
+    persisted_routes = second.list_instagram_source_routes()
+    assert {route["media_id"] for route in persisted_routes if route["media_id"]} == {"story-meta-exact", "post-meta-exact"}
+    assert {route["shortcode"] for route in persisted_routes if route["shortcode"]} == {"ReelExact123", "PostExact123"}
+    assert all(route["topic_id"] == topic["topic_id"] for route in persisted_routes)
+
+    story, story_method = route_for_inbound(ad_id=None, media_id="story-meta-exact", source_type="story_reply")
+    post, post_method = route_for_inbound(ad_id=None, media_id=None, post_media_id="post-meta-exact", source_type="post")
+    reel, reel_method = route_for_inbound(ad_id=None, media_id=None, shortcode="ReelExact123", source_type="reel")
+    assert story["topic_id"] == topic["topic_id"] and story_method == "story_media_id"
+    assert post["topic_id"] == topic["topic_id"] and post_method == "shared_post_media_id"
+    assert reel["topic_id"] == topic["topic_id"] and reel_method == "shared_media_url"
+
+
 def test_shared_topic_response_renderer_keeps_both_orders_explicit():
     description = "Topic description."
     menu = "Approved menu details."
@@ -732,24 +785,6 @@ def test_post_pairing_still_unaffected_by_topic_changes(catalogue_db):
     assert bound["status"] == "bound"
     matched, method = route_for_inbound(ad_id=None, media_id=None, post_media_id="17930882778146779")
     assert method == "shared_post_media_id"
-
-
-def test_whatsapp_remains_human_only_after_topic_changes(catalogue_db, monkeypatch):
-    """Behavioral, not textual: with default config, an inbound WhatsApp
-    message must never reach the responder, regardless of anything Topic
-    or Menu catalogue related."""
-    import camellia.whatsapp_adapter as whatsapp_module
-
-    monkeypatch.setattr(whatsapp_module.config, "WHATSAPP_CHATBOT_ENABLED", False)
-    called = []
-    monkeypatch.setattr(
-        whatsapp_module.responder, "match_and_respond",
-        lambda *a, **k: called.append(True) or ("x", True, "t", None),
-    )
-    result = whatsapp_module.whatsapp_adapter.process_incoming_message("919000000000", "Hello")
-    assert called == []
-    assert result["bot_replied"] is False
-    assert result["template_id"] == "whatsapp_human_only"
 
 
 # --- Admin auth on new endpoints ------------------------------------------

@@ -1,3 +1,4 @@
+import hashlib
 import json
 import re
 from dataclasses import dataclass, field
@@ -370,7 +371,11 @@ class RAGFallbackEngine:
                     result.confidence_score = 0.40
                     result.retrieved_sources = [top["source_ref"], second["source_ref"]]
                     result.source_chunks = [top["response"], second["response"]]
-                    log.warning("RAG retrieved conflicting sources for '%s': %s vs %s", user_message, top["source_ref"], second["source_ref"])
+                    message_hash = hashlib.sha256(str(user_message or "").encode("utf-8")).hexdigest()[:12]
+                    log.warning(
+                        "RAG retrieved conflicting sources for message_hash=%s: %s vs %s",
+                        message_hash, top["source_ref"], second["source_ref"],
+                    )
                     return result
 
         result.retrieved_sources = [top["source_ref"]]
@@ -420,7 +425,12 @@ class RAGFallbackEngine:
                 if candidate_id is not None:
                     result.candidate_id = candidate_id
                     result.approval_status = "PENDING_APPROVAL"
-                    log.info("RAG Candidate Template #%d created for '%s' (status: PENDING_APPROVAL, confidence: %.2f)", candidate_id, user_message, result.confidence_score)
+                    message_hash = hashlib.sha256(str(user_message or "").encode("utf-8")).hexdigest()[:12]
+                    log.info(
+                        "RAG Candidate Template #%d created for message_hash=%s "
+                        "(status: PENDING_APPROVAL, confidence: %.2f)",
+                        candidate_id, message_hash, result.confidence_score,
+                    )
             except Exception as e:
                 log.error("Failed to save RAG candidate template: %s", e)
 

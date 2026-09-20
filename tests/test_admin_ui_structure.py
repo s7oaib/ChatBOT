@@ -66,7 +66,7 @@ def test_dashboard_javascript_brackets_balance(script, opener, closer):
     )
 
 
-def test_the_dashboard_has_five_client_facing_tabs(page):
+def test_the_dashboard_has_a_coherent_sidebar_navigation(page):
     """
     Eight tabs needed 1655px of nav on a 347px phone, so most of the portal was
     unreachable on the handset the kitchen actually uses. Menu Manager is its
@@ -81,17 +81,16 @@ def test_the_dashboard_has_five_client_facing_tabs(page):
     this main nav bar. Custom Q&A is the fifth: the client-managed reusable
     knowledge library, on the same learned_knowledge table.
     """
-    nav = page[page.index('<div class="tabs-nav">'):page.index('</div>', page.index('<div class="tabs-nav">'))]
-    buttons = re.findall(r'<button class="tab-btn[^"]*" onclick="switchTab\(', nav)
-    assert len(buttons) == 5, f"expected 5 client-facing tabs, found {len(buttons)}"
-    assert "Custom Q&amp;A" in nav
+    nav = page[page.index('<aside class="admin-sidebar"'):page.index('</aside>', page.index('<aside class="admin-sidebar"'))]
+    for label in ("Dashboard", "Menu", "Instagram Stories", "Posts &amp; Reels", "Handoffs", "QA Templates", "Analytics", "Candidates", "Settings / Health"):
+        assert label in nav
+    assert "handoffSidebarBadge" in nav
 
 
 def test_menu_manager_sits_between_menu_and_ai_resolution(page):
-    nav = page[page.index('<div class="tabs-nav">'):]
-    nav = nav[:nav.index('</div>')]
-    assert nav.index("tab-image") < nav.index("tab-menu-manager") < nav.index("tab-ai-resolution")
-    assert "Menu Manager" in nav
+    assert 'id="tab-image"' in page
+    assert 'id="tab-menu-manager"' in page
+    assert "Manage catalogue" in page
 
 
 def test_customers_and_answers_are_not_in_normal_client_navigation(page):
@@ -102,11 +101,10 @@ def test_customers_and_answers_are_not_in_normal_client_navigation(page):
     dashboard is no longer offered two extra buttons for workflows the
     unified tab already covers.
     """
-    nav = page[page.index('<div class="tabs-nav">'):]
-    nav = nav[:nav.index('</div>')]
-    assert "💬 Customers" not in nav
-    assert "✅ Answers <span" not in nav
-    assert "🤖 AI Resolution &amp; Answers" in nav
+    nav = page[page.index('<aside class="admin-sidebar"'):page.index('</aside>', page.index('<aside class="admin-sidebar"'))]
+    assert "Customers" not in nav
+    assert "Answers" not in nav
+    assert "Candidates" in nav
 
 
 def test_legacy_views_are_reachable_only_from_the_advanced_disclosure(page):
@@ -441,6 +439,20 @@ def test_instagram_routing_has_a_simple_client_first_default_view(page):
     assert "Advanced settings are normally filled automatically" in section
 
 
+def test_topic_selectors_explain_empty_catalogues_and_refresh_together(page):
+    """A fresh database must be configurable, and a new Topic reaches Stories too."""
+    assert 'id="igTopicEmptyHelp"' in page
+    assert "No active Topics are configured yet." in page
+    assert 'id="igStoryTopicEmptyHelp"' in page
+    assert 'onclick="openTopicModal()">+ Add Topic</button>' in page
+    load_topics = page[page.index("async function loadTopicsAndMenus"):page.index("function onIgTopicChange")]
+    assert "activeTopics = igTopics.filter" in load_topics
+    assert "populateInstagramStoryPickers();" in load_topics
+    story_pickers = page[page.index("function populateInstagramStoryPickers"):page.index("function onInstagramStoryTopicChange")]
+    assert "activeTopics = igTopics.filter" in story_pickers
+    assert "igStoryTopicEmptyHelp" in story_pickers
+
+
 def test_instagram_routing_keeps_client_friendly_cards_and_existing_actions(page):
     section = page[page.index('function renderInstagramMediaCard'):page.index('// Shared-post pairing')]
     assert "View Details" in section
@@ -586,3 +598,32 @@ def test_custom_qa_lifecycle_and_delete_confirmation_are_present(page):
     assert "This permanently removes this Q&amp;A and it will no longer be available to the chatbot." in page
     assert "cqaSetStatus" in page
     assert "customQaHistoryModal" in page
+
+
+def test_admin_redesign_has_dashboard_gallery_and_drawer(page):
+    assert 'id="tab-dashboard"' in page
+    assert 'id="tab-instagram-content"' in page
+    assert 'id="igContentGallery"' in page
+    assert 'data-content-filter="post"' in page
+    assert 'data-content-filter="reel"' in page
+    assert 'id="igContentTableView"' in page
+    assert 'id="contentDetailsDrawer"' in page
+    assert 'Open full details' in page
+    assert "function openContentDetails" in page
+
+
+def test_handoff_notifications_are_global_and_persistent(page):
+    assert 'id="handoffBell"' in page
+    assert 'id="handoffSidebarBadge"' in page
+    assert 'id="handoffPopover"' in page
+    assert "fetch('/admin/handoffs?limit=100'" in page
+    assert "/admin/handoffs/${encodeURIComponent(ref)}/seen" in page
+    assert "showHandoffToast" in page
+    assert "WAITING_FOR_HUMAN" in page
+
+
+def test_story_cards_open_the_shared_details_drawer(page):
+    assert 'class="instagram-gallery"' in page
+    assert 'data-story-media-id' in page
+    assert "openContentDetails('story', source)" in page
+    assert "Exact Meta ID" in page

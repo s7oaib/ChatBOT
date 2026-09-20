@@ -9,7 +9,6 @@ from camellia.config import config
 from camellia.database import db
 from camellia.responder import responder
 from camellia.session_memory import session_memory
-from camellia.whatsapp_adapter import whatsapp_adapter
 
 
 def test_delivery_area_followup_confirms_a_serviceable_area_and_keeps_area_flow_active():
@@ -89,17 +88,15 @@ def test_delivery_area_flag_does_not_consume_a_new_business_question():
     assert session_memory.get_facts(user_id, "whatsapp")["awaiting_area_confirmation"] is False
 
 
-def test_instagram_escalation_offers_a_whatsapp_link_instead_of_asking_for_a_number():
+def test_instagram_generic_human_help_uses_callback_ack_without_whatsapp():
     """
     OLD REQUIREMENT: an Instagram customer whose question needed a human was
     asked to type their WhatsApp number, then asked to confirm it, before an
     escalation was ever recorded — three round trips, a number typed by hand,
     and staff calling the customer back.
 
-    NEW REQUIREMENT: Instagram never asks for a phone number. It creates an
-    opaque handoff reference immediately and offers a WhatsApp click-to-chat
-    link the customer opens themselves — one round trip, no typed number
-    stored on Instagram, no confusion about who initiates contact.
+    NEW REQUIREMENT: generic support requests receive a callback acknowledgement
+    and never expose the booking-only WhatsApp continuation.
 
     WHY CHANGED: explicit client channel-policy requirement — Instagram AI,
     WhatsApp human-only, connected by a handoff link rather than a collected
@@ -124,17 +121,12 @@ def test_instagram_escalation_offers_a_whatsapp_link_instead_of_asking_for_a_num
     assert escalate.called
     reply_text = send_reply.call_args.args[1]
     assert "standard escalation" not in reply_text
-    assert "WhatsApp" in reply_text
-    assert "https://wa.me/919800000000" in reply_text
-
-    ref_match = re.search(r"CAM-\d{5,6}", reply_text)
-    assert ref_match, f"no opaque handoff reference in {reply_text!r}"
-    assert f"Ref:%20{ref_match.group(0)}" in reply_text or f"Ref: {ref_match.group(0)}" in urllib.parse.unquote(reply_text)
+    assert "wa.me" not in reply_text
+    assert "someone will get back to you shortly" in reply_text
 
 
-def test_repeated_human_requests_reuse_the_same_handoff_reference():
-    """A customer saying "human" three times gets ONE reference, not three —
-    the active handoff is looked up and reused rather than re-created."""
+def test_repeated_human_requests_reuse_the_same_handoff_without_duplicate_alerts():
+    """A customer saying "human" again while waiting gets no second CAM or alert."""
     user_id = "client_instagram_repeat_handoff"
     session_memory.clear_session(user_id, "instagram")
 
@@ -146,15 +138,13 @@ def test_repeated_human_requests_reuse_the_same_handoff_reference():
         app.escalator, "handle_escalation", return_value={"escalation_id": 1},
     ), patch.object(config, "WHATSAPP_BUSINESS_NUMBER", "919800000000"):
         app._process_instagram_event(user_id, "I want to speak to someone", "ad-1")
-        first_ref = re.search(r"CAM-\d{5,6}", send_reply.call_args.args[1]).group(0)
-
+        first_reply = send_reply.call_args.args[1]
         app._process_instagram_event(user_id, "human please", "ad-1")
-        second_ref = re.search(r"CAM-\d{5,6}", send_reply.call_args.args[1]).group(0)
-
         app._process_instagram_event(user_id, "is anyone there", "ad-1")
-        third_ref = re.search(r"CAM-\d{5,6}", send_reply.call_args.args[1]).group(0)
 
-    assert first_ref == second_ref == third_ref
+    assert "wa.me" not in first_reply
+    assert "someone will get back to you shortly" in first_reply
+    assert send_reply.call_count == 1
     rows_for_this_user = [
         h for h in db.get_handoffs(limit=200) if h["source_user_id"] == user_id
     ]
@@ -251,6 +241,23 @@ def test_bare_price_question_with_no_topic_asks_which_product_instead_of_guessin
     assert "sondesh_price_detailed" != reply[2]
 
 
+def test_instagram_bare_price_after_source_route_uses_client_food_overview(monkeypatch):
+    monkeypatch.setattr(config, "BYPASS_AD_GATE", True)
+    user_id = "client_instagram_general_price"
+    session_memory.clear_session(user_id, "instagram")
+    facts = session_memory.get_facts(user_id, "instagram")
+    facts["source_route"] = {"routing_id": 1, "source_type": "story", "active": True}
+    facts["source_context_superseded"] = True
+
+    reply = responder.match_and_respond("whats the price", user_id=user_id, channel="instagram")
+
+    assert reply[2] == "savoury_food_intro"
+    assert "À LA CARTE" in reply[0]
+    assert "BENGALI BENTO" in reply[0]
+    assert "INSERT" not in reply[0]
+    assert facts["source_context_used"] is False
+
+
 def test_bare_price_question_after_meals_topic_still_asks_about_the_weekly_menu():
     user_id = "client_meals_then_price"
     session_memory.clear_session(user_id, "whatsapp")
@@ -259,52 +266,6 @@ def test_bare_price_question_after_meals_topic_still_asks_about_the_weekly_menu(
     reply = responder.match_and_respond("What's the price?", user_id=user_id, channel="whatsapp")
 
     assert reply[2] == "context_meal_price_followup"
-
-
-def test_whatsapp_never_escalates_or_replies_it_is_already_a_human_channel():
-    """
-    OLD REQUIREMENT: a WhatsApp message that the chatbot could not answer
-    triggered escalator.handle_escalation and a bot-composed reply — the
-    same escalation path Instagram uses.
-
-    NEW REQUIREMENT: WhatsApp has no chatbot to escalate FROM any more. A
-    human is already reading the message directly, so there is nothing to
-    hand off and nothing to auto-reply with.
-
-    WHY CHANGED: explicit client channel-policy requirement.
-    """
-    with patch(
-        "camellia.whatsapp_adapter.responder.match_and_respond",
-        return_value=("standard escalation", False, None, None),
-    ) as match_and_respond, patch(
-        "camellia.whatsapp_adapter.escalator.handle_escalation"
-    ) as escalate, patch.object(whatsapp_adapter, "send_message") as send_message:
-        result = whatsapp_adapter.process_incoming_message("919876543210", "I need help")
-
-    assert not escalate.called
-    assert not match_and_respond.called
-    assert not send_message.called
-    assert result["bot_replied"] is False
-
-
-def test_a_whatsapp_message_naming_a_handoff_reference_still_gets_no_bot_reply():
-    """A customer pasting "Ref: CAM-48371" is recorded for staff tracking —
-    the reference is marked connected — but still receives no automated
-    reply. Nothing about a handoff reference makes WhatsApp intelligent."""
-    with patch(
-        "camellia.whatsapp_adapter.mark_whatsapp_connected",
-    ) as mark_connected, patch(
-        "camellia.whatsapp_adapter.responder.match_and_respond"
-    ) as match_and_respond, patch.object(whatsapp_adapter, "send_message") as send_message:
-        result = whatsapp_adapter.process_incoming_message(
-            "919876543210", "Hi, I'm continuing my Camellia Instagram enquiry. Ref: CAM-48371",
-        )
-
-    assert result["bot_replied"] is False
-    assert result["handoff_ref"] == "CAM-48371"
-    mark_connected.assert_called_once_with("CAM-48371")
-    match_and_respond.assert_not_called()
-    send_message.assert_not_called()
 
 
 def test_asking_about_delivery_outside_ncr_lists_the_covered_cities():

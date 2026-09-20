@@ -105,6 +105,45 @@ def test_explicit_topic_intent_is_not_treated_as_a_source_followup(deterministic
     assert facts["source_context_used"] is False
 
 
+@pytest.mark.parametrize("text, expected_template", [
+    ("tell me more about this", "bengali_home_table_details"),
+    ("Whats the price?", "bengali_home_table_pricing"),
+])
+def test_mapped_home_table_story_uses_campaign_answers_for_ambiguous_followups(
+    deterministic_responder, text, expected_template,
+):
+    uid = "referential_home_table_story_" + expected_template
+    facts = _set_source(uid, source_type="story")
+    facts["source_route"].update({
+        "routing_topic": "Bengali Home Table",
+        "priority_products": [],
+    })
+
+    reply, matched, template_id, _images = _reply(uid, text)
+
+    assert matched is True
+    assert template_id == expected_template
+    assert facts["source_context_used"] is True
+    if expected_template == "bengali_home_table_pricing":
+        assert "₹1,500 per person" in reply
+        assert "₹2,500 per person" in reply
+
+def test_purchase_help_overrides_source_only_route(deterministic_responder):
+    """An explicit purchase-help request must not be answered by Story copy."""
+    uid = "referential_purchase_help"
+    facts = _set_source(uid)
+    facts["source_route"]["menu_mode"] = "NONE"
+
+    reply, matched, template_id, _images = _reply(
+        uid, "I am ready to place my order and need help booking.",
+    )
+
+    assert matched is False
+    assert template_id == "order_next_steps"
+    assert reply
+    assert facts["source_context_used"] is False
+
+
 @pytest.mark.parametrize("text", ["I want this", "How much is this?"])
 def test_referential_message_without_source_clarifies(deterministic_responder, text):
     uid = "referential_no_source_" + text[:4]
@@ -294,7 +333,7 @@ def test_composite_greeting_keeps_menu_and_handoff_intents(deterministic_respond
     ("hi tell me more about Kanchagolla", "kanchagolla"),
     ("tell me more about Kanchagolla", "kanchagolla"),
     ("tell me more about Jolbhora", "jolbhora"),
-    ("tell me more about Sondesh", "sondesh_price_detailed"),
+        ("tell me more about Sondesh", "sondesh_details"),
 ])
 def test_named_subject_precedes_generic_detail_nlu(
     deterministic_responder, monkeypatch, text, expected,

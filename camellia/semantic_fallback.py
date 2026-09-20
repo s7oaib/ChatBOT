@@ -272,6 +272,7 @@ SUBTOPIC_DOMAIN: Dict[str, str] = {
     "gift_wrap": "packaging",
     "custom_box": "packaging",
     "same_day": "delivery",
+    "opening_hours": "delivery",
     "delivery_fee": "delivery",
     "cancellation": "subscriptions",
     "rescheduling": "subscriptions",
@@ -307,6 +308,12 @@ SUBTOPICS: Dict[str, Tuple[Tuple[str, ...], Tuple[str, ...]]] = {
         ("same day", "same-day", "within 30 minutes", "in 30 minutes",
          "in an hour", "right now delivery", "immediate delivery"),
         ("same day", "same-day", "30 minutes", "within an hour"),
+    ),
+    "opening_hours": (
+        ("opening hours", "opening time", "when are you open", "when do you open",
+         "what time are you open", "what time do you open", "kitchen hours",
+         "kitchen opening hours", "kitchen timings"),
+        ("open", "kitchen"),
     ),
     "delivery_fee": (
         ("delivery fee", "delivery charge", "delivery charges", "shipping cost",

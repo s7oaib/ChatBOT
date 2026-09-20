@@ -1,45 +1,33 @@
 # Architecture
 
-## Channel policy: Instagram AI, WhatsApp human-only
+## Channel policy: Instagram AI, WhatsApp manual continuation
 
-Instagram is the only AI chatbot channel. WhatsApp is reserved for the
-client's own human team — customers reach it only after Instagram creates a
-handoff, and no automated reply is ever composed for a WhatsApp message.
+Instagram is the only automated customer channel. When Instagram cannot
+answer, or a customer asks for a person, `camellia/handoff.py` creates a
+durable opaque CAM reference. Generic support handoffs do not include a
+WhatsApp link. Booking, order, payment, and purchase-related handoffs may
+include the separately approved manual `wa.me` continuation. WhatsApp is the
+human team's continuation surface: this service has no WhatsApp webhook, bot,
+Cloud API sender, AI/RAG/template path, or inbound message processing.
 
 ```
-INSTAGRAM                                  WHATSAPP
-   |                                          |
-   v                                          v
-AI chatbot (full architecture,          human-only
-unchanged from prior phases)            (camellia/whatsapp_adapter.py:
-   |                                     process_incoming_message does not
-   +-- can answer -> answer             call responder/understanding/RAG
-   |                                     by default; WHATSAPP_CHATBOT_ENABLED,
-   +-- can't / human / order / -->      off by default, is the only escape
-       complaint / bulk enquiry          hatch, and it is logged when used)
-       -> camellia/handoff.py                |
-          creates an opaque reference         v
-          ("CAM-48371") and a wa.me      A message naming a handoff reference
-          click-to-chat link ->          is recorded and marked
-          customer taps it themselves    WHATSAPP_CONNECTED for staff
-                                          tracking — still no bot reply.
+Instagram DM -> approved AI response
+            -> CAM handoff + deduplicated WAITING_FOR_HUMAN state
+            -> human resumes the conversation
+
+Booking/order/payment handoff -> optional manual wa.me continuation
 ```
 
-`camellia/handoff.py` owns the opaque reference, deduplication (a repeated
-"human please" reuses the active handoff instead of minting a new one), the
-click-to-chat link (`WHATSAPP_BUSINESS_NUMBER`, manually configured — see the
-manual-configuration report), and the staff-facing summary — built from
-whatever Instagram's own structured understanding already extracted this
-session (`facts["last_entities"]`, order-draft slots), never re-asked of the
-customer. Staff notification continues to go through the existing
-`escalator.handle_escalation` mechanism unchanged.
+`camellia/handoff.py` owns the opaque reference, deduplication, the optional
+`WHATSAPP_BUSINESS_NUMBER` link target for purchase-related handoffs, and the
+staff-facing summary built from Instagram's existing structured state. The
+durable escalation outbox records the handoff for admin visibility and marks
+external notification as `SKIPPED`; no provider credential or network send is
+involved. Explicit admin resume remains idempotent and restores Instagram AI
+only after the handoff is closed.
 
-`INSTAGRAM_CHATBOT_ENABLED` (default true), `WHATSAPP_CHATBOT_ENABLED`
-(default false), and `WHATSAPP_HUMAN_HANDOFF_ENABLED` (default true) are the
-explicit config knobs; the human-only behaviour is enforced in code, not by
-configuration defaults alone — `WHATSAPP_CHATBOT_ENABLED` is the one flag
-that would restore the old auto-reply behaviour, and the code path it gates
-is not reachable any other way.
+`INSTAGRAM_CHATBOT_ENABLED` is the only channel automation control. The
+WhatsApp business number is retained solely for the manual `wa.me` link.
 
 ## Runtime boundaries
 

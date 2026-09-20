@@ -43,6 +43,8 @@ class SessionMemoryManager:
                 "awaiting_subscription_booking": False,
                 "subscription_context": False,
                 "savoury_crosssell_sent": False,
+                "alacarte_sondesh_addon_sent": False,
+                "alacarte_sondesh_addon_declined": False,
                 "sondesh_crosssell_sent": False,
                 "previous_menus_offered": False,
                 "slow_notice_sent": False,
@@ -73,6 +75,9 @@ class SessionMemoryManager:
                 "last_llm_called": False,
                 "last_fallback_used": False,
                 "last_grounding": None,
+                "decision_lane": None,
+                "route_trace": {},
+                "last_handoff_reason": None,
                 "last_escalation_status": None,
                 "cart": [],
                 "order_draft": {
@@ -119,7 +124,9 @@ class SessionMemoryManager:
         facts = session.setdefault("facts", {})
         transient = {
             "image_card_sent", "awaiting_subscription_booking", "subscription_context",
-            "last_greeting_index", "savoury_crosssell_sent", "sondesh_crosssell_sent",
+            "last_greeting_index", "savoury_crosssell_sent",
+            "alacarte_sondesh_addon_sent", "alacarte_sondesh_addon_declined",
+            "sondesh_crosssell_sent",
             "slow_notice_sent", "awaiting_menu_choice", "awaiting_product_price",
             "awaiting_area_confirmation", "awaiting_instagram_contact",
             "awaiting_instagram_contact_confirmation", "pending_instagram_contact",
@@ -130,7 +137,8 @@ class SessionMemoryManager:
             "clarify_sent", "last_topic",
             "last_intents", "last_entities", "last_actions", "knowledge_sufficient",
             "last_knowledge_sufficiency", "last_knowledge_ids", "last_llm_called",
-            "last_fallback_used", "last_grounding", "last_escalation_status",
+            "last_fallback_used", "last_grounding", "decision_lane", "route_trace",
+            "last_handoff_reason", "last_escalation_status",
             "last_nlu_confidence", "last_nlu_reason",
             "cart", "order_draft",
         }

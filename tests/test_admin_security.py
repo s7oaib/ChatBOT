@@ -1,8 +1,4 @@
-import base64
-import hashlib
-import hmac
 import inspect
-import struct
 import time
 
 import pytest
@@ -10,26 +6,20 @@ from fastapi.testclient import TestClient
 
 import camellia.app as app_module
 from camellia.app import app
-from camellia.admin_security import digest, hash_secret
+from camellia.admin_security import digest, hash_password
 from camellia.config import config
 from camellia.database import Database
 
 
 PASSWORD = "a long production-style admin passphrase"
 USERNAME = "owner"
-MFA_SECRET = "JBSWY3DPEHPK3PXP"
-
-
 @pytest.fixture
 def security_client(tmp_path, monkeypatch):
     database = Database(str(tmp_path / "admin-security.db"))
     database.init_db()
     monkeypatch.setattr(app_module, "db", database)
     monkeypatch.setattr(config, "ADMIN_USERNAME", USERNAME)
-    monkeypatch.setattr(config, "ADMIN_PASSWORD_HASH", hash_secret(PASSWORD))
-    monkeypatch.setattr(config, "ADMIN_MFA_TOTP_SECRET", "")
-    monkeypatch.setattr(config, "ADMIN_MFA_RECOVERY_CODE_HASHES", "")
-    monkeypatch.setattr(config, "ADMIN_MFA_REQUIRED", False)
+    monkeypatch.setattr(config, "ADMIN_PASSWORD_HASH", hash_password(PASSWORD))
     monkeypatch.setattr(config, "ADMIN_REQUIRE_HTTPS", True)
     monkeypatch.setattr(config, "ADMIN_API_KEY", "machine-api-key-never-in-browser")
     limiter_enabled = app.state.limiter.enabled
@@ -39,19 +29,11 @@ def security_client(tmp_path, monkeypatch):
     app.state.limiter.enabled = limiter_enabled
 
 
-def _login(client, username=USERNAME, password=PASSWORD, totp=""):
+def _login(client, username=USERNAME, password=PASSWORD):
     return client.post(
         "/admin/login",
-        json={"username": username, "password": password, "totp": totp},
+        json={"username": username, "password": password},
     )
-
-
-def _totp(secret: str, now: float | None = None) -> str:
-    key = base64.b32decode(secret + "=" * (-len(secret) % 8), casefold=True)
-    counter = int((time.time() if now is None else now) // 30)
-    raw = hmac.new(key, struct.pack(">Q", counter), hashlib.sha1).digest()
-    offset = raw[-1] & 0x0F
-    return str((struct.unpack(">I", raw[offset:offset + 4])[0] & 0x7FFFFFFF) % 1_000_000).zfill(6)
 
 
 def test_valid_password_login_creates_secure_server_session(security_client):
@@ -125,17 +107,20 @@ def test_ip_and_account_scopes_are_independent_and_cooldown_expires(tmp_path):
     assert database.admin_login_rate_status([account], now + 301) == 0
 
 
-def test_valid_mfa_is_required_and_wrong_mfa_is_throttled(security_client, monkeypatch):
+def test_password_only_login_has_no_second_challenge(security_client):
     client, _database = security_client
-    monkeypatch.setattr(config, "ADMIN_MFA_REQUIRED", True)
-    monkeypatch.setattr(config, "ADMIN_MFA_TOTP_SECRET", MFA_SECRET)
-
-    challenge = _login(client)
-    assert challenge.status_code == 200
-    assert challenge.json() == {"mfa_required": True}
-    assert "camellia_admin_session" not in client.cookies
-    assert _login(client, totp="000000").status_code == 401
-    assert _login(client, totp=_totp(MFA_SECRET)).status_code == 200
+    assert _login(client).status_code == 200
+    page = client.get("/admin").text
+    assert page.count('class="credential-input"') == 2
+    assert page.count('autocomplete="username"') == 1
+    assert page.count('autocomplete="current-password"') == 1
+    assert page.count('type="password"') == 1
+    admin_auth = client.get("/health").json()["admin_auth"]
+    assert admin_auth == {
+        "password_configured": True,
+        "machine_api_configured": True,
+        "https_required": True,
+    }
 
 
 def test_expired_session_and_logout_revoke_access(security_client):
@@ -159,11 +144,11 @@ def test_expired_session_and_logout_revoke_access(security_client):
 def test_authenticated_browser_write_requires_csrf_and_accepts_valid_csrf(security_client):
     client, _database = security_client
     assert _login(client).status_code == 200
-    assert client.post("/admin/security/recovery-codes").status_code == 403
     csrf = client.cookies.get("camellia_admin_csrf")
-    response = client.post("/admin/security/recovery-codes", headers={"X-CSRF-Token": csrf})
+    response = client.post("/admin/logout")
+    assert response.status_code == 403
+    response = client.post("/admin/logout", headers={"X-CSRF-Token": csrf})
     assert response.status_code == 200
-    assert len(response.json()["codes"]) == 10
 
 
 def test_legacy_pin_and_browser_api_key_bypass_are_blocked(security_client):
@@ -185,10 +170,7 @@ def test_security_headers_and_admin_endpoint_inventory(security_client):
     assert response.headers["cache-control"].startswith("no-store")
     assert response.headers["strict-transport-security"].startswith("max-age=")
 
-    public = {
-        "/admin", "/admin/dashboard", "/admin/login", "/admin/verify-pin",
-        "/admin/forgot-password", "/admin/reset-password", "/admin/reset-password/cancel",
-    }
+    public = {"/admin", "/admin/dashboard", "/admin/login", "/admin/verify-pin"}
     missing = []
     for route in app.routes:
         if not route.path.startswith("/admin") or route.path in public:

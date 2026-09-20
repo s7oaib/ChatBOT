@@ -38,12 +38,14 @@ from camellia.ice_breakers import (
 import camellia.responder as responder_module
 from camellia.responder import compose_topic_response, responder
 from camellia.ai_responder import ai_responder
-from camellia.whatsapp_adapter import whatsapp_adapter
 from camellia.escalator import escalator
 from camellia.handoff import (
     customer_facing_link_message,
     customer_facing_notice,
+    customer_query_summary,
+    handoff_contact_mode,
     get_or_create_handoff,
+    is_human_help_request,
     mark_referred,
     retire_order_state,
     staff_summary,
@@ -77,22 +79,19 @@ from camellia import menu_catalogue
 from camellia.menu_catalogue import MenuCatalogueError
 from camellia.session_memory import session_memory
 from camellia.monitoring import get_logger, delivery_monitor, latency_monitor, classify_instagram_delivery
-from camellia import admin_mailer
 from camellia.admin_security import (
     digest as security_digest,
-    generate_recovery_code,
-    hash_secret,
     new_token,
     normalize_username,
     token_hash,
     verify_password,
-    verify_totp,
 )
 from camellia.knowledge import SOURCE_MAP
 from camellia.candidate_safety import candidate_eligibility, detect_business_commitment_warnings, validate_candidate_answer
 from camellia.assisted_resolution import create_suggestion
 from camellia.auto_resolve import simulate_auto_resolve
 from camellia.content_integrity import apply_confirmed_menu_facts, apply_safe_content_remediations
+from camellia.instagram_story_sync import sync_instagram_stories, story_sync_loop
 
 log = get_logger("camellia.app")
 
@@ -102,25 +101,9 @@ _admin_context: ContextVar[Optional[Dict[str, Any]]] = ContextVar("admin_context
 
 
 def _admin_security_version() -> str:
-    credential = _active_admin_credential()
     return security_digest(
-        f"{credential.get('password_hash', '')}\x00{config.ADMIN_MFA_TOTP_SECRET}\x00{credential.get('username', '')}"
+        f"{config.ADMIN_PASSWORD_HASH}\x00{config.ADMIN_USERNAME}"
     )
-
-
-def _active_admin_credential() -> Dict[str, str]:
-    """Return the durable credential, bootstrapping it from env exactly once."""
-    credential = db.get_admin_credential()
-    if credential:
-        return credential
-    username = normalize_username(config.ADMIN_USERNAME)
-    password_hash = config.ADMIN_PASSWORD_HASH or ""
-    if username and password_hash:
-        db.bootstrap_admin_credential(username, password_hash, time.time())
-        credential = db.get_admin_credential()
-        if credential:
-            return credential
-    return {"username": username, "password_hash": password_hash}
 
 
 def _admin_ip(request: Request) -> str:
@@ -134,56 +117,6 @@ def _admin_scopes(username: str, ip: str) -> List[str]:
     # single account lockout permanent or allowing username rotation to evade
     # the network controls.
     return [f"account:{username_key}", f"ip:{ip_key}", "endpoint:admin-login"]
-
-
-def _admin_reset_scopes(kind: str, identity: str, ip: str) -> List[str]:
-    return [
-        f"{kind}:identity:{security_digest(identity)}",
-        f"{kind}:ip:{security_digest(ip)}",
-        f"endpoint:{kind}",
-    ]
-
-
-def _admin_action_rate_status(scopes: List[str]) -> int:
-    return db.admin_login_rate_status(scopes, time.time(), window_seconds=900.0)
-
-
-def _admin_action_failed(scopes: List[str], thresholds: List[int], request: Request, event_type: str) -> int:
-    retry_after = _admin_action_record(scopes, thresholds)
-    _audit_admin_event(event_type, "", request)
-    return retry_after
-
-
-def _admin_action_record(scopes: List[str], thresholds: List[int]) -> int:
-    return db.record_admin_login_failure(
-        list(zip(scopes, thresholds, [900.0] * len(scopes))),
-        time.time(),
-        window_seconds=900.0,
-    )
-
-
-def _normalize_recovery_email(value: str) -> str:
-    return str(value or "").strip().casefold()
-
-
-def _reset_public_base_url(request: Request) -> str:
-    configured = (config.ADMIN_PUBLIC_BASE_URL or "").strip().rstrip("/")
-    if configured:
-        return configured
-    # Never build a production reset link from an attacker-controlled Host
-    # header. Local HTTP tests may use their own origin explicitly.
-    if not config.ADMIN_REQUIRE_HTTPS:
-        return f"{request.url.scheme}://{request.url.netloc}"
-    return ""
-
-
-def _verify_reset_mfa(code: str, now: float) -> bool:
-    totp_ok = bool(config.ADMIN_MFA_TOTP_SECRET) and verify_totp(config.ADMIN_MFA_TOTP_SECRET, code)
-    if totp_ok:
-        return True
-    if code:
-        return db.consume_admin_recovery_code(code, verify_password, now)
-    return False
 
 
 def _audit_admin_event(event_type: str, username: str, request: Request) -> None:
@@ -264,18 +197,14 @@ async def lifespan(app: FastAPI):
     _prune_expired_weekly_menus()
 
     db.init_db()
-    if config.ADMIN_USERNAME and config.ADMIN_PASSWORD_HASH:
-        db.bootstrap_admin_credential(
-            normalize_username(config.ADMIN_USERNAME),
-            config.ADMIN_PASSWORD_HASH,
-            time.time(),
+    try:
+        delivered_notifications = await asyncio.to_thread(
+            escalator.process_pending_notifications, limit=20,
         )
-    configured_recovery_hashes = [
-        item.strip()
-        for item in re.split(r"[\s,]+", config.ADMIN_MFA_RECOVERY_CODE_HASHES or "")
-        if item.strip()
-    ]
-    db.seed_admin_recovery_codes(configured_recovery_hashes, time.time())
+        if delivered_notifications:
+            log.info("Delivered %s durable human notification event(s) on startup.", delivered_notifications)
+    except Exception:
+        log.exception("Could not process durable human notification events on startup.")
     # Apply only the audited, canonical copy corrections through the existing
     # versioned Response Library store.  This is idempotent and deliberately
     # preserves any distinct client-authored override.
@@ -314,17 +243,10 @@ async def lifespan(app: FastAPI):
         )
     if not (config.ADMIN_USERNAME and config.ADMIN_PASSWORD_HASH):
         log.critical("Browser admin authentication is not configured; password login fails closed.")
-    if config.ADMIN_MFA_REQUIRED and not config.ADMIN_MFA_TOTP_SECRET:
-        log.critical("Production admin MFA is required but ADMIN_MFA_TOTP_SECRET is not configured.")
     if config.ADMIN_PIN:
         log.warning("ADMIN_PIN is configured only as a legacy value and is never accepted for browser admin authentication.")
     if config.ADMIN_API_KEY:
         log.info("Machine admin API authentication is configured separately from browser sessions.")
-    if not config.WHATSAPP_MOCK_MODE and not (config.WHATSAPP_ACCESS_TOKEN and config.WHATSAPP_PHONE_NUMBER_ID):
-        log.critical(
-            "WhatsApp is in live mode but WHATSAPP_ACCESS_TOKEN / WHATSAPP_PHONE_NUMBER_ID "
-            "are incomplete. Replies will not be delivered."
-        )
     try:
         removed = db.purge_expired_data()
         if any(removed.values()):
@@ -363,11 +285,60 @@ async def lifespan(app: FastAPI):
                 "Startup menu sync failed; serving the menu baked into the image."
             )
 
-    yield
+    story_sync_task = None
+    story_sync_stop = None
+    if config.INSTAGRAM_STORY_AUTO_SYNC_ENABLED:
+        story_sync_stop = asyncio.Event()
+        story_sync_task = asyncio.create_task(story_sync_loop(story_sync_stop, db))
+        log.info(
+            "Instagram Story auto-sync enabled; interval=%ss.",
+            config.INSTAGRAM_STORY_SYNC_INTERVAL_SECONDS,
+        )
+
+    notification_stop = asyncio.Event()
+    notification_task = asyncio.create_task(
+        _human_notification_loop(notification_stop),
+    )
+    try:
+        yield
+    finally:
+        notification_stop.set()
+        notification_task.cancel()
+        try:
+            await notification_task
+        except asyncio.CancelledError:
+            pass
+        if story_sync_stop is not None:
+            story_sync_stop.set()
+        if story_sync_task is not None:
+            story_sync_task.cancel()
+            try:
+                await story_sync_task
+            except asyncio.CancelledError:
+                pass
+
+
+async def _human_notification_loop(stop_event: asyncio.Event) -> None:
+    """Poll the durable notification outbox with bounded work per pass."""
+    while not stop_event.is_set():
+        try:
+            delivered = await asyncio.to_thread(
+                escalator.process_pending_notifications, limit=20,
+            )
+            if delivered:
+                log.info("Delivered %s durable human notification event(s).", delivered)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("Durable human notification poll failed.")
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=30.0)
+        except asyncio.TimeoutError:
+            pass
 
 limiter = Limiter(key_func=get_remote_address, default_limits=["300/minute"])
 app = FastAPI(
-    title="FastAPI Webhook Application for Camellia Artisanal — Instagram & WhatsApp Auto-Response Bot",
+    title="FastAPI Webhook Application for Camellia Artisanal — Instagram AI and human handoff",
     version="1.0.0",
     lifespan=lifespan
 )
@@ -392,8 +363,6 @@ async def add_security_headers(request: Request, call_next):
     )
     if request.url.path.startswith("/admin"):
         response.headers["Cache-Control"] = "no-store, max-age=0"
-        if request.url.path in {"/admin/forgot-password", "/admin/reset-password"}:
-            response.headers["Referrer-Policy"] = "no-referrer"
     if _request_is_secure(request):
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     return response
@@ -469,16 +438,11 @@ def verify_meta_signature(raw_body: bytes, signature_header: Optional[str]) -> N
 
     if not signature_header or not hmac.compare_digest(expected, signature_header):
         log.warning(
-            "Rejected webhook payload signature mismatch!\n"
-            "  Body length: %d bytes\n"
-            "  Secret length: %d (starts with '%s...')\n"
-            "  Received Header: %s\n"
-            "  Expected HMAC:   %s",
+            "Rejected webhook payload signature mismatch (body_length=%d, "
+            "secret_configured=%s, signature_present=%s).",
             len(raw_body),
-            len(secret),
-            secret[:4] if len(secret) >= 4 else "***",
-            signature_header,
-            expected,
+            bool(secret),
+            bool(signature_header),
         )
         raise HTTPException(status_code=403, detail="Invalid payload signature")
 
@@ -499,9 +463,9 @@ def require_web_tester() -> None:
     """
     Guards the browser chat tester and its APIs.
 
-    These write real conversation rows and fire real escalation alerts to the
-    owner's phone, so on a public domain they are abusable by anyone who finds
-    the URL. Keep ENABLE_WEB_TESTER false in production; it exists for local
+    These write real conversation rows and create durable handoff/outbox
+    records, so on a public domain they are abusable by anyone who finds the
+    URL. Keep ENABLE_WEB_TESTER false in production; it exists for local
     development, where a browser cannot attach an admin header on navigation.
     """
     if not config.ENABLE_WEB_TESTER:
@@ -520,7 +484,7 @@ def read_root(request: Request):
         return RedirectResponse(url="/admin")
     return {
         "client": "camellia.artisanal",
-        "service": "Ad-Gated Auto-Response Bot",
+        "service": "Instagram Ad-Gated AI with manual WhatsApp handoff",
         "status": "running",
         "chat_url": "/chat",
         "admin_url": "/admin"
@@ -554,6 +518,7 @@ def _process_instagram_event(
     shared_reel: Optional[Dict[str, str]] = None,
     shared_post_id: Optional[str] = None,
     shared_source_type: Optional[str] = None,
+    instagram_username: Optional[str] = None,
 ) -> None:
     """
     Matches, logs, escalates and replies for one Instagram DM.
@@ -570,6 +535,23 @@ def _process_instagram_event(
     """
     try:
         facts = session_memory.get_facts(sender_id, "instagram")
+        active_handoff = db.get_active_handoff("instagram", sender_id)
+        if active_handoff:
+            # A customer message remains durable context, but cannot wake the
+            # autonomous responder or create a second ticket while staff own
+            # the conversation. Only the authenticated resume endpoint below
+            # removes this gate.
+            entry = entry_point or EntryPoint()
+            customer_message = str(message_text or "").strip() or "[shared media]"
+            db.log_conversation(
+                sender_id, "instagram", customer_message, "", False,
+                "waiting_for_human", message_source=entry.source, ad_id=ad_id,
+            )
+            log.info(
+                "Stored Instagram customer message while handoff %s is waiting for human.",
+                active_handoff["handoff_ref"],
+            )
+            return
         shared_source_type = shared_source_type or (
             "reel" if shared_reel else "post" if shared_post_id else None
         )
@@ -676,8 +658,11 @@ def _process_instagram_event(
         customer_message = str(message_text or "").strip() or "[shared media]"
         response_input = str(message_text or "").strip() or "Tell me more"
         log.info(
-            "Instagram inbound from %s: source=%s ad_id=%s ad_title=%r payload=%r",
-            sender_id, entry.source, trace["ad_id"], trace["ad_title"], entry.raw_payload,
+            "Instagram inbound: sender_hash=%s source=%s ad_present=%s "
+            "ad_title_present=%s media_present=%s text_present=%s",
+            _safe_identifier_hash(sender_id), entry.source,
+            bool(trace["ad_id"]), bool(trace["ad_title"]),
+            bool(source_media_present), bool(str(message_text or "").strip()),
         )
 
         response_text, was_matched, template_id, image_url = responder.match_and_respond(
@@ -715,6 +700,7 @@ def _process_instagram_event(
         # flag or a future route adapter reports an escalation-shaped result.
         # Order completion remains deliberately outside this allowlist.
         informational_templates = {
+            "opening_hours",
             "subscription_details",
             "sondesh_dispatch_time",
             "bengali_home_table_details",
@@ -722,7 +708,12 @@ def _process_instagram_event(
             "bengali_home_table_payment",
             "GUARD_staff_names_manager_contact",
         }
-        informational_answer = template_id in informational_templates
+        client_approved_answer = bool(
+            template_id and template_id.startswith("client_approved_")
+            and template_id != "client_approved_order_ready_handoff"
+        )
+        informational_answer = template_id in informational_templates or client_approved_answer
+        explicit_human_help = is_human_help_request(customer_message)
         needs_escalation = (
             (not was_matched and not informational_answer)
             or (
@@ -733,7 +724,9 @@ def _process_instagram_event(
                 "explicit_escalation",
                 "order_draft_receipt",
                 "order_next_steps",
+                "client_approved_order_ready_handoff",
             )
+            or explicit_human_help
         )
         log.info(
             "INSTAGRAM_OUTPUT_POLICY template=%s matched=%s informational=%s "
@@ -745,8 +738,14 @@ def _process_instagram_event(
             bool(needs_escalation),
         )
         if needs_escalation:
+            contact_mode = handoff_contact_mode(
+                customer_message, template_id=template_id,
+            )
             reason = (
-                "Order Confirmation & Intake Request" if was_matched
+                "Order Confirmation & Intake Request"
+                if contact_mode == "whatsapp_order"
+                else "Generic Human Support"
+                if explicit_human_help
                 else "Unmatched Instagram Query / Sensitive Request"
             )
             # Created before the staff alert (not after) so the alert can name
@@ -756,11 +755,18 @@ def _process_instagram_event(
             # cart into the handoff. "Talk to human" is not one of those, and
             # treating it as one is what attached a days-old Jolbhora order to
             # a plain request to speak to somebody.
-            is_order_handoff = template_id in ("order_draft_receipt", "order_next_steps")
+            is_order_handoff = template_id in (
+                "order_draft_receipt", "order_next_steps", "client_approved_order_ready_handoff",
+            )
             handoff = get_or_create_handoff(
                 user_id=sender_id, channel="instagram", reason=reason,
                 user_message=customer_message, facts=facts,
                 include_order=is_order_handoff,
+                instagram_username=instagram_username,
+                query_summary=customer_query_summary(
+                    customer_message, contact_mode=contact_mode, reason=reason,
+                ),
+                contact_mode=contact_mode,
             )
             # A repeated "human"/"can someone help" against an already-active
             # handoff reuses the reference (above) and must not re-alert
@@ -778,20 +784,27 @@ def _process_instagram_event(
                     },
                 )
             order_summary = handoff.get("verified_order")
-            if template_id == "order_draft_receipt":
+            if template_id in ("order_draft_receipt", "client_approved_order_ready_handoff") or facts.get("client_qa_handoff_exact"):
                 response_text = response_text.rstrip()
             else:
                 response_text = customer_facing_notice(
                     finalized_order=template_id == "order_next_steps"
                 )
-            link_message = customer_facing_link_message(handoff["handoff_ref"], order_summary)
+            link_message = (
+                customer_facing_link_message(handoff["handoff_ref"], order_summary)
+                if contact_mode == "whatsapp_order" else None
+            )
             mark_referred(handoff["handoff_ref"])
             if is_order_handoff and order_summary:
                 # The order is now on its way to a human, prefilled in the
                 # link above. Instagram's copy has done its job; keeping it
                 # would make it luggage for every later enquiry.
                 retire_order_state(sender_id, "instagram")
-            template_id = "instagram_whatsapp_handoff"
+            template_id = (
+                "instagram_whatsapp_handoff"
+                if contact_mode == "whatsapp_order"
+                else "instagram_support_handoff"
+            )
             image_url = None
 
         trace["source_context_used"] = bool(facts.get("source_context_used"))
@@ -800,7 +813,7 @@ def _process_instagram_event(
         )
         trace["source_referential_intent"] = facts.get("source_referential_intent")
         logged_response = response_text
-        if needs_escalation:
+        if needs_escalation and link_message:
             logged_response = f"{response_text}\n\n{link_message}"
         conversation_id = db.log_conversation(
             sender_id, "instagram", customer_message, logged_response, was_matched,
@@ -811,7 +824,7 @@ def _process_instagram_event(
             sender_id, response_text, image_url=image_url,
             inbound_message_id=conversation_id, response_type="reply",
         )
-        if needs_escalation:
+        if needs_escalation and link_message:
             send_instagram_reply(
                 sender_id, link_message,
                 inbound_message_id=conversation_id, response_type="handoff",
@@ -880,7 +893,7 @@ def _reply_to_unreadable_attachment(
     try:
         facts = session_memory.get_facts(sender_id, "instagram")
         if facts.get("attachment_notice_sent"):
-            log.info("Attachment from %s; the type-instead notice was already sent.", sender_id)
+            log.info("Attachment notice already sent for sender_hash=%s.", _safe_identifier_hash(sender_id))
             if source_media_present:
                 _log_unreadable_attachment_audit(
                     sender_id, source_type=source_type, media_id=media_id,
@@ -1356,11 +1369,44 @@ def get_instagram_media_verification(
     return verify_media_by_id(media_id)
 
 
-def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks) -> dict:
-    log.info("Instagram Webhook Raw Payload:\n%s", json.dumps(payload, indent=2))
+def _safe_identifier_hash(value: Any) -> Optional[str]:
+    """Return a short correlation token without logging the raw identifier."""
+    raw = str(value or "").strip()
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12] if raw else None
 
+
+def _safe_instagram_event_shape(messaging_event: dict) -> Dict[str, Any]:
+    """Describe an event without retaining customer text or raw payload."""
+    message = messaging_event.get("message") or {}
+    reply_to = message.get("reply_to") or {}
+    return {
+        "has_text": bool(message.get("text") or (messaging_event.get("message_edit") or {}).get("text")),
+        "has_attachment": bool(message.get("attachments")),
+        "has_postback": bool(messaging_event.get("postback")),
+        "has_story_reply": bool(isinstance(reply_to, dict) and reply_to.get("story")),
+        "has_story_mention": bool(message.get("story_mention") or messaging_event.get("story_mention")),
+        "has_referral": bool(message.get("referral") or messaging_event.get("referral")),
+        "is_echo": bool(message.get("is_echo") or (messaging_event.get("message_edit") or {}).get("is_echo")),
+        "is_read": "read" in messaging_event,
+        "is_delivery": "delivery" in messaging_event,
+    }
+
+
+def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks) -> dict:
+    entries = payload.get("entry", []) if isinstance(payload, dict) else []
+    if not isinstance(entries, list):
+        entries = []
+    configured_account_id = str(getattr(config, "INSTAGRAM_ACCOUNT_ID", "") or "").strip()
+    log.info(
+        "Instagram webhook received: entry_count=%d account_guard_configured=%s",
+        len(entries), bool(configured_account_id),
+    )
     results = []
-    for entry in payload.get("entry", []):
+    for entry in entries:
+        if configured_account_id and str(entry.get("id", "")) != configured_account_id:
+            log.info("Ignored Instagram webhook entry for foreign account (foreign_account=true).")
+            continue
+
         events = list(entry.get("messaging", []))
         if "changes" in entry:
             for change in entry.get("changes", []):
@@ -1372,6 +1418,11 @@ def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks
             is_ad_qualified, sender_id, message_text, ad_id = ad_gate.inspect_and_gate_message(messaging_event)
             entry_point = describe_entry_point(messaging_event)
             message = messaging_event.get("message") or {}
+            log.info(
+                "Instagram event observed: sender_hash=%s source=%s shape=%s",
+                _safe_identifier_hash(sender_id), entry_point.source,
+                _safe_instagram_event_shape(messaging_event),
+            )
 
             # Story IDs are durable routing evidence even when the operator
             # has not mapped them yet. Capture before sender/ad-gate handling
@@ -1470,8 +1521,9 @@ def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks
                 if reason:
                     _record_dropped_webhook_event(reason, messaging_event, sender_id)
                 log.warning(
-                    "Ignored Instagram event without text payload (sender: %s, keys: %s, inner: %s).",
-                    sender_id, list(messaging_event.keys()),
+                    "Ignored Instagram event without text payload "
+                    "(sender_hash=%s, keys=%s, inner=%s).",
+                    _safe_identifier_hash(sender_id), list(messaging_event.keys()),
                     list((messaging_event.get("postback") or messaging_event.get("message") or {}).keys()),
                 )
                 results.append({"sender_id": sender_id, "action": "ignored_empty_text"})
@@ -1479,7 +1531,7 @@ def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks
 
             if not is_ad_qualified:
                 # Hard Gate: Ignore organic messages per PRD Requirement #4
-                log.info("Ad-gate: sender %s is a non-ad organic DM; left for manual reply.", sender_id)
+                log.info("Ad-gate: sender_hash=%s is a non-ad organic DM; left for manual reply.", _safe_identifier_hash(sender_id))
                 results.append({"sender_id": sender_id, "action": "ignored_organic_dm"})
                 continue
 
@@ -1641,6 +1693,28 @@ def _instagram_natural_split(value: str, limit: int) -> int:
     return min(limit, _INSTAGRAM_MAX_TEXT_CHARS)
 
 
+def _normalise_images(image_url) -> list:
+    """Return image values as ``(url, caption)`` pairs for Instagram sends."""
+    raw = [image_url] if isinstance(image_url, (str, dict)) else list(image_url or [])
+    pairs = []
+    for entry in raw:
+        if isinstance(entry, dict):
+            url = entry.get("url")
+            if url:
+                pairs.append((url, entry.get("caption")))
+        elif entry:
+            pairs.append((entry, None))
+    return pairs
+
+
+def _public_url(path: str) -> str:
+    """Make a local asset path fetchable by Meta's Instagram API."""
+    if path.startswith(("http://", "https://")):
+        return path
+    base = config.PUBLIC_BASE_URL.rstrip("/")
+    return base + path if base else path
+
+
 def send_instagram_reply(
     recipient_id: str,
     text: str,
@@ -1653,19 +1727,18 @@ def send_instagram_reply(
     """Sends text plus zero or more image cards via Meta Graph API to Instagram user."""
     # Instagram has no caption field on attachments, so a captioned card is sent
     # as the image followed by its own text message — same card, detail, card,
-    # detail sequence the customer sees on WhatsApp.
+    # detail sequence the customer sees in the customer-facing continuation.
     # Meta fetches a card by URL, so it has to be absolute. This path used to
     # hand it the raw template value — "/images/AAMAR%20MISHTI.jpeg" — which
     # Meta cannot resolve, so the attachment POST failed and took the whole
     # reply down with it: "show me the menu" (captioned cards, sent first)
     # returned nothing at all, and "sondesh price" (uncaptioned, text first)
-    # arrived as text with no menu. The WhatsApp adapter always did this
-    # conversion; only Instagram was missing it.
-    pairs = whatsapp_adapter._normalise_images(image_url)
+    # arrived as text with no menu.
+    pairs = _normalise_images(image_url)
     captioned = []
     undelivered_captions = []
     for img, caption in pairs:
-        public = whatsapp_adapter._public_url(img)
+        public = _public_url(img)
         if not public.startswith(("http://", "https://")):
             log.warning(
                 "Instagram card '%s' is relative and PUBLIC_BASE_URL is unset, so Meta "
@@ -1697,17 +1770,19 @@ def send_instagram_reply(
     cards_first = any(caption for _, caption in captioned) and not text_first
 
     if not config.INSTAGRAM_ACCESS_TOKEN:
-        safe_text = text[:60].encode("ascii", "backslashreplace").decode("ascii")
-        msg_type = f"IMAGE x{len(images)} ({', '.join(images)})" if images else "TEXT"
-        log.info("[MOCK IG OUTBOUND] [%s] To: %s | Message: %s...", msg_type, recipient_id, safe_text)
+        msg_type = f"IMAGE x{len(images)}" if images else "TEXT"
+        log.info(
+            "[MOCK IG OUTBOUND] type=%s recipient_hash=%s text_length=%d",
+            msg_type, _safe_identifier_hash(recipient_id), len(text or ""),
+        )
         return {"mock": True, "status": "sent", "recipient": recipient_id, "type": msg_type}
 
     token = config.INSTAGRAM_ACCESS_TOKEN.strip()
     if token.startswith("IGAA"):
-        url = f"https://graph.instagram.com/{config.WHATSAPP_API_VERSION}/me/messages"
+        url = f"https://graph.instagram.com/{config.INSTAGRAM_API_VERSION}/me/messages"
     else:
         page_id = config.INSTAGRAM_PAGE_ID or "me"
-        url = f"https://graph.facebook.com/{config.WHATSAPP_API_VERSION}/{page_id}/messages"
+        url = f"https://graph.facebook.com/{config.INSTAGRAM_API_VERSION}/{page_id}/messages"
 
     headers = {
         "Authorization": f"Bearer {token}",
@@ -1912,7 +1987,7 @@ def send_instagram_reply(
             log.warning(
                 "Could not finalize failed Instagram outbound audit %s: %s",
                 parent_send_id, _safe_outbound_exception(audit_error),
-            )
+        )
         delivery_monitor.record_failure(
             "instagram", str(e),
             classification=failure_classification or classify_instagram_delivery(
@@ -1920,60 +1995,11 @@ def send_instagram_reply(
             ),
         )
         if hasattr(e, "response") and getattr(e, "response", None) is not None:
-            log.error("Instagram Meta API Error Body: %s", e.response.text)
+            log.error(
+                "Instagram Meta API request failed: http_status=%s error_type=%s.",
+                e.response.status_code, type(e).__name__,
+            )
         return {"error": str(e), "status": "failed"}
-
-# --------------------------------------------------------------------------
-# WhatsApp Webhook Endpoints
-# --------------------------------------------------------------------------
-@app.get("/webhook/whatsapp", response_class=PlainTextResponse)
-def verify_whatsapp_webhook(
-    hub_mode: Optional[str] = Query(None, alias="hub.mode"),
-    hub_verify_token: Optional[str] = Query(None, alias="hub.verify_token"),
-    hub_challenge: Optional[str] = Query(None, alias="hub.challenge")
-):
-    """Meta Webhook verification endpoint for WhatsApp Business API."""
-    if hub_mode == "subscribe" and hub_verify_token == config.META_VERIFY_TOKEN:
-        log.info("WhatsApp webhook verification successful.")
-        return hub_challenge or ""
-    log.warning("WhatsApp webhook verification failed: invalid token.")
-    raise HTTPException(status_code=403, detail="Verification token mismatch")
-
-def _process_whatsapp_event(sender_phone: str, message_text: str) -> None:
-    """
-    Handles one WhatsApp message off the webhook request path.
-
-    Same reasoning as the Instagram side: the work is blocking, it used to run
-    inside the `async` handler and stall the event loop for every other
-    customer, and a slow 200 makes Meta redeliver the message.
-    """
-    try:
-        whatsapp_adapter.process_incoming_message(sender_phone, message_text)
-    except Exception:
-        log.exception("Failed to process WhatsApp message from %s.", sender_phone)
-
-
-@app.post("/webhook/whatsapp")
-@limiter.limit("120/minute")
-async def handle_whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
-    """Handles WhatsApp Business Webhook events."""
-    raw_body = await request.body()
-    verify_meta_signature(raw_body, request.headers.get("X-Hub-Signature-256"))
-    try:
-        payload = json.loads(raw_body or b"{}")
-    except json.JSONDecodeError:
-        log.warning("Received malformed JSON on WhatsApp webhook — ignoring.")
-        return {"status": "ignored", "reason": "malformed_json"}
-    if payload.get("object") in ("instagram", "page"):
-        return _dispatch_instagram_payload(payload, background_tasks)
-
-    parsed = whatsapp_adapter.parse_webhook_message(payload)
-    if not parsed:
-        return {"status": "no_message_event"}
-
-    sender_phone, msg_id, message_text = parsed
-    background_tasks.add_task(_process_whatsapp_event, sender_phone, message_text)
-    return {"status": "queued", "sender_phone": sender_phone, "message_id": msg_id}
 
 # --------------------------------------------------------------------------
 # Legal Pages (required by Meta before an app can go Live, and by the
@@ -2008,7 +2034,8 @@ def privacy_policy():
 <p class="updated">{config.BUSINESS_LEGAL_NAME} &middot; Last updated 5 August 2026</p>
 
 <p>This policy explains what happens to your information when you message
-{config.BUSINESS_LEGAL_NAME} on Instagram or WhatsApp and our automated assistant replies.
+{config.BUSINESS_LEGAL_NAME} on Instagram. WhatsApp is available only as a
+human continuation after a handoff; there is no WhatsApp bot.
 We have tried to write it in plain language rather than legal boilerplate.</p>
 
 <h2>Who is responsible for your data</h2>
@@ -2020,8 +2047,7 @@ or call +91 87965 51990.</p>
 <h2>What we collect</h2>
 <ul>
   <li><strong>Your messages to us</strong> and the assistant's replies.</li>
-  <li><strong>Your Instagram or WhatsApp account identifier</strong>, as supplied by Meta.
-      For WhatsApp this is your phone number.</li>
+  <li><strong>Your Instagram account identifier</strong>, as supplied by Meta.</li>
   <li><strong>Your first name</strong>, only if you tell it to us in the chat.</li>
   <li><strong>Whether you arrived via one of our advertisements</strong>, because our assistant
       only replies automatically to enquiries that started from an ad.</li>
@@ -2049,9 +2075,10 @@ This deletion is enforced by the software itself, not by someone remembering to 
 
 <h2>Who we share it with</h2>
 <p>We do not sell your information, and we do not share it with advertisers or data brokers.
-Your messages travel through <strong>Meta Platforms</strong> (Instagram and WhatsApp), which
-handles them under its own privacy policy — that is unavoidable for any business reachable on
-those apps. Beyond Meta, your conversation stays on our own server. No third-party analytics
+Your Instagram messages travel through <strong>Meta Platforms</strong>, which handles them under
+its own privacy policy. If you choose the manual WhatsApp continuation, WhatsApp handles that
+conversation under its own privacy policy; our server does not receive or answer WhatsApp
+messages. Beyond Meta, your Instagram conversation stays on our own server. No third-party analytics
 or advertising service receives it.</p>
 
 <h2>Where it is stored</h2>
@@ -2099,11 +2126,13 @@ def terms_of_service():
 <p class="updated">{config.BUSINESS_LEGAL_NAME} &middot; Last updated 5 August 2026</p>
 
 <p>These terms cover the automated chat assistant that replies to messages sent to
-{config.BUSINESS_LEGAL_NAME} on Instagram and WhatsApp.</p>
+{config.BUSINESS_LEGAL_NAME} on Instagram. WhatsApp is a human-only continuation
+available through a manual handoff link.</p>
 
 <h2>You are talking to software</h2>
-<p>Replies are generated automatically. When the assistant is not confident about your
-question, it stops and passes you to a human colleague rather than guessing.</p>
+<p>Instagram replies are generated automatically. When the assistant is not confident
+about your question, it stops and passes you to a human colleague rather than guessing.
+WhatsApp messages are handled by the human team and are not processed by this service.</p>
 
 <h2>Prices and availability</h2>
 <p>Prices quoted in chat are indicative and may change with ingredient costs and seasonal
@@ -2278,35 +2307,14 @@ def _storage_durability() -> dict:
 
 
 def _delivery_capability() -> dict:
-    """
-    Reports whether a reply would actually reach a customer.
-
-    Mock mode is the failure worth naming here: it never constructs an outbound
-    request, so the bot looks entirely healthy while every customer sits in
-    silence. That is indistinguishable from working unless something says so.
-    """
-    if config.WHATSAPP_MOCK_MODE:
-        # Not counted as unhealthy: mock is the correct and default state for
-        # local development and the test suite, and failing health there would
-        # train everyone to ignore a red health check. It is surfaced as a
-        # warning instead, so an operator looking at a deployed bot can see it.
-        return {
-            "delivering": False,
-            "mode": "mock",
-            "problem": "WHATSAPP_MOCK_MODE is on — replies are logged, never sent to customers.",
-        }
-    missing = [
-        name for name, value in (
-            ("WHATSAPP_ACCESS_TOKEN", config.WHATSAPP_ACCESS_TOKEN),
-            ("WHATSAPP_PHONE_NUMBER_ID", config.WHATSAPP_PHONE_NUMBER_ID),
-        ) if not value
-    ]
+    """Report Instagram delivery and the manual-only WhatsApp boundary."""
     return {
-        "delivering": not missing,
-        "mode": "live",
-        "problem": f"missing {', '.join(missing)}" if missing else None,
+        "delivering": True,
+        "mode": "instagram_only",
+        "problem": None,
+        "whatsapp_automation": "removed",
+        "manual_handoff": "available",
     }
-
 
 def _webhook_signature_status() -> str:
     """How webhook payloads are being authenticated, in one word."""
@@ -2322,12 +2330,12 @@ def _instagram_profile_url_and_identity() -> Tuple[str, str]:
     token = (config.INSTAGRAM_ACCESS_TOKEN or "").strip()
     if token.startswith("IGAA"):
         return (
-            f"https://graph.instagram.com/{config.WHATSAPP_API_VERSION}/me/messenger_profile",
+            f"https://graph.instagram.com/{config.INSTAGRAM_API_VERSION}/me/messenger_profile",
             "instagram_login_token (graph.instagram.com/me)",
         )
     page_id = config.INSTAGRAM_PAGE_ID or "me"
     return (
-        f"https://graph.facebook.com/{config.WHATSAPP_API_VERSION}/{page_id}/messenger_profile",
+        f"https://graph.facebook.com/{config.INSTAGRAM_API_VERSION}/{page_id}/messenger_profile",
         f"page_token (graph.facebook.com/{page_id})",
     )
 
@@ -2414,19 +2422,6 @@ def health_check():
     instagram_token = instagram_token_status()
     instagram_outbound = db.instagram_outbound_health()
 
-    # Which phone actually receives escalation alerts. The environment
-    # overrides the code default, and the environment is a dashboard nothing
-    # here can read — so changing the number in code and assuming it took is
-    # the same mistake the undelivered templates and the dead token both were.
-    # Masked to the last four digits: enough to tell two numbers apart, not
-    # enough to publish someone's phone on an unauthenticated endpoint.
-    escalation_phone = (config.HUMAN_ESCALATION_PHONE or "").strip()
-    alert_destination = {
-        "configured": bool(escalation_phone),
-        "ends_with": escalation_phone[-4:] if len(escalation_phone) >= 4 else None,
-        "from_environment": bool(os.getenv("HUMAN_ESCALATION_PHONE")),
-    }
-
     # Shadow mode is switched on in the host dashboard, which nothing in this
     # repo can read. Without this, turning it on and hoping is the only option.
     router_shadow: Dict[str, Any] = {
@@ -2455,21 +2450,14 @@ def health_check():
             llm_triage["error"] = f"{type(e).__name__}"
             log.warning("Could not read the triage shadow pulse: %s", e)
 
-    # A bot that cannot answer is down, whatever else is working. Live mode
-    # without credentials is the same kind of failure one step later — it
-    # produces a reply that cannot be delivered.
-    live_but_broken = delivery["mode"] == "live" and not delivery["delivering"]
-    healthy = outbound["healthy"] and answering["ready"] and not live_but_broken
+    healthy = outbound["healthy"] and answering["ready"]
     if not answering["ready"]:
         log.error("Health check failed — bot cannot answer: %s", "; ".join(answering["problems"]))
-    if live_but_broken:
-        log.error("Health check failed — replies cannot be delivered: %s", delivery["problem"])
 
     # Things that are not outages but that an operator needs to see, because
     # each of them looks exactly like a working bot from the outside.
     warnings = []
-    if delivery["mode"] == "mock":
-        warnings.append(delivery["problem"])
+    warnings.append("WhatsApp automation removed; manual human handoff via wa.me is available.")
     if signature == "DISABLED":
         warnings.append("META_APP_SECRET unset — webhook payloads are not verified.")
     if config.ENABLE_WEB_TESTER:
@@ -2487,11 +2475,8 @@ def health_check():
         )
     if instagram_token.get("state") == "invalid":
         # A warning rather than a 503, on purpose. This genuinely is an outage
-        # of the Instagram channel, but the health endpoint is what the host
-        # restarts the service on — and returning 503 for a dead credential
-        # would take WhatsApp down too, to fix nothing. Only a new token in the
-        # environment can resolve this, so it is reported as loudly as possible
-        # without knocking over the half that still works.
+        # of the Instagram channel, but the health endpoint remains available
+        # so an operator can see the credential failure and repair it.
         warnings.append(
             "Instagram access token is rejected by Meta "
             f"({instagram_token.get('detail')}). DMs are still being received "
@@ -2519,16 +2504,23 @@ def health_check():
             "outbound_delivery": outbound,
             "instagram_token": instagram_token,
             "admin_auth": {
-                "password_configured": bool(_active_admin_credential().get("password_hash")),
-                "mfa_required": bool(config.ADMIN_MFA_REQUIRED),
-                "mfa_configured": bool(config.ADMIN_MFA_TOTP_SECRET),
+                "password_configured": bool(config.ADMIN_USERNAME and config.ADMIN_PASSWORD_HASH),
                 "machine_api_configured": bool(config.ADMIN_API_KEY),
                 "https_required": bool(config.ADMIN_REQUIRE_HTTPS),
             },
             # Diagnostic only: no traffic is not an outage, so this block never
             # participates in the overall healthy/degraded calculation.
             "instagram_outbound": instagram_outbound,
-            "escalation_alerts_to": alert_destination,
+            "human_escalation_notifications": {
+                "status": "SKIPPED",
+                "reason": "WhatsApp automation removed; staff alerts are manual-only.",
+            },
+            "whatsapp": {
+                "automation": "removed",
+                "manual_handoff": "available",
+                "business_number_configured": bool(config.WHATSAPP_BUSINESS_NUMBER),
+                "cloud_api": "unavailable",
+            },
             "router_shadow": router_shadow,
             "llm_triage": llm_triage,
             "auto_resolve": {
@@ -2584,119 +2576,6 @@ def _generic_login_failure(retry_after: int = 0) -> JSONResponse:
     return JSONResponse(status_code=401, content={"detail": "Invalid credentials."})
 
 
-FORGOT_PASSWORD_HTML = r"""<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-    <meta name="referrer" content="no-referrer"><title>Reset Admin Password · Camellia Artisanal</title>
-    <style>
-        :root { color-scheme: light; font-family: Arial, sans-serif; }
-        body { margin:0; min-height:100vh; display:grid; place-items:center; background:#e6e2dd; color:#1f1c1b; }
-        main { width:min(420px,calc(100% - 32px)); background:#fff; border-radius:18px; padding:28px; box-shadow:0 12px 30px #0002; }
-        h1 { margin:0 0 8px; font-size:1.35rem; } p { color:#6f6965; line-height:1.45; }
-        label { display:block; margin:16px 0 6px; font-size:.85rem; font-weight:600; }
-        input { width:100%; padding:12px; box-sizing:border-box; border:1px solid #d9d3ce; border-radius:9px; font-size:1rem; }
-        button { width:100%; margin-top:20px; padding:12px; border:0; border-radius:9px; background:#524036; color:#fff; font-weight:700; cursor:pointer; }
-        a { color:#524036; } #message { margin-top:16px; font-size:.9rem; }
-    </style>
-</head>
-<body><main>
-    <h1>Reset Admin Password</h1>
-    <p>Enter the registered recovery email. If it is configured for an admin account, a one-time reset link will be sent.</p>
-    <form id="forgotForm">
-        <label for="email">Recovery email</label>
-        <input id="email" name="email" type="email" autocomplete="email" required>
-        <button type="submit">Send Reset Link</button>
-    </form>
-    <div id="message" role="status"></div>
-    <p><a href="/admin">Return to Admin Portal</a></p>
-</main>
-<script>
-function readCookie(name) {
-    const prefix = name + '=';
-    const item = document.cookie.split('; ').find(row => row.startsWith(prefix));
-    return item ? decodeURIComponent(item.slice(prefix.length)) : '';
-}
-document.getElementById('forgotForm').addEventListener('submit', async (event) => {
-    event.preventDefault();
-    const message = document.getElementById('message');
-    try {
-        const csrf = readCookie('camellia_admin_csrf');
-        const headers = {'Content-Type': 'application/json'};
-        if (csrf) headers['X-CSRF-Token'] = csrf;
-        const response = await fetch('/admin/forgot-password', {
-            method: 'POST', credentials: 'same-origin',
-            headers,
-            body: JSON.stringify({email: document.getElementById('email').value})
-        });
-        const data = await response.json().catch(() => ({}));
-        message.textContent = response.status === 429 ? 'Too many requests. Try again later.' : (data.message || data.detail || 'Request received.');
-    } catch (error) { message.textContent = 'Could not submit the request. Try again later.'; }
-});
-</script></body></html>"""
-
-
-RESET_PASSWORD_HTML = r"""<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-    <meta name="referrer" content="no-referrer"><title>Set New Admin Password · Camellia Artisanal</title>
-    <style>
-        :root { color-scheme: light; font-family: Arial, sans-serif; }
-        body { margin:0; min-height:100vh; display:grid; place-items:center; background:#e6e2dd; color:#1f1c1b; }
-        main { width:min(420px,calc(100% - 32px)); background:#fff; border-radius:18px; padding:28px; box-shadow:0 12px 30px #0002; }
-        h1 { margin:0 0 8px; font-size:1.35rem; } p { color:#6f6965; line-height:1.45; }
-        label { display:block; margin:16px 0 6px; font-size:.85rem; font-weight:600; }
-        input { width:100%; padding:12px; box-sizing:border-box; border:1px solid #d9d3ce; border-radius:9px; font-size:1rem; }
-        button { width:100%; margin-top:20px; padding:12px; border:0; border-radius:9px; background:#524036; color:#fff; font-weight:700; cursor:pointer; }
-        a { color:#524036; } #message { margin-top:16px; font-size:.9rem; }
-    </style>
-</head>
-<body><main>
-    <h1>Set New Admin Password</h1>
-    <p>This link expires in approximately 15 minutes. A valid authenticator code is required; password reset never disables MFA.</p>
-    <form id="resetForm">
-        <label for="password">New password</label>
-        <input id="password" type="password" autocomplete="new-password" minlength="12" required>
-        <label for="confirm">Confirm new password</label>
-        <input id="confirm" type="password" autocomplete="new-password" minlength="12" required>
-        <label for="totp">Authenticator code</label>
-        <input id="totp" inputmode="numeric" autocomplete="one-time-code" maxlength="6" required>
-        <button type="submit">Reset Password</button>
-    </form>
-    <div id="message" role="status"></div>
-    <p><a href="/admin">Return to Admin Portal</a></p>
-</main>
-<script>
-const fragment = new URLSearchParams(window.location.hash.slice(1));
-const query = new URLSearchParams(window.location.search);
-const resetToken = fragment.get('token') || query.get('token') || '';
-window.history.replaceState({}, document.title, '/admin/reset-password');
-function readCookie(name) {
-    const prefix = name + '=';
-    const item = document.cookie.split('; ').find(row => row.startsWith(prefix));
-    return item ? decodeURIComponent(item.slice(prefix.length)) : '';
-}
-document.getElementById('resetForm').addEventListener('submit', async (event) => {
-    event.preventDefault();
-    const message = document.getElementById('message');
-    try {
-        const csrf = readCookie('camellia_admin_csrf');
-        const headers = {'Content-Type': 'application/json'};
-        if (csrf) headers['X-CSRF-Token'] = csrf;
-        const response = await fetch('/admin/reset-password', {
-            method: 'POST', credentials: 'same-origin', headers,
-            body: JSON.stringify({token: resetToken, password: document.getElementById('password').value,
-                confirm_password: document.getElementById('confirm').value, totp: document.getElementById('totp').value})
-        });
-        const data = await response.json().catch(() => ({}));
-        message.textContent = response.ok ? data.message : (data.detail || 'Could not reset the password.');
-        if (response.ok) document.getElementById('resetForm').style.display = 'none';
-    } catch (error) { message.textContent = 'Could not complete the reset. Try again later.'; }
-});
-</script></body></html>"""
-
-
 @app.post("/admin/login")
 @limiter.limit("60/minute")
 async def admin_login(request: Request):
@@ -2716,15 +2595,13 @@ async def admin_login(request: Request):
 
     username = str(body.get("username") or "").strip()
     password = str(body.get("password") or "")
-    totp_code = str(body.get("totp") or "").strip()
     retry_after = _admin_login_rate_limit(request, username)
     if retry_after:
         _audit_admin_event("RATE_LIMIT", username, request)
         return _generic_login_failure(retry_after)
 
-    credential = _active_admin_credential()
-    configured_username = normalize_username(credential.get("username", ""))
-    password_ok = verify_password(password, credential.get("password_hash", ""))
+    configured_username = normalize_username(config.ADMIN_USERNAME)
+    password_ok = verify_password(password, config.ADMIN_PASSWORD_HASH)
     username_ok = bool(configured_username) and hmac.compare_digest(
         normalize_username(username), configured_username
     )
@@ -2732,187 +2609,18 @@ async def admin_login(request: Request):
         retry_after = _admin_login_failed(request, username, "LOGIN_FAILURE")
         return _generic_login_failure(retry_after)
 
-    recovery_used = False
-    if config.ADMIN_MFA_REQUIRED:
-        if not config.ADMIN_MFA_TOTP_SECRET:
-            _audit_admin_event("MFA_UNAVAILABLE", username, request)
-            return JSONResponse(status_code=503, content={"detail": "Admin authentication is not configured."})
-        if not totp_code:
-            return JSONResponse(status_code=200, content={"mfa_required": True})
-        totp_ok = verify_totp(config.ADMIN_MFA_TOTP_SECRET, totp_code)
-        if not totp_ok and totp_code:
-            recovery_used = db.consume_admin_recovery_code(totp_code, verify_password, time.time())
-        if not totp_ok and not recovery_used:
-            retry_after = _admin_login_failed(request, username, "MFA_FAILURE")
-            return _generic_login_failure(retry_after)
-        _audit_admin_event("MFA_SUCCESS", username, request)
-
     now = time.time()
     db.reset_admin_login_scopes(_admin_scopes(username, _admin_ip(request))[:2])
     session_token = new_token()
     csrf_token = new_token()
     db.create_admin_session(
-        token_hash(session_token), configured_username, token_hash(csrf_token),
+        token_hash(session_token), normalize_username(username), token_hash(csrf_token),
         _admin_security_version(), now, now + config.ADMIN_SESSION_ABSOLUTE_SECONDS,
     )
     _audit_admin_event("LOGIN_SUCCESS", username, request)
-    response = JSONResponse(content={"status": "authenticated", "username": configured_username})
+    response = JSONResponse(content={"status": "authenticated", "username": normalize_username(username)})
     _set_admin_cookies(response, session_token, csrf_token)
     return response
-
-
-FORGOT_PASSWORD_MESSAGE = "If an admin account exists for that email, a password reset link has been sent."
-
-
-@app.get("/admin/forgot-password", response_class=HTMLResponse)
-def forgot_password_page():
-    return HTMLResponse(content=FORGOT_PASSWORD_HTML)
-
-
-@app.post("/admin/forgot-password")
-@limiter.limit("30/minute")
-async def request_password_reset(request: Request):
-    _require_secure_admin_request(request)
-    if int(request.headers.get("content-length", "0") or 0) > 2048:
-        raise HTTPException(status_code=413, detail="Request too large.")
-    try:
-        raw = await request.body()
-        if len(raw) > 2048:
-            raise HTTPException(status_code=413, detail="Request too large.")
-        body = json.loads(raw or b"{}")
-    except HTTPException:
-        raise
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid request.")
-
-    email = _normalize_recovery_email(body.get("email"))
-    scopes = _admin_reset_scopes("admin-forgot", email, _admin_ip(request))
-    retry_after = _admin_action_rate_status(scopes)
-    if retry_after:
-        _audit_admin_event("PASSWORD_RESET_RATE_LIMIT", "", request)
-        return JSONResponse(
-            status_code=429,
-            content={"detail": "Too many password reset attempts. Try again later."},
-            headers={"Retry-After": str(retry_after)},
-        )
-
-    _admin_action_record(scopes, [3, 3, 30])
-    configured_email = _normalize_recovery_email(config.ADMIN_RECOVERY_EMAIL)
-    credential = _active_admin_credential()
-    if email and configured_email and hmac.compare_digest(email, configured_email) and credential.get("password_hash"):
-        now = time.time()
-        reset_token = new_token()
-        db.issue_admin_password_reset_token(
-            credential["username"],
-            token_hash(reset_token),
-            now,
-            now + config.ADMIN_RESET_TOKEN_TTL_SECONDS,
-            security_digest(_admin_ip(request)),
-        )
-        public_base_url = _reset_public_base_url(request)
-        # Keep the bearer token in the URL fragment so it is not sent in the
-        # reset-page HTTP request, access logs, or a downstream Referer.
-        reset_url = f"{public_base_url}/admin/reset-password#token={reset_token}" if public_base_url else ""
-        sent = bool(reset_url) and admin_mailer.send_password_reset_email(
-            configured_email,
-            reset_url,
-            max(1, int(config.ADMIN_RESET_TOKEN_TTL_SECONDS // 60)),
-        )
-        _audit_admin_event("PASSWORD_RESET_REQUESTED", credential["username"], request)
-        if sent:
-            _audit_admin_event("PASSWORD_RESET_EMAIL_SENT", credential["username"], request)
-        else:
-            db.cancel_admin_password_reset_token(token_hash(reset_token), time.time())
-            _audit_admin_event("PASSWORD_RESET_EMAIL_FAILED", credential["username"], request)
-    else:
-        _audit_admin_event("PASSWORD_RESET_UNKNOWN_EMAIL", "", request)
-
-    return JSONResponse(content={"message": FORGOT_PASSWORD_MESSAGE})
-
-
-@app.get("/admin/reset-password", response_class=HTMLResponse)
-def reset_password_page():
-    return HTMLResponse(content=RESET_PASSWORD_HTML)
-
-
-@app.post("/admin/reset-password")
-@limiter.limit("30/minute")
-async def reset_password(request: Request):
-    _require_secure_admin_request(request)
-    if int(request.headers.get("content-length", "0") or 0) > 8192:
-        raise HTTPException(status_code=413, detail="Request too large.")
-    try:
-        raw = await request.body()
-        if len(raw) > 8192:
-            raise HTTPException(status_code=413, detail="Request too large.")
-        body = json.loads(raw or b"{}")
-    except HTTPException:
-        raise
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid request.")
-
-    reset_token = str(body.get("token") or "").strip()
-    scopes = _admin_reset_scopes("admin-reset", reset_token, _admin_ip(request))
-    retry_after = _admin_action_rate_status(scopes)
-    if retry_after:
-        _audit_admin_event("PASSWORD_RESET_RATE_LIMIT", "", request)
-        return JSONResponse(
-            status_code=429,
-            content={"detail": "Too many password reset attempts. Try again later."},
-            headers={"Retry-After": str(retry_after)},
-        )
-    _admin_action_record(scopes, [5, 10, 50])
-
-    row = db.get_active_admin_password_reset_token(token_hash(reset_token), time.time()) if reset_token else None
-    if not row:
-        _audit_admin_event("PASSWORD_RESET_TOKEN_INVALID", "", request)
-        return JSONResponse(status_code=400, content={"detail": "Invalid or expired reset link."})
-
-    password = str(body.get("password") or "")
-    confirmation = str(body.get("confirm_password") or "")
-    if len(password) < 12 or password != confirmation:
-        _audit_admin_event("PASSWORD_RESET_INVALID_PASSWORD", row["username"], request)
-        return JSONResponse(
-            status_code=400,
-            content={"detail": "Password must be at least 12 characters and match its confirmation."},
-        )
-
-    totp_code = str(body.get("totp") or "").strip()
-    if not _verify_reset_mfa(totp_code, time.time()):
-        _audit_admin_event("PASSWORD_RESET_MFA_FAILURE", row["username"], request)
-        return JSONResponse(status_code=401, content={"detail": "Invalid authenticator code."})
-
-    completed = db.complete_admin_password_reset(
-        token_hash(reset_token), hash_secret(password), time.time()
-    )
-    if not completed:
-        _audit_admin_event("PASSWORD_RESET_TOKEN_INVALID", "", request)
-        return JSONResponse(status_code=400, content={"detail": "Invalid or expired reset link."})
-    _audit_admin_event("PASSWORD_RESET_COMPLETED", completed["username"], request)
-    return {"status": "password_reset", "message": "Password reset complete. Sign in with your new password."}
-
-
-@app.post("/admin/reset-password/cancel")
-@limiter.limit("30/minute")
-async def cancel_password_reset(request: Request):
-    _require_secure_admin_request(request)
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
-    reset_token = str(body.get("token") or "").strip()
-    scopes = _admin_reset_scopes("admin-reset-cancel", reset_token, _admin_ip(request))
-    retry_after = _admin_action_rate_status(scopes)
-    if retry_after:
-        return JSONResponse(
-            status_code=429,
-            content={"detail": "Too many password reset attempts. Try again later."},
-            headers={"Retry-After": str(retry_after)},
-        )
-    _admin_action_record(scopes, [5, 10, 50])
-    if reset_token and db.cancel_admin_password_reset_token(token_hash(reset_token), time.time()):
-        _audit_admin_event("PASSWORD_RESET_CANCELLED", "", request)
-    return {"message": "If that reset link was active, it has been cancelled."}
 
 
 @app.post("/admin/verify-pin")
@@ -2946,17 +2654,6 @@ def admin_logout(request: Request):
     response.delete_cookie(ADMIN_SESSION_COOKIE, path="/", secure=True, httponly=True, samesite="strict")
     response.delete_cookie(ADMIN_CSRF_COOKIE, path="/", secure=True, httponly=False, samesite="strict")
     return response
-
-
-@app.post("/admin/security/recovery-codes")
-def generate_admin_recovery_codes(request: Request):
-    require_admin()
-    codes = [generate_recovery_code() for _ in range(10)]
-    now = time.time()
-    for code in codes:
-        db.add_admin_recovery_code(hash_secret(code), now)
-    _audit_admin_event("RECOVERY_CODES_GENERATED", (_admin_context.get() or {}).get("username", ""), request)
-    return {"status": "generated", "codes": codes, "warning": "Shown once. Store securely; they cannot be retrieved again."}
 
 
 @app.get("/admin/security/audit")
@@ -3117,6 +2814,16 @@ def list_instagram_story_sources(
     """Lists captured Story IDs, including unmapped IDs, for admin routing."""
     require_admin(x_admin_key, x_admin_pin)
     return {"status": "success", "story_sources": db.list_instagram_story_sources(include_deleted=include_deleted)}
+
+
+@app.post("/admin/instagram-story-sources/sync")
+def sync_instagram_story_sources(
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """Synchronize owned active Stories into the admin-only inventory."""
+    require_admin(x_admin_key, x_admin_pin)
+    return sync_instagram_stories(db)
 
 
 @app.delete("/admin/instagram-story-sources/{story_media_id}")
@@ -3600,8 +3307,7 @@ def delete_user_data(user_id: str, x_admin_key: Optional[str] = Header(None), x_
     require_admin(x_admin_key, x_admin_pin)
     removed = db.delete_user_data(user_id)
     session_memory.clear_session(user_id, "instagram")
-    session_memory.clear_session(user_id, "whatsapp")
-    log.info("Erased all stored data for user %s: %s", user_id, removed)
+    log.info("Erased all stored data for user_hash=%s: %s", _safe_identifier_hash(user_id), removed)
     return {"status": "deleted", "user_id": user_id, "removed": removed}
 
 @app.get("/admin/escalations")
@@ -3610,6 +3316,105 @@ def get_escalations_list(limit: int = 50, status: Optional[str] = None, x_admin_
     require_admin(x_admin_key, x_admin_pin)
     escalations = db.get_escalations(limit, status)
     return {"count": len(escalations), "escalations": escalations}
+
+
+def _safe_admin_handoff_label(handoff: Dict[str, Any]) -> str:
+    """Choose an operator-friendly label without ever falling back to Meta ID."""
+    try:
+        known = json.loads(handoff.get("known_entities") or "{}")
+    except (TypeError, ValueError):
+        known = {}
+    if not isinstance(known, dict):
+        known = {}
+    for key in ("instagram_username", "username", "display_name", "customer_name"):
+        value = str(known.get(key) or "").strip()
+        if value and value != str(handoff.get("source_user_id") or ""):
+            return value
+    return "Instagram customer"
+
+
+@app.get("/admin/handoffs")
+def get_admin_handoffs(
+    limit: int = 50,
+    status: Optional[str] = None,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """Return safe, durable handoff notifications for the Admin shell.
+
+    The raw Instagram sender identifier is intentionally omitted. CAM status
+    remains read-only here; lifecycle changes continue through the existing
+    resume endpoint.
+    """
+    require_admin(x_admin_key, x_admin_pin)
+    requested_status = str(status or "").strip().upper() or None
+    rows = db.get_handoffs(limit=max(1, min(int(limit or 50), 200)), status=requested_status)
+    refs = [str(row.get("handoff_ref") or "") for row in rows]
+    seen_refs = db.get_admin_handoff_seen_refs(refs)
+    handoffs = []
+    for row in rows:
+        row_status = str(row.get("status") or "CREATED").upper()
+        # CREATED is included because the accepted flow promotes it to
+        # WAITING_FOR_HUMAN after notification delivery; neither state should
+        # make the operator miss a fresh CAM.
+        if requested_status is None and row_status not in {"CREATED", "WAITING_FOR_HUMAN"}:
+            continue
+        handoff_ref = str(row.get("handoff_ref") or "")
+        handoffs.append({
+            "handoff_ref": handoff_ref,
+            "customer_display_name": _safe_admin_handoff_label(row),
+            "source_channel": row.get("source_channel"),
+            "reason": row.get("reason") or "Human support requested",
+            "summary": row.get("summary") or "",
+            "unresolved_topic": row.get("unresolved_topic"),
+            "status": row_status,
+            "created_at": row.get("created_at"),
+            "updated_at": row.get("updated_at"),
+            "expires_at": row.get("expires_at"),
+            "seen": handoff_ref in seen_refs,
+        })
+    unread_count = sum(
+        1 for item in handoffs
+        if item["status"] in {"CREATED", "WAITING_FOR_HUMAN"} and not item["seen"]
+    )
+    return {"count": len(handoffs), "unread_count": unread_count, "handoffs": handoffs}
+
+
+@app.post("/admin/handoffs/{handoff_ref}/seen")
+def mark_admin_handoff_seen(
+    handoff_ref: str,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """Persist notification read state without changing the CAM lifecycle."""
+    require_admin(x_admin_key, x_admin_pin)
+    if not db.mark_admin_handoff_seen(handoff_ref):
+        raise HTTPException(status_code=404, detail="Handoff not found")
+    return {"status": "seen", "handoff_ref": handoff_ref}
+
+@app.get("/admin/notifications")
+def get_human_notifications_list(limit: int = 50, status: Optional[str] = None, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    """Returns durable staff-notification delivery status, without payloads."""
+    require_admin(x_admin_key, x_admin_pin)
+    events = db.get_human_notification_events(limit=limit, status=status)
+    return {"count": len(events), "notifications": events}
+
+@app.post("/admin/handoffs/{handoff_ref}/resume")
+def resume_handoff(
+    handoff_ref: str,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """Explicitly release one handoff back to autonomous Instagram handling."""
+    require_admin(x_admin_key, x_admin_pin)
+    handoff = db.resume_handoff(handoff_ref)
+    if not handoff:
+        raise HTTPException(status_code=404, detail="Handoff not found")
+    return {
+        "status": "resumed" if handoff["status"] == "RESUMED" else handoff["status"].lower(),
+        "handoff_ref": handoff_ref,
+        "handoff_status": handoff["status"],
+    }
 
 @app.get("/admin/analytics")
 def get_analytics(x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
@@ -3918,7 +3723,10 @@ async def set_instagram_ice_breakers(
 
     if resp.status_code != 200:
         error = result.get("error", {}) if isinstance(result, dict) else {}
-        log.error("Meta rejected the ice breaker write: %s", error or resp.text[:200])
+        log.error(
+            "Meta rejected the ice breaker write: HTTP %s error_code=%s",
+            resp.status_code, error.get("code") if isinstance(error, dict) else None,
+        )
         raise HTTPException(
             status_code=502,
             detail=f"Meta rejected the change: {error.get('message') or resp.text[:200]}",
@@ -5882,9 +5690,9 @@ def _reviewed_menu_items(raw: Any, field: str) -> List[Dict[str, Any]]:
 @app.get("/admin/dashboard", response_class=HTMLResponse)
 def get_admin_dashboard():
     """
-    Password- and MFA-protected Kitchen & Menu Management Portal for Camellia Artisanal.
+    Dedicated PIN-Protected Kitchen & Menu Management Portal for Camellia Artisanal.
     Features:
-    - Username/password authentication with optional production MFA
+    - Username/password authentication
     - 📋 Paste Menu Card Text Parser
     - 📸 Drag-and-Drop Image Flyer Upload with Groq Vision OCR
     - 📊 Google Sheets Live Sync
@@ -6079,6 +5887,83 @@ def get_admin_dashboard():
             .ad-route-row { grid-template-columns: 1fr auto; }
             .ad-route-id { grid-column: 1 / -1; }
         }
+
+        /* Admin product shell: the older workflow panels remain available,
+           but the operator now enters them through one persistent hierarchy. */
+        body { background: #f5f6f8; }
+        .admin-header { background: #171b24; min-height: 72px; padding: 14px 28px; }
+        .admin-header .brand-text h1 { font-size: 1.08rem; }
+        .admin-header .brand-text p { color: #b8c0cf; }
+        .admin-app-shell { display: grid; grid-template-columns: 248px minmax(0, 1fr); min-height: calc(100vh - 132px); }
+        .admin-sidebar { background: #202631; color: #e7ebf2; padding: 22px 14px; border-right: 1px solid #303847; }
+        .admin-sidebar-label { color: #8e99aa; font-size: .68rem; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; padding: 14px 12px 7px; }
+        .admin-sidebar .tabs-nav { display: flex; flex-direction: column; gap: 4px; background: transparent; padding: 0; margin: 0; }
+        .admin-sidebar .tab-btn { width: 100%; min-height: 42px; justify-content: flex-start; color: #b8c0cf; padding: 10px 12px; border-radius: 10px; font-size: .83rem; }
+        .admin-sidebar .tab-btn.active, .admin-sidebar .tab-btn:hover:not(.active) { background: #303a4b; color: #fff; box-shadow: none; }
+        .admin-sidebar .tab-btn.active { box-shadow: inset 3px 0 0 #d6b98c; }
+        .admin-nav-badge { margin-left: auto; min-width: 20px; padding: 2px 6px; border-radius: 999px; background: #d97706; color: #fff; font-size: .68rem; text-align: center; }
+        .admin-main { min-width: 0; }
+        .admin-main .main-container { max-width: 1280px; margin: 0 auto; padding: 28px 32px 48px; }
+        .admin-main .panel-card { border-radius: 16px; padding: 26px; }
+        .admin-page-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; margin-bottom: 22px; }
+        .admin-page-heading h2 { margin-bottom: 5px; }
+        .admin-page-heading p { color: var(--text-muted); font-size: .86rem; max-width: 760px; line-height: 1.5; }
+        .admin-kpi-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; margin-bottom: 18px; }
+        .admin-kpi { background: #fff; border: 1px solid var(--border); border-radius: 14px; padding: 17px; }
+        .admin-kpi-label { color: var(--text-muted); font-size: .72rem; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; }
+        .admin-kpi-value { color: var(--primary); font-family: 'Outfit', sans-serif; font-size: 1.8rem; margin-top: 5px; }
+        .admin-kpi-note { color: var(--text-muted); font-size: .76rem; margin-top: 4px; }
+        .instagram-gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(245px, 1fr)); gap: 16px; margin-top: 18px; }
+        .instagram-gallery .ig-media-card { display: flex; flex-direction: column; gap: 12px; height: 100%; padding: 0 0 14px; overflow: hidden; background: #fff; border: 1px solid #e1e5eb; border-radius: 14px; box-shadow: 0 4px 12px rgba(24,32,45,.05); cursor: pointer; transition: transform .18s, box-shadow .18s, border-color .18s; }
+        .instagram-gallery .ig-media-card:hover, .instagram-gallery .ig-media-card:focus-visible { transform: translateY(-2px); border-color: #b9c5d5; box-shadow: 0 8px 20px rgba(24,32,45,.10); outline: none; }
+        .instagram-gallery .ig-media-preview { width: 100%; height: 190px; border-radius: 0; }
+        .instagram-gallery .ig-media-thumb { object-fit: cover; }
+        .instagram-gallery .ig-media-main { padding: 0 14px; }
+        .instagram-gallery .ig-media-title { margin-bottom: 7px; }
+        .instagram-gallery .ig-media-topic { font-size: .92rem; }
+        .instagram-gallery .ig-media-summary { min-height: 2.2em; }
+        .instagram-gallery .ig-media-facts { padding: 0 14px; }
+        .instagram-gallery .ig-media-actions { padding: 0 14px; justify-content: flex-start; margin-top: auto; }
+        .instagram-gallery .ig-media-details { display: none; }
+        .instagram-table { width: 100%; border-collapse: collapse; margin-top: 18px; }
+        .instagram-table th, .instagram-table td { padding: 11px 10px; border-bottom: 1px solid var(--border); text-align: left; font-size: .8rem; vertical-align: top; }
+        .instagram-table th { color: var(--text-muted); font-size: .7rem; text-transform: uppercase; letter-spacing: .05em; }
+        .gallery-toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+        .gallery-toolbar .field-control { flex: 1 1 240px; min-width: 180px; }
+        .gallery-view-toggle { padding: 8px 11px; border: 1px solid var(--border); background: #fff; color: var(--text-muted); border-radius: 8px; font-size: .76rem; font-weight: 700; cursor: pointer; }
+        .gallery-view-toggle.active { background: var(--primary); border-color: var(--primary); color: #fff; }
+        .content-drawer-backdrop { display: none; position: fixed; inset: 0; z-index: 1200; background: rgba(18,24,34,.38); }
+        .content-drawer { position: fixed; z-index: 1201; top: 0; right: 0; width: min(460px, 94vw); height: 100vh; overflow-y: auto; background: #fff; box-shadow: -12px 0 35px rgba(19,27,40,.18); transform: translateX(105%); transition: transform .2s ease; padding: 26px; }
+        .content-drawer.open { transform: translateX(0); }
+        .content-drawer-backdrop.open { display: block; }
+        .content-drawer-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 18px; }
+        .content-drawer-close { border: 0; background: #f2f4f7; border-radius: 8px; width: 34px; height: 34px; font-size: 1.3rem; cursor: pointer; }
+        .drawer-preview { width: 100%; height: 250px; border-radius: 12px; overflow: hidden; background: #edeff3; margin-bottom: 18px; display: flex; align-items: center; justify-content: center; }
+        .drawer-preview img { width: 100%; height: 100%; object-fit: cover; }
+        .drawer-facts { display: grid; gap: 12px; margin: 18px 0; }
+        .drawer-fact { border-bottom: 1px solid #eef0f3; padding-bottom: 10px; }
+        .drawer-fact-label { display: block; color: var(--text-muted); font-size: .68rem; font-weight: 800; text-transform: uppercase; letter-spacing: .05em; margin-bottom: 3px; }
+        .drawer-fact-value { color: var(--text-dark); font-size: .84rem; overflow-wrap: anywhere; }
+        .handoff-list { display: grid; gap: 10px; margin-top: 16px; }
+        .handoff-card { background: #fff; border: 1px solid var(--border); border-radius: 12px; padding: 15px; display: grid; gap: 9px; cursor: pointer; }
+        .handoff-card.unseen { border-left: 4px solid #d97706; background: #fffaf1; }
+        .handoff-card:hover, .handoff-card:focus-visible { border-color: #aebaca; outline: none; }
+        .handoff-card-top { display: flex; justify-content: space-between; gap: 10px; align-items: flex-start; }
+        .handoff-name { font-weight: 800; color: var(--primary); }
+        .handoff-ref { color: var(--text-muted); font: .72rem ui-monospace, SFMono-Regular, Consolas, monospace; }
+        .handoff-meta { color: var(--text-muted); font-size: .76rem; }
+        .handoff-summary { color: #514943; font-size: .82rem; white-space: pre-line; line-height: 1.45; }
+        .notification-popover { display: none; position: absolute; right: 0; top: 46px; width: min(380px, 90vw); background: #fff; color: var(--text-dark); border: 1px solid var(--border); border-radius: 12px; padding: 12px; box-shadow: 0 12px 28px rgba(0,0,0,.18); z-index: 1100; }
+        .notification-popover.open { display: block; }
+        .notification-wrap { position: relative; }
+        .toast-stack { position: fixed; right: 20px; bottom: 20px; z-index: 1300; display: grid; gap: 8px; width: min(360px, calc(100vw - 40px)); }
+        .handoff-toast { background: #202631; color: #fff; border-radius: 10px; padding: 13px 15px; box-shadow: 0 8px 22px rgba(0,0,0,.2); font-size: .8rem; }
+        .admin-status-bar { background: #fff; }
+        .main-container { max-width: none; width: 100%; margin: 0; padding: 28px 32px 48px; display: grid; grid-template-columns: 248px minmax(0, 1fr); align-items: start; gap: 0; }
+        .main-container > .panel-card, .main-container > details { grid-column: 2; min-width: 0; }
+        .main-container > .admin-sidebar { grid-column: 1; grid-row: 1 / span 20; position: sticky; top: 0; min-height: calc(100vh - 132px); }
+        @media (max-width: 980px) { .admin-app-shell { grid-template-columns: 82px minmax(0,1fr); } .admin-sidebar-label, .admin-sidebar .tab-btn span.nav-label { display:none; } .admin-sidebar .tab-btn { justify-content:center; padding:10px 6px; font-size: 1.05rem; } .admin-nav-badge { position:absolute; margin: -22px 0 0 18px; } .admin-sidebar .tab-btn { position:relative; } .admin-kpi-grid { grid-template-columns: repeat(2,minmax(0,1fr)); } }
+        @media (max-width: 660px) { .main-container { display:block; padding: 18px 14px 36px; } .main-container > .admin-sidebar { min-height:0; margin: -18px -14px 18px; position: sticky; top:0; z-index:800; padding: 6px; border-right:0; border-bottom:1px solid #303847; } .admin-sidebar .tabs-nav { flex-direction:row; overflow-x:auto; } .admin-sidebar .tab-btn { min-width:48px; flex:0 0 48px; } .admin-kpi-grid { grid-template-columns: 1fr 1fr; gap: 9px; } .admin-kpi { padding: 12px; } .admin-kpi-value { font-size: 1.4rem; } .instagram-gallery { grid-template-columns: 1fr 1fr; gap: 9px; } .instagram-gallery .ig-media-preview { height: 140px; } .instagram-gallery .ig-media-main, .instagram-gallery .ig-media-facts, .instagram-gallery .ig-media-actions { padding-left: 10px; padding-right: 10px; } }
         
         /* Main Layout */
         .main-container { max-width: 1100px; width: 100%; margin: 24px auto; padding: 0 20px 40px; flex: 1; }
@@ -6253,23 +6138,16 @@ def get_admin_dashboard():
                 <label for="passwordInput">Password</label>
                 <input type="password" id="passwordInput" class="credential-input" autocomplete="current-password" onkeydown="if(event.key==='Enter') loginAdmin()">
             </div>
-            <div class="credential-input-wrap" id="totpInputWrap" style="display:none">
-                <label for="totpInput">Authenticator code</label>
-                <input type="text" id="totpInput" class="credential-input" inputmode="numeric" autocomplete="one-time-code" maxlength="6" onkeydown="if(event.key==='Enter') loginAdmin()">
-            </div>
-            
             <button class="auth-btn" onclick="loginAdmin()">
                 <span>Unlock Portal</span> ➔
             </button>
-
-            <p style="margin:14px 0 0;"><a href="/admin/forgot-password" style="color:var(--primary); font-weight:600;">Forgot Password?</a></p>
             
-            <p class="auth-hint">Use your configured admin username, password, and authenticator code when prompted.</p>
+            <p class="auth-hint">Use your configured admin username and password.</p>
         </div>
     </div>
 
     <!-- Main Navigation Header -->
-    <header>
+    <header class="admin-header">
         <div class="brand-box">
             <span class="brand-logo">C</span>
             <div class="brand-text">
@@ -6278,13 +6156,20 @@ def get_admin_dashboard():
             </div>
         </div>
         <div class="header-actions">
+            <div class="notification-wrap">
+                <button class="header-btn" id="handoffBell" type="button" aria-label="Open handoff notifications" aria-expanded="false" onclick="toggleHandoffPopover()">🔔 <span id="handoffBellBadge" class="admin-nav-badge" style="display:none;">0</span></button>
+                <div id="handoffPopover" class="notification-popover" role="dialog" aria-label="Recent handoffs">
+                    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px;"><b>Recent handoffs</b><button class="btn-secondary" type="button" onclick="switchTab('tab-handoffs', null); toggleHandoffPopover(false);" style="padding:5px 8px;font-size:.7rem;">View all</button></div>
+                    <div id="handoffPopoverList"><span class="ig-media-muted">No new handoffs.</span></div>
+                </div>
+            </div>
             <a href="/chat" target="_blank" class="header-btn">💬 Customer Chat Tester</a>
             <button class="header-btn" onclick="lockPortal()">🔒 Lock Portal</button>
         </div>
     </header>
 
     <!-- Live Status Bar -->
-    <div class="status-bar">
+    <div class="status-bar admin-status-bar">
         <div class="status-items">
             <span class="status-pill"><span class="dot gold" id="ocrDot"></span> Menu reader: <b id="ocrStatus">checking…</b></span>
             <span class="status-pill">Dishes live: <b id="activeCountBadge">Loading...</b></span>
@@ -6296,13 +6181,61 @@ def get_admin_dashboard():
 
     <!-- Main Workspace -->
     <div class="main-container">
-        <!-- Tab Navigation Bar -->
-        <div class="tabs-nav">
-            <button class="tab-btn active" onclick="switchTab('tab-image', this)">🍱 Menu</button>
-            <button class="tab-btn" onclick="switchTab('tab-menu-manager', this)">📋 Menu Manager</button>
-            <button class="tab-btn" onclick="switchTab('tab-instagram-stories', this)">📖 Instagram Stories</button>
-            <button class="tab-btn" onclick="switchTab('tab-ai-resolution', this)">🤖 AI Resolution &amp; Answers <span id="aiResolutionBadge" style="display:none; background: var(--danger); color: #fff; border-radius: 10px; padding: 1px 7px; font-size: 0.72rem; margin-left: 4px;"></span></button>
-            <button class="tab-btn" onclick="switchTab('tab-custom-qa', this)">🗂️ Custom Q&amp;A</button>
+        <aside class="admin-sidebar" aria-label="Admin navigation">
+            <div class="admin-sidebar-label">Workspace</div>
+            <nav class="tabs-nav" aria-label="Primary">
+                <button class="tab-btn active" onclick="switchTab('tab-dashboard', this)">⌂ <span class="nav-label">Dashboard</span></button>
+                <button class="tab-btn" onclick="switchTab('tab-image', this)">🍱 <span class="nav-label">Menu</span></button>
+                <button class="tab-btn" onclick="switchTab('tab-instagram-stories', this)">▣ <span class="nav-label">Instagram Stories</span></button>
+                <button class="tab-btn" onclick="switchTab('tab-instagram-content', this)">◉ <span class="nav-label">Posts &amp; Reels</span></button>
+                <button class="tab-btn" onclick="switchTab('tab-handoffs', this)">↗ <span class="nav-label">Handoffs</span><span id="handoffSidebarBadge" class="admin-nav-badge" style="display:none;">0</span></button>
+            </nav>
+            <div class="admin-sidebar-label">More</div>
+            <nav class="tabs-nav" aria-label="Secondary">
+                <button class="tab-btn" onclick="switchTab('tab-custom-qa', this)">▤ <span class="nav-label">QA Templates</span></button>
+                <button class="tab-btn" onclick="switchTab('tab-stats', this)">⌁ <span class="nav-label">Analytics</span></button>
+                <button class="tab-btn" onclick="switchTab('tab-candidates', this)">✓ <span class="nav-label">Candidates</span></button>
+                <button class="tab-btn" onclick="switchTab('tab-settings', this)">⚙ <span class="nav-label">Settings / Health</span></button>
+            </nav>
+        </aside>
+
+        <div id="tab-dashboard" class="panel-card" data-group="dashboard">
+            <div class="admin-page-heading"><div><h2>Good morning, Camellia team</h2><p>A calm overview of the work that needs attention today. Open a primary workspace from the sidebar to manage details.</p></div><button class="btn-secondary" type="button" onclick="loadDashboardOverview()">↻ Refresh</button></div>
+            <div class="admin-kpi-grid">
+                <div class="admin-kpi"><div class="admin-kpi-label">Unresolved handoffs</div><div class="admin-kpi-value" id="dashHandoffs">—</div><div class="admin-kpi-note">Waiting for human support</div></div>
+                <div class="admin-kpi"><div class="admin-kpi-label">Current menu</div><div class="admin-kpi-value" id="dashMenuStatus">—</div><div class="admin-kpi-note">Live customer view</div></div>
+                <div class="admin-kpi"><div class="admin-kpi-label">Active Stories</div><div class="admin-kpi-value" id="dashStories">—</div><div class="admin-kpi-note">Exact-ID sources</div></div>
+                <div class="admin-kpi"><div class="admin-kpi-label">Unmapped content</div><div class="admin-kpi-value" id="dashUnmapped">—</div><div class="admin-kpi-note">Stories, Posts &amp; Reels</div></div>
+            </div>
+            <div class="dashboard-subcard" style="margin:0;background:#fbfcfd;border:1px solid var(--border);border-radius:14px;padding:18px;"><div class="admin-page-heading" style="margin-bottom:12px;"><div><h3 style="color:var(--primary);">System pulse</h3><p>Recent routing activity and health stay lightweight here; operational detail lives in the dedicated workspaces.</p></div><span class="ig-media-status" id="dashHealthStatus">Checking</span></div><div id="dashRecentActivity" class="handoff-list"><span class="ig-media-muted">Loading recent activity…</span></div></div>
+        </div>
+
+        <div id="tab-instagram-content" class="panel-card" data-group="instagram_content" style="display:none;">
+            <div class="admin-page-heading"><div><h2>Instagram Posts &amp; Reels</h2><p>Visual routing gallery for exact Meta content IDs. Click a card to inspect the mapping without losing your place.</p></div><button class="btn-secondary" type="button" onclick="loadInstagramContentGallery()">↻ Refresh</button></div>
+            <div class="gallery-toolbar" aria-label="Post and Reel filters">
+                <input class="field-control" id="igContentSearch" type="search" placeholder="Search exact ID, topic, or route" autocomplete="off">
+                <button class="ig-media-filter active" data-content-filter="all" type="button" onclick="setInstagramContentFilter('all')">All</button>
+                <button class="ig-media-filter" data-content-filter="post" type="button" onclick="setInstagramContentFilter('post')">Posts</button>
+                <button class="ig-media-filter" data-content-filter="reel" type="button" onclick="setInstagramContentFilter('reel')">Reels</button>
+                <button class="ig-media-filter" data-content-filter="ACTIVE" type="button" onclick="setInstagramContentFilter('ACTIVE')">Active</button>
+                <button class="ig-media-filter" data-content-filter="UNMAPPED" type="button" onclick="setInstagramContentFilter('UNMAPPED')">Unmapped</button>
+                <button class="ig-media-filter" data-content-filter="ARCHIVED" type="button" onclick="setInstagramContentFilter('ARCHIVED')">Archived</button>
+                <button class="gallery-view-toggle active" id="igContentGalleryView" type="button" onclick="setInstagramContentView('gallery')">Gallery</button><button class="gallery-view-toggle" id="igContentTableView" type="button" onclick="setInstagramContentView('table')">List</button>
+            </div>
+            <div id="igContentGallery" class="instagram-gallery"><span class="ig-media-muted">Open Posts &amp; Reels to load content.</span></div>
+        </div>
+
+        <div id="tab-handoffs" class="panel-card" data-group="handoffs" style="display:none;">
+            <div class="admin-page-heading"><div><h2>Handoffs</h2><p>Owner notifications for conversations waiting on a human. Opening an item marks only the notification as seen; CAM lifecycle remains unchanged.</p></div><button class="btn-secondary" type="button" onclick="loadHandoffs()">↻ Refresh</button></div>
+            <div id="handoffPageSummary" class="result-box" role="status"></div>
+            <div id="handoffList" class="handoff-list"><span class="ig-media-muted">Loading handoffs…</span></div>
+        </div>
+
+        <div id="tab-settings" class="panel-card" data-group="settings" style="display:none;">
+            <div class="admin-page-heading"><div><h2>Settings / Health</h2><p>Operational checks and guarded links for the existing Admin configuration. Authentication, CSRF, sessions, and production controls are unchanged.</p></div></div>
+            <div class="admin-kpi-grid" style="grid-template-columns:repeat(2,minmax(0,1fr));"><div class="admin-kpi"><div class="admin-kpi-label">Admin session</div><div class="admin-kpi-value" style="font-size:1.2rem;">Protected</div><div class="admin-kpi-note">Username/password session with CSRF protection</div></div><div class="admin-kpi"><div class="admin-kpi-label">Story auto sync</div><div class="admin-kpi-value" style="font-size:1.2rem;">Existing setting</div><div class="admin-kpi-note">No new sync behavior is enabled by this redesign</div></div></div>
+            <div id="settingsHealthResult" class="result-box" role="status">Health status will be checked when this view opens.</div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;"><button class="btn-secondary" type="button" onclick="loadSettingsHealth()">Check health</button><button class="btn-secondary" type="button" onclick="lockPortal()">Lock portal</button></div>
         </div>
 
         <!-- Customers and Answers used to be their own top-level tabs. Every
@@ -6327,6 +6260,15 @@ def get_admin_dashboard():
 
         <!-- MENU tab, panel 2 of 4: same job, for when there is no photo -->
         <div id="tab-image" class="panel-card" data-group="menu">
+            <div class="admin-page-heading">
+                <div><h2>Menu</h2><p>Your first-class home for the live menu, menu assets, and publishing controls. The chatbot keeps its existing data model and publish safeguards.</p></div>
+                <div style="display:flex;gap:8px;flex-wrap:wrap;"><button class="btn-secondary" type="button" onclick="switchTab('tab-menu-manager', null)">Manage catalogue</button><button class="btn-secondary" type="button" onclick="switchTab('tab-active', null)">View live menu</button></div>
+            </div>
+            <div class="admin-kpi-grid" style="grid-template-columns:repeat(3,minmax(0,1fr));">
+                <div class="admin-kpi"><div class="admin-kpi-label">Live menu</div><div class="admin-kpi-value" style="font-size:1.25rem;">Active</div><div class="admin-kpi-note">Current customer-facing menu</div></div>
+                <div class="admin-kpi"><div class="admin-kpi-label">Assets</div><div class="admin-kpi-value" style="font-size:1.25rem;">Managed</div><div class="admin-kpi-note">Preview, publish, archive, restore</div></div>
+                <div class="admin-kpi"><div class="admin-kpi-label">Publishing</div><div class="admin-kpi-value" style="font-size:1.25rem;">Guarded</div><div class="admin-kpi-note">Draft review stays in place</div></div>
+            </div>
             <div class="panel-header">
                 <h2>📸 Upload this week's menu</h2>
                 <p>Upload a photo of your printed menu card, packaging flyer, or Instagram story. The image is read and the dishes hot-reload into the live bot.</p>
@@ -6337,7 +6279,7 @@ def get_admin_dashboard():
             <div class="drop-zone" id="dropZone" onclick="document.getElementById('fileInput').click()">
                 <div class="drop-zone-icon">📷</div>
                 <h3>Drag & Drop, Paste, or Click to Add the Full Menu Photo</h3>
-                <p>Copy a menu image and press Ctrl+V here, or use JPEG, PNG, WEBP (flyer, WhatsApp image, Instagram banner).</p>
+                <p>Copy a menu image and press Ctrl+V here, or use JPEG, PNG, WEBP (flyer or Instagram banner).</p>
                 <input type="file" id="fileInput" class="file-input-hidden" accept="image/jpeg,image/png,image/webp" onchange="handleFileSelected(event)">
             </div>
 
@@ -6387,6 +6329,7 @@ def get_admin_dashboard():
                     <button class="btn-secondary" type="button" onclick="openTopicModal()">+ Add Topic</button>
                     <button class="btn-secondary" id="igEditTopicButton" type="button" onclick="openTopicEditor()" disabled>Edit Topic</button>
                 </div>
+                <small id="igTopicEmptyHelp" class="ig-media-muted" style="display:none; margin-top:6px;">No active Topics are configured yet. Use + Add Topic to create one before saving Instagram routing.</small>
             </div>
 
             <div id="igTopicPreview" style="display:none; margin-top:14px; background:#FCFBF9; border:1px solid var(--border); border-radius:10px; padding:14px; font-size:0.85rem;">
@@ -6452,10 +6395,13 @@ def get_admin_dashboard():
                 <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px; flex-wrap:wrap;">
                     <div>
                         <h2>📖 Instagram Stories</h2>
-                        <p>Every Story a customer replies to appears here, newest first. Map a Story ID to a Topic without exposing temporary media URLs.</p>
-                        <p class="ig-media-muted">New Stories appear here after Instagram sends a Story interaction/reply event.</p>
+                        <p>Stories discovered by Meta sync or customer replies appear here, newest first. Map a Story ID to a Topic without exposing temporary media URLs.</p>
+                        <p class="ig-media-muted">New Stories appear here after Instagram sends a Story interaction/reply event. New synced Stories also remain <b>UNMAPPED</b> until an operator chooses a Topic.</p>
                     </div>
-                    <button class="btn-secondary" id="igStoryRefreshButton" type="button">🔄 Refresh Stories</button>
+                    <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                        <button class="btn-secondary" id="igStorySyncButton" type="button">↻ Sync Stories Now</button>
+                        <button class="btn-secondary" id="igStoryRefreshButton" type="button">🔄 Refresh Stories</button>
+                    </div>
                 </div>
             </div>
             <div id="igStoryResult" class="result-box" role="status" aria-live="polite"></div>
@@ -6467,6 +6413,9 @@ def get_admin_dashboard():
                 <button class="ig-media-filter ig-story-filter" type="button" data-story-filter="MAPPED">Mapped</button>
                 <button class="ig-media-filter ig-story-filter" type="button" data-story-filter="DISABLED">Disabled</button>
                 <button class="ig-media-filter ig-story-filter" type="button" data-story-filter="ARCHIVED">Archived</button>
+                <button class="ig-media-filter ig-story-filter" type="button" data-story-filter="ACTIVE">Active</button>
+                <button class="ig-media-filter ig-story-filter" type="button" data-story-filter="EXPIRED">Expired</button>
+                <button class="ig-media-filter ig-story-filter" type="button" data-story-filter="REMOVED">Removed</button>
                 <button class="ig-media-filter ig-story-filter" type="button" data-story-filter="DELETED">Deleted</button>
             </div>
 
@@ -6485,7 +6434,11 @@ def get_admin_dashboard():
                     </div>
                     <div>
                         <label class="field-label" for="igStoryTopicPicker">Topic</label>
-                        <select class="field-control" id="igStoryTopicPicker"><option value="">Select Topic</option></select>
+                        <div style="display:flex; gap:8px; align-items:flex-start; flex-wrap:wrap;">
+                            <select class="field-control" id="igStoryTopicPicker" style="flex:1; min-width:180px;"><option value="">Select Topic</option></select>
+                            <button class="btn-secondary" type="button" onclick="openTopicModal()">+ Add Topic</button>
+                        </div>
+                        <small id="igStoryTopicEmptyHelp" class="ig-media-muted" style="display:none; margin-top:6px;">No active Topics are configured yet. Create a Topic above, then choose it here.</small>
                     </div>
                     <div>
                         <label class="field-label" for="igStoryMenuMode">Menu behavior</label>
@@ -6526,14 +6479,14 @@ def get_admin_dashboard():
                     </div>
                 </div>
             </div>
-            <div id="igStoryList" class="ad-route-list"><p style="color:var(--text-muted);font-size:0.84rem;">Open this tab to load captured Stories.</p></div>
+            <div id="igStoryList" class="instagram-gallery"><p style="color:var(--text-muted);font-size:0.84rem;">Open this tab to load captured Stories.</p></div>
         </div>
 
         <!-- MENU tab, panel 3 of 4: same job again, from a shared sheet -->
         <div id="tab-paste" class="panel-card" data-group="menu" style="display: none;">
             <div class="panel-header">
                 <h2>📋 No photo? Paste the menu as text</h2>
-                <p>Paste raw unstructured flyer text, WhatsApp broadcast message, or dish lists. The AI extractor categorizes veg/non-veg, captures prices, and updates the bot instantly.</p>
+                <p>Paste raw unstructured flyer text or dish lists. The AI extractor categorizes veg/non-veg, captures prices, and updates the menu instantly.</p>
             </div>
             
             <textarea id="rawTextPaste" class="text-input" placeholder="Example:
@@ -6613,7 +6566,7 @@ THIS WEEK'S BENGAL SPECIALS
                 <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
                     <div>
                         <h2>🍱 What the bot is serving right now</h2>
-                        <p>Real-time view of all dishes currently served by the bot to customers on Instagram & WhatsApp.</p>
+                        <p>Real-time view of all dishes currently served by the Instagram assistant.</p>
                     </div>
                     <div style="display: flex; gap: 8px;">
                         <button class="btn-secondary" onclick="loadActiveMenu()">🔄 Refresh View</button>
@@ -6718,13 +6671,12 @@ THIS WEEK'S BENGAL SPECIALS
                 <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
                     <div>
                         <h2>💬 What customers are asking</h2>
-                        <p>Audit recent customer interactions across Instagram Ads and WhatsApp.</p>
+                        <p>Audit recent Instagram customer interactions and human handoffs.</p>
                     </div>
                     <div style="display: flex; gap: 8px; align-items: center;">
                         <select id="convChannelFilter" style="padding: 8px 12px; border-radius: 8px; border: 1px solid var(--border);" onchange="loadConversations()">
                             <option value="">All Channels</option>
                             <option value="instagram">Instagram</option>
-                            <option value="whatsapp">WhatsApp</option>
                         </select>
                         <button class="btn-secondary" onclick="loadConversations()">🔄 Refresh</button>
                     </div>
@@ -7295,6 +7247,15 @@ THIS WEEK'S BENGAL SPECIALS
         </div>
     </div>
 
+    <div id="contentDetailsBackdrop" class="content-drawer-backdrop" aria-hidden="true"></div>
+    <aside id="contentDetailsDrawer" class="content-drawer" aria-hidden="true" aria-labelledby="contentDetailsTitle" role="dialog">
+        <div class="content-drawer-header"><div><div class="ig-media-muted" id="contentDetailsType">Instagram content</div><h2 id="contentDetailsTitle" style="margin:4px 0 0;color:var(--primary);">Details</h2></div><button class="content-drawer-close" id="contentDetailsClose" type="button" aria-label="Close details">&times;</button></div>
+        <div id="contentDetailsPreview" class="drawer-preview"><span class="ig-media-muted">Preview unavailable</span></div>
+        <div id="contentDetailsFacts" class="drawer-facts"></div>
+        <div id="contentDetailsActions" style="display:flex;gap:8px;flex-wrap:wrap;"></div>
+    </aside>
+    <div id="adminToastStack" class="toast-stack" aria-live="polite" aria-atomic="true"></div>
+
     <script>
         // Authentication state lives in an HttpOnly server cookie. JavaScript
         // sees only the short-lived CSRF token, never the session token,
@@ -7336,7 +7297,7 @@ THIS WEEK'S BENGAL SPECIALS
                 if (requestGeneration !== authRequestGeneration) return;
                 adminAuthenticated = true;
                 hideAuthOverlay();
-                loadActiveMenu(); loadAdRoutes(); loadAnalytics(); refreshCandidateBadge();
+                loadActiveMenu(); loadAdRoutes(); loadAnalytics(); refreshCandidateBadge(); loadDashboardOverview(); loadHandoffs(); loadInstagramContentGallery();
             } catch (e) {
                 if (requestGeneration !== authRequestGeneration) return;
                 adminAuthenticated = false;
@@ -7381,11 +7342,12 @@ THIS WEEK'S BENGAL SPECIALS
             // The default tab is already marked active in the markup, so its
             // whole group has to be on screen to match — otherwise only the
             // leading panel shows and the rest look like they do not exist.
-            showGroup('menu');
+            showGroup('dashboard');
             refreshReaderStatus();
             checkAdminSession();
             setupDragAndDrop();
             document.addEventListener('visibilitychange', syncInstagramStoryAutoRefresh);
+            document.getElementById('igStorySyncButton')?.addEventListener('click', syncInstagramStoriesNow);
             document.getElementById('igStoryRefreshButton')?.addEventListener('click', loadInstagramStories);
             document.getElementById('igStorySearch')?.addEventListener('input', renderInstagramStories);
             document.querySelectorAll('.ig-story-filter').forEach(button => {
@@ -7396,15 +7358,17 @@ THIS WEEK'S BENGAL SPECIALS
             document.getElementById('igStoryAddPriorityButton')?.addEventListener('click', addInstagramStoryPriorityProduct);
             document.getElementById('igStorySaveButton')?.addEventListener('click', saveInstagramStoryMapping);
             document.getElementById('igStoryCancelButton')?.addEventListener('click', cancelInstagramStoryMapping);
+            document.getElementById('igContentSearch')?.addEventListener('input', renderInstagramContentGallery);
+            document.getElementById('contentDetailsClose')?.addEventListener('click', closeContentDetails);
+            document.getElementById('contentDetailsBackdrop')?.addEventListener('click', closeContentDetails);
+            document.addEventListener('keydown', event => { if (event.key === 'Escape') { closeContentDetails(); toggleHandoffPopover(false); } });
         });
 
         async function loginAdmin() {
             const requestGeneration = ++authRequestGeneration;
             const username = document.getElementById('usernameInput').value.trim();
             const passwordInput = document.getElementById('passwordInput');
-            const totpInput = document.getElementById('totpInput');
             const password = passwordInput.value;
-            const totp = totpInput.value.trim();
             if (!username || !password) return;
 
             try {
@@ -7412,25 +7376,18 @@ THIS WEEK'S BENGAL SPECIALS
                     method: 'POST',
                     credentials: 'same-origin',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({ username: username, password: password, totp: totp })
+                    body: JSON.stringify({ username: username, password: password })
                 });
-                const data = await resp.json().catch(() => ({}));
-
                 if (requestGeneration !== authRequestGeneration) return;
                 if (resp.ok) {
-                    if (data.mfa_required) {
-                        document.getElementById('totpInputWrap').style.display = 'block';
-                        totpInput.focus();
-                        return;
-                    }
                     adminAuthenticated = true;
                     passwordInput.value = '';
-                    totpInput.value = '';
                     hideAuthOverlay();
                     loadActiveMenu();
                     loadAdRoutes();
                     loadAnalytics();
                     refreshCandidateBadge();
+                    loadDashboardOverview(); loadHandoffs(); loadInstagramContentGallery();
                 } else {
                     const card = document.getElementById('authCard');
                     card.classList.add('shake');
@@ -7453,8 +7410,6 @@ THIS WEEK'S BENGAL SPECIALS
             try { await fetch('/admin/logout', { method: 'POST', headers: getAuthHeaders(), credentials: 'same-origin' }); } catch (e) { /* session expires server-side */ }
             adminAuthenticated = false;
             document.getElementById('passwordInput').value = '';
-            document.getElementById('totpInput').value = '';
-            document.getElementById('totpInputWrap').style.display = 'none';
             showAuthLogin();
         }
 
@@ -7468,17 +7423,25 @@ THIS WEEK'S BENGAL SPECIALS
             return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
         }
 
-        // Eight tabs needed 1655px of nav on a 347px phone, so six of them were
-        // simply invisible to a kitchen working off a handset. Panels are now
-        // grouped three ways and a tab shows its whole group stacked. Each tab
-        // is named after the panel it leads with, so the panels themselves did
-        // not have to move.
+        // The sidebar names the daily workspaces. Legacy panel entry points
+        // remain mapped below so existing in-page actions keep working.
         const TAB_GROUPS = {
+            'tab-dashboard': 'dashboard',
             'tab-image': 'menu',
+            'tab-ad-routing': 'menu',
+            'tab-paste': 'menu',
+            'tab-sheets': 'menu',
+            'tab-active': 'menu',
             'tab-menu-manager': 'menu_manager',
             'tab-instagram-stories': 'instagram_stories',
+            'tab-instagram-content': 'instagram_content',
+            'tab-handoffs': 'handoffs',
+            'tab-settings': 'settings',
             'tab-stats': 'customers',
+            'tab-conversations': 'customers',
             'tab-candidates': 'answers',
+            'tab-write': 'answers',
+            'tab-knowledge': 'answers',
             'tab-ai-resolution': 'ai_resolution',
             'tab-custom-qa': 'custom_qa'
         };
@@ -7506,6 +7469,242 @@ THIS WEEK'S BENGAL SPECIALS
             if (group === 'ai_resolution') { loadAiResolution(); loadTriageShadow(); }
             if (group === 'custom_qa') { loadCustomQa(); loadAssistedEvaluation(); }
             if (group === 'instagram_stories') { loadInstagramStories(); }
+            if (group === 'instagram_content') { loadInstagramContentGallery(); }
+            if (group === 'handoffs') { loadHandoffs(); }
+            if (group === 'dashboard') { loadDashboardOverview(); }
+            if (group === 'settings') { loadSettingsHealth(); }
+        }
+
+        let adminHandoffs = [];
+        let handoffPollTimer = null;
+        let handoffSnapshotReady = false;
+        let igContentRoutes = [];
+        let igContentFilter = 'all';
+        let igContentView = 'gallery';
+
+        function setDashboardValue(id, value) {
+            const element = document.getElementById(id);
+            if (element) element.innerText = value == null || value === '' ? '—' : String(value);
+        }
+
+        async function loadDashboardOverview() {
+            if (!adminAuthenticated) return;
+            try {
+                const responses = await Promise.all([
+                    fetch('/admin/handoffs?limit=100', { headers: getAuthHeaders() }),
+                    fetch('/admin/menu/active', { headers: getAuthHeaders() }),
+                    fetch('/admin/instagram-story-sources', { headers: getAuthHeaders() }),
+                    fetch('/admin/instagram-routes', { headers: getAuthHeaders() }),
+                    fetch('/admin/analytics', { headers: getAuthHeaders() }),
+                    fetch('/health'),
+                ]);
+                const [handoffResp, menuResp, storyResp, routeResp, analyticsResp, healthResp] = responses;
+                const [handoffData, menuData, storyData, routeData, analyticsData, healthData] = await Promise.all(responses.map(response => response.json().catch(() => ({}))));
+                if (handoffResp.ok) setDashboardValue('dashHandoffs', handoffData.unread_count ?? handoffData.count ?? 0);
+                if (menuResp.ok) setDashboardValue('dashMenuStatus', menuData.menu ? 'Live' : 'Check');
+                if (storyResp.ok) {
+                    const stories = storyData.story_sources || [];
+                    setDashboardValue('dashStories', stories.filter(item => String(item.story_status || 'ACTIVE').toUpperCase() === 'ACTIVE' && !Number(item.admin_deleted || 0)).length);
+                    setDashboardValue('dashUnmapped', stories.filter(item => String(item.mapping_status || item.status || 'UNMAPPED').toUpperCase() === 'UNMAPPED').length);
+                }
+                if (routeResp.ok) {
+                    const routes = (routeData.routes || []).filter(route => ['post', 'reel'].includes(route.source_type));
+                    const unmapped = routes.filter(route => !route.routing_topic && !route.topic_id).length;
+                    const current = Number(document.getElementById('dashUnmapped')?.innerText || 0);
+                    setDashboardValue('dashUnmapped', current + unmapped);
+                }
+                const health = document.getElementById('dashHealthStatus');
+                if (health) { health.innerText = healthResp.ok && healthData.status !== 'unhealthy' ? 'Healthy' : 'Needs attention'; health.className = `ig-media-status ${healthResp.ok && healthData.status !== 'unhealthy' ? '' : 'waiting'}`; }
+                const activity = document.getElementById('dashRecentActivity');
+                if (activity) activity.innerHTML = `<span class="ig-media-muted">${analyticsResp.ok ? 'Analytics and routing services are responding.' : 'Analytics is unavailable; open Analytics for details.'}</span>`;
+            } catch (error) {
+                const health = document.getElementById('dashHealthStatus');
+                if (health) { health.innerText = 'Unknown'; health.className = 'ig-media-status waiting'; }
+            }
+        }
+
+        function formatAdminTimestamp(value) {
+            if (!value) return 'Time unavailable';
+            const parsed = new Date(String(value).replace(' ', 'T') + (String(value).includes('Z') ? '' : 'Z'));
+            return Number.isNaN(parsed.getTime()) ? String(value) : parsed.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
+        }
+
+        function renderHandoffCard(item, compact = false) {
+            const unseenClass = item.seen ? '' : ' unseen';
+            return `<article class="handoff-card${unseenClass}" tabindex="0" data-handoff-ref="${escapeHtml(item.handoff_ref || '')}">
+                <div class="handoff-card-top"><div><div class="handoff-name">${escapeHtml(item.customer_display_name || 'Instagram customer')}</div><div class="handoff-ref">${escapeHtml(item.handoff_ref || 'CAM')}</div></div><span class="ig-media-status waiting">${escapeHtml(item.status || 'WAITING_FOR_HUMAN')}</span></div>
+                <div class="handoff-summary">${escapeHtml(item.reason || 'Human support requested')}${item.summary && !compact ? `\n${escapeHtml(item.summary)}` : ''}</div>
+                <div class="handoff-meta">${escapeHtml(formatAdminTimestamp(item.created_at))}${item.unresolved_topic ? ` · ${escapeHtml(item.unresolved_topic)}` : ''}</div>
+            </article>`;
+        }
+
+        function renderHandoffs() {
+            const list = document.getElementById('handoffList');
+            const popover = document.getElementById('handoffPopoverList');
+            if (list) list.innerHTML = adminHandoffs.length ? adminHandoffs.map(item => renderHandoffCard(item)).join('') : '<span class="ig-media-muted">No active handoffs waiting for a human.</span>';
+            if (popover) popover.innerHTML = adminHandoffs.length ? adminHandoffs.slice(0, 4).map(item => renderHandoffCard(item, true)).join('') : '<span class="ig-media-muted">No new handoffs.</span>';
+            document.querySelectorAll('[data-handoff-ref]').forEach(card => {
+                card.addEventListener('click', () => openHandoffDetails(card.dataset.handoffRef));
+                card.addEventListener('keydown', event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openHandoffDetails(card.dataset.handoffRef); } });
+            });
+        }
+
+        function updateHandoffBadges(unreadCount) {
+            ['handoffBellBadge', 'handoffSidebarBadge'].forEach(id => { const badge = document.getElementById(id); if (badge) { badge.innerText = String(unreadCount || 0); badge.style.display = unreadCount ? 'inline-block' : 'none'; } });
+        }
+
+        async function loadHandoffs() {
+            if (!adminAuthenticated) return;
+            try {
+                const response = await fetch('/admin/handoffs?limit=100', { headers: getAuthHeaders() });
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok) throw new Error(data.detail || 'Could not load handoffs.');
+                const previousRefs = new Set(adminHandoffs.filter(item => !item.seen).map(item => item.handoff_ref));
+                adminHandoffs = data.handoffs || [];
+                const newItems = handoffSnapshotReady ? adminHandoffs.filter(item => !item.seen && !previousRefs.has(item.handoff_ref)) : [];
+                handoffSnapshotReady = true;
+                updateHandoffBadges(Number(data.unread_count || 0));
+                renderHandoffs();
+                const summary = document.getElementById('handoffPageSummary');
+                if (summary) { summary.style.display = 'block'; summary.className = 'result-box info'; summary.innerText = `${Number(data.unread_count || 0)} unread · ${adminHandoffs.length} active handoff(s)`; }
+                newItems.slice(0, 2).forEach(item => showHandoffToast(item));
+            } catch (error) {
+                const summary = document.getElementById('handoffPageSummary');
+                if (summary) { summary.style.display = 'block'; summary.className = 'result-box error'; summary.innerText = error.message || 'Could not load handoffs.'; }
+            }
+            if (!handoffPollTimer) handoffPollTimer = setInterval(() => { if (adminAuthenticated && document.visibilityState !== 'hidden') loadHandoffs(); }, 20000);
+        }
+
+        function showHandoffToast(item) {
+            const stack = document.getElementById('adminToastStack');
+            if (!stack) return;
+            const toast = document.createElement('div'); toast.className = 'handoff-toast'; toast.innerHTML = `<b>New handoff</b><br>${escapeHtml(item.customer_display_name || 'Instagram customer')} · ${escapeHtml(item.reason || 'Human support requested')}`;
+            toast.addEventListener('click', () => { openHandoffDetails(item.handoff_ref); toast.remove(); });
+            stack.appendChild(toast); setTimeout(() => toast.remove(), 8000);
+        }
+
+        function toggleHandoffPopover(force) {
+            const popover = document.getElementById('handoffPopover');
+            const bell = document.getElementById('handoffBell');
+            if (!popover) return;
+            const open = typeof force === 'boolean' ? force : !popover.classList.contains('open');
+            popover.classList.toggle('open', open); if (bell) bell.setAttribute('aria-expanded', String(open));
+            if (open) loadHandoffs();
+        }
+
+        async function markHandoffSeen(ref) {
+            if (!ref) return;
+            try { await fetch(`/admin/handoffs/${encodeURIComponent(ref)}/seen`, { method: 'POST', headers: getAuthHeaders() }); } catch (error) { /* next refresh can retry */ }
+            const item = adminHandoffs.find(entry => entry.handoff_ref === ref); if (item) item.seen = true;
+            updateHandoffBadges(adminHandoffs.filter(entry => !entry.seen).length); renderHandoffs();
+        }
+
+        function openHandoffDetails(ref) {
+            const item = adminHandoffs.find(entry => entry.handoff_ref === ref); if (!item) return;
+            markHandoffSeen(ref);
+            const drawer = document.getElementById('contentDetailsDrawer'); const backdrop = document.getElementById('contentDetailsBackdrop');
+            document.getElementById('contentDetailsType').innerText = 'Customer handoff';
+            document.getElementById('contentDetailsTitle').innerText = item.customer_display_name || 'Instagram customer';
+            document.getElementById('contentDetailsPreview').innerHTML = '<div style="font-size:3rem;color:#8b97a8;">↗</div>';
+            document.getElementById('contentDetailsFacts').innerHTML = [['CAM reference', item.handoff_ref], ['Status', item.status || 'WAITING_FOR_HUMAN'], ['Reason', item.reason], ['Summary', item.summary || '—'], ['Created', formatAdminTimestamp(item.created_at)]].map(([label, value]) => `<div class="drawer-fact"><span class="drawer-fact-label">${escapeHtml(label)}</span><span class="drawer-fact-value">${escapeHtml(value)}</span></div>`).join('');
+            document.getElementById('contentDetailsActions').innerHTML = `<button class="btn-secondary" type="button" onclick="resumeAdminHandoff('${escapeHtml(item.handoff_ref)}')">Resume CAM</button><button class="btn-secondary" type="button" onclick="switchTab('tab-handoffs', null); closeContentDetails();">Open Handoffs</button>`;
+            drawer.classList.add('open'); backdrop.classList.add('open'); drawer.setAttribute('aria-hidden', 'false'); backdrop.setAttribute('aria-hidden', 'false'); document.getElementById('contentDetailsClose').focus();
+        }
+
+        async function resumeAdminHandoff(ref) {
+            if (!confirm('Resume this handoff and release the human-support gate?')) return;
+            const response = await fetch(`/admin/handoffs/${encodeURIComponent(ref)}/resume`, { method: 'POST', headers: getAuthHeaders() });
+            if (!response.ok) { alert('Could not resume this handoff.'); return; }
+            closeContentDetails(); loadHandoffs(); loadDashboardOverview();
+        }
+
+        function closeContentDetails() {
+            const drawer = document.getElementById('contentDetailsDrawer'); const backdrop = document.getElementById('contentDetailsBackdrop');
+            if (!drawer || !backdrop) return; drawer.classList.remove('open'); backdrop.classList.remove('open'); drawer.setAttribute('aria-hidden', 'true'); backdrop.setAttribute('aria-hidden', 'true');
+        }
+
+        function instagramContentStatus(route) {
+            if (route.archived_at) return 'ARCHIVED';
+            if (!route.routing_topic && !route.topic_id) return 'UNMAPPED';
+            return route.active === false ? 'ARCHIVED' : 'ACTIVE';
+        }
+
+        function setInstagramContentFilter(filter) {
+            igContentFilter = filter || 'all';
+            document.querySelectorAll('[data-content-filter]').forEach(button => button.classList.toggle('active', button.dataset.contentFilter === igContentFilter));
+            renderInstagramContentGallery();
+        }
+
+        function setInstagramContentView(view) {
+            igContentView = view === 'table' ? 'table' : 'gallery';
+            document.getElementById('igContentGalleryView')?.classList.toggle('active', igContentView === 'gallery');
+            document.getElementById('igContentTableView')?.classList.toggle('active', igContentView === 'table');
+            renderInstagramContentGallery();
+        }
+
+        function openAdminRoute(route) {
+            closeContentDetails(); switchTab('tab-image', null); setTimeout(() => editInstagramRoute(Number(route.routing_id)), 0);
+        }
+
+        function renderInstagramContentCard(route) {
+            const status = instagramContentStatus(route); const label = route.source_type === 'reel' ? 'REEL' : 'POST'; const image = route.preview_url || route.admin_preview_url;
+            const preview = image ? `<img class="ig-media-thumb" src="${escapeHtml(image)}" alt="${label} preview" onerror="this.style.display='none';this.nextElementSibling.style.display='flex';"><div class="ig-media-placeholder" style="display:none;"><span class="ig-media-placeholder-icon">◎</span><span>${label}</span></div>` : `<div class="ig-media-placeholder"><span class="ig-media-placeholder-icon">◎</span><span>${label}</span></div>`;
+            return `<article class="ig-media-card" tabindex="0" data-content-route-id="${escapeHtml(String(route.routing_id || ''))}"><div class="ig-media-preview">${preview}<span class="ig-media-badge">${label}</span></div><div class="ig-media-main"><div class="ig-media-title"><b class="ig-media-topic">${escapeHtml(route.routing_topic || 'Unmapped content')}</b><span class="ig-media-status ${status === 'ARCHIVED' || status === 'UNMAPPED' ? 'disabled' : ''}">${status}</span></div><div class="ig-media-summary">Meta ID: ${escapeHtml(route.media_id || 'Not connected')}</div><div class="ig-media-facts"><span><b>Route:</b> ${escapeHtml(route.menu_id || route.routing_topic || '—')}</span><span><b>Published:</b> ${escapeHtml(route.published_at || route.created_at || '—')}</span></div></div><div class="ig-media-actions"><button class="btn-secondary" type="button" data-content-action="details">View details</button></div></article>`;
+        }
+
+        function renderInstagramContentGallery() {
+            const list = document.getElementById('igContentGallery'); if (!list) return;
+            const query = (document.getElementById('igContentSearch')?.value || '').trim().toLowerCase();
+            const filtered = igContentRoutes.filter(route => {
+                const status = instagramContentStatus(route);
+                if (igContentFilter === 'post' || igContentFilter === 'reel') { if (route.source_type !== igContentFilter) return false; }
+                else if (igContentFilter !== 'all' && status !== igContentFilter) return false;
+                if (!query) return true;
+                return [route.media_id, route.routing_id, route.routing_topic, route.topic_description, route.menu_id, route.canonical_url].filter(Boolean).join(' ').toLowerCase().includes(query);
+            });
+            if (!filtered.length) { list.innerHTML = '<span class="ig-media-muted">No Posts or Reels match this filter.</span>'; return; }
+            if (igContentView === 'table') {
+                list.className = ''; list.innerHTML = `<table class="instagram-table"><thead><tr><th>Type</th><th>Exact Meta ID</th><th>Topic / intent</th><th>Route</th><th>Status</th><th></th></tr></thead><tbody>${filtered.map(route => `<tr><td>${route.source_type === 'reel' ? 'Reel' : 'Post'}</td><td><code>${escapeHtml(route.media_id || 'Not connected')}</code></td><td>${escapeHtml(route.routing_topic || 'Unmapped')}</td><td>${escapeHtml(route.menu_id || '—')}</td><td>${instagramContentStatus(route)}</td><td><button class="btn-secondary" type="button" data-content-table-id="${escapeHtml(String(route.routing_id || ''))}" style="padding:6px 9px;font-size:.72rem;">Details</button></td></tr>`).join('')}</tbody></table>`;
+                list.querySelectorAll('[data-content-table-id]').forEach(button => button.addEventListener('click', () => openContentDetails('content', igContentRoutes.find(route => String(route.routing_id) === button.dataset.contentTableId))));
+                return;
+            }
+            list.className = 'instagram-gallery'; list.innerHTML = filtered.map(renderInstagramContentCard).join('');
+            list.querySelectorAll('[data-content-route-id]').forEach(card => { const route = igContentRoutes.find(item => String(item.routing_id) === card.dataset.contentRouteId); card.addEventListener('click', event => { if (event.target.closest('button,a')) return; openContentDetails('content', route); }); card.querySelector('[data-content-action="details"]')?.addEventListener('click', event => { event.stopPropagation(); openContentDetails('content', route); }); });
+        }
+
+        async function loadInstagramContentGallery() {
+            if (!adminAuthenticated) return;
+            const list = document.getElementById('igContentGallery'); if (!list) return;
+            try {
+                const responses = await Promise.all([fetch('/admin/instagram-routes', { headers: getAuthHeaders() }), fetch('/admin/instagram-routes?include_archived=true', { headers: getAuthHeaders() })]);
+                const payloads = await Promise.all(responses.map(response => response.json().catch(() => ({}))));
+                if (!responses[0].ok) throw new Error(payloads[0].detail || 'Could not load Instagram content.');
+                const map = new Map(); payloads.forEach(payload => [...(payload.routes || [])].filter(route => ['post', 'reel'].includes(route.source_type)).forEach(route => map.set(String(route.routing_id || `${route.source_type}:${route.media_id}`), route)));
+                igContentRoutes = [...map.values()]; window.igContentRoutes = igContentRoutes; renderInstagramContentGallery();
+            } catch (error) { list.innerHTML = `<span style="color:var(--danger);">${escapeHtml(error.message || 'Could not load Instagram content.')}</span>`; }
+        }
+
+        function openContentDetails(kind, item) {
+            if (!item) return;
+            const isStory = kind === 'story'; const route = isStory ? item : item; const drawer = document.getElementById('contentDetailsDrawer'); const backdrop = document.getElementById('contentDetailsBackdrop');
+            const typeLabel = isStory ? 'Instagram Story' : (item.source_type === 'reel' ? 'Instagram Reel' : 'Instagram Post');
+            document.getElementById('contentDetailsType').innerText = typeLabel; document.getElementById('contentDetailsTitle').innerText = isStory ? (item.routing_topic || 'Unmapped Story') : (item.routing_topic || 'Unmapped content');
+            const image = !isStory && (item.preview_url || item.admin_preview_url); document.getElementById('contentDetailsPreview').innerHTML = image ? `<img src="${escapeHtml(image)}" alt="${escapeHtml(typeLabel)} preview">` : `<div style="font-size:3rem;color:#8b97a8;">${isStory ? '▣' : '◎'}</div>`;
+            const status = isStory ? (storyIsAdminDeleted(item) ? 'DELETED' : String(item.mapping_status || item.status || 'UNMAPPED').toUpperCase()) : instagramContentStatus(item);
+            const id = item.story_media_id || item.media_id || 'Not supplied';
+            const routeHealth = status === 'ACTIVE' || status === 'MAPPED' ? 'Healthy mapping' : status === 'UNMAPPED' ? 'Needs mapping' : 'Inactive';
+            const auditSummary = [item.source || 'Existing Admin record', item.first_seen ? `first seen ${item.first_seen}` : '', item.updated_at ? `updated ${item.updated_at}` : ''].filter(Boolean).join(' · ');
+            document.getElementById('contentDetailsFacts').innerHTML = [['Exact Meta ID', id], ['Content type', typeLabel], ['Status', status], ['Route health', routeHealth], ['Topic / intent', item.routing_topic || 'Unmapped'], ['Route destination', item.menu_id || item.canonical_url || 'Not mapped'], ['Published', item.published_at || item.created_at || 'Not supplied'], ['Expiry / last seen', item.expires_at || item.last_seen || 'Not supplied'], ['Routing history / audit', auditSummary || 'No additional history supplied']].map(([label, value]) => `<div class="drawer-fact"><span class="drawer-fact-label">${escapeHtml(label)}</span><span class="drawer-fact-value">${escapeHtml(value)}</span></div>`).join('');
+            const actions = [];
+            if (isStory) { if (item.story_media_id && !storyIsAdminDeleted(item)) actions.push(`<button class="btn-secondary" type="button" onclick="closeContentDetails(); openInstagramStoryMapping('${escapeHtml(item.story_media_id)}')">Edit route</button>`); if (item.routing_id && status === 'MAPPED') actions.push(`<button class="btn-danger" type="button" onclick="archiveInstagramStory(${Number(item.routing_id)}); closeContentDetails();">Archive</button>`); }
+            else if (item.routing_id) { actions.push(`<button class="btn-secondary" type="button" onclick="openAdminRoute(igContentRoutes.find(route => Number(route.routing_id) === ${Number(item.routing_id)}))">Edit route</button>`); if (item.archived_at) actions.push(`<button class="btn-secondary" type="button" onclick="restoreInstagramRoute(${Number(item.routing_id)}); closeContentDetails();">Unarchive</button>`); else actions.push(`<button class="btn-danger" type="button" onclick="archiveInstagramRoute(${Number(item.routing_id)}); closeContentDetails();">Archive</button>`); }
+            actions.push(`<button class="btn-secondary" type="button" onclick="switchTab('tab-image', null); closeContentDetails();">Open full details</button>`);
+            document.getElementById('contentDetailsActions').innerHTML = actions.join(''); drawer.classList.add('open'); backdrop.classList.add('open'); drawer.setAttribute('aria-hidden', 'false'); backdrop.setAttribute('aria-hidden', 'false'); document.getElementById('contentDetailsClose').focus();
+        }
+
+        async function loadSettingsHealth() {
+            const box = document.getElementById('settingsHealthResult'); if (!box) return;
+            try { const response = await fetch('/health'); const data = await response.json().catch(() => ({})); box.className = response.ok ? 'result-box success' : 'result-box error'; box.innerText = response.ok ? `Healthy · ${data.status || 'ok'}` : 'Health check needs attention.'; } catch (error) { box.className = 'result-box error'; box.innerText = 'Health check unavailable.'; }
         }
 
         // MENU MANAGER tab: every menu is edited as a draft (server-side, in
@@ -7775,15 +7974,19 @@ THIS WEEK'S BENGAL SPECIALS
                 igMenus = (menusData.menus || []).filter(m => m.active);
                 window.igMenuCategories = menusData.categories || [];
 
-                const topicOptions = '<option value="">Select Topic</option>' + igTopics.map(t =>
+                const activeTopics = igTopics.filter(t => t.active !== false);
+                const topicOptions = '<option value="">Select Topic</option>' + activeTopics.map(t =>
                     `<option value="${escapeHtml(t.topic_id)}">${escapeHtml(t.name)}</option>`).join('');
                 document.getElementById('igTopicPicker').innerHTML = topicOptions;
+                const emptyHelp = document.getElementById('igTopicEmptyHelp');
+                if (emptyHelp) emptyHelp.style.display = activeTopics.length ? 'none' : 'block';
 
                 const menuOptions = '<option value="">No menu — description only</option>' + igMenus.map(m =>
                     `<option value="${escapeHtml(m.menu_id)}">${escapeHtml(m.name)}</option>`).join('');
                 document.getElementById('igMenuPicker').innerHTML = menuOptions;
                 const topicDefaultMenuEl = document.getElementById('topicDefaultMenu');
                 if (topicDefaultMenuEl) topicDefaultMenuEl.innerHTML = menuOptions;
+                populateInstagramStoryPickers();
             } catch (err) { /* dropdowns just stay empty; the rest of the tab still works */ }
         }
 
@@ -8340,7 +8543,7 @@ THIS WEEK'S BENGAL SPECIALS
         let igStoryRestoreInFlight = new Set();
 
         function storyStatusClass(status) {
-            return status === 'UNMAPPED' || status === 'DISABLED' || status === 'ARCHIVED' ? 'disabled' : '';
+            return status === 'UNMAPPED' || status === 'DISABLED' || status === 'ARCHIVED' || status === 'EXPIRED' || status === 'REMOVED' ? 'disabled' : '';
         }
 
         // deleted_at is retained as historical audit evidence after Restore;
@@ -8366,7 +8569,15 @@ THIS WEEK'S BENGAL SPECIALS
             const status = deleted
                 ? 'DELETED'
                 : String(source.mapping_status || source.status || 'UNMAPPED').toUpperCase();
-            if (igStoryFilter !== 'all' && status !== igStoryFilter) return false;
+            const lifecycle = String(source.story_status || 'ACTIVE').toUpperCase();
+            // Default/current view: Stories that left Meta's inventory
+            // (EXPIRED or REMOVED) are current-view noise, not deleted — they
+            // stay fully visible under History (its own filter selection),
+            // never hard-deleted.
+            if (igStoryFilter === 'all' && !deleted && ['EXPIRED', 'REMOVED'].includes(lifecycle)) return false;
+            if (igStoryFilter !== 'all' && ['ACTIVE', 'EXPIRED', 'REMOVED'].includes(igStoryFilter)) {
+                if (lifecycle !== igStoryFilter) return false;
+            } else if (igStoryFilter !== 'all' && status !== igStoryFilter) return false;
             const query = (document.getElementById('igStorySearch')?.value || '').trim().toLowerCase();
             if (!query) return true;
             return [source.story_media_id, source.routing_topic, source.topic_description, source.story_status, status]
@@ -8385,7 +8596,10 @@ THIS WEEK'S BENGAL SPECIALS
             const menus = document.getElementById('igStoryMenuPicker');
             const products = document.getElementById('igStoryPriorityPicker');
             const scopes = document.getElementById('igStoryKnowledgeScope');
-            if (topics) topics.innerHTML = '<option value="">Select Topic</option>' + igTopics.map(topic => `<option value="${escapeHtml(topic.topic_id)}">${escapeHtml(topic.name)}</option>`).join('');
+            const activeTopics = igTopics.filter(topic => topic.active !== false);
+            if (topics) topics.innerHTML = '<option value="">Select Topic</option>' + activeTopics.map(topic => `<option value="${escapeHtml(topic.topic_id)}">${escapeHtml(topic.name)}</option>`).join('');
+            const emptyHelp = document.getElementById('igStoryTopicEmptyHelp');
+            if (emptyHelp) emptyHelp.style.display = activeTopics.length ? 'none' : 'block';
             if (menus) menus.innerHTML = '<option value="">Select a menu…</option>' + igMenus.map(menu => `<option value="${escapeHtml(menu.menu_id)}">${escapeHtml(menu.name)}</option>`).join('');
             if (products) products.innerHTML = '<option value="">Choose an approved product…</option>' + igProducts.map(product => `<option value="${escapeHtml(product.id)}">${escapeHtml(product.label)}</option>`).join('');
             if (scopes) scopes.innerHTML = igStoryKnowledgeScopes.map(scope => `<option value="${escapeHtml(scope)}">${escapeHtml(scope)}</option>`).join('');
@@ -8476,6 +8690,29 @@ THIS WEEK'S BENGAL SPECIALS
             result.style.display = 'block';
             result.className = `result-box ${kind}`;
             result.innerText = message;
+        }
+
+        async function syncInstagramStoriesNow() {
+            const button = document.getElementById('igStorySyncButton');
+            if (button) { button.disabled = true; button.textContent = '↻ Syncing…'; }
+            try {
+                const response = await fetch('/admin/instagram-story-sources/sync', {
+                    method: 'POST', headers: getAuthHeaders(),
+                });
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok || data.status === 'failed' || data.status === 'partial' || data.status === 'busy') {
+                    throw new Error(data.failure?.category || data.detail || 'Could not sync Stories.');
+                }
+                showInstagramStoryResult(
+                    'success',
+                    `Story sync complete: ${Number(data.fetched || 0)} fetched, ${Number(data.created || 0)} new, ${Number(data.updated || 0)} updated, ${Number(data.unchanged || 0)} unchanged, ${Number(data.expired || 0)} expired.`,
+                );
+                await loadInstagramStories(igStoryFilter === 'DELETED');
+            } catch (err) {
+                showInstagramStoryResult('error', err.message || String(err));
+            } finally {
+                if (button) { button.disabled = false; button.textContent = '↻ Sync Stories Now'; }
+            }
         }
 
         async function saveInstagramStoryMapping() {
@@ -8590,6 +8827,7 @@ THIS WEEK'S BENGAL SPECIALS
                 const status = storyIsAdminDeleted(source)
                     ? 'DELETED'
                     : String(source.mapping_status || source.status || 'UNMAPPED').toUpperCase();
+                const lifecycle = String(source.story_status || 'ACTIVE').toUpperCase();
                 const routeId = source.routing_id ? Number(source.routing_id) : null;
                 let actions = '';
                 if (status === 'DELETED') actions = `<button class="btn-secondary" type="button" data-story-action="restore-source" data-story-media-id="${escapeHtml(source.story_media_id || '')}">Restore</button>`;
@@ -8598,8 +8836,12 @@ THIS WEEK'S BENGAL SPECIALS
                 else if (status === 'DISABLED') actions = `<button class="btn-secondary" type="button" data-story-action="edit" data-story-media-id="${escapeHtml(source.story_media_id || '')}">Edit Mapping</button><button class="btn-secondary" type="button" data-story-action="enable" data-routing-id="${routeId}">Enable</button><button class="btn-danger" type="button" data-story-action="archive" data-routing-id="${routeId}">Archive</button><button class="btn-danger" type="button" data-story-action="delete" data-story-media-id="${escapeHtml(source.story_media_id || '')}">Delete</button>`;
                 else actions = `<button class="btn-secondary" type="button" data-story-action="restore" data-routing-id="${routeId}">Restore</button><button class="btn-danger" type="button" data-story-action="delete" data-story-media-id="${escapeHtml(source.story_media_id || '')}">Delete</button>`;
                 const topic = source.routing_topic || 'Unmapped Story';
-                const details = `<details class="ig-media-details"><summary style="cursor:pointer;">View details</summary><div>Story media ID: ${escapeHtml(source.story_media_id || '—')}<br>Routing ID: ${escapeHtml(String(routeId || '—'))}<br>Preview metadata: <span class="ig-story-preview-meta">${escapeHtml(storyPreviewMetadata(source.temporary_url))}</span><br>Meta Story status: ${escapeHtml(source.story_status || 'Not supplied')}<br>First seen: ${escapeHtml(source.first_seen || '—')}<br>Last seen: ${escapeHtml(source.last_seen || '—')}</div></details>`;
-                return `<article class="ig-media-card ig-story-card"><div class="ig-media-preview"><div class="ig-media-placeholder"><span class="ig-media-placeholder-icon">📖</span><span>STORY</span></div><span class="ig-media-badge">STORY</span></div><div class="ig-media-main"><div class="ig-media-title"><b class="ig-media-topic">${escapeHtml(topic)}</b><span class="ig-media-status ${storyStatusClass(status)}">${escapeHtml(status)}</span></div><div class="ig-media-summary">Captured Story media ID: ${escapeHtml(source.story_media_id || '—')}</div><div class="ig-media-facts"><span><b>Last seen:</b> ${escapeHtml(source.last_seen || '—')}</span><span><b>Source status:</b> ${escapeHtml(source.story_status || 'Not supplied')}</span></div></div><div class="ig-media-actions">${actions}</div>${details}</article>`;
+                const isNewUnmapped = source.source === 'META_STORY_SYNC' && status === 'UNMAPPED';
+                // Sequence is an admin convenience label only — routing and
+                // mapping always use the exact story_media_id shown below.
+                const sequenceDisplay = source.story_sequence_display || 'Story — sequence unavailable';
+                const details = `<details class="ig-media-details"><summary style="cursor:pointer;">View details</summary><div>Meta Story ID: ${escapeHtml(source.story_media_id || '—')}<br>Routing ID: ${escapeHtml(String(routeId || '—'))}<br>Preview metadata: <span class="ig-story-preview-meta">${escapeHtml(storyPreviewMetadata(source.temporary_url))}</span><br>Media type: ${escapeHtml(source.media_type || 'Not supplied')}<br>Published: ${escapeHtml(source.published_at || 'Not supplied')}<br>Meta Story status: ${escapeHtml(lifecycle)}<br>Inventory source: ${escapeHtml(source.source || 'WEBHOOK_STORY_REPLY')}<br>First seen: ${escapeHtml(source.first_seen || '—')}<br>Last seen: ${escapeHtml(source.last_seen || '—')}</div></details>`;
+                return `<article class="ig-media-card ig-story-card" tabindex="0" data-story-media-id="${escapeHtml(source.story_media_id || '')}"><div class="ig-media-preview"><div class="ig-media-placeholder"><span class="ig-media-placeholder-icon">📖</span><span>STORY</span></div><span class="ig-media-badge">STORY</span></div><div class="ig-media-main"><div class="ig-media-title"><b class="ig-media-topic">${escapeHtml(topic)}</b><span class="ig-media-status ${storyStatusClass(status)}">${escapeHtml(status)}</span>${isNewUnmapped ? '<span class="ig-media-status">NEW / UNMAPPED</span>' : ''}</div><div class="ig-media-summary">${escapeHtml(sequenceDisplay)}</div><div class="ig-media-facts"><span><b>Exact ID:</b> ${escapeHtml(source.story_media_id || '—')}</span><span><b>Last seen:</b> ${escapeHtml(source.last_seen || '—')}</span><span><b>Meta status:</b> ${escapeHtml(lifecycle)}</span></div></div><div class="ig-media-actions">${actions}</div>${details}</article>`;
             }).join('');
             list.querySelectorAll('[data-story-action]').forEach(button => button.addEventListener('click', () => {
                 const action = button.dataset.storyAction;
@@ -8611,6 +8853,11 @@ THIS WEEK'S BENGAL SPECIALS
                 else if (action === 'restore') restoreInstagramStory(routingId);
                 else if (action === 'delete') deleteInstagramStory(button.dataset.storyMediaId || '');
                 else if (action === 'restore-source') restoreInstagramStorySource(button.dataset.storyMediaId || '', button);
+            }));
+            list.querySelectorAll('[data-story-media-id]').forEach(card => card.addEventListener('click', event => {
+                if (event.target.closest('button,a,summary')) return;
+                const source = igStorySources.find(item => String(item.story_media_id || '') === String(card.dataset.storyMediaId || ''));
+                openContentDetails('story', source);
             }));
         }
 
@@ -10026,7 +10273,7 @@ Non-Veg:
                 const metricTarget = document.getElementById('autoResolveMetrics');
                 if (metricTarget) {
                     const metric = (label, value) => `<div style="padding:10px;border:1px solid var(--border);border-radius:10px;text-align:center"><small>${escapeHtml(label)}</small><h3 style="margin:4px 0">${escapeHtml(value)}</h3></div>`;
-                    metricTarget.innerHTML = [metric('Simulated Eligible', ar.simulated_eligible_cases || 0), metric('False Positives', ar.simulation_false_positives || 0), metric('Grounded Reviewed', ar.reviewed_grounded_cases || 0), metric('Risk Violations', ar.risk_violations || 0), metric('Source Overrides', ar.source_routing_overrides || 0), metric('WhatsApp AI', ar.whatsapp_ai_activity || 0), metric('Order/CAM Interference', ar.order_cam_interference || 0)].join('');
+                    metricTarget.innerHTML = [metric('Simulated Eligible', ar.simulated_eligible_cases || 0), metric('False Positives', ar.simulation_false_positives || 0), metric('Grounded Reviewed', ar.reviewed_grounded_cases || 0), metric('Risk Violations', ar.risk_violations || 0), metric('Source Overrides', ar.source_routing_overrides || 0), metric('Legacy WhatsApp AI', ar.whatsapp_ai_activity || 0), metric('Order/CAM Interference', ar.order_cam_interference || 0)].join('');
                 }
                 const rows = (obj, labels) => labels.map(label => { const x = obj[label] || {}; return `<tr><td>${escapeHtml(label)}</td><td>${x.reviewed ?? x.total ?? 0}</td><td>${x.approved_as_is || x.approved || 0}</td><td>${x.edited || 0}</td><td>${x.rejected || 0}</td><td>${x.human_handoff || x.sent_to_human || 0}</td></tr>`; }).join('');
                 document.getElementById('assistedConfidenceTable').innerHTML = rows(ev.confidence_buckets || {}, Object.keys(ev.confidence_buckets || {}));
@@ -10037,7 +10284,7 @@ Non-Veg:
                 document.getElementById('assistedHighConfidenceProblems').innerHTML = problems.length ? problems.map(x => `<div style="padding:6px;border-bottom:1px solid var(--border)"><b>${escapeHtml(x.confidence)}</b> · ${escapeHtml(x.triage_category)} · ${escapeHtml(x.status)} · ${escapeHtml(x.customer_message)}<br><small>Grounding: ${escapeHtml(x.grounding_status)} · Knowledge: ${escapeHtml(x.matched_knowledge_source || '—')} · Reason: ${escapeHtml(x.rejection_reason || x.edit_severity || '—')}</small></div>`).join('') : 'None recorded.';
                 const comparisons = ev.shadow_vs_assisted || [];
                 document.getElementById('assistedShadowComparison').innerHTML = comparisons.length ? comparisons.map(x => `<div>${escapeHtml(x.shadow_prediction)} → ${escapeHtml(x.assisted_prediction)} → ${escapeHtml(x.human_final_decision || 'Pending')}</div>`).join('') : 'No correlated records.';
-                document.getElementById('assistedSafetyMetrics').innerHTML = `Source Routing Overrides by AI: <b>${safety.source_routing_overrides || 0}</b> · WhatsApp Assisted AI Activity: <b>${safety.whatsapp_assisted_activity || 0}</b> · Protected order flow: <b>${safety.protected_order_flow || 0}</b> · CAM interference: <b>${safety.cam_interference || 0}</b>`;
+                document.getElementById('assistedSafetyMetrics').innerHTML = `Source Routing Overrides by AI: <b>${safety.source_routing_overrides || 0}</b> · Legacy WhatsApp AI Activity: <b>${safety.whatsapp_assisted_activity || 0}</b> · Protected order flow: <b>${safety.protected_order_flow || 0}</b> · CAM interference: <b>${safety.cam_interference || 0}</b>`;
                 const signal = document.getElementById('customQaAiSignals');
                 if (signal) signal.innerHTML = 'AI Review Signal: ' + ((ev.knowledge_signals || []).length ? (ev.knowledge_signals || []).map(k => `${escapeHtml(k.topic || k.knowledge_id)} — Used in ${k.total || 0} assisted suggestions; Approved ${k.approved_as_is || 0}; Edited ${k.edited || 0}; Rejected ${k.rejected || 0}${k.knowledge_review_recommended ? ' · <b>Knowledge Review Recommended</b>' : ''}`).join('<br>') : 'No Custom Q&A usage yet.');
             } catch (err) {
@@ -10916,15 +11163,23 @@ async def api_test_chat(request: Request):
             "active_memory": session_memory.get_session(user_id, "instagram")["facts"]
         }
 
-    # Simulate Instagram Ad or WhatsApp
+    if channel == "whatsapp":
+        return {
+            "status": "manual_only",
+            "is_ad_qualified": False,
+            "response": None,
+            "was_matched": False,
+            "template_id": None,
+            "image_url": None,
+            "whatsapp_automation": "removed",
+            "manual_handoff": "available",
+        }
+
+    # Simulate an Instagram ad-originated conversation.
     if channel == "instagram_ad":
         db.set_ad_qualified(user_id, "instagram", is_ad_qualified=True)
         ch_name = "instagram"
         ref_source = "ADS"
-    else:
-        ch_name = "whatsapp"
-        ref_source = None
-
     response_text, was_matched, template_id, image_url = responder.match_and_respond(
         user_message, user_id=user_id, channel=ch_name, referral_source=ref_source
     )
@@ -10952,7 +11207,7 @@ async def api_reset_session(request: Request):
     payload = await request.json()
     user_id = payload.get("user_id", "web_tester")
     channel = payload.get("channel", "instagram_ad")
-    ch_name = "whatsapp" if channel == "whatsapp" else "instagram"
+    ch_name = "instagram"
     session_memory.clear_session(user_id, ch_name)
     return {"status": "cleared", "user_id": user_id, "channel": ch_name}
 
@@ -11040,7 +11295,6 @@ def get_web_chat():
                 <select id="channelSelect" class="channel-select" onchange="resetSession()">
                     <option value="instagram_ad">Instagram DM (Ad-Originated) ✅ Auto-Reply Enabled</option>
                     <option value="instagram_organic">Instagram DM (Organic) 🛑 Auto-Reply Blocked</option>
-                    <option value="whatsapp">WhatsApp Business 🛑 Human-Only in Production (engine preview only)</option>
                 </select>
             </div>
             
@@ -11072,7 +11326,7 @@ def get_web_chat():
         <div class="modal-overlay" id="menuModal">
             <div class="modal-box">
                 <h3>📋 Paste Raw Menu Card Text</h3>
-                <p style="margin: 0; font-size: 0.8rem; color: #555;">Paste raw flyer text, WhatsApp broadcast, or dish items with prices below. The AI/parser will structure & update the bot's menu automatically!</p>
+                <p style="margin: 0; font-size: 0.8rem; color: #555;">Paste raw flyer text or dish items with prices below. The AI/parser will structure & update the menu automatically!</p>
                 <textarea id="rawMenuInput" placeholder="Example:&#10;Rose Sondesh 250g - Rs 450&#10;Jolbhora Nolen Gur 500g ₹1400&#10;Kosha Mangsho Bento ₹650 (non veg)"></textarea>
                 <div class="modal-actions">
                     <button class="btn-cancel" onclick="closeMenuModal()">Cancel</button>
@@ -11313,8 +11567,8 @@ def get_web_chat():
                 // then each collection's note-and-card pair). This function
                 // used to always draw every image before the outer text
                 // regardless of that flag, so the tester showed the general
-                // text arriving dead last — the opposite of what Instagram and
-                // WhatsApp actually send, and of the order the client asked for.
+                // text arriving dead last — the opposite of the order the
+                // Instagram client asked for.
                 const entries0 = Array.isArray(imageUrl) ? imageUrl : (imageUrl ? [imageUrl] : []);
                 const leadsWithText = entries0.some(e => e && typeof e === 'object' && e.text_first);
 

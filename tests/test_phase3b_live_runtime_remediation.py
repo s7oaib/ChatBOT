@@ -196,7 +196,13 @@ def test_home_table_final_output_uses_exact_copy_after_stale_override(
 
     assert len(sent) == 1
     assert not escalated.called
-    assert sent[0]["text"] == CLIENT_CONFIRMED_EXACT_RESPONSES[template_id]
+    from camellia.client_qa import REGISTRY_BY_ID
+    source_id = {
+        "bengali_home_table_details": "home_table_details",
+        "bengali_home_table_pricing": "home_table_price",
+        "bengali_home_table_payment": "home_table_payment",
+    }[template_id]
+    assert sent[0]["text"] == REGISTRY_BY_ID[source_id].answer
     assert stale not in sent[0]["text"]
     assert "wa.me" not in sent[0]["text"]
     assert sent[0]["image_url"] is None

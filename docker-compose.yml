@@ -16,15 +16,10 @@ services:
       - ADMIN_API_KEY=${ADMIN_API_KEY}
       # Without this the /admin portal cannot be unlocked by PIN in a container
       - ADMIN_PIN=${ADMIN_PIN}
-      - WHATSAPP_MOCK_MODE=${WHATSAPP_MOCK_MODE:-true}
-      - WHATSAPP_ACCESS_TOKEN=${WHATSAPP_ACCESS_TOKEN}
-      - WHATSAPP_PHONE_NUMBER_ID=${WHATSAPP_PHONE_NUMBER_ID}
-      - WHATSAPP_API_VERSION=${WHATSAPP_API_VERSION:-v19.0}
+      # Used only to build the manual customer-facing wa.me handoff link.
+      - WHATSAPP_BUSINESS_NUMBER=${WHATSAPP_BUSINESS_NUMBER:-}
       - INSTAGRAM_PAGE_ID=${INSTAGRAM_PAGE_ID}
-      # Falls back to WHATSAPP_ACCESS_TOKEN; set only if the Page uses its own
       - INSTAGRAM_ACCESS_TOKEN=${INSTAGRAM_ACCESS_TOKEN:-}
-      - HUMAN_ESCALATION_PHONE=${HUMAN_ESCALATION_PHONE:-+918796551990}
-      - HUMAN_ESCALATION_EMAIL=${HUMAN_ESCALATION_EMAIL:-owner@camelliaartisanal.com}
       # Must live under the mounted volume or all history is lost on rebuild.
       # Deliberately /app/var, not /app/data: the volume would otherwise hide
       # the menu.json and qa_templates.json baked into the image.

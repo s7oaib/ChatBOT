@@ -1,6 +1,7 @@
 # Deployment
 
-The live service runs on **Railway**, at `https://chatbot-production-8164.up.railway.app`.
+The live service runs on **Railway**. The current service URL is an operator-managed
+deployment value; verify it in Railway before running a production health check.
 
 Build and start config lives in [`railway.json`](railway.json) (`main.py` via
 Nixpacks). Railway has no committed environment file — **every variable below is
@@ -20,10 +21,10 @@ only signal is the `warnings` array and the fields below it.
 
 | Variable | Set to | What happens if it is wrong |
 |---|---|---|
-| `WHATSAPP_MOCK_MODE` | `false` | In mock mode the bot never builds an outbound request. It accepts webhooks, matches, logs a reply, and sends nothing — customers get silence while the process looks perfectly healthy. |
 | `PUBLIC_BASE_URL` | the service's own `https://` URL | Menu cards are stored as relative paths and Meta fetches them by URL. Unset, every card is dropped and customers get text-only replies with no menu photos. |
+| `WHATSAPP_BUSINESS_NUMBER` | digits with country code | Used only to build the manual `wa.me` link. It is not a Cloud API credential and is never used to receive or send messages server-side. |
 | `BYPASS_AD_GATE` | `true` | `false` restores PRD #4: only ad-originated Instagram DMs (`referral.source == "ADS"`) get a reply and organic ones are left for a human. With it `true` the bot answers everyone, including complaints — the escalation triggers in `data/qa_templates.json` are then the only thing routing those to a human. |
-| `ENABLE_WEB_TESTER` | leave unset | Defaults off. Setting it `true` exposes `/chat` to anyone with the URL, and that tester writes real conversation rows and fires real escalation alerts at the manager's phone. |
+| `ENABLE_WEB_TESTER` | leave unset | Defaults off. Setting it `true` exposes `/chat` to anyone with the URL, and that tester writes real conversation and handoff rows. |
 
 ## Persistent storage (required)
 
@@ -101,11 +102,11 @@ Confirm it worked in `/health`:
 
 ## Menu updates — the Google Sheet is the source of truth
 
-The container filesystem does not persist. A menu edited through `/admin` is
-written to `/app/data/menu.json` **inside the container** and is gone on the
-next deploy, when the copy baked into the image comes back. No volume is
-mounted there, and mounting one would hide the seed `menu.json` and
-`qa_templates.json` the bot needs to start.
+With the production storage contract, a menu edited through `/admin` is written
+to the configured durable `MENU_JSON_PATH` (normally `/app/var/menu.json`). If
+the volume is missing or the path is left inside the image, the edit is lost on
+the next deploy. Do not mount a volume at `/app/data`: that would hide the seed
+`menu.json` and `qa_templates.json` the bot needs to start.
 
 So the durable path is a published Google Sheet, which the bot re-pulls on
 every boot. Whatever the client last saved in the sheet is what customers are
@@ -161,8 +162,8 @@ still goes out as text, built from `menu.json`'s structured items.
 
 ## Secrets — set in the dashboard, never committed
 
-`META_APP_SECRET`, `META_VERIFY_TOKEN`, `WHATSAPP_ACCESS_TOKEN`,
-`WHATSAPP_PHONE_NUMBER_ID`, `INSTAGRAM_ACCESS_TOKEN`, `INSTAGRAM_PAGE_ID`,
+`META_APP_SECRET`, `META_VERIFY_TOKEN`, `INSTAGRAM_ACCESS_TOKEN`,
+`INSTAGRAM_PAGE_ID`, `WHATSAPP_BUSINESS_NUMBER`,
 `ADMIN_API_KEY`, `ADMIN_PIN`, `GROQ_API_KEY`.
 
 Once `META_APP_SECRET` is set and `/health` reports `webhook_signature:

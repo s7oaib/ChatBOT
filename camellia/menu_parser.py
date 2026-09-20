@@ -38,9 +38,9 @@ _VISION_RETRY_BACKOFF_SECONDS = 1.5
 # this used 4096 and made uploads fail that had previously worked.
 #
 # 2048 was still too high, for a reason the TPM number hides: Groq caps
-# *output* separately, and on qwen/qwen3.6-27b that OTPM ceiling is 1000.
+# *output* separately, and on qwen/qwen3.6-27b that output-token ceiling is 1000.
 # Reserving 2048 against a 1000 ceiling is rejected before a single token is
-# generated — "Request too large ... on output tokens per minute (OTPM):
+# generated — "Request too large ... on output tokens per minute:
 # Limit 1000". Every full-flyer upload therefore failed, saved the photo, and
 # left the dish text on the previous week. Confirmed by replaying the
 # client's own flyer: 400 json_validate_failed, then two 429s, then give up.
@@ -515,9 +515,9 @@ class MenuParser:
                         else f"Vision model HTTP {resp.status_code}."
                     )
                     log.warning(
-                        "Groq vision HTTP %s on attempt %d/%d (model %r): %s",
+                        "Groq vision HTTP %s on attempt %d/%d (model %r)",
                         resp.status_code, attempt, _VISION_MAX_ATTEMPTS,
-                        config.GROQ_VISION_MODEL, body[:200],
+                        config.GROQ_VISION_MODEL,
                     )
                     if not _is_retryable_vision_failure(resp.status_code, body):
                         return {"status": "failed", "reason": last_reason}

@@ -99,53 +99,11 @@ class TestTheClientsRequestedOrder:
         assert "completely hand crafted end to end" in signature
 
 
-class TestWhatsAppKeepsTheSameOrder:
-    def test_a_note_is_its_own_message_before_the_card(self):
-        # A WhatsApp caption renders under its image, so honouring the order
-        # means sending the note separately rather than attaching it.
-        from camellia.whatsapp_adapter import whatsapp_adapter
-
-        user_id = "wa_seq_" + uuid.uuid4().hex[:6]
-        session_memory.clear_session(user_id, "whatsapp")
-        text, _m, _t, images = responder.match_and_respond(
-            "what is the price of sondesh", user_id=user_id, channel="whatsapp"
-        )
-
-        posted = []
-
-        class _Resp:
-            def raise_for_status(self):
-                pass
-
-            def json(self):
-                return {}
-
-        def post(url, headers=None, json=None):
-            posted.append(json)
-            return _Resp()
-
-        client = MagicMock()
-        client.__enter__.return_value.post = post
-        with patch.object(app_module.config, "WHATSAPP_MOCK_MODE", False), \
-             patch.object(app_module.config, "WHATSAPP_ACCESS_TOKEN", "t"), \
-             patch.object(app_module.config, "WHATSAPP_PHONE_NUMBER_ID", "1"), \
-             patch.object(app_module.config, "PUBLIC_BASE_URL", "https://example.test"), \
-             patch("camellia.whatsapp_adapter.httpx.Client", return_value=client):
-            whatsapp_adapter.send_message("919876543210", text, image_url=images)
-
-        kinds = [p["type"] for p in posted]
-        assert kinds[:5] == ["text", "text", "image", "text", "image"]
-        # The note must not also be stuck under the card as a caption.
-        for payload in posted:
-            if payload["type"] == "image":
-                assert "caption" not in payload["image"]
-
-
 class TestTheTesterUiMatchesTheRealSendOrder:
     """
     The web tester renders a reply as one HTML bubble built by client-side
-    JS, not by replaying the same code path as send_instagram_reply/
-    whatsapp_adapter — so getting the wire order right (tested above) does
+    JS, not by replaying the same code path as send_instagram_reply — so getting
+    the wire order right (tested above) does
     not by itself get the on-screen order right. appendMessage() used to
     unconditionally draw every image card before the outer reply text,
     regardless of text_first, so a customer opening the tester saw the

@@ -600,40 +600,18 @@ def test_candidate_queue_requires_admin_auth():
 
 def test_health_warns_about_silent_failure_modes():
     """
-    Mock mode and an unverified webhook both look exactly like a working bot
-    from the outside, so health has to name them explicitly.
+    Removed WhatsApp automation and an unverified webhook must be visible.
     """
     body = client.get("/health").json()
     assert "warnings" in body
     assert "reply_delivery" in body
     assert "webhook_signature" in body
 
-    with_mock = [w for w in body["warnings"] if "MOCK" in w.upper()]
-    assert with_mock, "mock mode must be surfaced — it means customers get silence"
-    assert body["reply_delivery"]["mode"] == "mock"
-    assert body["reply_delivery"]["delivering"] is False
+    assert any("WhatsApp automation removed" in w for w in body["warnings"])
+    assert body["reply_delivery"]["mode"] == "instagram_only"
+    assert body["reply_delivery"]["manual_handoff"] == "available"
 
     # Mock mode is the correct default locally, so it must not fail the check.
-    assert client.get("/health").status_code == 200
-
-
-def test_health_fails_when_live_mode_has_no_credentials():
-    """Live mode without a token produces replies that cannot be delivered."""
-    saved_mock = config.WHATSAPP_MOCK_MODE
-    saved_token = config.WHATSAPP_ACCESS_TOKEN
-    config.WHATSAPP_MOCK_MODE = False
-    config.WHATSAPP_ACCESS_TOKEN = ""
-    try:
-        resp = client.get("/health")
-        assert resp.status_code == 503
-        body = resp.json()
-        assert body["reply_delivery"]["mode"] == "live"
-        assert body["reply_delivery"]["delivering"] is False
-        assert "WHATSAPP_ACCESS_TOKEN" in body["reply_delivery"]["problem"]
-    finally:
-        config.WHATSAPP_MOCK_MODE = saved_mock
-        config.WHATSAPP_ACCESS_TOKEN = saved_token
-
     assert client.get("/health").status_code == 200
 
 
@@ -783,7 +761,7 @@ def test_uploaded_flyer_photo_becomes_the_weekly_menu_card():
         # "show me the menu" must use it in place of the fixed weekly image.
         reply = client.post(
             "/api/test-chat",
-            json={"message": "show me the menu", "user_id": "flyer_test_user", "channel": "whatsapp"},
+            json={"message": "show me the menu", "user_id": "flyer_test_user", "channel": "instagram_ad"},
         )
         images = reply.json().get("image_url") or []
         urls = [i["url"] if isinstance(i, dict) else i for i in images]
@@ -845,7 +823,7 @@ def test_no_upload_falls_back_to_the_baked_in_weekly_image():
     weekly_flyer.clear()
     reply = client.post(
         "/api/test-chat",
-        json={"message": "show me the menu", "user_id": "no_flyer_user", "channel": "whatsapp"},
+        json={"message": "show me the menu", "user_id": "no_flyer_user", "channel": "instagram_ad"},
     )
     images = reply.json().get("image_url") or []
     urls = [i["url"] if isinstance(i, dict) else i for i in images]
@@ -902,7 +880,7 @@ def test_photo_and_text_agree_on_the_date_after_an_upload():
         # menu.json — must show the same date the photo now claims.
         reply = client.post(
             "/api/test-chat",
-            json={"message": "veg menu", "user_id": "date_regress_user", "channel": "whatsapp"},
+            json={"message": "veg menu", "user_id": "date_regress_user", "channel": "instagram_ad"},
         )
         assert week in reply.json().get("response", "")
     finally:
@@ -1019,7 +997,7 @@ def test_a_second_upload_with_a_new_date_replaces_the_old_one_everywhere():
 
         reply = client.post(
             "/api/test-chat",
-            json={"message": "veg menu", "user_id": "date_replace_user", "channel": "whatsapp"},
+            json={"message": "veg menu", "user_id": "date_replace_user", "channel": "instagram_ad"},
         )
         text = reply.json().get("response", "")
         assert new_week in text
@@ -1140,7 +1118,7 @@ def test_expired_menu_is_never_shown_to_a_customer():
 
         reply = client.post(
             "/api/test-chat",
-            json={"message": "veg menu", "user_id": "expired_user", "channel": "whatsapp"},
+            json={"message": "veg menu", "user_id": "expired_user", "channel": "instagram_ad"},
         ).json()
 
         text = reply.get("response", "")
@@ -1165,7 +1143,7 @@ def test_expired_weekly_menu_does_not_hide_the_sondesh_collections():
 
         reply = client.post(
             "/api/test-chat",
-            json={"message": "show me the menu", "user_id": "expired_browse", "channel": "whatsapp"},
+            json={"message": "show me the menu", "user_id": "expired_browse", "channel": "instagram_ad"},
         ).json()
         urls = [i["url"] if isinstance(i, dict) else i for i in (reply.get("image_url") or [])]
 
@@ -1206,7 +1184,7 @@ def test_a_new_upload_takes_over_the_expired_menu_slot():
         _set_current_week("19, 20, 21 JUNE")
         stale = client.post(
             "/api/test-chat",
-            json={"message": "veg menu", "user_id": "slot_user_a", "channel": "whatsapp"},
+            json={"message": "veg menu", "user_id": "slot_user_a", "channel": "instagram_ad"},
         ).json()
         assert "finalising this week" in stale.get("response", "")
 
@@ -1226,7 +1204,7 @@ def test_a_new_upload_takes_over_the_expired_menu_slot():
 
         fresh = client.post(
             "/api/test-chat",
-            json={"message": "veg menu", "user_id": "slot_user_b", "channel": "whatsapp"},
+            json={"message": "veg menu", "user_id": "slot_user_b", "channel": "instagram_ad"},
         ).json()
         assert _current_week() in fresh.get("response", "")
         assert "finalising this week" not in fresh.get("response", "")

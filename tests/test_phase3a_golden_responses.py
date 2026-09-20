@@ -246,6 +246,57 @@ def test_explicit_product_switch_clears_home_table_context():
     assert template_id == "kanchagolla"
 
 
+def test_explicit_jolbhora_price_overrides_stale_home_table_context_on_instagram(monkeypatch):
+    monkeypatch.setattr(config, "BYPASS_AD_GATE", True)
+    user_id = _user("instagram_home_table_switch")
+    session_memory.clear_session(user_id, "instagram")
+    facts = session_memory.get_facts(user_id, "instagram")
+    facts.update({
+        "home_table_context": True,
+        "last_topic": "bengali_home_table",
+        "source_route": {
+            "active": True,
+            "routing_topic": "Bengali Home Table",
+            "source_type": "story",
+        },
+    })
+
+    text, matched, template_id, _images = responder.match_and_respond(
+        "What is the price of Jolbhora?",
+        user_id=user_id,
+        channel="instagram",
+    )
+
+    assert matched is True
+    assert template_id == "jolbhora"
+    assert "Jolbhora" in text
+
+
+def test_unsupported_new_request_overrides_stale_home_table_context_on_instagram(monkeypatch):
+    monkeypatch.setattr(config, "BYPASS_AD_GATE", True)
+    user_id = _user("instagram_home_table_unsupported")
+    session_memory.clear_session(user_id, "instagram")
+    facts = session_memory.get_facts(user_id, "instagram")
+    facts.update({
+        "home_table_context": True,
+        "last_topic": "bengali_home_table",
+        "source_route": {
+            "active": True,
+            "routing_topic": "Bengali Home Table",
+            "source_type": "story",
+        },
+    })
+
+    _text, _matched, template_id, _images = responder.match_and_respond(
+        "Can you cater a wedding in Mumbai?",
+        user_id=user_id,
+        channel="instagram",
+    )
+
+    assert template_id != "bengali_home_table_details"
+    assert template_id != "bengali_home_table_pricing"
+
+
 def test_explicit_bento_switch_preserves_bento_context_for_bare_price():
     user_id = _user("bento_switch")
     session_memory.clear_session(user_id, "whatsapp")
