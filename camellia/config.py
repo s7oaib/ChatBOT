@@ -126,15 +126,12 @@ class Config:
     # Machine authentication for trusted tools. Never use this as a browser
     # password and never inject it into the Admin Portal JavaScript.
     ADMIN_API_KEY: str = _env_secret("ADMIN_API_KEY")
-    # Browser authentication is username + Argon2id password, followed by MFA
-    # in production. ADMIN_PIN remains readable only for deprecation telemetry;
-    # it is never accepted by the browser or require_admin().
+    # Browser authentication is username + Argon2id password. ADMIN_PIN remains
+    # readable only for deprecation telemetry; it is never accepted by the
+    # browser or require_admin().
     ADMIN_PIN: str = _env_secret("ADMIN_PIN")
     ADMIN_USERNAME: str = _env_secret("ADMIN_USERNAME")
     ADMIN_PASSWORD_HASH: str = _env_secret("ADMIN_PASSWORD_HASH")
-    ADMIN_MFA_TOTP_SECRET: str = _env_secret("ADMIN_MFA_TOTP_SECRET")
-    ADMIN_MFA_RECOVERY_CODE_HASHES: str = _env_secret("ADMIN_MFA_RECOVERY_CODE_HASHES")
-    ADMIN_MFA_REQUIRED: bool = os.getenv("ADMIN_MFA_REQUIRED", "true").lower() in ("true", "1", "t", "yes")
     ADMIN_REQUIRE_HTTPS: bool = os.getenv("ADMIN_REQUIRE_HTTPS", "true").lower() in ("true", "1", "t", "yes")
     try:
         ADMIN_SESSION_IDLE_SECONDS: int = max(300, int(os.getenv("ADMIN_SESSION_IDLE_SECONDS", "1800")))

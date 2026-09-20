@@ -254,14 +254,6 @@ class Database:
             );
             """)
             cursor.execute("""
-            CREATE TABLE IF NOT EXISTS admin_recovery_codes (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                code_hash TEXT NOT NULL UNIQUE,
-                created_at REAL NOT NULL,
-                used_at REAL
-            );
-            """)
-            cursor.execute("""
             CREATE TABLE IF NOT EXISTS admin_security_audit (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 event_type TEXT NOT NULL,
@@ -4591,39 +4583,6 @@ class Database:
     def revoke_admin_sessions_for_user(self, username: str, now: float) -> None:
         with self.get_connection() as conn:
             conn.execute("UPDATE admin_sessions SET revoked_at=? WHERE username=? AND revoked_at IS NULL", (now, username))
-            conn.commit()
-
-    def seed_admin_recovery_codes(self, code_hashes: List[str], now: float) -> None:
-        if not code_hashes:
-            return
-        with self.get_connection() as conn:
-            conn.executemany(
-                "INSERT OR IGNORE INTO admin_recovery_codes (code_hash, created_at) VALUES (?, ?)",
-                ((code_hash, now) for code_hash in code_hashes if code_hash),
-            )
-            conn.commit()
-
-    def consume_admin_recovery_code(self, code: str, verify_hash, now: float) -> bool:
-        with self.get_connection() as conn:
-            rows = conn.execute(
-                "SELECT id, code_hash FROM admin_recovery_codes WHERE used_at IS NULL ORDER BY id"
-            ).fetchall()
-            for row in rows:
-                if verify_hash(code, row["code_hash"]):
-                    updated = conn.execute(
-                        "UPDATE admin_recovery_codes SET used_at=? WHERE id=? AND used_at IS NULL",
-                        (now, row["id"]),
-                    )
-                    conn.commit()
-                    return updated.rowcount == 1
-        return False
-
-    def add_admin_recovery_code(self, code_hash: str, now: float) -> None:
-        with self.get_connection() as conn:
-            conn.execute(
-                "INSERT INTO admin_recovery_codes (code_hash, created_at) VALUES (?, ?)",
-                (code_hash, now),
-            )
             conn.commit()
 
     def record_admin_security_event(

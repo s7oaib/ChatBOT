@@ -38,9 +38,9 @@ _VISION_RETRY_BACKOFF_SECONDS = 1.5
 # this used 4096 and made uploads fail that had previously worked.
 #
 # 2048 was still too high, for a reason the TPM number hides: Groq caps
-# *output* separately, and on qwen/qwen3.6-27b that OTPM ceiling is 1000.
+# *output* separately, and on qwen/qwen3.6-27b that output-token ceiling is 1000.
 # Reserving 2048 against a 1000 ceiling is rejected before a single token is
-# generated — "Request too large ... on output tokens per minute (OTPM):
+# generated — "Request too large ... on output tokens per minute:
 # Limit 1000". Every full-flyer upload therefore failed, saved the photo, and
 # left the dish text on the previous week. Confirmed by replaying the
 # client's own flyer: 400 json_validate_failed, then two 429s, then give up.

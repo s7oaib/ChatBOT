@@ -43,7 +43,7 @@ Built to convert Meta Ad leads, filter out organic DM noise, send high-resolutio
 - **Manual Handoff**: Stores durable conversation/handoff state in `camellia.db` subject to retention, while normal logs use hashed identifiers and safe error metadata only. Customers receive a `wa.me` link; WhatsApp is handled by a human.
 
 ### 5. 🔐 Kitchen & Menu Admin Portal (`/admin` / `/admin/dashboard`)
-- **Secure Admin Authentication**: Browser access uses `ADMIN_USERNAME` + an Argon2id `ADMIN_PASSWORD_HASH`, production TOTP MFA, durable rate limiting, CSRF-protected server sessions, and logout revocation. `ADMIN_API_KEY` remains a separate machine credential; legacy `ADMIN_PIN` is not accepted.
+- **Secure Admin Authentication**: Browser access uses `ADMIN_USERNAME` + an Argon2id `ADMIN_PASSWORD_HASH`, durable rate limiting, CSRF-protected server sessions, and logout revocation. `ADMIN_API_KEY` remains a separate machine credential; legacy `ADMIN_PIN` is not accepted.
 - **📋 Paste Menu Card Parser**: Extracts dish names, descriptions, weights, and prices from flyer notes or dish lists, automatically categorizing items as Veg or Non-Veg.
 - **📸 Flyer Photo & Graphic OCR**: Scans printed menu photos or Instagram flyers with a Groq vision model, using the same key the bot already needs for replies.
 - **📊 Google Sheets Live Sync**: One-click sync from Google Sheets CSV without server restarts or touching code.

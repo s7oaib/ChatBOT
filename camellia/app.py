@@ -81,13 +81,10 @@ from camellia.session_memory import session_memory
 from camellia.monitoring import get_logger, delivery_monitor, latency_monitor, classify_instagram_delivery
 from camellia.admin_security import (
     digest as security_digest,
-    generate_recovery_code,
-    hash_secret,
     new_token,
     normalize_username,
     token_hash,
     verify_password,
-    verify_totp,
 )
 from camellia.knowledge import SOURCE_MAP
 from camellia.candidate_safety import candidate_eligibility, detect_business_commitment_warnings, validate_candidate_answer
@@ -105,7 +102,7 @@ _admin_context: ContextVar[Optional[Dict[str, Any]]] = ContextVar("admin_context
 
 def _admin_security_version() -> str:
     return security_digest(
-        f"{config.ADMIN_PASSWORD_HASH}\x00{config.ADMIN_MFA_TOTP_SECRET}\x00{config.ADMIN_USERNAME}"
+        f"{config.ADMIN_PASSWORD_HASH}\x00{config.ADMIN_USERNAME}"
     )
 
 
@@ -208,12 +205,6 @@ async def lifespan(app: FastAPI):
             log.info("Delivered %s durable human notification event(s) on startup.", delivered_notifications)
     except Exception:
         log.exception("Could not process durable human notification events on startup.")
-    configured_recovery_hashes = [
-        item.strip()
-        for item in re.split(r"[\s,]+", config.ADMIN_MFA_RECOVERY_CODE_HASHES or "")
-        if item.strip()
-    ]
-    db.seed_admin_recovery_codes(configured_recovery_hashes, time.time())
     # Apply only the audited, canonical copy corrections through the existing
     # versioned Response Library store.  This is idempotent and deliberately
     # preserves any distinct client-authored override.
@@ -252,8 +243,6 @@ async def lifespan(app: FastAPI):
         )
     if not (config.ADMIN_USERNAME and config.ADMIN_PASSWORD_HASH):
         log.critical("Browser admin authentication is not configured; password login fails closed.")
-    if config.ADMIN_MFA_REQUIRED and not config.ADMIN_MFA_TOTP_SECRET:
-        log.critical("Production admin MFA is required but ADMIN_MFA_TOTP_SECRET is not configured.")
     if config.ADMIN_PIN:
         log.warning("ADMIN_PIN is configured only as a legacy value and is never accepted for browser admin authentication.")
     if config.ADMIN_API_KEY:
@@ -2516,8 +2505,6 @@ def health_check():
             "instagram_token": instagram_token,
             "admin_auth": {
                 "password_configured": bool(config.ADMIN_USERNAME and config.ADMIN_PASSWORD_HASH),
-                "mfa_required": bool(config.ADMIN_MFA_REQUIRED),
-                "mfa_configured": bool(config.ADMIN_MFA_TOTP_SECRET),
                 "machine_api_configured": bool(config.ADMIN_API_KEY),
                 "https_required": bool(config.ADMIN_REQUIRE_HTTPS),
             },
@@ -2608,7 +2595,6 @@ async def admin_login(request: Request):
 
     username = str(body.get("username") or "").strip()
     password = str(body.get("password") or "")
-    totp_code = str(body.get("totp") or "").strip()
     retry_after = _admin_login_rate_limit(request, username)
     if retry_after:
         _audit_admin_event("RATE_LIMIT", username, request)
@@ -2622,21 +2608,6 @@ async def admin_login(request: Request):
     if not username_ok or not password_ok:
         retry_after = _admin_login_failed(request, username, "LOGIN_FAILURE")
         return _generic_login_failure(retry_after)
-
-    recovery_used = False
-    if config.ADMIN_MFA_REQUIRED:
-        if not config.ADMIN_MFA_TOTP_SECRET:
-            _audit_admin_event("MFA_UNAVAILABLE", username, request)
-            return JSONResponse(status_code=503, content={"detail": "Admin authentication is not configured."})
-        if not totp_code:
-            return JSONResponse(status_code=200, content={"mfa_required": True})
-        totp_ok = verify_totp(config.ADMIN_MFA_TOTP_SECRET, totp_code)
-        if not totp_ok and totp_code:
-            recovery_used = db.consume_admin_recovery_code(totp_code, verify_password, time.time())
-        if not totp_ok and not recovery_used:
-            retry_after = _admin_login_failed(request, username, "MFA_FAILURE")
-            return _generic_login_failure(retry_after)
-        _audit_admin_event("MFA_SUCCESS", username, request)
 
     now = time.time()
     db.reset_admin_login_scopes(_admin_scopes(username, _admin_ip(request))[:2])
@@ -2683,17 +2654,6 @@ def admin_logout(request: Request):
     response.delete_cookie(ADMIN_SESSION_COOKIE, path="/", secure=True, httponly=True, samesite="strict")
     response.delete_cookie(ADMIN_CSRF_COOKIE, path="/", secure=True, httponly=False, samesite="strict")
     return response
-
-
-@app.post("/admin/security/recovery-codes")
-def generate_admin_recovery_codes(request: Request):
-    require_admin()
-    codes = [generate_recovery_code() for _ in range(10)]
-    now = time.time()
-    for code in codes:
-        db.add_admin_recovery_code(hash_secret(code), now)
-    _audit_admin_event("RECOVERY_CODES_GENERATED", (_admin_context.get() or {}).get("username", ""), request)
-    return {"status": "generated", "codes": codes, "warning": "Shown once. Store securely; they cannot be retrieved again."}
 
 
 @app.get("/admin/security/audit")
@@ -5657,7 +5617,7 @@ def get_admin_dashboard():
     """
     Dedicated PIN-Protected Kitchen & Menu Management Portal for Camellia Artisanal.
     Features:
-    - Username/password authentication with optional production MFA
+    - Username/password authentication
     - 📋 Paste Menu Card Text Parser
     - 📸 Drag-and-Drop Image Flyer Upload with Groq Vision OCR
     - 📊 Google Sheets Live Sync
@@ -6026,16 +5986,11 @@ def get_admin_dashboard():
                 <label for="passwordInput">Password</label>
                 <input type="password" id="passwordInput" class="credential-input" autocomplete="current-password" onkeydown="if(event.key==='Enter') loginAdmin()">
             </div>
-            <div class="credential-input-wrap" id="totpInputWrap" style="display:none">
-                <label for="totpInput">Authenticator code</label>
-                <input type="text" id="totpInput" class="credential-input" inputmode="numeric" autocomplete="one-time-code" maxlength="6" onkeydown="if(event.key==='Enter') loginAdmin()">
-            </div>
-            
             <button class="auth-btn" onclick="loginAdmin()">
                 <span>Unlock Portal</span> ➔
             </button>
             
-            <p class="auth-hint">Use your configured admin username, password, and authenticator code when prompted.</p>
+            <p class="auth-hint">Use your configured admin username and password.</p>
         </div>
     </div>
 
@@ -7184,9 +7139,7 @@ THIS WEEK'S BENGAL SPECIALS
             const requestGeneration = ++authRequestGeneration;
             const username = document.getElementById('usernameInput').value.trim();
             const passwordInput = document.getElementById('passwordInput');
-            const totpInput = document.getElementById('totpInput');
             const password = passwordInput.value;
-            const totp = totpInput.value.trim();
             if (!username || !password) return;
 
             try {
@@ -7194,20 +7147,12 @@ THIS WEEK'S BENGAL SPECIALS
                     method: 'POST',
                     credentials: 'same-origin',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({ username: username, password: password, totp: totp })
+                    body: JSON.stringify({ username: username, password: password })
                 });
-                const data = await resp.json().catch(() => ({}));
-
                 if (requestGeneration !== authRequestGeneration) return;
                 if (resp.ok) {
-                    if (data.mfa_required) {
-                        document.getElementById('totpInputWrap').style.display = 'block';
-                        totpInput.focus();
-                        return;
-                    }
                     adminAuthenticated = true;
                     passwordInput.value = '';
-                    totpInput.value = '';
                     hideAuthOverlay();
                     loadActiveMenu();
                     loadAdRoutes();
@@ -7235,8 +7180,6 @@ THIS WEEK'S BENGAL SPECIALS
             try { await fetch('/admin/logout', { method: 'POST', headers: getAuthHeaders(), credentials: 'same-origin' }); } catch (e) { /* session expires server-side */ }
             adminAuthenticated = false;
             document.getElementById('passwordInput').value = '';
-            document.getElementById('totpInput').value = '';
-            document.getElementById('totpInputWrap').style.display = 'none';
             showAuthLogin();
         }
 
