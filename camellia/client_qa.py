@@ -206,19 +206,23 @@ def match(message: str, facts: Optional[Dict[str, Any]] = None) -> Optional[Appr
         return result("price_is_high", "exact" if normalized == _normalise_question("PRICE IS HIGH") else "paraphrase")
     if home and re.search(r"\b(?:how\s+to\s+pay|payment|pay)\b", text, re.I):
         return result("home_table_payment", "exact" if normalized == _normalise_question("How to pay") else "paraphrase")
-    if home and _generic_price(text):
+    if home and (_generic_price(text) or re.search(r"\b(?:price|cost|how\s+much)\b", text, re.I)):
         return result("home_table_price", "exact" if normalized in {_normalise_question("Whats the price?"), _normalise_question("What's the price?")} else "paraphrase")
-    if home and re.search(r"\b(?:tell|talk|share|give)\s+me\s+(?:more|details)\s+(?:about\s+)?(?:this|(?:the\s+)?(?:bengali\s+)?home\s+table|the\s+event)\b", text, re.I):
+    if home and re.search(r"\b(?:tell|talk|share|give)\s+me\s+(?:more|details)\s+(?:about\s+)?(?:this|(?:the\s+)?(?:bengali\s+)?home\s+table|the\s+event)\b|\btell\s+me\s+about\s+(?:the\s+)?(?:bengali\s+)?home\s+table\b", text, re.I):
         return result("home_table_details", "exact" if normalized == _normalise_question("tell me more about this") else "paraphrase")
 
     # Specific product and flow questions precede the broad generic price.
     if re.search(r"\b(?:minimum|multiples?\s+of\s+(?:nine|9)|9\s*pieces|250\s*g)\b", text, re.I) and re.search(r"\b(?:flavou?r|sondesh|order)\b", text, re.I):
         return result("minimum_sondesh_quantity_client")
-    if re.search(r"\b(?:out\s+of\s+area|other\s+city|different\s+city|xyz\s+city|outside\s+(?:delhi|ncr)|deliver\s+to\s+(?:bangalore|bengaluru|mumbai|chennai|hyderabad|pune|kolkata))\b", text, re.I):
+    if re.search(r"\b(?:out\s+of\s+area|other\s+city|different\s+city|xyz\s+city|outside\s+(?:delhi|ncr)|deliver(?:\s+\w+){0,5}\s+to\s+(?:bangalore|bengaluru|mumbai|chennai|hyderabad|pune|kolkata))\b", text, re.I):
         return result("delivery_out_of_area_client")
-    if re.search(r"\bsubscription\b|\bmeal\s+plan\b|\beveryday\s+meal\b", text, re.I):
+    if re.search(r"\bsubscriptions?\b|\bmeal\s+plan\b|\beveryday\s+meal\b", text, re.I):
         return result("subscription_price" if re.search(r"\b(?:price|cost|rate|how\s+much)\b", text, re.I) else "subscription_details_client")
-    if re.search(r"\bbengali\s+bento\b|\bbento\b", text, re.I):
+    if re.search(r"\bbengali\s+bento\b|\bbento\b", text, re.I) and not re.search(
+        r"\b(?:without|no|remove|replace|substitut|customi[sz]|cheapest|lowest|how\s+much\s+more|difference|cheaper)\b",
+        text,
+        re.I,
+    ):
         return result("bento_price_client" if re.search(r"\b(?:price|cost|how\s+much|rate|pirce)\b", text, re.I) else "bento_details_client")
     if re.search(r"\bchicken\s+kosha\b", text, re.I):
         return result("chicken_kosha_price_client")
@@ -234,14 +238,21 @@ def match(message: str, facts: Optional[Dict[str, Any]] = None) -> Optional[Appr
 
     if re.search(r"\b(?:price\s+(?:is\s+)?high|high\s+price|too\s+expensive|quite\s+expensive|why\s+is\s+it\s+so\s+expensive)\b", text, re.I):
         return result("price_is_high")
-    if re.search(r"\b(?:best\s+time|when)\s+to\s+book\b", text, re.I):
+    if re.search(r"\b(?:best\s+time|when)\s+to\s+(?:book|reserve)\b|\bwhen\s+is\s+the\s+best\s+time\b", text, re.I):
         return result("best_time_to_book")
     if re.search(r"\bdelivery\s+time\b|\bhow\s+long\b.*\bdeliver(?:y)?\b", text, re.I):
         return result("savoury_delivery_time")
 
     # The general two-line question variants are intentionally separate from
     # the Home Table variants above.
-    if not home and normalized in {_normalise_question("can you tell me more about this"), _normalise_question("tell me more about your food"), _normalise_question("what do you offer") }:
+    if not home and (
+        normalized in {
+            _normalise_question("can you tell me more about this"),
+            _normalise_question("tell me more about your food"),
+            _normalise_question("what do you offer"),
+        }
+        or re.search(r"\b(?:share|tell|explain|describe)\b.*\b(?:food|meal|format|offer|menu)\b", text, re.I)
+    ):
         return result("general_details", "exact" if normalized == _normalise_question("Can you tell me more about this") else "paraphrase")
     if not home and _generic_price(text):
         return result("general_price", "exact" if normalized == _normalise_question("whats the price") else "paraphrase")
@@ -249,7 +260,11 @@ def match(message: str, facts: Optional[Dict[str, Any]] = None) -> Optional[Appr
     if re.search(r"\b(?:how\s+to\s+pay|how\s+do\s+i\s+pay|payment\s+(?:method|options?))\b", text, re.I):
         return result("home_table_payment" if home else "general_payment_client")
     if re.search(r"\b(?:pre\s*[- ]?book|pre\s*[- ]?order|how\s+to\s+order\s+(?:from|an?)\s+menu|order\s+ala\s*[- ]?carte)\b", text, re.I):
-        return result("order_prebook" if re.search(r"\bto\s+place\s+an\s+order\b", text, re.I) else "alacarte_prebook")
+        return result(
+            "order_prebook"
+            if state.get("order_flow_context") or re.search(r"\bto\s+place\s+an\s+order\b", text, re.I)
+            else "alacarte_prebook"
+        )
     if re.search(r"\b(?:ready\s+to\s+(?:place|order)|placed\s+(?:my|the)\s+order|confirm\s+(?:my|the)\s+order|finali[sz]e\s+(?:it|my\s+order))\b", text, re.I):
         return result("order_ready_handoff")
     if re.search(r"\b(?:how\s+do\s+i\s+pay|payment)\b", text, re.I):

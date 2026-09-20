@@ -188,6 +188,34 @@ def _bento_grounded_comparison(question: str, approved_response: str) -> Optiona
     return None
 
 
+# The client-QA registry is the authoritative copy source, while the public
+# route/template IDs remain stable for existing admin/audit consumers.
+_CLIENT_QA_TEMPLATE_IDS = {
+    "home_table_details": "bengali_home_table_details",
+    "home_table_price": "bengali_home_table_pricing",
+    "home_table_payment": "bengali_home_table_payment",
+    "general_price": "savoury_food_intro",
+    "general_details": "savoury_food_intro",
+    "alacarte_prebook": "alacarte_prebooking_steps",
+    "subscription_price": "subscription_details",
+    "subscription_details_client": "subscription_details",
+    "price_is_high": "pricing_value_context",
+    "bento_details_client": "bento_details",
+    "bento_price_client": "bento_details",
+    "best_time_to_book": "savoury_best_time_to_book",
+    "savoury_delivery_time": "savoury_delivery_time",
+    "chicken_kosha_price_client": "chicken_kosha_price",
+    "sondesh_delivery_time": "sondesh_dispatch_time",
+    "sondesh_price_client": "sondesh_price_detailed",
+    "sondesh_details_client": "sondesh_details",
+    "sondesh_unfamiliar_client": "sondesh_unfamiliar",
+    "delivery_out_of_area_client": "delivery_out_of_area",
+    "order_prebook": "alacarte_prebooking_steps",
+    "general_payment_client": "GUARD_payment_method",
+    "minimum_sondesh_quantity_client": "minimum_sondesh_quantity",
+}
+
+
 # The flower strip lives in text_rules so database.py can use it too — the
 # reply path is not the only place text reaches the client's people.
 _FLOWER_RE = FLOWER_RE
@@ -1970,7 +1998,38 @@ class DeterministicResponder:
         # matcher may understand a paraphrase, but the response itself is
         # loaded from the source block and never sent through Groq, RAG,
         # response-library overrides, or cross-sell rewriting.
-        client_match = client_qa.match(user_message, facts)
+        # The registry matcher is deliberately broad, so safety and explicit
+        # intent gates must run before it.  These exclusions preserve the
+        # authoritative source copy without letting a product FAQ swallow a
+        # grounded calculation, a fail-closed safety handoff, a purchase
+        # handoff, or an explicit out-of-area delivery question.
+        bento_template_for_precedence = self._template_by_id("bento_details") or {}
+        client_qa_excluded = bool(
+            _UNSUPPORTED_CUSTOMIZATION_RE.search(lowered_text)
+            or _HIGH_RISK_UNSUPPORTED_RE.search(lowered_text)
+            or _bento_grounded_comparison(
+                user_message,
+                str(bento_template_for_precedence.get("response") or ""),
+            )
+            or (
+                re.search(r"\b(?:sondesh|sandesh|mishti|sweets?)\b", lowered_text)
+                and DELIVERY_ACTION_RE.search(lowered_text)
+                and NON_NCR_DESTINATION_RE.search(lowered_text)
+            )
+            or (
+                channel == "instagram"
+                and PURCHASE_ASSISTANCE_RE.search(lowered_text)
+            )
+            or (
+                semantic_fallback._ESCALATION_INTENT_RE.search(lowered_text)
+                and not semantic_fallback._IDENTITY_QUESTION_RE.search(lowered_text)
+            )
+        )
+        client_match = (
+            None
+            if channel != "instagram" or client_qa_excluded
+            else client_qa.match(user_message, facts)
+        )
         if client_match:
             entry = client_match.entry
             asset_urls: List[str] = []
@@ -2009,9 +2068,24 @@ class DeterministicResponder:
                 "client_qa_asset_status": "ASSET-MISSING" if asset_missing else "available",
                 "client_qa_missing_assets": asset_missing,
             })
+            if entry.context == "home_table" and (
+                facts.get("source_route")
+                or facts.get("last_topic") == "bengali_home_table"
+                or facts.get("home_table_context")
+            ):
+                facts["source_context_used"] = True
             if entry.context == "home_table":
                 facts["home_table_context"] = True
                 facts["last_topic"] = "bengali_home_table"
+                source_route = facts.get("source_route")
+                if isinstance(source_route, dict):
+                    source_topic = " ".join(
+                        str(source_route.get(key) or "")
+                        for key in ("routing_topic", "topic_name", "name")
+                    )
+                    facts["source_context_used"] = bool(
+                        re.search(r"bengali\s+home\s+table|home\s+table|kolkata\s+home", source_topic, re.I)
+                    )
             if asset_missing:
                 handoff, _ = self.build_handover_response(user_message)
                 facts["last_actions"] = [
@@ -2020,9 +2094,10 @@ class DeterministicResponder:
                 ]
                 session_memory.add_turn(user_id, channel, user_message, handoff)
                 return handoff, False, "client_approved_asset_missing", None
+            template_id = _CLIENT_QA_TEMPLATE_IDS.get(entry.qa_id)
             response_text = entry.answer
             session_memory.add_turn(user_id, channel, user_message, response_text)
-            return response_text, True, f"client_approved_{entry.qa_id}", asset_urls or None
+            return response_text, True, template_id or f"client_approved_{entry.qa_id}", asset_urls or None
 
         # A decline closes only this active add-on flow. It is session-scoped,
         # so a later conversation can offer the add-on again.

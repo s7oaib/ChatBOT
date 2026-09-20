@@ -119,3 +119,49 @@ def test_operational_placeholders_are_not_customer_output():
     assert "sondesh_addon_images" in client_qa.REGISTRY_BY_ID["general_price"].asset_keys
     assert "subscription_rate_chart" in client_qa.REGISTRY_BY_ID["subscription_price"].asset_keys
     assert "aamar_menu" in client_qa.REGISTRY_BY_ID["sondesh_details_client"].asset_keys
+
+
+def test_every_canonical_source_block_resolves_through_the_real_responder(monkeypatch):
+    from camellia.config import config
+    from camellia.responder import responder
+    from camellia.session_memory import session_memory
+
+    monkeypatch.setattr(config, "BYPASS_AD_GATE", True)
+    cases = [
+        ("home_table_details", "tell me more about this", {"home_table_context": True}),
+        ("home_table_price", "Whats the price?", {"home_table_context": True}),
+        ("home_table_payment", "How to pay", {"home_table_context": True}),
+        ("general_price", "whats the price", {}),
+        ("general_details", "Can you tell me more about this", {}),
+        ("alacarte_prebook", "WHAT ARE THE NEXT STEPS TO PRE BOOK?", {}),
+        ("subscription_price", "What is the price of SUBSCRIPTION - HOME FOOD AWAY FROM HOME", {}),
+        ("subscription_details_client", "Tell me more about SUBSCRIPTION - HOME FOOD AWAY FROM HOME", {}),
+        ("price_is_high", "PRICE IS HIGH", {}),
+        ("bento_details_client", "tell me about BENGALI BENTO", {}),
+        ("bento_price_client", "what is pirce of BENGALI BENTO", {}),
+        ("best_time_to_book", "whats the BEST TIME TO BOOK", {}),
+        ("savoury_delivery_time", "WHATS THE DELIVERY TIME", {}),
+        ("chicken_kosha_price_client", "WHATS THE PRICE OF CHICKEN KOSHA", {}),
+        ("order_ready_handoff", "I am ready to place my order", {}),
+        ("sondesh_delivery_time", "How much time do you take to deliver sondesh", {}),
+        ("sondesh_price_client", "Whats the price of sondesh?", {}),
+        ("sondesh_details_client", "Tell me more about sondesh", {}),
+        ("sondesh_unfamiliar_client", "Sondesh unfamiliar (new category)", {}),
+        ("delivery_out_of_area_client", "Do you deliver to xyz city?", {}),
+        ("order_prebook", "WHAT ARE THE NEXT STEPS TO PRE BOOK?", {"order_flow_context": True}),
+        ("general_payment_client", "How do I pay?", {}),
+        ("minimum_sondesh_quantity_client", "Why is the Minimum order 9 pieces 250g for some flavours", {}),
+    ]
+    for index, (expected_id, question, seed) in enumerate(cases):
+        user_id = f"source_golden_{index}_{expected_id}"
+        session_memory.clear_session(user_id, "instagram")
+        session_memory.get_facts(user_id, "instagram").update(seed)
+        response, matched, _template_id, _images = responder.match_and_respond(
+            question, user_id=user_id, channel="instagram",
+        )
+        facts = session_memory.get_facts(user_id, "instagram")
+        assert matched is True, expected_id
+        assert facts["client_qa_id"] == expected_id
+        assert facts["last_grounding"] == "exact_approved"
+        assert facts["last_llm_called"] is False
+        assert response == client_qa.REGISTRY_BY_ID[expected_id].answer
