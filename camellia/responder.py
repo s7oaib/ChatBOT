@@ -816,6 +816,8 @@ TOPIC_MAP = {
     "signature_collection": "signature",
     "mahua_signature_special": "signature",
     "sondesh_price_detailed": "sondesh_general",
+    "sondesh_details": "sondesh_general",
+    "sondesh_unfamiliar": "sondesh_general",
     "product_overview": "sondesh_general",
     "know_more": "sondesh_general",
     "sugar_free_options": "sondesh_general",
@@ -1021,6 +1023,38 @@ class DeterministicResponder:
             session_memory.add_turn(user_id, channel, message, reply)
             return reply, True, template_id, images
 
+        # These client-approved questions have distinctive intent that broad
+        # compatibility triggers can otherwise misread (for example, a
+        # chicken price as the generic Sondesh price, or a dispatch question
+        # as a delivery-area query). Reuse the canonical records; do not add a
+        # second copy of their answer here.
+        special_template_ids = []
+        if re.search(r"\b(?:price is high|prices are high|too expensive|quite expensive|why is it so expensive)\b", text):
+            special_template_ids.append("pricing_value_context")
+        if re.search(r"\b(?:chicken kosha price|price of chicken kosha|what is the price of chicken kosha|how much is chicken kosha)\b", text):
+            special_template_ids.append("chicken_kosha_price")
+        if re.search(r"\b(?:how much time do you take to deliver sondesh|how long do you take to deliver sondesh)\b", text):
+            special_template_ids.append("sondesh_dispatch_time")
+        if re.search(r"\b(?:tell me more about sondesh|tell me about sondesh|what is sondesh|sondesh details)\b", text):
+            special_template_ids.append("sondesh_details")
+        if re.search(r"\b(?:sondesh unfamiliar|sondesh is unfamiliar|new to sondesh|never tried sondesh|what is this sondesh)\b", text):
+            special_template_ids.append("sondesh_unfamiliar")
+        if re.search(r"\b(?:why is the minimum order 9 pieces|minimum order 9 pieces|minimum order quantity 9|why minimum 250g sondesh|multiples of 9 pieces)\b", text):
+            special_template_ids.append("minimum_sondesh_quantity")
+        if text in {"share weekly menu", "show weekly menu", "current weekly menu"}:
+            special_template_ids.append("savoury_food_intro")
+        if special_template_ids:
+            template_id = special_template_ids[0]
+            template = self._template_by_id(template_id) or {}
+            response = template.get("response") or self._generic_fallback()
+            response, images = self._format_dynamic_response(
+                template_id, response, user_id=user_id, channel=channel, user_message=message,
+            )
+            response, images = self._apply_crosssell_nudges(
+                template_id, response, images, session_memory.get_facts(user_id, channel),
+            )
+            return finish(response, template_id, images)
+
         if ACK_ONLY_RE.fullmatch(text):
             return finish("Got it!", "acknowledgement")
         if CLOSING_ONLY_RE.fullmatch(text):
@@ -1143,6 +1177,7 @@ class DeterministicResponder:
 
         sondesh_templates = {
             "sondesh_price_detailed", "sondesh_price_general",
+            "sondesh_details", "sondesh_unfamiliar",
             "classic_collection_details", "signature_collection_details",
             "aamar_mishti_details", "signature_sondesh_details",
             "jolbhora_talgash_details", "shelf_life_storage",
@@ -2931,7 +2966,9 @@ class DeterministicResponder:
             "subscription_details", "subscription_booking_steps", "alacarte_prebooking_steps",
             "sondesh_dispatch_time", "savoury_crosssell_sondesh", "sondesh_crosssell_savoury",
             "savoury_best_time_to_book", "savoury_delivery_time", "kolkata_expansion_info",
-            "order_next_steps", "sondesh_price_general", "recall_name", "name_introduction"
+            "order_next_steps", "sondesh_price_general", "recall_name", "name_introduction",
+            "pricing_value_context", "chicken_kosha_price",
+            "minimum_sondesh_quantity"
         }
 
         TIER_3_GENERIC_INFO = {
@@ -4095,6 +4132,11 @@ class DeterministicResponder:
                 # The client-approved price reply is text first, followed by
                 # each collection note and its matching menu card.
                 target_images = self._collection_cards_static(img_aamar_mishti, img_signature_sondesh)
+
+        elif template_id in ["sondesh_details", "sondesh_unfamiliar"]:
+            target_images = self._collection_cards_static(img_aamar_mishti, img_signature_sondesh)
+            if current_weekly_img:
+                target_images.append({"url": current_weekly_img, "caption": None})
 
         # Savoury food intro, Sondesh->Savoury cross-sell & Bento details — attach current weekly menu image card alongside text
         elif template_id in ["savoury_food_intro", "sondesh_crosssell_savoury", "bento_details"]:
