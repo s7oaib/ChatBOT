@@ -77,6 +77,7 @@ from camellia import menu_manager
 from camellia import menu_images
 from camellia import menu_catalogue
 from camellia.menu_catalogue import MenuCatalogueError
+from camellia import client_qa
 from camellia.session_memory import session_memory
 from camellia.monitoring import get_logger, delivery_monitor, latency_monitor, classify_instagram_delivery
 from camellia.admin_security import (
@@ -4914,6 +4915,42 @@ def get_templates(x_admin_key: Optional[str] = Header(None), x_admin_pin: Option
         log.error("Failed to read qa_templates.json: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
 
+
+@app.get("/admin/canonical-qa")
+def get_canonical_qa_registry(
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """Read-only view of the client-approved canonical QA registry.
+
+    This endpoint intentionally has no update method. Canonical answers come
+    from the approved source file; operator-authored Q&A remains separate in
+    the editable Custom Q&A library.
+    """
+    require_admin(x_admin_key, x_admin_pin)
+    entries = []
+    for entry in client_qa.REGISTRY:
+        entries.append({
+            "canonical_id": entry.canonical_id,
+            "legacy_id": entry.qa_id,
+            "lane": entry.lane,
+            "intent": entry.intent,
+            "entity": entry.entity,
+            "topic": entry.topic,
+            "canonical_question": entry.canonical_question,
+            "aliases": list(entry.aliases),
+            "context_requirements": entry.context_requirements_dict,
+            "canonical_answer": entry.canonical_answer,
+            "actions": list(entry.actions),
+            "assets": list(entry.asset_keys),
+            "source": entry.provenance,
+            "status": entry.status,
+            "business_fact_guard": entry.business_fact_guard,
+            "editable": False,
+            "generation_allowed": False,
+        })
+    return {"status": "success", "registry": client_qa.registry_summary(), "entries": entries}
+
 @app.post("/admin/templates")
 async def update_templates(request: Request, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
     """Updates Q&A templates in qa_templates.json and hot-reloads the responder."""
@@ -6940,6 +6977,22 @@ THIS WEEK'S BENGAL SPECIALS
                     <div class="qa-architecture-item"><b>Intent overrides stale state</b><span>Explicit intent wins over stale menu, Story, Home Table, pre-book, or payment context.</span></div>
                     <div class="qa-architecture-item"><b>Context-sensitive handling</b><span>Home Table, pre-booking, and payment answers require the matching context before they can win.</span></div>
                     <div class="qa-architecture-item"><b>Answer record</b><span>Paraphrases/aliases, canonical approved answer, context requirements, asset/action requirements, source/provenance, and active/inactive status are retained.</span></div>
+                </div>
+            </section>
+
+            <section id="canonicalQaRegistry" aria-labelledby="canonicalQaRegistryTitle" style="margin:0 0 18px; padding:14px; border:1px solid var(--border); border-radius:12px; background:#F8FAFC;">
+                <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; flex-wrap:wrap;">
+                    <div>
+                        <h3 id="canonicalQaRegistryTitle" style="margin:0;color:var(--primary);">Client-approved canonical registry</h3>
+                        <p style="margin:6px 0 0;color:var(--text-muted);font-size:.82rem;line-height:1.5;">Read-only production routing records. Explicit entity and intent beat stale Story or session context; superseded source variants remain visible for audit history.</p>
+                    </div>
+                    <span id="canonicalQaRegistryMeta" class="badge">Loading…</span>
+                </div>
+                <div style="overflow-x:auto;margin-top:12px;">
+                    <table class="data-table" aria-label="Client-approved canonical QA registry">
+                        <thead><tr><th>Canonical ID</th><th>Lane</th><th>Intent / Entity</th><th>Question / Aliases</th><th>Approved Answer</th><th>Context</th><th>Actions / Assets</th><th>Source / Status</th></tr></thead>
+                        <tbody id="canonicalQaRegistryBody"><tr><td colspan="8" style="text-align:center;color:#888;">Loading approved registry…</td></tr></tbody>
+                    </table>
                 </div>
             </section>
 
@@ -10654,15 +10707,18 @@ Non-Veg:
             try {
                 const sourceFilter = document.getElementById('cqaSourceFilter').value;
                 const customSource = sourceFilter === 'system_template' ? '' : sourceFilter;
-                const [resp, systemResp] = await Promise.all([
+                const [resp, systemResp, canonicalResp] = await Promise.all([
                     fetch(`/admin/custom-qa?status=${encodeURIComponent(customQaStatusFilter)}${customSource ? `&source=${encodeURIComponent(customSource)}` : ''}&limit=500`, { headers: getAuthHeaders() }),
                     fetch(`/admin/response-library?status=${encodeURIComponent(customQaStatusFilter)}${sourceFilter ? `&source=${encodeURIComponent(sourceFilter)}` : ''}&limit=500`, { headers: getAuthHeaders() }),
+                    fetch('/admin/canonical-qa', { headers: getAuthHeaders() }),
                 ]);
-                if (!resp.ok || !systemResp.ok) throw new Error('failed');
+                if (!resp.ok || !systemResp.ok || !canonicalResp.ok) throw new Error('failed');
                 const data = await resp.json();
                 const systemData = await systemResp.json();
+                const canonicalData = await canonicalResp.json();
                 customQaItems = data.items || [];
                 systemResponseItems = (systemData.items || []).filter(i => i.kind === 'system_template');
+                renderCanonicalQaRegistry(canonicalData);
 
                 const topicSelect = document.getElementById('cqaTopicFilter');
                 const currentTopic = topicSelect.value;
@@ -10676,6 +10732,36 @@ Non-Veg:
             } catch (err) {
                 tbody.innerHTML = '<tr><td colspan="9" style="text-align: center; color: red;">Failed to load Custom Q&amp;A.</td></tr>';
             }
+        }
+
+        function renderCanonicalQaRegistry(data) {
+            const body = document.getElementById('canonicalQaRegistryBody');
+            const meta = document.getElementById('canonicalQaRegistryMeta');
+            if (!body) return;
+            const entries = data.entries || [];
+            const summary = data.registry || {};
+            if (meta) meta.textContent = `${summary.active_entry_count || 0} active · ${entries.length} records · read-only`;
+            if (!entries.length) {
+                body.innerHTML = '<tr><td colspan="8" style="text-align:center;color:#888;">No canonical records loaded.</td></tr>';
+                return;
+            }
+            body.innerHTML = entries.map(item => {
+                const aliases = (item.aliases || []).map(escapeHtml).join(', ') || '—';
+                const context = item.context_requirements || {};
+                const contextText = `${context.topic || item.entity || 'general'}${context.required === 'true' ? ' · exact source required' : ''}`;
+                const actions = [...(item.actions || []), ...(item.assets || []).map(asset => `asset:${asset}`)];
+                const statusClass = item.status === 'ACTIVE' ? 'badge-veg' : 'badge-nonveg';
+                return `<tr>
+                    <td style="white-space:nowrap;"><b>${escapeHtml(item.canonical_id || '')}</b><br><small style="color:var(--text-muted);">legacy: ${escapeHtml(item.legacy_id || '')}</small></td>
+                    <td><span class="badge">${escapeHtml(item.lane || '')}</span></td>
+                    <td>${escapeHtml(item.intent || '')}<br><small>${escapeHtml(item.entity || '')}</small></td>
+                    <td style="min-width:220px;"><b>${escapeHtml(item.canonical_question || '')}</b><br><small style="color:var(--text-muted);">${aliases}</small></td>
+                    <td style="min-width:280px;max-width:420px;white-space:pre-wrap;font-size:.78rem;">${escapeHtml(item.canonical_answer || '')}</td>
+                    <td style="font-size:.78rem;">${escapeHtml(contextText)}</td>
+                    <td style="font-size:.76rem;">${escapeHtml(actions.join(', ') || '—')}</td>
+                    <td style="font-size:.76rem;"><span class="badge ${statusClass}">${escapeHtml(item.status || '')}</span><br>${escapeHtml(item.source?.heading || '')}<br><small>${escapeHtml(item.source?.path || '')}</small></td>
+                </tr>`;
+            }).join('');
         }
 
         function setCustomQaStatusFilter(status) {

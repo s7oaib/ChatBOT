@@ -14,6 +14,7 @@ EXACT_APPROVED = "EXACT_APPROVED"
 GROUNDED_APPROVED = "GROUNDED_APPROVED"
 INSUFFICIENT_KNOWLEDGE = "INSUFFICIENT_KNOWLEDGE"
 SENSITIVE_BUSINESS_FACT = "SENSITIVE_BUSINESS_FACT"
+CLARIFICATION_REQUIRED = "CLARIFICATION_REQUIRED"
 
 _HANDOFF_TEMPLATES = frozenset({
     None,
@@ -61,6 +62,8 @@ def classify_lane(
         return INSUFFICIENT_KNOWLEDGE
 
     grounding = str(facts.get("last_grounding") or "")
+    if grounding == "clarification":
+        return CLARIFICATION_REQUIRED
     if grounding == "pass" or grounding.startswith("grounded"):
         return GROUNDED_APPROVED
     return EXACT_APPROVED
