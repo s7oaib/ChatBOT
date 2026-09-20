@@ -107,17 +107,13 @@ def test_customers_and_answers_are_not_in_normal_client_navigation(page):
     assert "Candidates" in nav
 
 
-def test_legacy_views_are_reachable_only_from_the_advanced_disclosure(page):
-    """
-    The old panels stay in the DOM for regression comparison during this
-    transition, but only behind a collapsed, clearly-labelled disclosure --
-    never as prominent client-facing navigation.
-    """
-    assert "Advanced / Legacy Views" in page
-    assert "Open Legacy Customers View" in page
-    assert "Open Legacy Answers View" in page
-    assert "switchTab('tab-stats', null)" in page
-    assert "switchTab('tab-candidates', null)" in page
+def test_legacy_views_are_removed_from_normal_ui_and_old_bookmarks_redirect(page):
+    """The modern AI Resolution workspace owns the migrated legacy actions."""
+    assert "Advanced / Legacy Views" not in page
+    assert "Open Legacy Customers View" not in page
+    assert "Open Legacy Answers View" not in page
+    assert "/admin/legacy" in {route.path for route in app.routes}
+    assert "tab-ai-resolution" in page
 
 
 def test_menu_manager_can_edit_preview_publish_and_restore(page):
@@ -136,9 +132,10 @@ def test_menu_manager_can_edit_preview_publish_and_restore(page):
 
 
 def test_ad_routing_panel_still_present_alongside_menu_manager(page):
-    """Menu Manager must not have displaced the existing Post & Ad Routing UI."""
+    """Routing remains available, now as a Posts & Reels subview."""
     assert 'id="tab-ad-routing"' in page
-    assert "Instagram Post" in page or "Post &amp; Ad Routing" in page
+    assert 'data-group="instagram_content"' in page[page.index('id="tab-ad-routing"'):]
+    assert "Posts &amp; Reels Routing" in page
     assert 'id="igPriorityProducts"' in page
 
 
@@ -616,10 +613,12 @@ def test_handoff_notifications_are_global_and_persistent(page):
     assert 'id="handoffBell"' in page
     assert 'id="handoffSidebarBadge"' in page
     assert 'id="handoffPopover"' in page
-    assert "fetch('/admin/handoffs?limit=100'" in page
+    assert "fetch('/admin/handoffs?limit=100&include_resumed=true'" in page
     assert "/admin/handoffs/${encodeURIComponent(ref)}/seen" in page
     assert "showHandoffToast" in page
     assert "WAITING_FOR_HUMAN" in page
+    assert "Open handoff" in page
+    assert "Read-only history" in page
 
 
 def test_story_cards_open_the_shared_details_drawer(page):
@@ -627,3 +626,42 @@ def test_story_cards_open_the_shared_details_drawer(page):
     assert 'data-story-media-id' in page
     assert "openContentDetails('story', source)" in page
     assert "Exact Meta ID" in page
+
+
+def test_second_pass_layout_and_drilldown_navigation_are_explicit(page):
+    assert "grid-template-columns: minmax(220px, 248px) minmax(0, 1fr)" in page
+    assert "← Back to Menu" in page
+    assert "Menu Catalogue" in page
+    assert "Current Menu" in page
+    assert "menuCurrentStatus" in page
+    assert "No published menu is currently serving customers" in page
+
+
+def test_posts_reels_owns_routing_as_a_first_class_subview(page):
+    section = page[page.index('id="tab-instagram-content"'):page.index('id="tab-handoffs"')]
+    assert "data-content-subview=\"gallery\"" in section
+    assert "data-content-subview=\"routing\"" in section
+    assert "data-content-subview=\"list\"" in section
+    assert "setInstagramContentSubview('routing')" in page
+    assert "Exact Meta ID" in page
+    assert "Instagram Content Routing" not in page[page.index('<aside class="admin-sidebar"'):page.index('</aside>')]
+
+
+def test_qa_page_states_latest_accepted_lane_and_provenance_model(page):
+    for marker in (
+        "Authoritative approved QA model", "EXACT_APPROVED", "GROUNDED_APPROVED",
+        "INSUFFICIENT_KNOWLEDGE", "Intent overrides stale state", "Home Table",
+        "pre-booking", "payment", "Paraphrases/aliases", "source/provenance",
+        "active/inactive status", "LLM cannot rewrite approved answers",
+    ):
+        assert marker in page
+
+
+def test_health_page_uses_safe_current_schema_and_refresh_states(page):
+    assert "fetch('/health', { cache: 'no-store' })" in page
+    assert "settingsHealthRefresh" in page
+    assert "settingsHealthIndicators" in page
+    for marker in ("Durable storage", "Instagram delivery", "Webhook signatures", "Auth readiness", "Failure counters"):
+        assert marker in page
+    settings = page[page.index('id="tab-settings"'):page.index('<!-- Customers and Answers')]
+    assert "mfa_health" not in settings.lower()

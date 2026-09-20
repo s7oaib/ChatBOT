@@ -46,11 +46,12 @@ class TestNavigationConsolidation:
         assert "Dashboard" in nav
         assert "QA Templates" in nav
 
-    def test_legacy_panels_still_exist_in_the_dom_for_regression_comparison(self):
+    def test_legacy_panels_remain_compatible_but_are_not_promoted_in_the_ui(self):
         page = client.get("/admin").text
         assert 'id="tab-stats"' in page
         assert 'id="tab-candidates"' in page
-        assert "Advanced / Legacy Views" in page
+        assert "Advanced / Legacy Views" not in page
+        assert "/admin/legacy" in {route.path for route in app_module.app.routes}
 
 
 class TestCandidateStatusFilterIsAdditiveNotDestructive:
