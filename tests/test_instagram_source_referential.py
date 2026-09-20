@@ -105,6 +105,30 @@ def test_explicit_topic_intent_is_not_treated_as_a_source_followup(deterministic
     assert facts["source_context_used"] is False
 
 
+@pytest.mark.parametrize("text, expected_template", [
+    ("tell me more about this", "bengali_home_table_details"),
+    ("Whats the price?", "bengali_home_table_pricing"),
+])
+def test_mapped_home_table_story_uses_campaign_answers_for_ambiguous_followups(
+    deterministic_responder, text, expected_template,
+):
+    uid = "referential_home_table_story_" + expected_template
+    facts = _set_source(uid, source_type="story")
+    facts["source_route"].update({
+        "routing_topic": "Bengali Home Table",
+        "priority_products": [],
+    })
+
+    reply, matched, template_id, _images = _reply(uid, text)
+
+    assert matched is True
+    assert template_id == expected_template
+    assert facts["source_context_used"] is True
+    if expected_template == "bengali_home_table_pricing":
+        assert "₹1,500 per person" in reply
+        assert "₹2,500 per person" in reply
+
+
 @pytest.mark.parametrize("text", ["I want this", "How much is this?"])
 def test_referential_message_without_source_clarifies(deterministic_responder, text):
     uid = "referential_no_source_" + text[:4]

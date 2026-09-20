@@ -2062,6 +2062,38 @@ class DeterministicResponder:
         source_context_authoritative = bool(
             source_route and not facts.get("source_context_superseded")
         )
+
+        # A mapped Bengali Home Table Story is a canonical campaign source,
+        # not a generic topic-only route.  Its ambiguous follow-ups still
+        # have approved campaign answers: "tell me more about this" maps to
+        # the introduction and "What's the price?" maps to the Home Table
+        # pricing response.  Without this bridge, a route with no priority
+        # product falls through to the generic topic overview and never
+        # reaches the campaign's exact pricing template.
+        source_topic_name = str((source_route or {}).get("routing_topic") or "")
+        if (
+            channel == "instagram"
+            and source_context_available
+            and source_route
+            and source_intent in {"details", "price"}
+            and not explicit_product
+            and HOME_TABLE_RE.search(source_topic_name)
+        ):
+            home_table_template_id = (
+                "bengali_home_table_pricing"
+                if source_intent == "price"
+                else "bengali_home_table_details"
+            )
+            home_table_template = self._template_by_id(home_table_template_id)
+            home_table_response = home_table_template.get("response") or self._generic_fallback()
+            facts["home_table_context"] = True
+            facts["source_context_used"] = True
+            facts["last_route_source"] = "source_home_table"
+            facts["last_topic"] = "bengali_home_table"
+            facts["active_product_context"] = None
+            session_memory.add_turn(user_id, channel, user_message, home_table_response)
+            return home_table_response, True, home_table_template_id, None
+
         can_use_source = not active_flow and (
             not facts.get("last_topic")
             or what_else
