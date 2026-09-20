@@ -688,11 +688,28 @@ class Database:
                 unresolved_topic TEXT,
                 status TEXT NOT NULL DEFAULT 'CREATED',
                 escalation_id INTEGER,
+                instagram_username TEXT,
+                query_summary TEXT,
+                contact_mode TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 expires_at TIMESTAMP
             );
             """)
+            # Additive, idempotent fields for owner-facing CAM context. The
+            # durable database may predate these columns; never rebuild or
+            # rewrite existing handoffs during a deploy.
+            cursor.execute("PRAGMA table_info(cross_channel_handoffs)")
+            handoff_columns = {row[1] for row in cursor.fetchall()}
+            for column, definition in (
+                ("instagram_username", "TEXT"),
+                ("query_summary", "TEXT"),
+                ("contact_mode", "TEXT"),
+            ):
+                if column not in handoff_columns:
+                    cursor.execute(
+                        f"ALTER TABLE cross_channel_handoffs ADD COLUMN {column} {definition}"
+                    )
 
             # Canonical missing-information queue. Unlike candidate_templates,
             # this records what fact/action is absent rather than teaching one
@@ -2949,7 +2966,8 @@ class Database:
             ).fetchone()["count"]
             rows = conn.execute(
                 """SELECT h.handoff_ref, h.reason, h.source_channel, h.status,
-                    h.created_at, s.seen_at
+                    h.created_at, h.instagram_username, h.query_summary,
+                    h.contact_mode, s.seen_at
                     FROM admin_notification_states s
                     JOIN cross_channel_handoffs h ON h.handoff_ref = s.handoff_ref
                     ORDER BY h.id DESC LIMIT ?""",
@@ -3104,6 +3122,9 @@ class Database:
         unresolved_topic: Optional[str],
         escalation_id: Optional[int],
         expires_at: Optional[str],
+        instagram_username: Optional[str] = None,
+        query_summary: Optional[str] = None,
+        contact_mode: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Records a new opaque handoff reference. Never overwrites one."""
         with self.get_connection() as conn:
@@ -3111,13 +3132,14 @@ class Database:
                 """
                 INSERT INTO cross_channel_handoffs (
                     handoff_ref, source_channel, source_user_id, reason, summary,
-                    known_entities, unresolved_topic, status, escalation_id, expires_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'CREATED', ?, ?)
+                    known_entities, unresolved_topic, status, escalation_id,
+                    instagram_username, query_summary, contact_mode, expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'CREATED', ?, ?, ?, ?, ?)
                 """,
                 (
                     handoff_ref, source_channel, source_user_id, reason, summary,
                     json.dumps(known_entities or {}, ensure_ascii=False), unresolved_topic,
-                    escalation_id, expires_at,
+                    escalation_id, instagram_username, query_summary, contact_mode, expires_at,
                 ),
             )
             conn.commit()
@@ -3135,6 +3157,9 @@ class Database:
         unresolved_topic: Optional[str],
         escalation_id: Optional[int],
         expires_at: Optional[str],
+        instagram_username: Optional[str] = None,
+        query_summary: Optional[str] = None,
+        contact_mode: Optional[str] = None,
     ) -> tuple[Dict[str, Any], bool]:
         """Atomically reuse or create one active handoff for a customer.
 
@@ -3163,13 +3188,14 @@ class Database:
                 """
                 INSERT INTO cross_channel_handoffs (
                     handoff_ref, source_channel, source_user_id, reason, summary,
-                    known_entities, unresolved_topic, status, escalation_id, expires_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'CREATED', ?, ?)
+                    known_entities, unresolved_topic, status, escalation_id,
+                    instagram_username, query_summary, contact_mode, expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'CREATED', ?, ?, ?, ?, ?)
                 """,
                 (
                     handoff_ref, source_channel, source_user_id, reason, summary,
                     json.dumps(known_entities or {}, ensure_ascii=False), unresolved_topic,
-                    escalation_id, expires_at,
+                    escalation_id, instagram_username, query_summary, contact_mode, expires_at,
                 ),
             )
             created = conn.execute(

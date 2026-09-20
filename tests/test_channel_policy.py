@@ -21,7 +21,7 @@ INSTAGRAM_HUMAN_INTENT_PROBE_MESSAGES = [
 
 
 @pytest.mark.parametrize("message", INSTAGRAM_HUMAN_INTENT_PROBE_MESSAGES)
-def test_instagram_direct_human_request_triggers_whatsapp_handoff(message):
+def test_instagram_direct_human_request_triggers_support_handoff_without_whatsapp(message):
     """These exact bare/short human-intent phrases must all reach the
     Instagram -> WhatsApp handoff, not an unrelated FAQ template — the direct
     human-intent recognition fix (camellia/semantic_fallback.py's
@@ -32,7 +32,8 @@ def test_instagram_direct_human_request_triggers_whatsapp_handoff(message):
     )
     reply_text = send_reply.call_args.args[1]
     assert escalate.called
-    assert "wa.me" in reply_text
+    assert "wa.me" not in reply_text
+    assert "someone will get back to you shortly" in reply_text
 # ---------------------------------------------------------------------------
 # Instagram: the full architecture is unchanged
 # ---------------------------------------------------------------------------
@@ -80,7 +81,7 @@ def test_instagram_delivery_request_still_works():
     assert "wa.me" not in send_reply.call_args.args[1]
 
 
-def test_instagram_unsupported_topic_escalates_to_whatsapp_with_no_invented_fact():
+def test_instagram_unsupported_topic_escalates_to_team_with_no_invented_fact():
     """"Do you offer wedding gift wrapping?" — no approved fact exists, so
     knowledge is insufficient and the customer is offered a WhatsApp
     continuation instead of an invented answer."""
@@ -89,7 +90,8 @@ def test_instagram_unsupported_topic_escalates_to_whatsapp_with_no_invented_fact
     )
     reply_text = send_reply.call_args.args[1]
     assert escalate.called
-    assert "wa.me" in reply_text
+    assert "wa.me" not in reply_text
+    assert "someone will get back to you shortly" in reply_text
     assert "gift wrap" not in reply_text.lower()
     assert "cornstarch" not in reply_text.lower()
 
@@ -98,11 +100,11 @@ def test_instagram_human_request_escalates_directly_without_an_unnecessary_faq()
     send_reply, escalate = _ask_instagram("policy_ig_human", "I want to speak to someone")
     reply_text = send_reply.call_args.args[1]
     assert escalate.called
-    assert "wa.me" in reply_text
+    assert "wa.me" not in reply_text
+    assert "someone will get back to you shortly" in reply_text
 
 
-def test_exact_production_human_request_uses_cam_whatsapp_continuation():
-    """The production wording must never leak the legacy callback promise."""
+def test_exact_production_human_request_uses_team_callback_without_whatsapp():
     user_id = "policy_ig_exact_agent_" + uuid.uuid4().hex[:8]
     session_memory.clear_session(user_id, "instagram")
     with patch.object(app, "send_instagram_reply") as send_reply, patch.object(
@@ -111,13 +113,12 @@ def test_exact_production_human_request_uses_cam_whatsapp_continuation():
         app._process_instagram_event(user_id, "I need an agent", "ad-1")
 
     reply_text = send_reply.call_args.args[1]
-    assert re.search(r"https://wa\.me/919800000000\?text=", reply_text)
-    assert re.search(r"CAM-\d{5,6}", urllib.parse.unquote(reply_text))
+    assert "https://wa.me/" not in reply_text
+    assert "Of course." in reply_text
     assert escalate.call_count == 1
-    assert "continue" in reply_text.lower()
-    assert "we'll contact you" not in reply_text.lower()
-    assert "they'll connect with you" not in reply_text.lower()
-    assert "whatsapp/call shortly" not in reply_text.lower()
+    handoff = db.get_active_handoff("instagram", user_id)
+    assert handoff["contact_mode"] == "support_callback"
+    assert handoff["query_summary"] == "A team member to respond."
 
 
 def test_repeated_explicit_human_requests_reuse_cam_and_alert_once():
@@ -130,10 +131,12 @@ def test_repeated_explicit_human_requests_reuse_cam_and_alert_once():
         app._process_instagram_event(user_id, "I want to speak to someone", "ad-1")
 
     replies = [urllib.parse.unquote(call.args[1]) for call in send_reply.call_args_list]
-    refs = {match.group(0) for reply in replies if (match := re.search(r"CAM-\d{5,6}", reply))}
-    assert len(refs) == 1
+    assert replies
+    assert all("wa.me" not in reply for reply in replies)
+    rows = [h for h in db.get_handoffs(limit=200) if h["source_user_id"] == user_id]
+    assert len(rows) == 1
     assert escalate.call_count == 1
-    assert all("whatsapp/call shortly" not in reply.lower() for reply in replies)
+    assert all("someone will get back to you shortly" in reply for reply in replies[:1])
 
 
 def test_verified_order_receipt_adds_concise_order_handoff_and_reuses_cam():
@@ -201,16 +204,12 @@ def test_instagram_order_example_offers_handoff_not_a_whatsapp_order_bot():
 # Handoff link shape
 # ---------------------------------------------------------------------------
 
-def test_handoff_link_contains_an_opaque_reference():
-    """The reference lives inside the wa.me link's URL-encoded prefill text
-    (visible in WhatsApp once the customer taps through), not as separate
-    plain text in the Instagram message — matching the approved copy, which
-    shows only the CTA link, not a bare reference. Decode before matching."""
+def test_generic_handoff_does_not_expose_whatsapp_or_raw_customer_context():
     send_reply, _escalate = _ask_instagram("policy_ig_opaque", "Do you have valet parking?")
     reply_text = urllib.parse.unquote(send_reply.call_args.args[1])
-    assert re.search(r"\bCAM-\d{5,6}\b", reply_text)
-    # Opaque means no raw database id leaks either.
-    assert not re.search(r"\bid=\d+\b", reply_text)
+    assert "wa.me" not in reply_text
+    assert "valet parking" not in reply_text.lower()
+    assert "CAM-" not in reply_text
 
 
 def test_handoff_link_does_not_expose_the_instagram_transcript():
@@ -219,10 +218,7 @@ def test_handoff_link_does_not_expose_the_instagram_transcript():
     )
     reply_text = send_reply.call_args.args[1]
     link = re.search(r"https://wa\.me/\S+", reply_text)
-    if link:
-        decoded = urllib.parse.unquote(link.group(0))
-        assert "gift wrapping" not in decoded.lower()
-        assert "policy_ig_no_transcript" not in decoded
+    assert link is None
 
 
 def test_duplicate_instagram_escalation_does_not_create_duplicate_handoffs():
@@ -234,14 +230,20 @@ def test_duplicate_instagram_escalation_does_not_create_duplicate_handoffs():
         app._process_instagram_event(user_id, "I want to talk to a human agent", "ad-1")
         app._process_instagram_event(user_id, "can I please speak to a human", "ad-1")
 
-    refs = {
-        match.group(0)
-        for call in send_reply.call_args_list
-        if (match := re.search(r"CAM-\d{5,6}", urllib.parse.unquote(call.args[1])))
-    }
-    assert len(refs) == 1
+    assert all("wa.me" not in urllib.parse.unquote(call.args[1]) for call in send_reply.call_args_list)
     rows = [h for h in db.get_handoffs(limit=200) if h["source_user_id"] == user_id]
     assert len(rows) == 1
+
+
+def test_booking_human_request_keeps_approved_whatsapp_handoff():
+    send_reply, escalate = _ask_instagram(
+        "policy_ig_booking_human", "I want to book this, can I talk to someone?",
+    )
+    reply_text = send_reply.call_args.args[1]
+    assert escalate.called
+    assert "wa.me" in reply_text
+    handoff_ref = re.search(r"CAM-\d{5,6}", urllib.parse.unquote(reply_text)).group(0)
+    assert db.get_handoff_by_ref(handoff_ref)["contact_mode"] == "whatsapp_order"
 
 
 def test_instagram_chatbot_enabled_default_is_true():

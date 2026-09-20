@@ -42,8 +42,12 @@ from camellia.escalator import escalator
 from camellia.handoff import (
     customer_facing_link_message,
     customer_facing_notice,
+    customer_query_summary,
+    handoff_contact_mode,
     get_or_create_handoff,
+    is_human_help_request,
     mark_referred,
+    normalize_instagram_username,
     retire_order_state,
     staff_summary,
 )
@@ -555,6 +559,7 @@ def _process_instagram_event(
     shared_reel: Optional[Dict[str, str]] = None,
     shared_post_id: Optional[str] = None,
     shared_source_type: Optional[str] = None,
+    instagram_username: Optional[str] = None,
 ) -> None:
     """
     Matches, logs, escalates and replies for one Instagram DM.
@@ -745,6 +750,7 @@ def _process_instagram_event(
             "GUARD_staff_names_manager_contact",
         }
         informational_answer = template_id in informational_templates
+        explicit_human_help = is_human_help_request(customer_message)
         needs_escalation = (
             (not was_matched and not informational_answer)
             or (
@@ -756,6 +762,7 @@ def _process_instagram_event(
                 "order_draft_receipt",
                 "order_next_steps",
             )
+            or explicit_human_help
         )
         log.info(
             "INSTAGRAM_OUTPUT_POLICY template=%s matched=%s informational=%s "
@@ -767,8 +774,14 @@ def _process_instagram_event(
             bool(needs_escalation),
         )
         if needs_escalation:
+            contact_mode = handoff_contact_mode(
+                customer_message, template_id=template_id,
+            )
             reason = (
-                "Order Confirmation & Intake Request" if was_matched
+                "Order Confirmation & Intake Request"
+                if contact_mode == "whatsapp_order"
+                else "Generic Human Support"
+                if explicit_human_help
                 else "Unmatched Instagram Query / Sensitive Request"
             )
             # Created before the staff alert (not after) so the alert can name
@@ -783,6 +796,11 @@ def _process_instagram_event(
                 user_id=sender_id, channel="instagram", reason=reason,
                 user_message=customer_message, facts=facts,
                 include_order=is_order_handoff,
+                instagram_username=instagram_username,
+                query_summary=customer_query_summary(
+                    customer_message, contact_mode=contact_mode, reason=reason,
+                ),
+                contact_mode=contact_mode,
             )
             # A repeated "human"/"can someone help" against an already-active
             # handoff reuses the reference (above) and must not re-alert
@@ -794,26 +812,35 @@ def _process_instagram_event(
                     user_message=customer_message,
                     reason=reason,
                     context_data={
-                        "ad_id": ad_id, "sender_id": sender_id, "template_id": template_id,
+                        "ad_id": ad_id, "sender_hash": _safe_identifier_hash(sender_id), "template_id": template_id,
                         "handoff_ref": handoff["handoff_ref"],
                         "handoff_summary": staff_summary(handoff),
                     },
                 )
             order_summary = handoff.get("verified_order")
-            if template_id == "order_draft_receipt":
+            if contact_mode == "support_callback":
+                response_text = customer_facing_notice()
+            elif template_id == "order_draft_receipt":
                 response_text = response_text.rstrip()
             else:
                 response_text = customer_facing_notice(
                     finalized_order=template_id == "order_next_steps"
                 )
-            link_message = customer_facing_link_message(handoff["handoff_ref"], order_summary)
+            link_message = (
+                customer_facing_link_message(handoff["handoff_ref"], order_summary)
+                if contact_mode == "whatsapp_order" else None
+            )
             mark_referred(handoff["handoff_ref"])
             if is_order_handoff and order_summary:
                 # The order is now on its way to a human, prefilled in the
                 # link above. Instagram's copy has done its job; keeping it
                 # would make it luggage for every later enquiry.
                 retire_order_state(sender_id, "instagram")
-            template_id = "instagram_whatsapp_handoff"
+            template_id = (
+                "instagram_whatsapp_handoff"
+                if contact_mode == "whatsapp_order"
+                else "instagram_support_handoff"
+            )
             image_url = None
 
         trace["source_context_used"] = bool(facts.get("source_context_used"))
@@ -822,7 +849,7 @@ def _process_instagram_event(
         )
         trace["source_referential_intent"] = facts.get("source_referential_intent")
         logged_response = response_text
-        if needs_escalation:
+        if needs_escalation and link_message:
             logged_response = f"{response_text}\n\n{link_message}"
         conversation_id = db.log_conversation(
             sender_id, "instagram", customer_message, logged_response, was_matched,
@@ -833,7 +860,7 @@ def _process_instagram_event(
             sender_id, response_text, image_url=image_url,
             inbound_message_id=conversation_id, response_type="reply",
         )
-        if needs_escalation:
+        if needs_escalation and link_message:
             send_instagram_reply(
                 sender_id, link_message,
                 inbound_message_id=conversation_id, response_type="handoff",
@@ -1349,6 +1376,25 @@ def _record_attachment_debug_event(messaging_event: dict, sender_id: Optional[st
         log.exception("Attachment diagnostic capture failed; the message itself is unaffected.")
 
 
+def _extract_instagram_username(messaging_event: Dict[str, Any]) -> Optional[str]:
+    """Use only a supplied profile handle; never fall back to Meta's numeric ID."""
+    candidates = []
+    for container in (
+        messaging_event.get("sender"),
+        messaging_event.get("from"),
+        (messaging_event.get("message") or {}).get("sender"),
+        (messaging_event.get("message") or {}).get("from"),
+        messaging_event.get("profile"),
+    ):
+        if isinstance(container, dict):
+            candidates.extend(container.get(key) for key in ("username", "handle", "instagram_username"))
+    for candidate in candidates:
+        normalized = normalize_instagram_username(candidate)
+        if normalized:
+            return normalized
+    return None
+
+
 @app.get("/admin/debug/instagram-attachments")
 def get_instagram_attachment_debug(
     x_admin_key: Optional[str] = Header(None),
@@ -1428,6 +1474,7 @@ def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks
 
         for messaging_event in events:
             is_ad_qualified, sender_id, message_text, ad_id = ad_gate.inspect_and_gate_message(messaging_event)
+            instagram_username = _extract_instagram_username(messaging_event)
             entry_point = describe_entry_point(messaging_event)
             message = messaging_event.get("message") or {}
             log.info(
@@ -1550,10 +1597,13 @@ def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks
             # Accepted. The reply itself is built and sent off the request path
             # so Meta gets its 200 immediately and does not retry this delivery.
             if shared_source_type:
-                background_tasks.add_task(
-                    _process_instagram_event, sender_id, message_text, ad_id, entry_point,
+                shared_args = (
+                    sender_id, message_text, ad_id, entry_point,
                     shared_reel, shared_post_id, shared_source_type,
                 )
+                if instagram_username is not None:
+                    shared_args = shared_args + (instagram_username,)
+                background_tasks.add_task(_process_instagram_event, *shared_args)
                 results.append({
                     "sender_id": sender_id,
                     "action": "queued_shared_media",
@@ -1562,9 +1612,10 @@ def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks
                     "ad_title": entry_point.ad_title,
                 })
                 continue
-            background_tasks.add_task(
-                _process_instagram_event, sender_id, message_text, ad_id, entry_point
-            )
+            process_args = (sender_id, message_text, ad_id, entry_point)
+            if instagram_username is not None:
+                process_args = process_args + (instagram_username,)
+            background_tasks.add_task(_process_instagram_event, *process_args)
             results.append({
                 "sender_id": sender_id,
                 "action": "queued",
@@ -7296,7 +7347,7 @@ THIS WEEK'S BENGAL SPECIALS
             const toast = document.getElementById('handoffToast');
             if (!toast) return;
             document.getElementById('handoffToastTitle').textContent = 'New handoff ' + (item.handoff_ref || '');
-            document.getElementById('handoffToastBody').textContent = (item.reason || 'Human assistance requested') + ' · WAITING_FOR_HUMAN';
+            document.getElementById('handoffToastBody').textContent = (item.instagram_username ? '@' + item.instagram_username + ' · ' : '') + (item.query_summary || item.reason || 'Human assistance requested') + ' · WAITING_FOR_HUMAN';
             toast.style.display = 'block';
             if (ownerNotificationToastTimer) clearTimeout(ownerNotificationToastTimer);
             ownerNotificationToastTimer = setTimeout(hideHandoffToast, 12000);
@@ -7313,7 +7364,7 @@ THIS WEEK'S BENGAL SPECIALS
                 if (badge) badge.textContent = data.unread_count || 0;
                 const list = document.getElementById('newHandoffsList');
                 if (list) {
-                    list.innerHTML = items.slice(0, 8).map(item => `<button type="button" onclick="markHandoffSeen('${escapeHtml(item.handoff_ref)}')" style="display:block;width:100%;text-align:left;border:1px solid var(--border);background:${item.seen_at ? '#fff' : '#FFFBEB'};border-radius:9px;padding:9px 11px;margin-top:7px;cursor:pointer;"><b>${escapeHtml(item.handoff_ref)}</b> · ${escapeHtml(item.reason || 'Human assistance requested')}<small style="display:block;color:var(--text-muted);margin-top:3px;">${escapeHtml(item.created_at || '')} · ${escapeHtml(item.status || 'WAITING_FOR_HUMAN')}</small></button>`).join('') || '<span style="color:var(--text-muted);font-size:.82rem;">No handoffs recorded yet.</span>';
+                    list.innerHTML = items.slice(0, 8).map(item => `<button type="button" onclick="markHandoffSeen('${escapeHtml(item.handoff_ref)}')" style="display:block;width:100%;text-align:left;border:1px solid var(--border);background:${item.seen_at ? '#fff' : '#FFFBEB'};border-radius:9px;padding:9px 11px;margin-top:7px;cursor:pointer;"><b>${escapeHtml(item.handoff_ref)}</b> · ${escapeHtml(item.instagram_username ? '@' + item.instagram_username : 'Instagram customer')}<small style="display:block;color:var(--text-muted);margin-top:3px;">Customer wants: ${escapeHtml(item.query_summary || 'Human assistance')}<br>${escapeHtml(item.reason || 'Human assistance requested')} · ${escapeHtml(item.created_at || '')} · ${escapeHtml(item.status || 'WAITING_FOR_HUMAN')} · ${item.seen_at ? 'seen' : 'unseen'}</small></button>`).join('') || '<span style="color:var(--text-muted);font-size:.82rem;">No handoffs recorded yet.</span>';
                 }
                 if (initial || !ownerNotificationInitialized) {
                     items.forEach(item => ownerNotificationRefs.add(item.handoff_ref));

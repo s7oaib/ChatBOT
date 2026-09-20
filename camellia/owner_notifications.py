@@ -16,6 +16,7 @@ from urllib.parse import quote
 import httpx
 
 from camellia.config import config
+from camellia.handoff import normalize_instagram_username
 from camellia.monitoring import get_logger
 
 log = get_logger("camellia.owner_notifications")
@@ -144,12 +145,18 @@ def safe_handoff_payload(handoff: Dict[str, Any], *, public_base_url: str = "") 
     ref = str(handoff.get("handoff_ref") or "")
     reason = str(handoff.get("reason") or "Human handoff")[:160]
     created_at = str(handoff.get("created_at") or "")[:40]
+    username = normalize_instagram_username(handoff.get("instagram_username")) or "Instagram customer"
+    query_summary = str(handoff.get("query_summary") or "Customer needs human assistance.")[:220]
+    contact_mode = str(handoff.get("contact_mode") or "support_callback")[:40]
     base = str(public_base_url or "").rstrip("/")
     admin_url = f"{base}/admin?handoff={ref}" if base and ref else "/admin"
     return {
         "title": "New Camellia handoff",
         "handoff_ref": ref,
         "reason": reason,
+        "instagram_username": username,
+        "query_summary": query_summary,
+        "contact_mode": contact_mode,
         "source": "Instagram",
         "timestamp": created_at,
         "status": "WAITING_FOR_HUMAN",
@@ -160,13 +167,18 @@ def safe_handoff_payload(handoff: Dict[str, Any], *, public_base_url: str = "") 
 def _email_message(payload: Dict[str, Any]) -> EmailMessage:
     message = EmailMessage()
     title = str(payload.get("title") or f"New Camellia handoff {payload['handoff_ref']}")
+    username = str(payload.get("instagram_username") or "").strip()
+    username_label = f"@{username}" if username and username != "Instagram customer" else "Instagram customer"
     message["Subject"] = title
     message["From"] = config.ADMIN_EMAIL_FROM
     message["To"] = _recipient()
     message.set_content(
         f"{title}\n\n"
         f"CAM reference: {payload['handoff_ref']}\n"
+        f"Instagram username: {username_label}\n"
+        f"Customer wants: {payload.get('query_summary') or 'Customer needs human assistance.'}\n"
         f"Reason: {payload['reason']}\n"
+        f"Contact path: {payload.get('contact_mode') or 'support_callback'}\n"
         f"Source: {payload['source']}\n"
         f"Time: {payload['timestamp']}\n"
         f"Status: {payload['status']}\n\n"
@@ -256,6 +268,8 @@ def send_email(payload: Dict[str, Any]) -> Dict[str, Any]:
         if readiness["provider"] == "gmail_api":
             return _send_via_gmail_api(payload)
         if readiness["provider"] == "resend":
+            username = str(payload.get("instagram_username") or "").strip()
+            username_label = f"@{username}" if username and username != "Instagram customer" else "Instagram customer"
             response = httpx.post(
                 "https://api.resend.com/emails",
                 headers={"Authorization": f"Bearer {config.ADMIN_EMAIL_API_KEY}"},
@@ -266,7 +280,10 @@ def send_email(payload: Dict[str, Any]) -> Dict[str, Any]:
                     "text": (
                         f"{str(payload.get('title') or 'A new Camellia human handoff is waiting.')}\n\n"
                         f"CAM reference: {payload['handoff_ref']}\n"
+                        f"Instagram username: {username_label}\n"
+                        f"Customer wants: {payload.get('query_summary') or 'Customer needs human assistance.'}\n"
                         f"Reason: {payload['reason']}\n"
+                        f"Contact path: {payload.get('contact_mode') or 'support_callback'}\n"
                         f"Source: {payload['source']}\n"
                         f"Time: {payload['timestamp']}\n"
                         f"Status: {payload['status']}\n\n"

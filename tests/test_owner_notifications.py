@@ -70,6 +70,57 @@ def test_safe_payload_excludes_meta_ids_and_raw_message(owner_db):
     assert payload["admin_url"].endswith("/admin?handoff=" + handoff["handoff_ref"])
 
 
+def test_owner_payload_and_email_include_username_and_customer_need(owner_db, monkeypatch):
+    handoff = handoff_module.get_or_create_handoff(
+        user_id="meta-numeric-id-should-not-leak",
+        channel="instagram",
+        reason="Generic Human Support",
+        user_message="I want to talk to a person",
+        facts={"last_entities": {}},
+        instagram_username="chatbot_testing.168",
+        query_summary="A team member to respond.",
+        contact_mode="support_callback",
+    )
+    payload = owner_notifications.safe_handoff_payload(
+        handoff, public_base_url="https://camellia.example",
+    )
+    assert payload["instagram_username"] == "chatbot_testing.168"
+    assert payload["query_summary"] == "A team member to respond."
+    assert payload["contact_mode"] == "support_callback"
+    assert "meta-numeric-id-should-not-leak" not in repr(payload)
+
+    monkeypatch.setattr(config, "ADMIN_EMAIL_FROM", "owner@example")
+    monkeypatch.setattr(config, "ADMIN_RECOVERY_EMAIL", "owner@example")
+    content = owner_notifications._email_message(payload).get_content()
+    assert "Instagram username: @chatbot_testing.168" in content
+    assert "Customer wants: A team member to respond." in content
+    assert "Generic Human Support" in content
+    assert "meta-numeric-id-should-not-leak" not in content
+
+
+def test_recent_cam_admin_state_includes_username_and_customer_need(owner_db):
+    handoff = handoff_module.get_or_create_handoff(
+        user_id="numeric-meta-id",
+        channel="instagram",
+        reason="Generic Human Support",
+        user_message="Can someone get back to me?",
+        facts={"last_entities": {}},
+        instagram_username="customer.handle",
+        query_summary="A team member to respond.",
+        contact_mode="support_callback",
+    )
+    with owner_db.get_connection() as conn:
+        conn.execute(
+            "INSERT INTO admin_notification_states (handoff_ref) VALUES (?)",
+            (handoff["handoff_ref"],),
+        )
+        conn.commit()
+    row = owner_db.get_admin_notification_state()["handoffs"][0]
+    assert row["instagram_username"] == "customer.handle"
+    assert row["query_summary"] == "A team member to respond."
+    assert "numeric-meta-id" not in repr(row)
+
+
 def test_email_retry_is_persisted_without_breaking_handoff(owner_db, monkeypatch):
     handoff = _new_handoff(owner_db, "retry-user")
     monkeypatch.setattr(config, "ADMIN_EMAIL_PROVIDER", "smtp")
