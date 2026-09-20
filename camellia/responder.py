@@ -2105,6 +2105,22 @@ class DeterministicResponder:
             facts["last_topic"] = "savoury"
             session_memory.add_turn(user_id, channel, user_message, response_text)
             return response_text, True, template_id, images
+        if (
+            channel == "instagram"
+            and re.search(r"\b(?:tell|talk)\s+me\s+about\s+(?:the\s+)?bengali\s+bento\b", lowered_text)
+        ):
+            template_id = "bento_details"
+            template = self._template_by_id(template_id) or {}
+            response_text, images = self._format_dynamic_response(
+                template_id,
+                template.get("response") or self._generic_fallback(),
+                user_id=user_id,
+                channel=channel,
+                user_message=user_message,
+            )
+            facts["last_topic"] = "bento"
+            session_memory.add_turn(user_id, channel, user_message, response_text)
+            return response_text, True, template_id, images
         has_explicit_source_reference = bool(re.search(
             r"\b(this|that|it|above|reel|post|video|item|one)\b", lowered_text,
         ))

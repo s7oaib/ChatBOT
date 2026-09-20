@@ -81,3 +81,21 @@ def test_instagram_prebook_question_beats_stale_subscription_context(monkeypatch
     assert matched is True
     assert template_id == "alacarte_prebooking_steps"
     assert "preferred day or meal slot" in response
+
+
+def test_instagram_bengali_bento_details_beats_stale_story_context(monkeypatch):
+    monkeypatch.setattr("camellia.config.config.BYPASS_AD_GATE", True)
+    user_id = "client-qa-bento-stale-story"
+    session_memory.clear_session(user_id, "instagram")
+    facts = session_memory.get_facts(user_id, "instagram")
+    facts["source_route"] = {"routing_id": 1, "source_type": "story", "active": True}
+    facts["source_context_superseded"] = True
+
+    response, matched, template_id, _images = responder.match_and_respond(
+        "tell me about BENGALI BENTO", user_id=user_id, channel="instagram",
+    )
+
+    assert matched is True
+    assert template_id == "bento_details"
+    assert "Vegetarian Bento" in response
+    assert "₹350" in response
