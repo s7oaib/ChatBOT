@@ -128,6 +128,21 @@ def test_mapped_home_table_story_uses_campaign_answers_for_ambiguous_followups(
         assert "₹1,500 per person" in reply
         assert "₹2,500 per person" in reply
 
+def test_purchase_help_overrides_source_only_route(deterministic_responder):
+    """An explicit purchase-help request must not be answered by Story copy."""
+    uid = "referential_purchase_help"
+    facts = _set_source(uid)
+    facts["source_route"]["menu_mode"] = "NONE"
+
+    reply, matched, template_id, _images = _reply(
+        uid, "I am ready to place my order and need help booking.",
+    )
+
+    assert matched is False
+    assert template_id == "order_next_steps"
+    assert reply
+    assert facts["source_context_used"] is False
+
 
 @pytest.mark.parametrize("text", ["I want this", "How much is this?"])
 def test_referential_message_without_source_clarifies(deterministic_responder, text):

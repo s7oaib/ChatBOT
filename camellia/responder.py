@@ -343,6 +343,19 @@ ORDER_READY_RE = re.compile(
     re.IGNORECASE,
 )
 
+# A longer purchase request can contain an active Story/Post route and still
+# be unambiguous.  Keep this narrower than ``ORDER_INTENT_RE`` so informational
+# questions such as "what's the best time to book?" remain normal Q&A, while a
+# request for help booking/ordering reaches the manual purchase handoff first.
+PURCHASE_ASSISTANCE_RE = re.compile(
+    r"(?:\b(?:need|want|looking\s+for)\s+(?:some\s+)?(?:help|assistance)\b.*"
+    r"\b(?:book|booking|order|ordering|purchase|buy)\b|"
+    r"\bhelp(?:\s+me)?\s+(?:to\s+)?(?:book|booking|order|ordering|purchase|buy)\b|"
+    r"\b(?:book|booking|order|ordering|purchase|buy)\b.*"
+    r"\b(?:need|want)\s+(?:some\s+)?(?:help|assistance)\b)",
+    re.IGNORECASE,
+)
+
 # Words that carry no information about what the customer wants. Used to tell a
 # genuinely vague message ("ok tell me") from a short but specific one
 # ("do you serve bhapa pitha") — the first is worth a clarifying question, the
@@ -2022,6 +2035,19 @@ class DeterministicResponder:
             order_response = order_template.get("response") or self._generic_fallback()
             facts["last_route_source"] = "canonical_order_handoff"
             facts["last_topic"] = "order"
+            session_memory.add_turn(user_id, channel, user_message, order_response)
+            return order_response, False, "order_next_steps", None
+
+        # A purchase request with an explicit need for help is also a complete
+        # handoff intent, even when a Story/Post route is active.  Source-only
+        # routes must not turn "I am ready to place my order and need help
+        # booking" into an unrelated topic description.
+        if channel == "instagram" and PURCHASE_ASSISTANCE_RE.search(lowered_text):
+            order_template = self._template_by_id("order_next_steps") or {}
+            order_response = order_template.get("response") or self._generic_fallback()
+            facts["last_route_source"] = "canonical_order_handoff"
+            facts["last_topic"] = "order"
+            facts["source_context_used"] = False
             session_memory.add_turn(user_id, channel, user_message, order_response)
             return order_response, False, "order_next_steps", None
 
