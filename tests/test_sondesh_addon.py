@@ -52,6 +52,20 @@ def test_alacarte_primary_answer_then_exact_addon_bundle_once():
     assert session_memory.get_facts(user_id, "instagram")["alacarte_sondesh_addon_sent"]
 
 
+def test_client_approved_alacarte_paraphrase_gets_addon_bundle_once():
+    user_id = f"addon-client-qa-{uuid.uuid4().hex}"
+    session_memory.clear_session(user_id, "instagram")
+
+    text, matched, template_id, images = _ask(
+        "What meals do you offer à la carte?", user_id
+    )
+
+    assert matched is True
+    assert template_id == "know_more"
+    assert ADDON_COPY in text
+    assert _urls(images)[-3:] == ADDON_ASSETS
+
+
 def test_alacarte_interrupts_stale_home_table_story_context():
     user_id = f"addon-stale-story-{uuid.uuid4().hex}"
     session_memory.clear_session(user_id, "instagram")

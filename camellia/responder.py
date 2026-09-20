@@ -2166,6 +2166,14 @@ class DeterministicResponder:
                 return handoff, False, "client_approved_asset_missing", None
             template_id = _CLIENT_QA_TEMPLATE_IDS.get(entry.qa_id)
             response_text = entry.answer
+            if template_id in ALACARTE_SONDESH_ADDON_TEMPLATES:
+                response_text, asset_urls = self._apply_crosssell_nudges(
+                    template_id,
+                    response_text,
+                    asset_urls or None,
+                    facts,
+                    user_message,
+                )
             session_memory.add_turn(user_id, channel, user_message, response_text)
             return (
                 response_text,
