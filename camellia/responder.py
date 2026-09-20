@@ -1075,6 +1075,23 @@ class DeterministicResponder:
 
         price_question = BARE_PRICE_QUESTION_RE.fullmatch(text)
         if price_question and not facts.get("last_topic") and not structured_owns_price:
+            # The client Q&A flow uses a bare Instagram "what's the price?"
+            # after the conversation has already entered through a Story/Post
+            # route as a request for the approved food overview and current
+            # menu.  Keep the no-context path cautious, but do not force a
+            # customer who arrived through an established route into a
+            # product-choice clarification after that route has been
+            # superseded by an explicit subject.
+            if channel == "instagram" and isinstance(facts.get("source_route"), dict):
+                template_id = "savoury_food_intro"
+                template = self._template_by_id(template_id) or {}
+                response, images = self._format_dynamic_response(
+                    template_id, template.get("response") or self._generic_fallback(),
+                    user_id=user_id, channel=channel, user_message=message,
+                )
+                facts["last_topic"] = "savoury"
+                facts["source_context_used"] = False
+                return finish(response, template_id, images)
             facts["awaiting_area_confirmation"] = False
             facts["awaiting_product_price"] = True
             return finish("Would you like prices for Sondesh or Bengali Meals?", "price_clarify_product")
@@ -2316,6 +2333,11 @@ class DeterministicResponder:
             _structured_nlu_enabled_for(user_id, channel)
             and understanding_engine.should_analyze(user_message)
             and not active_conversation_flow
+            and not (
+                channel == "instagram"
+                and isinstance(facts.get("source_route"), dict)
+                and BARE_PRICE_QUESTION_RE.fullmatch(" ".join(user_message.lower().split()).strip(" .?!"))
+            )
         )
         if config.CONVERSATION_IMPROVEMENTS_ENABLED:
             conversational = self._conversation_request(
