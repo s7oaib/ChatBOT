@@ -2434,15 +2434,11 @@ def health_check():
         notification_email = owner_notifications.email_readiness()
         notification_push = owner_notifications.web_push_readiness(db.web_push_subscription_count())
         notification_pulse = db.notification_channel_pulse()
-        notification_email.update(notification_pulse.get("EMAIL") or {})
-        notification_push.update(notification_pulse.get("WEB_PUSH") or {})
-        notification_email["healthy"] = bool(
-            notification_email["ready"]
-            and notification_email.get("last_status") not in {"FAILED", "RETRYING"}
+        notification_email = owner_notifications.channel_health(
+            notification_email, notification_pulse.get("EMAIL"), require_ready=True,
         )
-        notification_push["healthy"] = bool(
-            notification_push["configured"]
-            and notification_push.get("last_status") not in {"FAILED", "RETRYING"}
+        notification_push = owner_notifications.channel_health(
+            notification_push, notification_pulse.get("WEB_PUSH"), require_ready=False,
         )
     except Exception as exc:
         notification_email = {"configured": False, "ready": False, "reason": type(exc).__name__}
@@ -3478,10 +3474,12 @@ def get_owner_notification_config(x_admin_key: Optional[str] = Header(None), x_a
     email = owner_notifications.email_readiness()
     push = owner_notifications.web_push_readiness(db.web_push_subscription_count())
     pulse = db.notification_channel_pulse()
-    email.update(pulse.get("EMAIL") or {})
-    push.update(pulse.get("WEB_PUSH") or {})
-    email["healthy"] = bool(email["ready"] and email.get("last_status") not in {"FAILED", "RETRYING"})
-    push["healthy"] = bool(push["configured"] and push.get("last_status") not in {"FAILED", "RETRYING"})
+    email = owner_notifications.channel_health(
+        email, pulse.get("EMAIL"), require_ready=True,
+    )
+    push = owner_notifications.channel_health(
+        push, pulse.get("WEB_PUSH"), require_ready=False,
+    )
     return {
         "email": email,
         "admin": {"enabled": True},

@@ -123,6 +123,38 @@ def test_vapid_readiness_requires_all_values_and_a_subscription(monkeypatch):
     assert incomplete["ready"] is False
 
 
+def test_channel_health_keeps_stale_skipped_delivery_separate_from_current_readiness():
+    readiness = {
+        "enabled": True,
+        "configured": True,
+        "public_key_available": True,
+        "subscriber_count": 1,
+        "ready": True,
+        "reason": None,
+    }
+    result = owner_notifications.channel_health(
+        readiness,
+        {
+            "last_status": "SKIPPED",
+            "last_error": "VAPID configuration is incomplete",
+            "last_updated_at": "2026-09-19 22:22:24",
+            "failures_last_24h": 0,
+        },
+        require_ready=False,
+    )
+
+    assert result["configured"] is True
+    assert result["ready"] is True
+    assert result["configuration_healthy"] is True
+    assert result["healthy"] is True
+    assert result["configuration"]["reason"] is None
+    assert result["last_delivery"] == {
+        "status": "SKIPPED",
+        "error": "VAPID configuration is incomplete",
+        "updated_at": "2026-09-19 22:22:24",
+    }
+
+
 def test_test_push_requires_auth_and_uses_only_synthetic_payload(admin_test_client):
     client, database = admin_test_client
     before = _counts(database)

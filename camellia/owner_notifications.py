@@ -96,6 +96,49 @@ def web_push_readiness(subscription_count: int) -> Dict[str, Any]:
     }
 
 
+def channel_health(
+    readiness: Dict[str, Any],
+    pulse: Optional[Dict[str, Any]],
+    *,
+    require_ready: bool,
+) -> Dict[str, Any]:
+    """Keep current configuration readiness separate from CAM history.
+
+    ``pulse`` is durable delivery history, so it may describe a skipped or
+    failed attempt made before the channel was configured.  That history stays
+    visible, but it must not overwrite the current configuration assessment.
+    The flat history fields remain for existing Admin/API consumers; the
+    explicit nested blocks make the distinction unambiguous.
+    """
+    current = dict(readiness)
+    history = dict(pulse or {})
+    current.update({
+        key: history.get(key)
+        for key in ("last_status", "last_error", "last_updated_at", "failures_last_24h")
+        if key in history
+    })
+    last_status = str(history.get("last_status") or "").upper() or None
+    delivery_healthy = last_status not in {"FAILED", "RETRYING"}
+    configuration_healthy = bool(readiness.get("configured"))
+    current["configuration_healthy"] = configuration_healthy
+    current["delivery_healthy"] = delivery_healthy
+    current["healthy"] = bool(
+        (readiness.get("ready") if require_ready else configuration_healthy)
+        and delivery_healthy
+    )
+    current["configuration"] = {
+        key: readiness.get(key)
+        for key in ("enabled", "configured", "public_key_available", "subscriber_count", "ready", "reason")
+        if key in readiness
+    }
+    current["last_delivery"] = {
+        "status": history.get("last_status"),
+        "error": history.get("last_error"),
+        "updated_at": history.get("last_updated_at"),
+    }
+    return current
+
+
 def safe_handoff_payload(handoff: Dict[str, Any], *, public_base_url: str = "") -> Dict[str, Any]:
     """Return only metadata approved for owner notification channels."""
     ref = str(handoff.get("handoff_ref") or "")
