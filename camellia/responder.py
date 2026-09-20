@@ -29,6 +29,7 @@ from camellia import semantic_fallback
 from camellia.understanding import BusinessAction, Intent, understanding_engine
 from camellia.knowledge import HUMAN_ONLY_INTENTS, approved_knowledge
 from camellia.content_integrity import (
+    ALACARTE_SONDESH_ADDON_COPY,
     quarantine_template_response,
     quarantine_unconfirmed_claims,
     runtime_quarantine_enabled,
@@ -147,6 +148,36 @@ _CONFIRMED_BENTO_SUBSTITUTION_RE = re.compile(
 # reply path is not the only place text reaches the client's people.
 _FLOWER_RE = FLOWER_RE
 _strip_flower_emoji = strip_flower_emoji
+
+
+# This is a deliberately narrow cross-sell. It is offered only after a
+# customer asks about individual meals/menu ordering, never as a generic
+# footer on food, delivery, Bento, or subscription answers.
+ALACARTE_SONDESH_ADDON_TEMPLATES = frozenset({
+    "alacarte_prebooking_steps", "know_more", "weekly_menu_veg",
+    "weekly_menu_nonveg", "savoury_food_intro", "how_to_order",
+})
+_ALACARTE_ADDON_MARKER_RE = re.compile(
+    r"\b(?:à\s*la\s*carte|a\s*la\s*carte|alacarte|individual\s+(?:dish|dishes|item|items)|"
+    r"from\s+the\s+menu|menu|food|meal|lunch|dinner|savoury|savory)\b",
+    re.IGNORECASE,
+)
+_ALACARTE_ADDON_EXCLUSION_RE = re.compile(
+    r"\b(?:bengali\s+home\s+table|home\s+table|subscription|sondesh|sandesh|mishti|"
+    r"payment|pay|delivery|deliver|courier|human|person|manager|support|story)\b",
+    re.IGNORECASE,
+)
+_ALACARTE_DIRECT_QUERY_RE = re.compile(
+    r"\b(?:à\s*la\s*carte|a\s*la\s*carte|alacarte)\b|"
+    r"\bindividual\s+(?:dish|dishes|item|items)\b|"
+    r"\bwhat\s+(?:food|meals?)\s+do\s+you\s+have\b",
+    re.IGNORECASE,
+)
+_ALACARTE_ADDON_DECLINE_RE = re.compile(
+    r"^(?:no(?:\s+thanks?)?|nope|not\s+interested|not\s+now|skip(?:\s+it)?|"
+    r"(?:i|we)\s+(?:don['’]t|do\s+not)\s+want(?:\s+(?:it|that))?|no\s+sweets?)$",
+    re.IGNORECASE,
+)
 
 
 def _quarantine_image_claims(images: Any) -> Any:
@@ -712,6 +743,9 @@ MEAL_PREORDER_QUERY_RE = re.compile(
     r"|"
     r"(?=.*\bbook(?:ing)?\b)"
     r"(?=.*\b(?:meal|lunch|dinner|menu|a la carte|à la carte|alacarte)\b)"
+    r"|"
+    r"(?=.*\bhow\s+(?:do\s+i|can\s+i|to)\s+order\b)"
+    r"(?=.*\bmenu\b)"
     r")",
     re.IGNORECASE,
 )
@@ -1021,6 +1055,7 @@ class DeterministicResponder:
         "price_clarify_product", "context_meal_price_followup", "name_introduction",
         "recall_name", "bot_identity", "bot_capabilities", "explicit_escalation",
         "groq_structured_event_escalation", "ad_gate_blocked", "product_recommendation",
+        "alacarte_sondesh_addon",
     })
 
     def _record_answer_sufficiency(
@@ -1079,33 +1114,29 @@ class DeterministicResponder:
         response_text: str,
         image_url: Any,
         facts: Dict[str, Any],
+        user_message: str = "",
     ) -> Tuple[str, Any]:
-        """The once-per-session savoury/sondesh nudges, wherever the answer came from.
-
-        These belong to the answer, not to the layer that selected it, so the
-        intent/entity path and the deterministic path apply them identically.
-        """
-        savoury_templates = {
-            "savoury_food_intro", "weekly_menu_veg", "weekly_menu_nonveg",
-            "combo_bento", "bento_details", "alacarte_prebooking_steps",
-            "subscription_booking_steps",
-            "savoury_best_time_to_book", "savoury_delivery_time",
-        }
+        """Apply the approved Sondesh add-on without broad food-flow spam."""
         # The expired-menu fallback ("kitchen is finalising this week's menu")
         # explicitly promises no photo and no price a customer could order
         # against — the nudge's own Sondesh card would break that promise.
         menu_is_being_updated = response_text.strip() == _WEEKLY_MENU_BEING_UPDATED.strip()
+        lowered_message = " ".join((user_message or "").lower().split())
+        alacarte_context = (
+            template_id in ALACARTE_SONDESH_ADDON_TEMPLATES
+            and bool(_ALACARTE_ADDON_MARKER_RE.search(lowered_message))
+            and not _ALACARTE_ADDON_EXCLUSION_RE.search(lowered_message)
+        )
         if (
-            template_id in savoury_templates
-            and not facts.get("savoury_crosssell_sent")
+            alacarte_context
+            and not facts.get("alacarte_sondesh_addon_sent")
+            and not facts.get("alacarte_sondesh_addon_declined")
             and not menu_is_being_updated
         ):
+            facts["alacarte_sondesh_addon_sent"] = True
             facts["savoury_crosssell_sent"] = True
-            crosssell_tmpl = self._template_by_id("savoury_crosssell_sondesh") or {}
-            crosssell_text = (crosssell_tmpl.get("response") or "").strip()
-            if crosssell_text:
-                response_text = response_text.rstrip() + '\n\n' + crosssell_text
-                image_url = self._append_sondesh_crosssell_images(image_url)
+            response_text = response_text.rstrip() + "\n\n" + ALACARTE_SONDESH_ADDON_COPY
+            image_url = self._append_sondesh_crosssell_images(image_url)
         elif template_id == "savoury_crosssell_sondesh":
             facts["savoury_crosssell_sent"] = True
             image_url = self._append_sondesh_crosssell_images(image_url)
@@ -1450,7 +1481,7 @@ class DeterministicResponder:
             # layer that chose it, so it is applied here too.
             if item.template_id:
                 rendered, rendered_images = self._apply_crosssell_nudges(
-                    item.template_id, rendered, rendered_images, facts,
+                    item.template_id, rendered, rendered_images, facts, user_message,
                 )
             replies.append(rendered)
             approved_facts.append(rendered)
@@ -1798,6 +1829,14 @@ class DeterministicResponder:
         # turn's decision is reset here.
         facts["source_context_used"] = False
         facts["source_referential_intent"] = None
+
+        # A decline closes only this active add-on flow. It is session-scoped,
+        # so a later conversation can offer the add-on again.
+        if (
+            facts.get("alacarte_sondesh_addon_sent")
+            and _ALACARTE_ADDON_DECLINE_RE.fullmatch(lowered_text.strip(" .!?"))
+        ):
+            facts["alacarte_sondesh_addon_declined"] = True
 
         # A new, explicit business subject must be able to interrupt a stale
         # conversational slot before any slot handler runs. Without this
@@ -2389,11 +2428,31 @@ class DeterministicResponder:
             session_memory.add_turn(user_id, channel, user_message, response_text)
             return response_text, True, "GUARD_pickup_address_hours", None
 
+        # These are explicit individual-meal/menu questions. Resolve them to
+        # the existing approved menu cards before model routing so the
+        # add-on cannot depend on an LLM paraphrase decision.
+        if (
+            _ALACARTE_DIRECT_QUERY_RE.search(lowered_text)
+            and not MEAL_PREORDER_QUERY_RE.search(lowered_text)
+            and not _ALACARTE_ADDON_EXCLUSION_RE.search(lowered_text)
+        ):
+            template = self._template_by_id("know_more") or {}
+            response_text, images = self._format_dynamic_response(
+                "know_more", template.get("response") or self._generic_fallback(),
+                user_id=user_id, channel=channel, user_message=user_message,
+            )
+            facts["last_topic"] = "savoury"
+            response_text, images = self._apply_crosssell_nudges(
+                "know_more", response_text, images, facts, user_message,
+            )
+            session_memory.add_turn(user_id, channel, user_message, response_text)
+            return response_text, True, "know_more", images
+
         if MEAL_PREORDER_QUERY_RE.search(lowered_text):
             template = self._template_by_id("alacarte_prebooking_steps") or {}
             response_text = template.get("response") or self._generic_fallback()
             response_text, images = self._apply_crosssell_nudges(
-                "alacarte_prebooking_steps", response_text, None, facts,
+                "alacarte_prebooking_steps", response_text, None, facts, user_message,
             )
             session_memory.add_turn(user_id, channel, user_message, response_text)
             return response_text, True, "alacarte_prebooking_steps", images
@@ -2432,7 +2491,7 @@ class DeterministicResponder:
                 user_id=user_id, channel=channel, user_message=user_message,
             )
             response_text, images = self._apply_crosssell_nudges(
-                "savoury_best_time_to_book", response_text, images, facts,
+                "savoury_best_time_to_book", response_text, images, facts, user_message,
             )
             if intro_greeting_prefix:
                 response_text = intro_greeting_prefix + response_text
@@ -2458,7 +2517,7 @@ class DeterministicResponder:
                 user_id=user_id, channel=channel, user_message=user_message,
             )
             response_text, images = self._apply_crosssell_nudges(
-                "savoury_delivery_time", response_text, images, facts,
+                "savoury_delivery_time", response_text, images, facts, user_message,
             )
             if intro_greeting_prefix:
                 response_text = intro_greeting_prefix + response_text
@@ -2748,13 +2807,6 @@ class DeterministicResponder:
                     facts["subscription_context"] = True
                     if follow_up_id == "subscription_booking_steps":
                         facts["awaiting_subscription_booking"] = False
-                    if follow_up_id != "subscription_details" and not facts.get("savoury_crosssell_sent"):
-                        facts["savoury_crosssell_sent"] = True
-                        crosssell = self._template_by_id("savoury_crosssell_sondesh")
-                        crosssell_text = ((crosssell or {}).get("response") or "").strip()
-                        if crosssell_text:
-                            response_text = response_text.rstrip() + "\n\n" + crosssell_text
-                            images = self._append_sondesh_crosssell_images(None)
                     if intro_greeting_prefix:
                         response_text = intro_greeting_prefix + response_text
                     session_memory.add_turn(user_id, channel, user_message, response_text)
@@ -2792,13 +2844,6 @@ class DeterministicResponder:
                 if tmpl and tmpl.get("response"):
                     response_text = tmpl["response"]
                     images = None
-                    if not facts.get("savoury_crosssell_sent"):
-                        facts["savoury_crosssell_sent"] = True
-                        crosssell = self._template_by_id("savoury_crosssell_sondesh")
-                        crosssell_text = (crosssell.get("response") or "").strip()
-                        if crosssell_text:
-                            response_text = response_text.rstrip() + "\n\n" + crosssell_text
-                            images = self._append_sondesh_crosssell_images(None)
                     if intro_greeting_prefix:
                         response_text = intro_greeting_prefix + response_text
                     session_memory.add_turn(user_id, channel, user_message, response_text)
@@ -3315,7 +3360,7 @@ class DeterministicResponder:
                 response_text = response_text.rstrip() + first_time_nudge
 
             response_text, image_url = self._apply_crosssell_nudges(
-                tmpl_id, response_text, image_url, facts,
+                tmpl_id, response_text, image_url, facts, user_message,
             )
 
             if tmpl_id not in {"greeting", "sondesh_price_detailed", "previous_menus"} and config.is_ai_enabled and ai_responder.get_active_provider() != "none":
@@ -3333,6 +3378,15 @@ class DeterministicResponder:
                         response_text = refined_text
                 except Exception as e:
                     log.warning("AI template refinement failed: %s", e)
+
+            # Refinement is allowed to rephrase the approved primary answer,
+            # but it must not discard the client-requested add-on pitch that
+            # was attached to it above.
+            if (
+                facts.get("alacarte_sondesh_addon_sent")
+                and ALACARTE_SONDESH_ADDON_COPY not in response_text
+            ):
+                response_text = response_text.rstrip() + "\n\n" + ALACARTE_SONDESH_ADDON_COPY
 
             # Appended AFTER refinement on purpose. The refinement cache is
             # keyed by the customer's wording, so a suffix added before it
@@ -3727,9 +3781,9 @@ class DeterministicResponder:
     def _append_sondesh_crosssell_images(image_url: Any) -> List[Any]:
         """Keeps the savoury answer first, then sends the three approved photos."""
         supplied = [
-            "/images/Sondesh%20Norom%20Pak%20Closeup.jpeg",
-            "/images/Sondesh%20Handcrafted%20Collection.jpeg",
-            "/images/Sondesh%20Gift%20Platter.jpeg",
+            "/images/sondesh_addon_01.jpeg",
+            "/images/sondesh_addon_02.jpeg",
+            "/images/sondesh_addon_03.jpeg",
         ]
         existing = list(image_url) if isinstance(image_url, list) else ([image_url] if image_url else [])
         images = existing + supplied
@@ -4242,11 +4296,26 @@ class DeterministicResponder:
             user_message, user_id, channel, referral_source, referral_ad_id, referral_ad_title
         )
         if runtime_quarantine_enabled(getattr(db, "db_path", "")):
-            safe_text = quarantine_template_response(
-                template_id,
-                text or "",
-                canonical_text=self._canonical_template_response(template_id),
-            )
+            addon_suffix = "\n\n" + ALACARTE_SONDESH_ADDON_COPY
+            if (
+                session_memory.get_facts(user_id or "default_user", channel or "default_channel").get(
+                    "alacarte_sondesh_addon_sent"
+                )
+                and addon_suffix in (text or "")
+            ):
+                primary_text = (text or "").rsplit(addon_suffix, 1)[0]
+                safe_primary = quarantine_template_response(
+                    template_id,
+                    primary_text,
+                    canonical_text=self._canonical_template_response(template_id),
+                )
+                safe_text = safe_primary.rstrip() + addon_suffix
+            else:
+                safe_text = quarantine_template_response(
+                    template_id,
+                    text or "",
+                    canonical_text=self._canonical_template_response(template_id),
+                )
             safe_images = _quarantine_image_claims(image_url)
         else:
             safe_text, safe_images = text or "", image_url

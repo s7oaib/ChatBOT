@@ -43,6 +43,8 @@ class SessionMemoryManager:
                 "awaiting_subscription_booking": False,
                 "subscription_context": False,
                 "savoury_crosssell_sent": False,
+                "alacarte_sondesh_addon_sent": False,
+                "alacarte_sondesh_addon_declined": False,
                 "sondesh_crosssell_sent": False,
                 "previous_menus_offered": False,
                 "slow_notice_sent": False,
@@ -119,7 +121,9 @@ class SessionMemoryManager:
         facts = session.setdefault("facts", {})
         transient = {
             "image_card_sent", "awaiting_subscription_booking", "subscription_context",
-            "last_greeting_index", "savoury_crosssell_sent", "sondesh_crosssell_sent",
+            "last_greeting_index", "savoury_crosssell_sent",
+            "alacarte_sondesh_addon_sent", "alacarte_sondesh_addon_declined",
+            "sondesh_crosssell_sent",
             "slow_notice_sent", "awaiting_menu_choice", "awaiting_product_price",
             "awaiting_area_confirmation", "awaiting_instagram_contact",
             "awaiting_instagram_contact_confirmation", "pending_instagram_contact",

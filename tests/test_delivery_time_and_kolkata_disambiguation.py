@@ -140,13 +140,13 @@ class TestTheSavourySondeshCrosssellUsesTheClientsOwnText:
         text, matched, template_id, images = reply_to("do you have lunch or dinner")
         assert matched is True
         assert template_id == "savoury_food_intro"
-        assert "We also make & send Bengali mishti - norom pak Sondesh" in text
+        assert "handcrafted Norom Pak Sondesh" in text
 
     def test_a_sondesh_menu_card_is_attached_alongside_the_weekly_menu(self):
         _text, _matched, _template_id, images = reply_to("do you have lunch or dinner")
         assert isinstance(images, list)
         urls = [img.get("url") if isinstance(img, dict) else img for img in images]
-        assert sum("/images/Sondesh%20" in url for url in urls) == 3
+        assert sum("/images/sondesh_addon_" in url for url in urls) == 3
         assert isinstance(images[0], dict) and images[0].get("text_first") is True
 
     def test_the_nudge_is_sent_once_per_session_not_on_every_savoury_reply(self):
@@ -156,8 +156,8 @@ class TestTheSavourySondeshCrosssellUsesTheClientsOwnText:
         first = responder.match_and_respond("do you have lunch or dinner", user_id=user_id, channel="whatsapp")
         second = responder.match_and_respond("tell me about the subscription", user_id=user_id, channel="whatsapp")
 
-        assert "We also make & send Bengali mishti" in first[0]
-        assert "We also make & send Bengali mishti" not in second[0]
+        assert "handcrafted Norom Pak Sondesh" in first[0]
+        assert "handcrafted Norom Pak Sondesh" not in second[0]
 
     @pytest.mark.parametrize("message, expected_template", [
         ("what are the bento meal box prices", "bento_details"),
@@ -170,6 +170,6 @@ class TestTheSavourySondeshCrosssellUsesTheClientsOwnText:
         text, matched, template_id, images = reply_to(message)
         assert matched is True
         assert template_id == expected_template
-        assert "WE ALSO OFFER SONDESH" in text
-        urls = [img.get("url") if isinstance(img, dict) else img for img in images]
-        assert sum("/images/Sondesh%20" in url for url in urls) == 3
+        assert "if you’d like to add something sweet to your order" not in text
+        urls = [img.get("url") if isinstance(img, dict) else img for img in (images or [])]
+        assert not any("/images/sondesh_addon_" in url for url in urls)

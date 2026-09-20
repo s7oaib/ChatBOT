@@ -18,6 +18,15 @@ from typing import Any, Dict, Iterable, Mapping, Optional
 ACTOR = "content_integrity_audit_2026-09-13"
 REASON = "approved_canonical_content_correction"
 
+# Client-approved copy for the narrowly scoped à la carte Sondesh add-on.
+# This is restored as an exact suffix after the generic claim scrubber has
+# checked the primary answer; it must not be silently shortened to a vague
+# offer while preserving the customer-requested asset bundle.
+ALACARTE_SONDESH_ADDON_COPY = (
+    "We also make handcrafted Norom Pak Sondesh if you’d like to add something "
+    "sweet to your order. Sharing a few pictures below."
+)
+
 # These claims were identified by the production content audit as requiring
 # current operator evidence.  They are deliberately narrow: confirmed facts
 # (prices, Porter actuals, gifting/events, A2 and the all-women-team wording)

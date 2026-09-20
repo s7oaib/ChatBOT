@@ -462,16 +462,12 @@ class Test25AgentStressScenarios(unittest.TestCase):
         self.assertTrue(resp2.was_matched)
         self.assertEqual(resp2.template_id, "savoury_food_intro")
 
-        # Verify: Customer name is RETAINED in session memory, order draft is RESET, cross-sell P.S. note fires
+        # Verify: Customer name is RETAINED in session memory and the order
+        # draft is RESET; meal/menu interest gets the one-time add-on.
         sess_after = session_memory.get_session(gap_uid, channel)
         self.assertEqual(sess_after["facts"]["name"], "Priya")
         self.assertIsNone(sess_after["facts"]["order_draft"]["flavour"])
-        # The approved line reads "handcraft", not "make & send"; the copy was
-        # changed and this assertion was never updated. Matching the part that
-        # carries the meaning rather than the exact phrasing, so the next
-        # wording tweak does not fail a test about cross-sell behaviour.
-        self.assertIn("We also make & send Bengali mishti", resp2.text)
-        self.assertIn("Bengali mishti", resp2.text)
+        self.assertIn("handcrafted Norom Pak Sondesh", resp2.text)
 
 
 if __name__ == "__main__":
