@@ -35,9 +35,22 @@ class InstagramOAuthError(Exception):
 
 @dataclass(frozen=True)
 class InstagramOAuthIdentity:
+    """Verified Instagram Login identity, excluding any provider secret."""
+
     account_id: str
     username: str
     access_token: str
+    user_id: str = ""
+
+    @property
+    def oauth_account_id(self) -> str:
+        """The app-scoped/profile id returned as ``/me.id``."""
+        return self.account_id
+
+    @property
+    def instagram_user_id(self) -> str:
+        """The Instagram professional account id returned as ``/me.user_id``."""
+        return self.user_id
 
 
 def _signing_key(app_secret: str) -> bytes:
@@ -174,7 +187,7 @@ async def exchange_and_verify(
             response = await client.get(
                 PROFILE_URL,
                 params={
-                    "fields": "id,username",
+                    "fields": "id,username,user_id",
                     "access_token": token,
                 },
             )
@@ -185,11 +198,12 @@ async def exchange_and_verify(
         raise InstagramOAuthError("Instagram account verification could not be completed.")
     account_id = str(profile.get("id") or "").strip()
     username = str(profile.get("username") or "").strip()
-    if not account_id or not username:
+    user_id = str(profile.get("user_id") or "").strip()
+    if not account_id or not user_id or not username:
         raise InstagramOAuthError("Instagram account verification could not be completed.")
     if username.casefold() != expected_username.strip().casefold():
         raise InstagramOAuthError("The authorized Instagram account is not the Camellia account.")
-    return InstagramOAuthIdentity(account_id, username, token)
+    return InstagramOAuthIdentity(account_id, username, token, user_id)
 
 
 def success_page(identity: InstagramOAuthIdentity) -> str:
@@ -199,7 +213,8 @@ def success_page(identity: InstagramOAuthIdentity) -> str:
         "<title>Instagram connection verified</title></head><body>"
         "<h1>Instagram connection verified</h1>"
         f"<p>Account: @{html.escape(identity.username)}</p>"
-        f"<p>Instagram account ID: {html.escape(identity.account_id)}</p>"
+        f"<p>OAuth/App-scoped ID: {html.escape(identity.oauth_account_id)}</p>"
+        f"<p>Instagram Professional Account ID: {html.escape(identity.instagram_user_id)}</p>"
         "<p>The token was not displayed or logged. Complete the Railway credential update before enabling the connection.</p>"
         "</body></html>"
     )

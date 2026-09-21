@@ -1495,6 +1495,15 @@ def _safe_instagram_event_shape(messaging_event: dict) -> Dict[str, Any]:
     }
 
 
+def _instagram_account_guard_matches(entry_id: Any, configured_account_id: Any) -> bool:
+    """Compare webhook and configured account ids without normalizing namespaces."""
+    entry_value = str(entry_id or "").strip()
+    configured_value = str(configured_account_id or "").strip()
+    if not configured_value:
+        return True
+    return hmac.compare_digest(entry_value, configured_value)
+
+
 def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks) -> dict:
     entries = payload.get("entry", []) if isinstance(payload, dict) else []
     if not isinstance(entries, list):
@@ -1506,8 +1515,21 @@ def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks
     )
     results = []
     for entry in entries:
-        if configured_account_id and str(entry.get("id", "")) != configured_account_id:
-            log.info("Ignored Instagram webhook entry for foreign account (foreign_account=true).")
+        entry_id = entry.get("id", "")
+        guard_match = _instagram_account_guard_matches(entry_id, configured_account_id)
+        log.info(
+            "Instagram account guard evaluated: match=%s entry_id_hash=%s configured_id_hash=%s",
+            guard_match,
+            _safe_identifier_hash(entry_id),
+            _safe_identifier_hash(configured_account_id),
+        )
+        if not guard_match:
+            log.info(
+                "Ignored Instagram webhook entry for foreign account "
+                "(foreign_account=true, entry_id_hash=%s, configured_id_hash=%s).",
+                _safe_identifier_hash(entry_id),
+                _safe_identifier_hash(configured_account_id),
+            )
             continue
 
         events = list(entry.get("messaging", []))

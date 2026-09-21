@@ -55,7 +55,11 @@ def _set_oauth_config(monkeypatch):
 def test_token_exchange_sends_exact_redirect_uri_and_verifies_identity(monkeypatch):
     fake = _FakeClient([
         _Response(200, {"access_token": "token-never-rendered", "user_id": "123"}),
-        _Response(200, {"id": "987654", "username": "camellia.artisanal"}),
+        _Response(200, {
+            "id": "987654",
+            "username": "camellia.artisanal",
+            "user_id": "28206314108997745",
+        }),
     ])
     monkeypatch.setattr("camellia.instagram_oauth.httpx.AsyncClient", lambda **kwargs: fake)
 
@@ -68,8 +72,12 @@ def test_token_exchange_sends_exact_redirect_uri_and_verifies_identity(monkeypat
     ))
 
     assert identity.account_id == "987654"
+    assert identity.oauth_account_id == "987654"
+    assert identity.user_id == "28206314108997745"
+    assert identity.instagram_user_id == "28206314108997745"
     assert identity.username == "camellia.artisanal"
     assert fake.post_calls[0][1]["redirect_uri"] == "https://example.test/auth/instagram/callback"
+    assert fake.get_calls[0][1]["fields"] == "id,username,user_id"
 
 
 def test_exchange_failure_is_sanitized(monkeypatch):
@@ -92,6 +100,27 @@ def test_exchange_failure_is_sanitized(monkeypatch):
         raise AssertionError("exchange should fail")
     assert message == "Instagram authorization could not be completed."
     assert "secret-code-and-token" not in message
+
+
+def test_identity_verification_requires_professional_user_id(monkeypatch):
+    fake = _FakeClient([
+        _Response(200, {"access_token": "token-never-rendered"}),
+        _Response(200, {"id": "987654", "username": "camellia.artisanal"}),
+    ])
+    monkeypatch.setattr("camellia.instagram_oauth.httpx.AsyncClient", lambda **kwargs: fake)
+
+    try:
+        asyncio.run(exchange_and_verify(
+            app_id="28666204229670328",
+            app_secret="instagram-secret-for-test",
+            redirect_uri="https://example.test/auth/instagram/callback",
+            code="fresh-code",
+            expected_username="camellia.artisanal",
+        ))
+    except InstagramOAuthError as exc:
+        assert str(exc) == "Instagram account verification could not be completed."
+    else:
+        raise AssertionError("verification must fail closed without user_id")
 
 
 def test_callback_rejects_missing_or_invalid_state(monkeypatch):
@@ -132,10 +161,25 @@ def test_callback_accepts_camellia_identity_without_rendering_token(monkeypatch)
         response = client.get(f"/auth/instagram/callback?state={state}&code=fresh-code")
     assert response.status_code == 200
     assert "@camellia.artisanal" in response.text
-    assert "987654" in response.text
+    assert "OAuth/App-scoped ID: 987654" in response.text
+    assert "Instagram Professional Account ID" in response.text
     assert token not in response.text
     assert "fresh-code" not in response.text
     assert "instagram-secret-for-test" not in response.text
+
+
+def test_success_page_labels_both_non_secret_identity_values_without_token():
+    identity = InstagramOAuthIdentity(
+        "oauth-profile-id",
+        "camellia.artisanal",
+        "token-never-rendered",
+        "professional-id",
+    )
+    body = app_module.instagram_oauth_success_page(identity)
+    assert "Account: @camellia.artisanal" in body
+    assert "OAuth/App-scoped ID: oauth-profile-id" in body
+    assert "Instagram Professional Account ID: professional-id" in body
+    assert "token-never-rendered" not in body
 
 
 def test_callback_rejects_wrong_username_and_does_not_adopt(monkeypatch):
