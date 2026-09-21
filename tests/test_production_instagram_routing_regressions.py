@@ -55,7 +55,7 @@ def test_exact_sondesh_price_phrase_uses_one_approved_long_answer():
     )
 
     assert matched is True
-    assert template_id == "sondesh_details"
+    assert template_id == "sondesh_price_detailed"
     assert text == client_qa.REGISTRY_BY_CANONICAL_ID["SONDESH_DETAILS"].answer
     assert text.startswith("Hi thanks for getting in touch.")
     assert "INSERT " not in text
@@ -71,7 +71,7 @@ def test_exact_sondesh_price_phrase_does_not_emit_debug_or_second_route():
     )
 
     assert matched is True
-    assert template_id == "sondesh_details"
+    assert template_id == "sondesh_price_detailed"
     assert text.count("Hi thanks for getting in touch.") == 1
     assert "Matched:" not in text
     assert "Sondesh unfamiliar" not in text

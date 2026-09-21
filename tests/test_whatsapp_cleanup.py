@@ -58,6 +58,7 @@ def test_manual_handoff_keeps_cam_dedup_waiting_state_and_link():
     user_id = "whatsapp-cleanup-handoff"
     session_memory.clear_session(user_id, "instagram")
     facts = session_memory.get_facts(user_id, "instagram")
+    facts["order_state"] = "CONFIRMED"
     with patch.object(config, "WHATSAPP_BUSINESS_NUMBER", "919800000000"):
         first = get_or_create_handoff(
             user_id=user_id,
@@ -73,7 +74,7 @@ def test_manual_handoff_keeps_cam_dedup_waiting_state_and_link():
             user_message="Please connect me",
             facts=facts,
         )
-        link = whatsapp_link(first["handoff_ref"])
+        link = whatsapp_link(first["handoff_ref"], order_state=facts["order_state"])
 
     assert second["handoff_ref"] == first["handoff_ref"]
     assert link and link.startswith("https://wa.me/919800000000?text=")

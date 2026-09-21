@@ -69,7 +69,13 @@ def test_exact_questions_return_their_canonical_ids_and_source_copy():
     for question, facts, expected_id in cases:
         result = _match(question, facts)
         assert result.entry.qa_id == expected_id
-        assert result.entry.answer == client_qa.REGISTRY_BY_ID[expected_id].answer
+        expected_answer = client_qa.REGISTRY_BY_ID[expected_id].answer
+        if expected_id == "sondesh_price_client" and question == "Whats the price of sondesh?":
+            # This exact production wording is an approved copy exception:
+            # it uses the long Sondesh introduction while retaining the
+            # price route for its other paraphrases.
+            expected_answer = client_qa.REGISTRY_BY_ID["sondesh_details_client"].answer
+        assert result.entry.answer == expected_answer
 
 
 def test_paraphrases_keep_the_same_canonical_answer_id():

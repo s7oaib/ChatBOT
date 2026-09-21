@@ -154,7 +154,7 @@ def test_repeated_human_requests_reuse_the_same_handoff_without_duplicate_alerts
 def test_known_instagram_details_reach_the_handoff_without_being_re_asked():
     """"50 boxes of Jolbhora for a wedding in Delhi" already told the bot the
     product, quantity, event and area — the handoff must carry them, not make
-    the customer repeat them before generating the WhatsApp link."""
+    the customer repeat them before the CAM is created."""
     user_id = "client_instagram_known_details"
     session_memory.clear_session(user_id, "instagram")
     facts = session_memory.get_facts(user_id, "instagram")
@@ -173,8 +173,8 @@ def test_known_instagram_details_reach_the_handoff_without_being_re_asked():
             user_id, "I need 50 boxes of Jolbhora for my wedding in Delhi", "ad-1",
         )
 
-    reference = re.search(r"CAM-\d{5,6}", send_reply.call_args.args[1]).group(0)
-    handoff = db.get_handoff_by_ref(reference)
+    handoff = db.get_active_handoff("instagram", user_id)
+    assert "wa.me" not in send_reply.call_args.args[1]
     known = json.loads(handoff["known_entities"])
     assert known["product"] == "Jolbhora"
     assert known["quantity"] == 50
@@ -190,6 +190,7 @@ def test_the_handoff_link_carries_no_conversation_or_personal_data():
     user_id = "client_instagram_opaque_link"
     session_memory.clear_session(user_id, "instagram")
     facts = session_memory.get_facts(user_id, "instagram")
+    facts["order_state"] = "CONFIRMED"
     facts["last_entities"] = {"product": "Jolbhora", "location": "Delhi", "event": "wedding"}
 
     with patch.object(
@@ -199,7 +200,7 @@ def test_the_handoff_link_carries_no_conversation_or_personal_data():
     ), patch.object(app, "send_instagram_reply") as send_reply, patch.object(
         app.escalator, "handle_escalation", return_value={"escalation_id": 1},
     ), patch.object(config, "WHATSAPP_BUSINESS_NUMBER", "919800000000"):
-        app._process_instagram_event(user_id, "50 boxes of Jolbhora for a wedding in Delhi", "ad-1")
+        app._process_instagram_event(user_id, "I need a person about my booked order", "ad-1")
 
     reply_text = send_reply.call_args.args[1]
     link = re.search(r"https://wa\.me/\S+", reply_text).group(0)

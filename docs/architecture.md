@@ -4,23 +4,27 @@
 
 Instagram is the only automated customer channel. When Instagram cannot
 answer, or a customer asks for a person, `camellia/handoff.py` creates a
-durable opaque CAM reference. Generic support handoffs do not include a
-WhatsApp link. Booking, order, payment, and purchase-related handoffs may
-include the separately approved manual `wa.me` continuation. WhatsApp is the
-human team's continuation surface: this service has no WhatsApp webhook, bot,
-Cloud API sender, AI/RAG/template path, or inbound message processing.
+durable opaque CAM reference. Generic support and inquiry handoffs do not
+include a WhatsApp link. A manual `wa.me` continuation is eligible only when
+the durable session order state is explicitly `BOOKED`, `CONFIRMED`, or
+`FINALIZED`, and the current handoff is an order continuation. Booking,
+payment, event, price, and pre-book wording alone never establishes that
+state. WhatsApp is the human team's continuation surface: this service has no
+WhatsApp webhook, bot, Cloud API sender, AI/RAG/template path, or inbound
+message processing.
 
 ```
 Instagram DM -> approved AI response
             -> CAM handoff + deduplicated WAITING_FOR_HUMAN state
             -> human resumes the conversation
 
-Booking/order/payment handoff -> optional manual wa.me continuation
+Explicit booked-order continuation -> optional manual wa.me continuation
 ```
 
-`camellia/handoff.py` owns the opaque reference, deduplication, the optional
-`WHATSAPP_BUSINESS_NUMBER` link target for purchase-related handoffs, and the
-staff-facing summary built from Instagram's existing structured state. The
+`camellia/handoff.py` owns the opaque reference, deduplication, the central
+booked-order-state predicate, the optional `WHATSAPP_BUSINESS_NUMBER` link
+target, and the staff-facing summary built from Instagram's existing
+structured state. The
 durable escalation outbox records the handoff for admin visibility and marks
 external notification as `SKIPPED`; no provider credential or network send is
 involved. Explicit admin resume remains idempotent and restores Instagram AI

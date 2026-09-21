@@ -40,7 +40,7 @@ Built to convert Meta Ad leads, filter out organic DM noise, send high-resolutio
 ### 4. 🚨 Human Escalation Pipeline (PRD Requirement #4b)
 - **Out-of-Syllabus Protection**: Unmatched customer queries are never answered with guesses.
 - **Sensitive Trigger Guard**: Queries containing sensitive keywords (`refund`, `complaint`, `cancel order`, `custom order`, `bulk order`, `payment link`) immediately trigger human escalation.
-- **Manual Handoff**: Stores durable conversation/handoff state in `camellia.db` subject to retention, while normal logs use hashed identifiers and safe error metadata only. Customers receive a `wa.me` link; WhatsApp is handled by a human.
+- **Manual Handoff**: Stores durable conversation/handoff state in `camellia.db` subject to retention, while normal logs use hashed identifiers and safe error metadata only. Customers receive a `wa.me` link only for an explicitly `BOOKED`, `CONFIRMED`, or `FINALIZED` order; WhatsApp is handled by a human.
 
 ### 5. 🔐 Kitchen & Menu Admin Portal (`/admin` / `/admin/dashboard`)
 - **Secure Admin Authentication**: Browser access uses `ADMIN_USERNAME` + an Argon2id `ADMIN_PASSWORD_HASH`, durable rate limiting, CSRF-protected server sessions, and logout revocation. `ADMIN_API_KEY` remains a separate machine credential; legacy `ADMIN_PIN` is not accepted.

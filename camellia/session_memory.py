@@ -79,6 +79,9 @@ class SessionMemoryManager:
                 "route_trace": {},
                 "last_handoff_reason": None,
                 "last_escalation_status": None,
+                # Set only by an explicit trusted business-state update. It is
+                # durable session state, not inferred from customer wording.
+                "order_state": None,
                 "cart": [],
                 "order_draft": {
                     "flavour": None,

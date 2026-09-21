@@ -3,11 +3,12 @@
 Channel policy: Instagram is the only AI chatbot channel. When Instagram
 cannot answer (an unsupported question), or the customer asks for a person,
 or the request is order/event/complaint-shaped, this module creates an opaque
-reference ("CAM-48371") and a durable owner handoff. Purchase-related
-requests may receive the approved WhatsApp click-to-chat continuation; generic
-support requests receive a callback acknowledgement with no WhatsApp link. It
-never sends the conversation contents anywhere public — the reference resolves
-context server-side through the existing `escalator` staff-notification path.
+reference ("CAM-48371") and a durable owner handoff. Only an explicit durable
+BOOKED, CONFIRMED, or FINALIZED order state may receive the approved WhatsApp
+click-to-chat continuation; inquiries receive a callback acknowledgement with
+no WhatsApp link. It never sends the conversation contents anywhere public —
+the reference resolves context server-side through the existing `escalator`
+staff-notification path.
 
 A repeated "human please" from the same customer reuses the active handoff
 (`db.get_active_handoff`) instead of minting a new reference every time.
@@ -28,14 +29,17 @@ from camellia.session_memory import session_memory
 log = get_logger("camellia.handoff")
 
 
-# A WhatsApp continuation is a purchase-flow tool, not a generic support
-# inbox. Keep this decision explicit and deterministic so a CAM can never gain
-# a WhatsApp link merely because it was escalated.
-_PURCHASE_HANDOFF_RE = re.compile(
-    r"\b(?:book(?:ing)?|order|ordering|purchase|buy|payment|pay|invoice|"
-    r"pre[- ]?order|pre[- ]?book|checkout|reserve|reservation|seat|"
-    r"place\s+(?:an?\s+)?order|ready\s+to\s+place|bulk\s+order|"
-    r"custom\s+order|\d+\s*(?:boxes?|pieces?|kg)\b)\b",
+# A WhatsApp continuation is allowed only for an explicitly recorded order
+# state. A message that mentions booking, payment, purchase, an event, or a
+# quantity is still an inquiry until the durable business state says otherwise.
+BOOKED_ORDER_STATES = frozenset({"BOOKED", "CONFIRMED", "FINALIZED"})
+_ORDER_CONTINUATION_TEMPLATES = frozenset({
+    "order_draft_receipt",
+    "order_next_steps",
+    "client_approved_order_ready_handoff",
+})
+_EVENT_INQUIRY_RE = re.compile(
+    r"\b(?:cater|wedding|event|party|function|bulk|boxes?)\b",
     re.IGNORECASE,
 )
 _HUMAN_HELP_RE = re.compile(
@@ -65,11 +69,46 @@ def normalize_instagram_username(value: Any) -> Optional[str]:
     return candidate
 
 
-def handoff_contact_mode(user_message: str, *, template_id: Optional[str] = None) -> str:
-    """Return the customer-facing continuation allowed for this request."""
-    if template_id in {"order_draft_receipt", "order_next_steps"}:
-        return "whatsapp_order"
-    if _PURCHASE_HANDOFF_RE.search(str(user_message or "")):
+def normalize_order_state(value: Any) -> Optional[str]:
+    """Normalize only the explicit durable order-state contract."""
+    state = str(value or "").strip().upper()
+    return state if state in BOOKED_ORDER_STATES else None
+
+
+def whatsapp_link_allowed(
+    *, facts: Optional[Dict[str, Any]] = None,
+    order_state: Optional[str] = None,
+) -> bool:
+    """Return whether the durable order state permits a manual WhatsApp link.
+
+    Missing, legacy, or inferred state is intentionally ineligible. In
+    particular, ``order_status`` and ``order_finalized`` are not accepted as
+    aliases because older sessions used those names for conversational state,
+    not a verified booking.
+    """
+    if order_state is None and isinstance(facts, dict):
+        order_state = facts.get("order_state")
+    return normalize_order_state(order_state) in BOOKED_ORDER_STATES
+
+
+def handoff_contact_mode(
+    user_message: str,
+    *,
+    template_id: Optional[str] = None,
+    facts: Optional[Dict[str, Any]] = None,
+    order_state: Optional[str] = None,
+) -> str:
+    """Return the customer-facing continuation allowed for this request.
+
+    Order state is the eligibility gate. The route check only prevents a
+    booked customer asking an unrelated generic/event question from receiving
+    a continuation link.
+    """
+    if not whatsapp_link_allowed(facts=facts, order_state=order_state):
+        return "support_callback"
+    if _EVENT_INQUIRY_RE.search(str(user_message or "")):
+        return "support_callback"
+    if template_id in _ORDER_CONTINUATION_TEMPLATES or is_human_help_request(user_message):
         return "whatsapp_order"
     return "support_callback"
 
@@ -261,7 +300,13 @@ def get_or_create_handoff(
     if order_summary:
         known_entities["verified_order"] = order_summary
     unresolved_topic = str((facts.get("last_entities") or {}).get("topic") or "").strip() or None
-    effective_mode = contact_mode or handoff_contact_mode(user_message)
+    requested_mode = contact_mode or handoff_contact_mode(user_message, facts=facts)
+    effective_mode = (
+        "whatsapp_order"
+        if requested_mode == "whatsapp_order" and whatsapp_link_allowed(facts=facts)
+        else "support_callback"
+    )
+    order_state = normalize_order_state(facts.get("order_state"))
     safe_username = normalize_instagram_username(instagram_username)
     effective_query_summary = query_summary or customer_query_summary(
         user_message, contact_mode=effective_mode, reason=reason,
@@ -297,10 +342,16 @@ def get_or_create_handoff(
         log.info("Created handoff %s for channel=%s user_hash=%s (%s).", reference, channel, _user_hash(user_id), reason)
     handoff["newly_created"] = newly_created
     handoff["verified_order"] = order_summary
+    handoff["order_state"] = order_state
     return handoff
 
 
-def whatsapp_link(handoff_ref: str, order_summary: Optional[Dict[str, Any]] = None) -> Optional[str]:
+def whatsapp_link(
+    handoff_ref: str,
+    order_summary: Optional[Dict[str, Any]] = None,
+    *,
+    order_state: Optional[str] = None,
+) -> Optional[str]:
     """A wa.me click-to-chat link to the client's own WhatsApp number.
 
     Returns None when WHATSAPP_BUSINESS_NUMBER is not yet configured — the
@@ -309,6 +360,8 @@ def whatsapp_link(handoff_ref: str, order_summary: Optional[Dict[str, Any]] = No
     details, no customer data, nothing beyond the opaque reference the human
     team looks up on their side.
     """
+    if not whatsapp_link_allowed(order_state=order_state):
+        return None
     number = re.sub(r"\D", "", config.WHATSAPP_BUSINESS_NUMBER or "")
     if not number:
         return None
@@ -329,6 +382,7 @@ def customer_facing_message(
     order_summary: Optional[Dict[str, Any]] = None,
     *,
     order_receipt: bool = False,
+    order_state: Optional[str] = None,
 ) -> str:
     """The Instagram-side copy offering the WhatsApp continuation.
 
@@ -337,7 +391,9 @@ def customer_facing_message(
     link/reference to whatever wording is configured, it never invents the
     lead sentence itself.
     """
-    link = whatsapp_link(handoff_ref, order_summary)
+    if not whatsapp_link_allowed(order_state=order_state):
+        return customer_facing_notice()
+    link = whatsapp_link(handoff_ref, order_summary, order_state=order_state)
     body = (
         "Continue on WhatsApp to send this order draft to our team."
         if order_receipt else config.INSTAGRAM_HANDOFF_MESSAGE.rstrip()
@@ -366,9 +422,13 @@ def customer_facing_notice(*, order_receipt: bool = False, finalized_order: bool
 def customer_facing_link_message(
     handoff_ref: str,
     order_summary: Optional[Dict[str, Any]] = None,
+    *,
+    order_state: Optional[str] = None,
 ) -> str:
     """Second Instagram message: a raw URL on its own line when configured."""
-    link = whatsapp_link(handoff_ref, order_summary)
+    if not whatsapp_link_allowed(order_state=order_state):
+        return customer_facing_notice()
+    link = whatsapp_link(handoff_ref, order_summary, order_state=order_state)
     if link:
         return f"Continue on WhatsApp:\n{link}"
     return f"Please quote reference {handoff_ref} when you message us on WhatsApp."

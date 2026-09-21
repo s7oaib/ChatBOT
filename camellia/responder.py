@@ -231,6 +231,53 @@ _CANONICAL_ROUTE_HINT_RE = re.compile(
 )
 
 
+def _ordered_client_asset_payload(
+    entry: client_qa.ApprovedQA,
+    asset_map: Dict[str, List[str]],
+) -> Tuple[str, List[Dict[str, Any]]]:
+    """Convert parsed QA segments into the existing ordered media contract.
+
+    The responder's public return shape stays ``(text, matched, route,
+    image_url)`` for compatibility.  The media value can nevertheless carry
+    ordered text/media/text: leading text remains the outer text, while text
+    after an asset becomes that asset's caption.  ``send_instagram_reply``
+    already sends those captions in order, and the web tester renders the same
+    flags, so Sondesh/menu card sequencing keeps its established behavior.
+    """
+    segments = tuple(entry.response_segments or ())
+    if not segments or not any(kind == "asset" for kind, _value in segments):
+        return entry.answer, []
+
+    leading_text: List[str] = []
+    payload: List[Dict[str, Any]] = []
+    seen_urls = set()
+    for kind, value in segments:
+        if kind == "text":
+            text = str(value or "").strip()
+            if not text:
+                continue
+            if payload:
+                previous = payload[-1]
+                previous["caption"] = "\n\n".join(
+                    part for part in (previous.get("caption"), text) if part
+                )
+            else:
+                leading_text.append(text)
+            continue
+
+        if kind != "asset":
+            continue
+        for url in asset_map.get(value, ()):
+            if not url or url in seen_urls:
+                continue
+            seen_urls.add(url)
+            payload.append({"url": url})
+
+    if leading_text and payload:
+        payload[0]["text_first"] = True
+    return "\n\n".join(leading_text), payload
+
+
 # The flower strip lives in text_rules so database.py can use it too — the
 # reply path is not the only place text reaches the client's people.
 _FLOWER_RE = FLOWER_RE
@@ -2173,7 +2220,7 @@ class DeterministicResponder:
         )
         if client_match:
             entry = client_match.entry
-            asset_urls: List[str] = []
+            asset_urls: Any = []
             asset_missing: List[str] = []
             asset_map = {
                 "sondesh_addon_images": [
@@ -2210,6 +2257,7 @@ class DeterministicResponder:
                 "client_qa_asset_status": "ASSET-MISSING" if asset_missing else "available",
                 "client_qa_missing_assets": asset_missing,
                 "client_qa_handoff_exact": entry.qa_id == "order_ready_handoff",
+                "client_qa_response_segments": [kind for kind, _value in entry.response_segments],
             })
             client_topic = TOPIC_MAP.get(_CLIENT_QA_TEMPLATE_IDS.get(entry.qa_id, ""))
             if client_topic:
@@ -2245,6 +2293,15 @@ class DeterministicResponder:
                 return handoff, False, "client_approved_asset_missing", None
             template_id = _CLIENT_QA_TEMPLATE_IDS.get(entry.qa_id)
             response_text = entry.answer
+            # The exact subscription pricing route is a text -> chart ->
+            # manager response.  Preserve the canonical source wording while
+            # returning only the leading text here; the ordered media payload
+            # carries the manager paragraph after the chart.
+            if entry.qa_id == "subscription_price":
+                ordered_text, ordered_assets = _ordered_client_asset_payload(entry, asset_map)
+                if ordered_assets:
+                    response_text = ordered_text
+                    asset_urls = ordered_assets
             if template_id in ALACARTE_SONDESH_ADDON_TEMPLATES:
                 response_text, asset_urls = self._apply_crosssell_nudges(
                     template_id,

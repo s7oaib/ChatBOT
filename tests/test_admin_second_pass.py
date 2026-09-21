@@ -160,6 +160,7 @@ def test_new_handoff_creation_persists_profile_username_when_event_omits_it(monk
 
 
 def test_cam_like_admin_row_backfills_verified_username_without_source_id(monkeypatch):
+    monkeypatch.setattr(config, "ADMIN_API_KEY", "test_admin_second_pass_key")
     user_id = f"17890000{uuid.uuid4().int % 100000000:08d}"
     session_memory.clear_session(user_id, "instagram")
     handoff = get_or_create_handoff(

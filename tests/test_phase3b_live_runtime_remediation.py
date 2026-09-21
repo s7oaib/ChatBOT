@@ -218,7 +218,7 @@ def test_home_table_booking_remains_handoff_after_copy_remediation(tmp_path, mon
 
     assert sent
     assert escalated.called
-    assert any("wa.me" in payload["text"] for payload in sent)
+    assert all("wa.me" not in payload["text"] for payload in sent)
 
 
 def test_distinct_operator_override_is_preserved_by_phase3b_migration(tmp_path):
