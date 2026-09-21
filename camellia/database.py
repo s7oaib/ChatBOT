@@ -666,8 +666,6 @@ class Database:
                 expires_at TIMESTAMP
             );
             """)
-            self._ensure_column(cursor, "cross_channel_handoffs", "customer_username", "TEXT")
-            self._ensure_column(cursor, "cross_channel_handoffs", "customer_external_id", "TEXT")
             # These fields make the generic-callback versus purchase-handoff
             # contract durable.  Add them for existing volumes without
             # rewriting or deleting handoff history.
@@ -682,6 +680,8 @@ class Database:
                     cursor.execute(
                         f"ALTER TABLE cross_channel_handoffs ADD COLUMN {column} {declaration}"
                     )
+            self._ensure_column(cursor, "cross_channel_handoffs", "customer_username", "TEXT")
+            self._ensure_column(cursor, "cross_channel_handoffs", "customer_external_id", "TEXT")
 
             # Admin notification state is deliberately separate from the
             # handoff lifecycle. Reading a notification must never mutate a
@@ -2925,11 +2925,11 @@ class Database:
         unresolved_topic: Optional[str],
         escalation_id: Optional[int],
         expires_at: Optional[str],
-        customer_username: Optional[str] = None,
-        customer_external_id: Optional[str] = None,
         instagram_username: Optional[str] = None,
         query_summary: Optional[str] = None,
         contact_mode: Optional[str] = None,
+        customer_username: Optional[str] = None,
+        customer_external_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Records a new opaque handoff reference. Never overwrites one."""
         with self.get_connection() as conn:
@@ -2937,16 +2937,16 @@ class Database:
                 """
                 INSERT INTO cross_channel_handoffs (
                     handoff_ref, source_channel, source_user_id, reason, summary,
-                    known_entities, customer_username, customer_external_id,
-                    unresolved_topic, status, escalation_id,
-                    instagram_username, query_summary, contact_mode, expires_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'CREATED', ?, ?, ?, ?, ?)
+                    known_entities, unresolved_topic, status, escalation_id,
+                    instagram_username, query_summary, contact_mode, expires_at,
+                    customer_username, customer_external_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'CREATED', ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     handoff_ref, source_channel, source_user_id, reason, summary,
-                    json.dumps(known_entities or {}, ensure_ascii=False),
-                    customer_username, customer_external_id, unresolved_topic,
+                    json.dumps(known_entities or {}, ensure_ascii=False), unresolved_topic,
                     escalation_id, instagram_username, query_summary, contact_mode, expires_at,
+                    customer_username, customer_external_id,
                 ),
             )
             conn.commit()
@@ -2964,11 +2964,11 @@ class Database:
         unresolved_topic: Optional[str],
         escalation_id: Optional[int],
         expires_at: Optional[str],
-        customer_username: Optional[str] = None,
-        customer_external_id: Optional[str] = None,
         instagram_username: Optional[str] = None,
         query_summary: Optional[str] = None,
         contact_mode: Optional[str] = None,
+        customer_username: Optional[str] = None,
+        customer_external_id: Optional[str] = None,
     ) -> tuple[Dict[str, Any], bool]:
         """Atomically reuse or create one active handoff for a customer.
 
@@ -2990,17 +2990,13 @@ class Database:
                 (source_channel, source_user_id),
             ).fetchone()
             if existing:
-                if any((customer_username, customer_external_id, instagram_username, query_summary, contact_mode)):
+                if customer_username or customer_external_id:
                     conn.execute(
                         "UPDATE cross_channel_handoffs SET "
                         "customer_username=COALESCE(?, customer_username), "
                         "customer_external_id=COALESCE(?, customer_external_id), "
-                        "instagram_username=COALESCE(?, instagram_username), "
-                        "query_summary=COALESCE(?, query_summary), "
-                        "contact_mode=COALESCE(?, contact_mode), "
                         "updated_at=CURRENT_TIMESTAMP WHERE handoff_ref = ?",
-                        (customer_username, customer_external_id, instagram_username,
-                         query_summary, contact_mode, existing["handoff_ref"]),
+                        (customer_username, customer_external_id, existing["handoff_ref"]),
                     )
                     existing = conn.execute(
                         "SELECT * FROM cross_channel_handoffs WHERE handoff_ref = ?",
@@ -3013,16 +3009,16 @@ class Database:
                 """
                 INSERT INTO cross_channel_handoffs (
                     handoff_ref, source_channel, source_user_id, reason, summary,
-                    known_entities, customer_username, customer_external_id,
-                    unresolved_topic, status, escalation_id,
-                    instagram_username, query_summary, contact_mode, expires_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'CREATED', ?, ?, ?, ?, ?)
+                    known_entities, unresolved_topic, status, escalation_id,
+                    instagram_username, query_summary, contact_mode, expires_at,
+                    customer_username, customer_external_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'CREATED', ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     handoff_ref, source_channel, source_user_id, reason, summary,
-                    json.dumps(known_entities or {}, ensure_ascii=False),
-                    customer_username, customer_external_id, unresolved_topic,
+                    json.dumps(known_entities or {}, ensure_ascii=False), unresolved_topic,
                     escalation_id, instagram_username, query_summary, contact_mode, expires_at,
+                    customer_username, customer_external_id,
                 ),
             )
             created = conn.execute(

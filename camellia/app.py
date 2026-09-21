@@ -92,7 +92,6 @@ from camellia.assisted_resolution import create_suggestion
 from camellia.auto_resolve import simulate_auto_resolve
 from camellia.content_integrity import apply_confirmed_menu_facts, apply_safe_content_remediations
 from camellia.instagram_story_sync import sync_instagram_stories, story_sync_loop
-from camellia.instagram_identity import resolve_instagram_identity
 from camellia.instagram_oauth import (
     STATE_COOKIE as INSTAGRAM_OAUTH_STATE_COOKIE,
     STATE_TTL_SECONDS as INSTAGRAM_OAUTH_STATE_TTL_SECONDS,
@@ -104,6 +103,7 @@ from camellia.instagram_oauth import (
     success_page as instagram_oauth_success_page,
     validate_state,
 )
+from camellia.instagram_identity import resolve_instagram_identity
 
 log = get_logger("camellia.app")
 
@@ -622,9 +622,9 @@ def _process_instagram_event(
     shared_reel: Optional[Dict[str, str]] = None,
     shared_post_id: Optional[str] = None,
     shared_source_type: Optional[str] = None,
+    instagram_username: Optional[str] = None,
     customer_identity: Optional[Dict[str, Any]] = None,
     resolve_identity: bool = False,
-    instagram_username: Optional[str] = None,
 ) -> None:
     """
     Matches, logs, escalates and replies for one Instagram DM.
@@ -640,13 +640,12 @@ def _process_instagram_event(
     frees the loop and lets several customers be handled at once.
     """
     try:
+        identity_was_supplied = customer_identity is not None
         identity = customer_identity or (
             resolve_instagram_identity(sender_id).as_record()
             if resolve_identity else
-            {"customer_external_id": sender_id, "customer_username": instagram_username}
+            {"customer_external_id": sender_id, "customer_username": None}
         )
-        if instagram_username and not identity.get("customer_username"):
-            identity["customer_username"] = instagram_username
         identity["customer_external_id"] = identity.get("customer_external_id") or sender_id
         facts = session_memory.get_facts(sender_id, "instagram")
         active_handoff = db.get_active_handoff("instagram", sender_id)
@@ -882,12 +881,12 @@ def _process_instagram_event(
                 user_id=sender_id, channel="instagram", reason=reason,
                 user_message=customer_message, facts=facts,
                 include_order=is_order_handoff,
-                customer_identity=identity,
                 instagram_username=instagram_username,
                 query_summary=customer_query_summary(
                     customer_message, contact_mode=contact_mode, reason=reason,
                 ),
                 contact_mode=contact_mode,
+                customer_identity=identity,
             )
             # A repeated "human"/"can someone help" against an already-active
             # handoff reuses the reference (above) and must not re-alert
@@ -913,6 +912,11 @@ def _process_instagram_event(
                 response_text = customer_facing_notice(
                     finalized_order=template_id == "order_next_steps"
                 )
+                if contact_mode == "support_callback" and identity_was_supplied:
+                    response_text = (
+                        f"{response_text}\n\nPlease quote reference {handoff['handoff_ref']} "
+                        "when you follow up with our team."
+                    )
             link_message = (
                 customer_facing_link_message(handoff["handoff_ref"], order_summary)
                 if contact_mode == "whatsapp_order" else None
@@ -1702,7 +1706,7 @@ def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks
                 background_tasks.add_task(
                     _process_instagram_event, sender_id, message_text, ad_id, entry_point,
                     shared_reel, shared_post_id, shared_source_type,
-                    None, True,
+                    None, None, True,
                 )
                 results.append({
                     "sender_id": sender_id,
@@ -1714,7 +1718,7 @@ def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks
                 continue
             background_tasks.add_task(
                 _process_instagram_event, sender_id, message_text, ad_id, entry_point,
-                None, None, None, None, True,
+                None, None, None, None, None, True,
             )
             results.append({
                 "sender_id": sender_id,

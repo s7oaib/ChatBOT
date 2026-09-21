@@ -75,6 +75,9 @@ class SessionMemoryManager:
                 "last_llm_called": False,
                 "last_fallback_used": False,
                 "last_grounding": None,
+                "decision_lane": None,
+                "route_trace": {},
+                "last_handoff_reason": None,
                 # Structured conversation state.  These fields are routing
                 # metadata only; customer-facing copy remains in approved QA.
                 "active_topic": None,
@@ -89,9 +92,6 @@ class SessionMemoryManager:
                 "last_assets_sent": [],
                 "active_asset": None,
                 "updated_at": current_time,
-                "decision_lane": None,
-                "route_trace": {},
-                "last_handoff_reason": None,
                 "last_escalation_status": None,
                 "cart": [],
                 "order_draft": {

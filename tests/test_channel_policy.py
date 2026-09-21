@@ -104,7 +104,7 @@ def test_active_price_clarification_routes_bengali_meals_to_approved_answer_with
     assert not [row for row in db.get_handoffs(limit=200) if row["source_user_id"] == user_id]
 
 
-def test_instagram_unsupported_topic_escalates_to_team_with_no_invented_fact():
+def test_instagram_unsupported_topic_escalates_to_whatsapp_with_no_invented_fact():
     """"Do you offer wedding gift wrapping?" — no approved fact exists, so
     knowledge is insufficient and the customer is offered a WhatsApp
     continuation instead of an invented answer."""
