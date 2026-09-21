@@ -42,7 +42,10 @@ from camellia.escalator import escalator
 from camellia.handoff import (
     customer_facing_link_message,
     customer_facing_notice,
+    customer_query_summary,
+    handoff_contact_mode,
     get_or_create_handoff,
+    is_human_help_request,
     mark_referred,
     retire_order_state,
     staff_summary,
@@ -78,13 +81,10 @@ from camellia.session_memory import session_memory
 from camellia.monitoring import get_logger, delivery_monitor, latency_monitor, classify_instagram_delivery
 from camellia.admin_security import (
     digest as security_digest,
-    generate_recovery_code,
-    hash_secret,
     new_token,
     normalize_username,
     token_hash,
     verify_password,
-    verify_totp,
 )
 from camellia.knowledge import SOURCE_MAP
 from camellia.candidate_safety import candidate_eligibility, detect_business_commitment_warnings, validate_candidate_answer
@@ -93,6 +93,17 @@ from camellia.auto_resolve import simulate_auto_resolve
 from camellia.content_integrity import apply_confirmed_menu_facts, apply_safe_content_remediations
 from camellia.instagram_story_sync import sync_instagram_stories, story_sync_loop
 from camellia.instagram_identity import resolve_instagram_identity
+from camellia.instagram_oauth import (
+    STATE_COOKIE as INSTAGRAM_OAUTH_STATE_COOKIE,
+    STATE_TTL_SECONDS as INSTAGRAM_OAUTH_STATE_TTL_SECONDS,
+    InstagramOAuthError,
+    build_authorization_url,
+    error_page as instagram_oauth_error_page,
+    exchange_and_verify,
+    issue_state,
+    success_page as instagram_oauth_success_page,
+    validate_state,
+)
 
 log = get_logger("camellia.app")
 
@@ -103,7 +114,7 @@ _admin_context: ContextVar[Optional[Dict[str, Any]]] = ContextVar("admin_context
 
 def _admin_security_version() -> str:
     return security_digest(
-        f"{config.ADMIN_PASSWORD_HASH}\x00{config.ADMIN_MFA_TOTP_SECRET}\x00{config.ADMIN_USERNAME}"
+        f"{config.ADMIN_PASSWORD_HASH}\x00{config.ADMIN_USERNAME}"
     )
 
 
@@ -206,12 +217,6 @@ async def lifespan(app: FastAPI):
             log.info("Delivered %s durable human notification event(s) on startup.", delivered_notifications)
     except Exception:
         log.exception("Could not process durable human notification events on startup.")
-    configured_recovery_hashes = [
-        item.strip()
-        for item in re.split(r"[\s,]+", config.ADMIN_MFA_RECOVERY_CODE_HASHES or "")
-        if item.strip()
-    ]
-    db.seed_admin_recovery_codes(configured_recovery_hashes, time.time())
     # Apply only the audited, canonical copy corrections through the existing
     # versioned Response Library store.  This is idempotent and deliberately
     # preserves any distinct client-authored override.
@@ -250,8 +255,6 @@ async def lifespan(app: FastAPI):
         )
     if not (config.ADMIN_USERNAME and config.ADMIN_PASSWORD_HASH):
         log.critical("Browser admin authentication is not configured; password login fails closed.")
-    if config.ADMIN_MFA_REQUIRED and not config.ADMIN_MFA_TOTP_SECRET:
-        log.critical("Production admin MFA is required but ADMIN_MFA_TOTP_SECRET is not configured.")
     if config.ADMIN_PIN:
         log.warning("ADMIN_PIN is configured only as a legacy value and is never accepted for browser admin authentication.")
     if config.ADMIN_API_KEY:
@@ -381,7 +384,8 @@ async def add_security_headers(request: Request, call_next):
 async def admin_session_middleware(request: Request, call_next):
     """Load server-side admin sessions and enforce browser CSRF protection."""
     public_paths = {"/admin", "/admin/dashboard", "/admin/login", "/admin/verify-pin"}
-    if not request.url.path.startswith("/admin"):
+    protected_non_admin_paths = {"/auth/instagram/start"}
+    if not request.url.path.startswith("/admin") and request.url.path not in protected_non_admin_paths:
         return await call_next(request)
     if request.url.path in public_paths:
         return await call_next(request)
@@ -480,6 +484,97 @@ def require_web_tester() -> None:
     if not config.ENABLE_WEB_TESTER:
         raise HTTPException(status_code=404, detail="Web tester is disabled. Set ENABLE_WEB_TESTER=true in environment variables.")
 
+
+@app.get("/auth/instagram/start")
+def start_instagram_oauth(
+    request: Request,
+    x_admin_key: Optional[str] = Header(None),
+):
+    """Start Instagram Login from an already authenticated Admin session."""
+    _require_secure_admin_request(request)
+    require_admin(x_admin_key)
+    try:
+        state = issue_state(config.INSTAGRAM_APP_SECRET)
+        url = build_authorization_url(
+            config.INSTAGRAM_APP_ID, config.INSTAGRAM_REDIRECT_URI, state
+        )
+    except InstagramOAuthError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    response = RedirectResponse(url=url, status_code=302)
+    response.set_cookie(
+        INSTAGRAM_OAUTH_STATE_COOKIE,
+        state,
+        max_age=INSTAGRAM_OAUTH_STATE_TTL_SECONDS,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+        path="/auth/instagram",
+    )
+    return response
+
+
+@app.get("/auth/instagram/callback", response_class=HTMLResponse)
+async def instagram_oauth_callback(
+    request: Request,
+    code: Optional[str] = Query(None),
+    state: Optional[str] = Query(None),
+    error: Optional[str] = Query(None),
+    error_reason: Optional[str] = Query(None),
+    error_description: Optional[str] = Query(None),
+):
+    """Exchange and verify Instagram Login without rendering credentials."""
+    response_kwargs = {"headers": {"Cache-Control": "no-store"}}
+    cookie_state = request.cookies.get(INSTAGRAM_OAUTH_STATE_COOKIE)
+    valid_state = False
+    try:
+        valid_state = validate_state(
+            state,
+            cookie_state,
+            config.INSTAGRAM_APP_SECRET,
+        )
+    except InstagramOAuthError:
+        valid_state = False
+    if not valid_state:
+        response = HTMLResponse(
+            instagram_oauth_error_page("This Instagram connection link is invalid or expired."),
+            status_code=400,
+            **response_kwargs,
+        )
+        response.delete_cookie(INSTAGRAM_OAUTH_STATE_COOKIE, path="/auth/instagram")
+        return response
+    if error or error_reason or error_description:
+        response = HTMLResponse(
+            instagram_oauth_error_page("Instagram authorization was cancelled or denied."),
+            status_code=400,
+            **response_kwargs,
+        )
+        response.delete_cookie(INSTAGRAM_OAUTH_STATE_COOKIE, path="/auth/instagram")
+        return response
+    if not code or len(code) > 4096 or any(char.isspace() for char in code):
+        response = HTMLResponse(
+            instagram_oauth_error_page("Instagram authorization code is missing or invalid."),
+            status_code=400,
+            **response_kwargs,
+        )
+        response.delete_cookie(INSTAGRAM_OAUTH_STATE_COOKIE, path="/auth/instagram")
+        return response
+    try:
+        identity = await exchange_and_verify(
+            app_id=config.INSTAGRAM_APP_ID,
+            app_secret=config.INSTAGRAM_APP_SECRET,
+            redirect_uri=config.INSTAGRAM_REDIRECT_URI,
+            code=code,
+            expected_username=config.INSTAGRAM_EXPECTED_USERNAME,
+        )
+        body = instagram_oauth_success_page(identity)
+        status_code = 200
+    except InstagramOAuthError as exc:
+        body = instagram_oauth_error_page(str(exc))
+        status_code = 502
+    response = HTMLResponse(body, status_code=status_code, **response_kwargs)
+    response.delete_cookie(INSTAGRAM_OAUTH_STATE_COOKIE, path="/auth/instagram")
+    return response
+
 # --------------------------------------------------------------------------
 # Root / Health Check / Favicon
 # --------------------------------------------------------------------------
@@ -529,6 +624,7 @@ def _process_instagram_event(
     shared_source_type: Optional[str] = None,
     customer_identity: Optional[Dict[str, Any]] = None,
     resolve_identity: bool = False,
+    instagram_username: Optional[str] = None,
 ) -> None:
     """
     Matches, logs, escalates and replies for one Instagram DM.
@@ -547,8 +643,10 @@ def _process_instagram_event(
         identity = customer_identity or (
             resolve_instagram_identity(sender_id).as_record()
             if resolve_identity else
-            {"customer_external_id": sender_id, "customer_username": None}
+            {"customer_external_id": sender_id, "customer_username": instagram_username}
         )
+        if instagram_username and not identity.get("customer_username"):
+            identity["customer_username"] = instagram_username
         identity["customer_external_id"] = identity.get("customer_external_id") or sender_id
         facts = session_memory.get_facts(sender_id, "instagram")
         active_handoff = db.get_active_handoff("instagram", sender_id)
@@ -730,7 +828,12 @@ def _process_instagram_event(
             "bengali_home_table_payment",
             "GUARD_staff_names_manager_contact",
         }
-        informational_answer = template_id in informational_templates
+        client_approved_answer = bool(
+            template_id and template_id.startswith("client_approved_")
+            and template_id != "client_approved_order_ready_handoff"
+        )
+        informational_answer = template_id in informational_templates or client_approved_answer
+        explicit_human_help = is_human_help_request(customer_message)
         needs_escalation = (
             (not was_matched and not informational_answer)
             or (
@@ -741,7 +844,9 @@ def _process_instagram_event(
                 "explicit_escalation",
                 "order_draft_receipt",
                 "order_next_steps",
+                "client_approved_order_ready_handoff",
             )
+            or explicit_human_help
         )
         log.info(
             "INSTAGRAM_OUTPUT_POLICY template=%s matched=%s informational=%s "
@@ -753,8 +858,14 @@ def _process_instagram_event(
             bool(needs_escalation),
         )
         if needs_escalation:
+            contact_mode = handoff_contact_mode(
+                customer_message, template_id=template_id,
+            )
             reason = (
-                "Order Confirmation & Intake Request" if was_matched
+                "Order Confirmation & Intake Request"
+                if contact_mode == "whatsapp_order"
+                else "Generic Human Support"
+                if explicit_human_help
                 else "Unmatched Instagram Query / Sensitive Request"
             )
             # Created before the staff alert (not after) so the alert can name
@@ -764,12 +875,19 @@ def _process_instagram_event(
             # cart into the handoff. "Talk to human" is not one of those, and
             # treating it as one is what attached a days-old Jolbhora order to
             # a plain request to speak to somebody.
-            is_order_handoff = template_id in ("order_draft_receipt", "order_next_steps")
+            is_order_handoff = template_id in (
+                "order_draft_receipt", "order_next_steps", "client_approved_order_ready_handoff",
+            )
             handoff = get_or_create_handoff(
                 user_id=sender_id, channel="instagram", reason=reason,
                 user_message=customer_message, facts=facts,
                 include_order=is_order_handoff,
                 customer_identity=identity,
+                instagram_username=instagram_username,
+                query_summary=customer_query_summary(
+                    customer_message, contact_mode=contact_mode, reason=reason,
+                ),
+                contact_mode=contact_mode,
             )
             # A repeated "human"/"can someone help" against an already-active
             # handoff reuses the reference (above) and must not re-alert
@@ -789,20 +907,27 @@ def _process_instagram_event(
                     },
                 )
             order_summary = handoff.get("verified_order")
-            if template_id == "order_draft_receipt":
+            if template_id in ("order_draft_receipt", "client_approved_order_ready_handoff") or facts.get("client_qa_handoff_exact"):
                 response_text = response_text.rstrip()
             else:
                 response_text = customer_facing_notice(
                     finalized_order=template_id == "order_next_steps"
                 )
-            link_message = customer_facing_link_message(handoff["handoff_ref"], order_summary)
+            link_message = (
+                customer_facing_link_message(handoff["handoff_ref"], order_summary)
+                if contact_mode == "whatsapp_order" else None
+            )
             mark_referred(handoff["handoff_ref"])
             if is_order_handoff and order_summary:
                 # The order is now on its way to a human, prefilled in the
                 # link above. Instagram's copy has done its job; keeping it
                 # would make it luggage for every later enquiry.
                 retire_order_state(sender_id, "instagram")
-            template_id = "instagram_whatsapp_handoff"
+            template_id = (
+                "instagram_whatsapp_handoff"
+                if contact_mode == "whatsapp_order"
+                else "instagram_support_handoff"
+            )
             image_url = None
 
         trace["source_context_used"] = bool(facts.get("source_context_used"))
@@ -811,7 +936,7 @@ def _process_instagram_event(
         )
         trace["source_referential_intent"] = facts.get("source_referential_intent")
         logged_response = response_text
-        if needs_escalation:
+        if needs_escalation and link_message:
             logged_response = f"{response_text}\n\n{link_message}"
         conversation_id = db.log_conversation(
             sender_id, "instagram", customer_message, logged_response, was_matched,
@@ -822,7 +947,7 @@ def _process_instagram_event(
             sender_id, response_text, image_url=image_url,
             inbound_message_id=conversation_id, response_type="reply",
         )
-        if needs_escalation:
+        if needs_escalation and link_message:
             send_instagram_reply(
                 sender_id, link_message,
                 inbound_message_id=conversation_id, response_type="handoff",
@@ -1405,6 +1530,15 @@ def _safe_instagram_event_shape(messaging_event: dict) -> Dict[str, Any]:
     }
 
 
+def _instagram_account_guard_matches(entry_id: Any, configured_account_id: Any) -> bool:
+    """Compare webhook and configured account ids without normalizing namespaces."""
+    entry_value = str(entry_id or "").strip()
+    configured_value = str(configured_account_id or "").strip()
+    if not configured_value:
+        return True
+    return hmac.compare_digest(entry_value, configured_value)
+
+
 def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks) -> dict:
     entries = payload.get("entry", []) if isinstance(payload, dict) else []
     if not isinstance(entries, list):
@@ -1416,8 +1550,21 @@ def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks
     )
     results = []
     for entry in entries:
-        if configured_account_id and str(entry.get("id", "")) != configured_account_id:
-            log.info("Ignored Instagram webhook entry for foreign account (foreign_account=true).")
+        entry_id = entry.get("id", "")
+        guard_match = _instagram_account_guard_matches(entry_id, configured_account_id)
+        log.info(
+            "Instagram account guard evaluated: match=%s entry_id_hash=%s configured_id_hash=%s",
+            guard_match,
+            _safe_identifier_hash(entry_id),
+            _safe_identifier_hash(configured_account_id),
+        )
+        if not guard_match:
+            log.info(
+                "Ignored Instagram webhook entry for foreign account "
+                "(foreign_account=true, entry_id_hash=%s, configured_id_hash=%s).",
+                _safe_identifier_hash(entry_id),
+                _safe_identifier_hash(configured_account_id),
+            )
             continue
 
         events = list(entry.get("messaging", []))
@@ -1785,16 +1932,24 @@ def send_instagram_reply(
     )
     cards_first = any(caption for _, caption in captioned) and not text_first
 
-    if not config.INSTAGRAM_ACCESS_TOKEN:
-        msg_type = f"IMAGE x{len(images)}" if images else "TEXT"
-        log.info(
-            "[MOCK IG OUTBOUND] type=%s recipient_hash=%s text_length=%d",
-            msg_type, _safe_identifier_hash(recipient_id), len(text or ""),
-        )
-        return {"mock": True, "status": "sent", "recipient": recipient_id, "type": msg_type}
+    try:
+        auth_mode = config.instagram_auth_mode()
+    except ValueError as exc:
+        log.error("Instagram outbound configuration is invalid: %s", exc)
+        return {"status": "failed", "error": str(exc)}
 
-    token = config.INSTAGRAM_ACCESS_TOKEN.strip()
-    if token.startswith("IGAA"):
+    token = (config.INSTAGRAM_ACCESS_TOKEN or "").strip()
+    if not token:
+        log.error(
+            "Instagram outbound is not configured: access token is missing "
+            "for auth_mode=%s.", auth_mode,
+        )
+        return {
+            "status": "failed",
+            "error": f"INSTAGRAM_ACCESS_TOKEN is not set for auth mode {auth_mode}.",
+        }
+
+    if auth_mode == "instagram_login":
         url = f"https://graph.instagram.com/{config.INSTAGRAM_API_VERSION}/me/messages"
     else:
         page_id = config.INSTAGRAM_PAGE_ID or "me"
@@ -2342,9 +2497,9 @@ def _webhook_signature_status() -> str:
 
 
 def _instagram_profile_url_and_identity() -> Tuple[str, str]:
-    """The messenger_profile URL for whichever token flavour is configured."""
-    token = (config.INSTAGRAM_ACCESS_TOKEN or "").strip()
-    if token.startswith("IGAA"):
+    """The messenger_profile URL for the explicitly configured auth mode."""
+    auth_mode = config.instagram_auth_mode()
+    if auth_mode == "instagram_login":
         return (
             f"https://graph.instagram.com/{config.INSTAGRAM_API_VERSION}/me/messenger_profile",
             "instagram_login_token (graph.instagram.com/me)",
@@ -2405,17 +2560,31 @@ def instagram_token_status(force: bool = False) -> Dict[str, Any]:
     `unknown` is deliberately not an alarm. A network blip must not be
     reported as a dead credential, or the warning stops meaning anything.
     """
+    try:
+        auth_mode = config.instagram_auth_mode()
+    except ValueError as exc:
+        return {"state": "configuration_error", "detail": str(exc)}
+
     token = (config.INSTAGRAM_ACCESS_TOKEN or "").strip()
     if not token:
-        return {"state": "not_configured", "detail": "INSTAGRAM_ACCESS_TOKEN is not set."}
+        return {
+            "state": "not_configured",
+            "auth_mode": auth_mode,
+            "detail": "INSTAGRAM_ACCESS_TOKEN is not set.",
+        }
 
     now = time.time()
     cached = _ig_token_state.get("result")
-    if not force and cached and (now - _ig_token_state["checked_at"]) < _IG_TOKEN_TTL_SECONDS:
+    if (
+        not force
+        and cached
+        and cached.get("auth_mode") == auth_mode
+        and (now - _ig_token_state["checked_at"]) < _IG_TOKEN_TTL_SECONDS
+    ):
         return {**cached, "checked_seconds_ago": round(now - _ig_token_state["checked_at"], 1)}
 
     url, identity = _instagram_profile_url_and_identity()
-    result = _check_instagram_token(token, url, identity)
+    result = {**_check_instagram_token(token, url, identity), "auth_mode": auth_mode}
     _ig_token_state["result"] = result
     _ig_token_state["checked_at"] = now
     if result["state"] == "invalid":
@@ -2489,6 +2658,10 @@ def health_check():
             f"Menu is at {storage['menu']['path']} with no GOOGLE_SHEET_CSV_URL set — "
             "menu edits are lost on every deploy."
         )
+    if instagram_token.get("state") == "configuration_error":
+        warnings.append(
+            f"Instagram outbound auth configuration is invalid: {instagram_token.get('detail')}"
+        )
     if instagram_token.get("state") == "invalid":
         # A warning rather than a 503, on purpose. This genuinely is an outage
         # of the Instagram channel, but the health endpoint remains available
@@ -2521,8 +2694,6 @@ def health_check():
             "instagram_token": instagram_token,
             "admin_auth": {
                 "password_configured": bool(config.ADMIN_USERNAME and config.ADMIN_PASSWORD_HASH),
-                "mfa_required": bool(config.ADMIN_MFA_REQUIRED),
-                "mfa_configured": bool(config.ADMIN_MFA_TOTP_SECRET),
                 "machine_api_configured": bool(config.ADMIN_API_KEY),
                 "https_required": bool(config.ADMIN_REQUIRE_HTTPS),
             },
@@ -2613,7 +2784,6 @@ async def admin_login(request: Request):
 
     username = str(body.get("username") or "").strip()
     password = str(body.get("password") or "")
-    totp_code = str(body.get("totp") or "").strip()
     retry_after = _admin_login_rate_limit(request, username)
     if retry_after:
         _audit_admin_event("RATE_LIMIT", username, request)
@@ -2627,21 +2797,6 @@ async def admin_login(request: Request):
     if not username_ok or not password_ok:
         retry_after = _admin_login_failed(request, username, "LOGIN_FAILURE")
         return _generic_login_failure(retry_after)
-
-    recovery_used = False
-    if config.ADMIN_MFA_REQUIRED:
-        if not config.ADMIN_MFA_TOTP_SECRET:
-            _audit_admin_event("MFA_UNAVAILABLE", username, request)
-            return JSONResponse(status_code=503, content={"detail": "Admin authentication is not configured."})
-        if not totp_code:
-            return JSONResponse(status_code=200, content={"mfa_required": True})
-        totp_ok = verify_totp(config.ADMIN_MFA_TOTP_SECRET, totp_code)
-        if not totp_ok and totp_code:
-            recovery_used = db.consume_admin_recovery_code(totp_code, verify_password, time.time())
-        if not totp_ok and not recovery_used:
-            retry_after = _admin_login_failed(request, username, "MFA_FAILURE")
-            return _generic_login_failure(retry_after)
-        _audit_admin_event("MFA_SUCCESS", username, request)
 
     now = time.time()
     db.reset_admin_login_scopes(_admin_scopes(username, _admin_ip(request))[:2])
@@ -2688,17 +2843,6 @@ def admin_logout(request: Request):
     response.delete_cookie(ADMIN_SESSION_COOKIE, path="/", secure=True, httponly=True, samesite="strict")
     response.delete_cookie(ADMIN_CSRF_COOKIE, path="/", secure=True, httponly=False, samesite="strict")
     return response
-
-
-@app.post("/admin/security/recovery-codes")
-def generate_admin_recovery_codes(request: Request):
-    require_admin()
-    codes = [generate_recovery_code() for _ in range(10)]
-    now = time.time()
-    for code in codes:
-        db.add_admin_recovery_code(hash_secret(code), now)
-    _audit_admin_event("RECOVERY_CODES_GENERATED", (_admin_context.get() or {}).get("username", ""), request)
-    return {"status": "generated", "codes": codes, "warning": "Shown once. Store securely; they cannot be retrieved again."}
 
 
 @app.get("/admin/security/audit")
@@ -5748,7 +5892,7 @@ def get_admin_dashboard():
     """
     Dedicated PIN-Protected Kitchen & Menu Management Portal for Camellia Artisanal.
     Features:
-    - Username/password authentication with optional production MFA
+    - Username/password authentication
     - 📋 Paste Menu Card Text Parser
     - 📸 Drag-and-Drop Image Flyer Upload with Groq Vision OCR
     - 📊 Google Sheets Live Sync
@@ -6194,16 +6338,11 @@ def get_admin_dashboard():
                 <label for="passwordInput">Password</label>
                 <input type="password" id="passwordInput" class="credential-input" autocomplete="current-password" onkeydown="if(event.key==='Enter') loginAdmin()">
             </div>
-            <div class="credential-input-wrap" id="totpInputWrap" style="display:none">
-                <label for="totpInput">Authenticator code</label>
-                <input type="text" id="totpInput" class="credential-input" inputmode="numeric" autocomplete="one-time-code" maxlength="6" onkeydown="if(event.key==='Enter') loginAdmin()">
-            </div>
-            
             <button class="auth-btn" onclick="loginAdmin()">
                 <span>Unlock Portal</span> ➔
             </button>
             
-            <p class="auth-hint">Use your configured admin username, password, and authenticator code when prompted.</p>
+            <p class="auth-hint">Use your configured admin username and password.</p>
         </div>
     </div>
 
@@ -7429,9 +7568,7 @@ THIS WEEK'S BENGAL SPECIALS
             const requestGeneration = ++authRequestGeneration;
             const username = document.getElementById('usernameInput').value.trim();
             const passwordInput = document.getElementById('passwordInput');
-            const totpInput = document.getElementById('totpInput');
             const password = passwordInput.value;
-            const totp = totpInput.value.trim();
             if (!username || !password) return;
 
             try {
@@ -7439,20 +7576,12 @@ THIS WEEK'S BENGAL SPECIALS
                     method: 'POST',
                     credentials: 'same-origin',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({ username: username, password: password, totp: totp })
+                    body: JSON.stringify({ username: username, password: password })
                 });
-                const data = await resp.json().catch(() => ({}));
-
                 if (requestGeneration !== authRequestGeneration) return;
                 if (resp.ok) {
-                    if (data.mfa_required) {
-                        document.getElementById('totpInputWrap').style.display = 'block';
-                        totpInput.focus();
-                        return;
-                    }
                     adminAuthenticated = true;
                     passwordInput.value = '';
-                    totpInput.value = '';
                     hideAuthOverlay();
                     loadActiveMenu();
                     loadAdRoutes();
@@ -7481,8 +7610,6 @@ THIS WEEK'S BENGAL SPECIALS
             try { await fetch('/admin/logout', { method: 'POST', headers: getAuthHeaders(), credentials: 'same-origin' }); } catch (e) { /* session expires server-side */ }
             adminAuthenticated = false;
             document.getElementById('passwordInput').value = '';
-            document.getElementById('totpInput').value = '';
-            document.getElementById('totpInputWrap').style.display = 'none';
             showAuthLogin();
         }
 

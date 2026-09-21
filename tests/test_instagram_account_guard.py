@@ -92,6 +92,11 @@ def test_matching_instagram_account_entry_is_processed(monkeypatch):
     assert len(tasks.queued) == 1
 
 
+def test_account_guard_uses_exact_webhook_entry_identifier(monkeypatch):
+    assert app_module._instagram_account_guard_matches("professional-id", "professional-id")
+    assert not app_module._instagram_account_guard_matches("oauth-profile-id", "professional-id")
+
+
 def test_foreign_instagram_account_entry_is_ignored_before_dispatch(monkeypatch, caplog):
     monkeypatch.setattr(config, "INSTAGRAM_ACCOUNT_ID", INSTAGRAM_ACCOUNT_ID)
     monkeypatch.setattr(config, "BYPASS_AD_GATE", True)
@@ -118,6 +123,8 @@ def test_foreign_instagram_account_entry_is_ignored_before_dispatch(monkeypatch,
     assert not match.called
     assert not log.called
     assert "foreign account" in caplog.text
+    assert "17841402372443585" not in caplog.text
+    assert INSTAGRAM_ACCOUNT_ID not in caplog.text
 
 
 def test_missing_instagram_account_guard_preserves_compatibility(monkeypatch):

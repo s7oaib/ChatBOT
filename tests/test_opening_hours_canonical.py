@@ -92,6 +92,50 @@ def test_opening_hours_route_does_not_call_nlu_or_groq(monkeypatch):
     assert not analyze.called
 
 
+def test_opening_hours_overrides_stale_home_table_story_context(monkeypatch):
+    monkeypatch.setattr(config, "BYPASS_AD_GATE", True)
+    user_id = "opening-hours-stale-story"
+    session_memory.clear_session(user_id, "instagram")
+    facts = session_memory.get_facts(user_id, "instagram")
+    facts.update({
+        "home_table_context": True,
+        "last_topic": "bengali_home_table",
+        "source_route": {
+            "active": True,
+            "routing_topic": "Bengali Home Table",
+            "source_type": "story",
+        },
+    })
+
+    text, matched, template_id, _images = responder.match_and_respond(
+        "What are your opening hours?", user_id=user_id, channel="instagram",
+    )
+
+    assert matched is True
+    assert template_id == "opening_hours"
+    assert text == OPENING_HOURS
+
+
+def test_opening_hours_kitchen_paraphrase_overrides_stale_story_context(monkeypatch):
+    monkeypatch.setattr(config, "BYPASS_AD_GATE", True)
+    user_id = "opening-hours-kitchen-paraphrase"
+    session_memory.clear_session(user_id, "instagram")
+    facts = session_memory.get_facts(user_id, "instagram")
+    facts.update({
+        "home_table_context": True,
+        "last_topic": "bengali_home_table",
+        "source_route": {"active": True, "routing_topic": "Bengali Home Table"},
+    })
+
+    text, matched, template_id, _images = responder.match_and_respond(
+        "When is the kitchen open?", user_id=user_id, channel="instagram",
+    )
+
+    assert matched is True
+    assert template_id == "opening_hours"
+    assert text == OPENING_HOURS
+
+
 def _resolve_delivery_time(entities):
     understood = UnderstandingResult(
         intents=[Intent.DELIVERY_TIME_QUESTION.value],
@@ -167,7 +211,7 @@ def test_equal_seed_version_backfills_opening_hours_without_overwriting_live_edi
     assert opening_hours["response"] == OPENING_HOURS
     assert delivery_time["response"] == "CLIENT OPERATOR DELIVERY COPY"
     assert greeting["response"] == "CLIENT OPERATOR GREETING COPY"
-    assert after["seed_version"] == 21
+    assert after["seed_version"] == _seed_data()["seed_version"]
     assert after["seeded_from_hash"] == "old-hash"
     assert after["operator_meta"] == "keep"
     assert any("opening_hours" in action for action in actions)

@@ -60,7 +60,7 @@ def _media_field_presence(media: Dict[str, Any]) -> Dict[str, bool]:
 
 def _media_list_details(client: httpx.Client, token: str, version: str) -> tuple[Optional[str], Optional[str]]:
     """Return the owned-media endpoint and a sanitized setup failure, if any."""
-    if token.startswith("IGAA"):
+    if config.instagram_auth_mode() == "instagram_login":
         return f"https://graph.instagram.com/{version}/me/media", None
     base = f"https://graph.facebook.com/{version}"
     page_id = (config.INSTAGRAM_PAGE_ID or "me").strip()
@@ -81,13 +81,9 @@ def _media_list_url(client: httpx.Client, token: str, version: str) -> Optional[
     """
     Where this token can list the account's own media, or None.
 
-    The two token flavours do not share a host. An Instagram Login token
-    ("IGAA...") addresses the account directly on graph.instagram.com and is
-    rejected by graph.facebook.com outright — which is what this function used
-    to ask unconditionally, so every lookup on such a deployment came back as
-    "permission_or_account_unavailable" and looked like a missing permission
-    rather than the wrong address. A page token still has to go the long way
-    round, via the page's linked instagram_business_account.
+    The two explicitly configured auth modes do not share a host. Instagram
+    Login addresses the account directly on graph.instagram.com. A legacy Page
+    token goes through graph.facebook.com and the linked business account.
     """
     return _media_list_details(client, token, version)[0]
 
@@ -110,7 +106,11 @@ def verify_media_by_id(media_id: str) -> Dict[str, Any]:
     if not media_id or not media_id.isdigit():
         return {"status": "invalid_media_id"}
     version = config.INSTAGRAM_API_VERSION
-    host = "graph.instagram.com" if token.startswith("IGAA") else "graph.facebook.com"
+    host = (
+        "graph.instagram.com"
+        if config.instagram_auth_mode() == "instagram_login"
+        else "graph.facebook.com"
+    )
     url = f"https://{host}/{version}/{media_id}"
     try:
         with httpx.Client(timeout=8.0) as client:

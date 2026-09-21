@@ -43,7 +43,7 @@ Built to convert Meta Ad leads, filter out organic DM noise, send high-resolutio
 - **Manual Handoff**: Stores durable conversation/handoff state in `camellia.db` subject to retention, while normal logs use hashed identifiers and safe error metadata only. Customers receive a `wa.me` link; WhatsApp is handled by a human.
 
 ### 5. 🔐 Kitchen & Menu Admin Portal (`/admin` / `/admin/dashboard`)
-- **Secure Admin Authentication**: Browser access uses `ADMIN_USERNAME` + an Argon2id `ADMIN_PASSWORD_HASH`, production TOTP MFA, durable rate limiting, CSRF-protected server sessions, and logout revocation. `ADMIN_API_KEY` remains a separate machine credential; legacy `ADMIN_PIN` is not accepted.
+- **Secure Admin Authentication**: Browser access uses `ADMIN_USERNAME` + an Argon2id `ADMIN_PASSWORD_HASH`, durable rate limiting, CSRF-protected server sessions, and logout revocation. `ADMIN_API_KEY` remains a separate machine credential; legacy `ADMIN_PIN` is not accepted.
 - **📋 Paste Menu Card Parser**: Extracts dish names, descriptions, weights, and prices from flyer notes or dish lists, automatically categorizing items as Veg or Non-Veg.
 - **📸 Flyer Photo & Graphic OCR**: Scans printed menu photos or Instagram flyers with a Groq vision model, using the same key the bot already needs for replies.
 - **📊 Google Sheets Live Sync**: One-click sync from Google Sheets CSV without server restarts or touching code.
@@ -140,10 +140,15 @@ the hosting provider's secret manager:
 Fill in your Meta App Credentials:
 ```env
 META_VERIFY_TOKEN=your_meta_verify_token
-INSTAGRAM_PAGE_ID=your_instagram_page_id
 INSTAGRAM_ACCESS_TOKEN=your_instagram_access_token
+INSTAGRAM_AUTH_MODE=instagram_login
 WHATSAPP_BUSINESS_NUMBER=919800000000
 ```
+
+Set `INSTAGRAM_AUTH_MODE=instagram_login` for Instagram Login credentials. The
+legacy Facebook Page-token path is retained only when explicitly configured as
+`INSTAGRAM_AUTH_MODE=legacy_page`; the app never infers the Graph host from a
+token prefix. `INSTAGRAM_PAGE_ID` is used only in legacy page mode.
 
 ### 3. Run Server
 

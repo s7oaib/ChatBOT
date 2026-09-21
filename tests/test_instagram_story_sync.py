@@ -66,6 +66,10 @@ def _story(story_id=STORY_ID, timestamp="2026-09-17T08:00:00+00:00"):
 def _install_meta(monkeypatch, responses, token="PAGE_TOKEN"):
     calls = []
     monkeypatch.setattr(config, "INSTAGRAM_ACCESS_TOKEN", token)
+    monkeypatch.setattr(
+        config, "INSTAGRAM_AUTH_MODE",
+        "instagram_login" if token.startswith("IGAA") else "legacy_page",
+    )
     monkeypatch.setattr(config, "INSTAGRAM_PAGE_ID", "page-1")
     monkeypatch.setattr(config, "INSTAGRAM_API_VERSION", "v25.0")
     monkeypatch.setattr(

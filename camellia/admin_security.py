@@ -1,17 +1,12 @@
 """Admin authentication primitives shared by the portal and its tests.
 
 This module deliberately contains no browser/UI code and never logs credential
-material. Passwords and recovery codes are verified with Argon2id; session and
-CSRF bearer values are stored only as hashes.
+material. Passwords are verified with Argon2id; session and CSRF bearer values
+are stored only as hashes.
 """
 
-import base64
 import hashlib
-import hmac
 import secrets
-import struct
-import time
-from typing import Optional
 
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
@@ -44,7 +39,7 @@ def verify_password(candidate: str, configured_hash: str) -> bool:
         return False
 
 
-def hash_secret(value: str) -> str:
+def hash_password(value: str) -> str:
     return PASSWORD_HASHER.hash(str(value))
 
 
@@ -54,29 +49,3 @@ def new_token() -> str:
 
 def token_hash(value: str) -> str:
     return digest(value)
-
-
-def verify_totp(secret: str, code: str, now: Optional[float] = None, window: int = 1) -> bool:
-    """Verify a six-digit RFC 6238 TOTP with a small clock-skew window."""
-    normalized = "".join(str(secret or "").split()).upper()
-    candidate = str(code or "").strip()
-    if not normalized or len(candidate) != 6 or not candidate.isdigit():
-        return False
-    try:
-        padded = normalized + "=" * (-len(normalized) % 8)
-        key = base64.b32decode(padded, casefold=True)
-    except (ValueError, base64.binascii.Error):
-        return False
-    counter = int((time.time() if now is None else now) // 30)
-    for offset in range(-max(0, int(window)), max(0, int(window)) + 1):
-        digest_value = hmac.new(key, struct.pack(">Q", counter + offset), hashlib.sha1).digest()
-        start = digest_value[-1] & 0x0F
-        number = struct.unpack(">I", digest_value[start:start + 4])[0] & 0x7FFFFFFF
-        expected = str(number % 1_000_000).zfill(6)
-        if hmac.compare_digest(expected, candidate):
-            return True
-    return False
-
-
-def generate_recovery_code() -> str:
-    return secrets.token_urlsafe(12)

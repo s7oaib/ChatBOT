@@ -52,6 +52,44 @@ def test_alacarte_primary_answer_then_exact_addon_bundle_once():
     assert session_memory.get_facts(user_id, "instagram")["alacarte_sondesh_addon_sent"]
 
 
+def test_client_approved_alacarte_paraphrase_gets_addon_bundle_once():
+    user_id = f"addon-client-qa-{uuid.uuid4().hex}"
+    session_memory.clear_session(user_id, "instagram")
+
+    text, matched, template_id, images = _ask(
+        "What meals do you offer à la carte?", user_id
+    )
+
+    assert matched is True
+    assert template_id == "know_more"
+    assert ADDON_COPY in text
+    assert _urls(images)[-3:] == ADDON_ASSETS
+
+
+def test_alacarte_interrupts_stale_home_table_story_context():
+    user_id = f"addon-stale-story-{uuid.uuid4().hex}"
+    session_memory.clear_session(user_id, "instagram")
+    facts = session_memory.get_facts(user_id, "instagram")
+    facts["home_table_context"] = True
+    facts["source_route"] = {
+        "active": True,
+        "routing_topic": "Bengali Home Table",
+        "topic_id": "bengali_home_table",
+        "source_type": "story",
+    }
+
+    text, matched, template_id, images = _ask(
+        "Can you show me the à la carte menu?", user_id
+    )
+
+    assert matched is True
+    assert template_id == "know_more"
+    assert "Bengali Home Table" not in text
+    assert ADDON_COPY in text
+    assert _urls(images)[-3:] == ADDON_ASSETS
+    assert session_memory.get_facts(user_id, "instagram")["source_context_superseded"]
+
+
 def test_repeat_alacarte_turn_has_no_duplicate_pitch_or_bundle():
     user_id = f"addon-repeat-{uuid.uuid4().hex}"
     session_memory.clear_session(user_id, "instagram")
@@ -59,6 +97,36 @@ def test_repeat_alacarte_turn_has_no_duplicate_pitch_or_bundle():
 
     text, _matched, _template_id, images = _ask(
         "what can I order à la carte?", user_id
+    )
+
+    assert ADDON_COPY not in text
+    assert not any(asset in _urls(images) for asset in ADDON_ASSETS)
+
+
+def test_durable_prior_addon_bundle_suppresses_stale_session_repeat(monkeypatch):
+    user_id = f"addon-durable-repeat-{uuid.uuid4().hex}"
+    session_memory.clear_session(user_id, "instagram")
+
+    monkeypatch.setattr(
+        "camellia.responder.db.get_conversations",
+        lambda **kwargs: [{
+            "id": 777,
+            "user_id": user_id,
+            "channel": "instagram",
+            "user_message": "What meals do you offer à la carte?",
+        }],
+    )
+    monkeypatch.setattr(
+        "camellia.responder.db.get_instagram_outbound_audit",
+        lambda **kwargs: [
+            {"response_type": "image", "success": 1},
+            {"response_type": "image", "success": 1},
+            {"response_type": "image", "success": 1},
+        ],
+    )
+
+    text, _matched, _template_id, images = _ask(
+        "What meals do you offer à la carte?", user_id
     )
 
     assert ADDON_COPY not in text

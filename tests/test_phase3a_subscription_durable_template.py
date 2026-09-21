@@ -68,7 +68,7 @@ def test_same_version_replaces_only_known_legacy_subscription_once(monkeypatch, 
     for before_item, after_item in zip(before, after["templates"]):
         if before_item["id"] != SUBSCRIPTION_ID:
             assert before_item == after_item
-    assert after["seed_version"] == seed["seed_version"] == 21
+    assert after["seed_version"] == seed["seed_version"]
     assert after["seeded_from_hash"] == "old-hash"
     assert after["operator_meta"] == "keep"
     backups = list(target.parent.glob("qa_templates.subscription-template-backfill.json"))

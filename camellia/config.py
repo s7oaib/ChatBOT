@@ -94,6 +94,15 @@ def _resolve_path(env_var: str, default: Path, must_exist: bool = False) -> str:
 
 _GRAPH_API_VERSION_RE = re.compile(r"^v\d+\.\d+$")
 _DEFAULT_INSTAGRAM_API_VERSION = "v25.0"
+_INSTAGRAM_AUTH_MODES = frozenset({"instagram_login", "legacy_page"})
+
+
+def _resolve_instagram_auth_mode() -> str:
+    """Read the Graph credential family without inferring it from a token."""
+    raw = os.getenv("INSTAGRAM_AUTH_MODE")
+    # Instagram Login is the safe default for this Instagram-only service.
+    # Legacy Page-token behavior is available only when explicitly selected.
+    return "instagram_login" if raw is None else raw.strip().casefold()
 
 
 def _resolve_graph_api_version(env_var: str, default: str) -> str:
@@ -126,15 +135,12 @@ class Config:
     # Machine authentication for trusted tools. Never use this as a browser
     # password and never inject it into the Admin Portal JavaScript.
     ADMIN_API_KEY: str = _env_secret("ADMIN_API_KEY")
-    # Browser authentication is username + Argon2id password, followed by MFA
-    # in production. ADMIN_PIN remains readable only for deprecation telemetry;
-    # it is never accepted by the browser or require_admin().
+    # Browser authentication is username + Argon2id password. ADMIN_PIN remains
+    # readable only for deprecation telemetry; it is never accepted by the
+    # browser or require_admin().
     ADMIN_PIN: str = _env_secret("ADMIN_PIN")
     ADMIN_USERNAME: str = _env_secret("ADMIN_USERNAME")
     ADMIN_PASSWORD_HASH: str = _env_secret("ADMIN_PASSWORD_HASH")
-    ADMIN_MFA_TOTP_SECRET: str = _env_secret("ADMIN_MFA_TOTP_SECRET")
-    ADMIN_MFA_RECOVERY_CODE_HASHES: str = _env_secret("ADMIN_MFA_RECOVERY_CODE_HASHES")
-    ADMIN_MFA_REQUIRED: bool = os.getenv("ADMIN_MFA_REQUIRED", "true").lower() in ("true", "1", "t", "yes")
     ADMIN_REQUIRE_HTTPS: bool = os.getenv("ADMIN_REQUIRE_HTTPS", "true").lower() in ("true", "1", "t", "yes")
     try:
         ADMIN_SESSION_IDLE_SECONDS: int = max(300, int(os.getenv("ADMIN_SESSION_IDLE_SECONDS", "1800")))
@@ -260,6 +266,22 @@ class Config:
     # When set, webhook entries must belong to this exact Instagram account.
     # Leaving it blank preserves compatibility with existing integrations.
     INSTAGRAM_ACCOUNT_ID: str = os.getenv("INSTAGRAM_ACCOUNT_ID", "").strip()
+    # Instagram Login has its own app credentials. Do not silently reuse the
+    # webhook/Page app secret: a code issued for one app cannot be exchanged by
+    # another app, even when both are owned by the same Meta account.
+    INSTAGRAM_APP_ID: str = os.getenv("INSTAGRAM_APP_ID", "").strip()
+    INSTAGRAM_APP_SECRET: str = _env_secret("INSTAGRAM_APP_SECRET")
+    INSTAGRAM_REDIRECT_URI: str = os.getenv(
+        "INSTAGRAM_REDIRECT_URI",
+        "https://web-production-0cad70.up.railway.app/auth/instagram/callback",
+    ).strip()
+    INSTAGRAM_EXPECTED_USERNAME: str = os.getenv(
+        "INSTAGRAM_EXPECTED_USERNAME", "camellia.artisanal"
+    ).strip().casefold()
+    # Never infer this from the credential prefix: Meta token formats are not
+    # a stable API contract. Production must set this explicitly; the default
+    # keeps an unset local environment on the modern Instagram Login path.
+    INSTAGRAM_AUTH_MODE: str = _resolve_instagram_auth_mode()
     INSTAGRAM_PAGE_ID: str = os.getenv("INSTAGRAM_PAGE_ID", "")
     INSTAGRAM_ACCESS_TOKEN: str = os.getenv("INSTAGRAM_ACCESS_TOKEN", "")
     INSTAGRAM_API_VERSION: str = _resolve_graph_api_version(
@@ -373,6 +395,14 @@ class Config:
         if not self.GROQ_ENABLED:
             return False
         return bool(self.GROQ_API_KEY)
+
+    def instagram_auth_mode(self) -> str:
+        """Return the configured Graph credential family or fail closed."""
+        mode = str(self.INSTAGRAM_AUTH_MODE or "").strip().casefold()
+        if mode not in _INSTAGRAM_AUTH_MODES:
+            allowed = ", ".join(sorted(_INSTAGRAM_AUTH_MODES))
+            raise ValueError(f"INSTAGRAM_AUTH_MODE must be one of: {allowed}.")
+        return mode
 
 config = Config()
 

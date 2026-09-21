@@ -38,9 +38,9 @@ def _create_cam(identity):
             user_id, "Do you offer wedding gift wrapping?", "ad-identity",
             customer_identity=identity,
         )
-    match = re.search(r"CAM-\d{5,6}", send_reply.call_args.args[1])
-    assert match and escalated.call_count == 1
-    return user_id, match.group(0)
+    rows = [row for row in db.get_handoffs(limit=200) if row["source_user_id"] == user_id]
+    assert rows and escalated.call_count == 1
+    return user_id, rows[0]["handoff_ref"]
 
 
 def test_username_available_is_stored_and_authenticated_admin_can_display_it():

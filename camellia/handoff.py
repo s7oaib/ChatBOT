@@ -1,13 +1,13 @@
-"""Instagram -> WhatsApp human handoff.
+"""Instagram human handoff with an explicit support/order destination.
 
 Channel policy: Instagram is the only AI chatbot channel. When Instagram
 cannot answer (an unsupported question), or the customer asks for a person,
 or the request is order/event/complaint-shaped, this module creates an opaque
-reference ("CAM-48371") and a WhatsApp click-to-chat link so the customer can
-continue with a human on WhatsApp. It never answers the customer itself, and
-it never sends the conversation contents anywhere public — the reference
-resolves context server-side, through this module and the existing
-`escalator` staff-notification path.
+reference ("CAM-48371") and a durable owner handoff. Purchase-related
+requests may receive the approved WhatsApp click-to-chat continuation; generic
+support requests receive a callback acknowledgement with no WhatsApp link. It
+never sends the conversation contents anywhere public — the reference resolves
+context server-side through the existing `escalator` staff-notification path.
 
 A repeated "human please" from the same customer reuses the active handoff
 (`db.get_active_handoff`) instead of minting a new reference every time.
@@ -26,6 +26,91 @@ from camellia.monitoring import get_logger
 from camellia.session_memory import session_memory
 
 log = get_logger("camellia.handoff")
+
+
+# A WhatsApp continuation is a purchase-flow tool, not a generic support
+# inbox. Keep this decision explicit and deterministic so a CAM can never gain
+# a WhatsApp link merely because it was escalated.
+_PURCHASE_HANDOFF_RE = re.compile(
+    r"\b(?:book(?:ing)?|order|ordering|purchase|buy|payment|pay|invoice|"
+    r"pre[- ]?order|pre[- ]?book|checkout|reserve|reservation|seat|"
+    r"place\s+(?:an?\s+)?order|ready\s+to\s+place|bulk\s+order|"
+    r"custom\s+order|\d+\s*(?:boxes?|pieces?|guests?|people|kg)\b|"
+    r"event\s+(?:order|catering))\b",
+    re.IGNORECASE,
+)
+_HUMAN_HELP_RE = re.compile(
+    r"\b(?:human\s+help|human|a\s+person|people|an?\s+agent|"
+    r"someone|somebody|your\s+team|support|staff)\b|"
+    r"\b(?:talk|speak|connect|put|reach|get)\s+(?:to|me|back|through)\b|"
+    r"\b(?:can|could|would|will)\s+(?:someone|somebody|your\s+team|"
+    r"a\s+person|an?\s+agent|staff)\b|\bget\s+back\s+to\s+me\b",
+    re.IGNORECASE,
+)
+_MANAGER_CONTACT_RE = re.compile(
+    r"\b(?:who\s+can\s+i\s+speak\s+to\s+directly|"
+    r"how\s+can\s+i\s+contact\s+(?:your|the)\s+manager|"
+    r"who\s+(?:do|should)\s+i\s+contact|"
+    r"manager(?:'s)?\s+(?:contact|email|details?))\b",
+    re.IGNORECASE,
+)
+
+
+def normalize_instagram_username(value: Any) -> Optional[str]:
+    """Keep a supplied Instagram handle, never substituting a Meta ID."""
+    candidate = str(value or "").strip().lstrip("@").strip()
+    if not candidate or len(candidate) > 100 or candidate.isdigit():
+        return None
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", candidate):
+        return None
+    return candidate
+
+
+def handoff_contact_mode(user_message: str, *, template_id: Optional[str] = None) -> str:
+    """Return the customer-facing continuation allowed for this request."""
+    if template_id in {"order_draft_receipt", "order_next_steps"}:
+        return "whatsapp_order"
+    if _PURCHASE_HANDOFF_RE.search(str(user_message or "")):
+        return "whatsapp_order"
+    return "support_callback"
+
+
+def is_human_help_request(user_message: str) -> bool:
+    """Recognize explicit requests for a person, including short probes."""
+    text = " ".join(str(user_message or "").lower().split()).strip(" .?!")
+    # These are approved informational manager-contact questions. They must
+    # continue to use the canonical contact record rather than becoming a
+    # generic callback handoff merely because they contain "speak" or
+    # "contact".
+    if _MANAGER_CONTACT_RE.search(text):
+        return False
+    return bool(
+        text in {"human", "person", "people", "agent", "staff", "support"}
+        or _HUMAN_HELP_RE.search(text)
+    )
+
+
+def customer_query_summary(
+    user_message: str,
+    *,
+    contact_mode: str,
+    reason: str,
+) -> str:
+    """Create a bounded, privacy-safe owner-facing description of the need."""
+    if contact_mode == "whatsapp_order":
+        return "Help with a booking, order, purchase, payment, or invoice."
+    if is_human_help_request(user_message):
+        return "A team member to respond."
+
+    value = " ".join(str(user_message or "").split()).strip()
+    # Keep only a short operational excerpt and remove the most common
+    # credential/contact shapes before it reaches email or Admin.
+    value = re.sub(r"https?://\S+|www\.\S+", "[link removed]", value, flags=re.IGNORECASE)
+    value = re.sub(r"\b[6-9]\d{9}\b|\+?91[\s-]*[6-9]\d{9}\b", "[phone removed]", value)
+    value = re.sub(r"[^\s@]+@[^\s@]+\.[^\s@]+", "[email removed]", value)
+    value = re.sub(r"\b(?:upi|ifsc|account(?: number)?|card|token|password|secret)\b[^.?!\n]{0,80}", "[payment detail removed]", value, flags=re.IGNORECASE)
+    value = " ".join(value.split())[:180].rstrip(" .,;:")
+    return f"Asks: {value}" if value else "Human assistance."
 
 
 def _user_hash(user_id: str) -> str:
@@ -155,6 +240,9 @@ def get_or_create_handoff(
     escalation_id: Optional[int] = None,
     include_order: bool = False,
     customer_identity: Optional[Dict[str, Any]] = None,
+    instagram_username: Optional[str] = None,
+    query_summary: Optional[str] = None,
+    contact_mode: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Returns the customer's active handoff, creating one only if needed.
 
@@ -175,7 +263,17 @@ def get_or_create_handoff(
     if order_summary:
         known_entities["verified_order"] = order_summary
     unresolved_topic = str((facts.get("last_entities") or {}).get("topic") or "").strip() or None
-    summary_lines = [f"Reason: {reason}"]
+    effective_mode = contact_mode or handoff_contact_mode(user_message)
+    identity = customer_identity or {}
+    safe_username = normalize_instagram_username(
+        identity.get("customer_username") or instagram_username
+    )
+    effective_query_summary = query_summary or customer_query_summary(
+        user_message, contact_mode=effective_mode, reason=reason,
+    )
+    summary_lines = [f"Reason: {reason}", f"Customer wants: {effective_query_summary}"]
+    if safe_username:
+        summary_lines.append(f"Instagram username: @{safe_username}")
     summary_lines.extend(_summarize_known_entities(known_entities))
     if unresolved_topic:
         summary_lines.append(f"Needs human confirmation: {unresolved_topic}")
@@ -196,8 +294,11 @@ def get_or_create_handoff(
         unresolved_topic=unresolved_topic,
         escalation_id=escalation_id,
         expires_at=expires_at,
-        customer_username=(customer_identity or {}).get("customer_username"),
-        customer_external_id=(customer_identity or {}).get("customer_external_id") or user_id,
+        customer_username=safe_username,
+        customer_external_id=identity.get("customer_external_id") or user_id,
+        instagram_username=safe_username,
+        query_summary=effective_query_summary,
+        contact_mode=effective_mode,
     )
     if newly_created:
         log.info("Created handoff %s for channel=%s user_hash=%s (%s).", reference, channel, _user_hash(user_id), reason)
@@ -266,12 +367,7 @@ def customer_facing_notice(*, order_receipt: bool = False, finalized_order: bool
         )
     if order_receipt:
         return "Continue on WhatsApp to send this order draft to our team."
-    # Keep the customer promise deterministic even if an older deployment
-    # still carries legacy callback wording in INSTAGRAM_HANDOFF_MESSAGE.
-    return (
-        "Our team can assist you personally on WhatsApp. "
-        "Please continue your enquiry using the link below."
-    )
+    return "Of course. I’ve shared your message with our team and someone will get back to you shortly."
 
 
 def customer_facing_link_message(
@@ -302,7 +398,11 @@ def staff_summary(handoff: Dict[str, Any]) -> str:
         lines.extend(_order_item_lines(handoff["verified_order"]))
         lines.append("Pending: Delivery address verification; final invoice")
     lines.append("")
-    lines.append("Customer moved to: WhatsApp")
+    lines.append(
+        "Customer continuation: WhatsApp order handoff"
+        if handoff.get("contact_mode") == "whatsapp_order"
+        else "Customer continuation: Camellia team callback"
+    )
     return "\n".join(lines)
 
 

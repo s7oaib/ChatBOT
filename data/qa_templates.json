@@ -1,5 +1,5 @@
 {
-  "seed_version": 21,
+  "seed_version": 22,
   "matching_rules": {
     "guard_precedence": "GUARD_ templates (id starting with GUARD_) have absolute precedence over any answer template. When matched, they escalate immediately with response: null to prevent unverified brand statements.",
     "how_it_works": "Each template has 'triggers' (keywords/phrases). If a customer message contains ANY trigger from a template's list, that template fires. If multiple templates match, the one with the MOST matched keywords wins. If nothing matches confidently, escalate to human — never guess.",
@@ -1393,6 +1393,9 @@
       "client_confirmed_date": "2026-09-08",
       "triggers": [
         "lunch menu",
+        "share weekly menu",
+        "show weekly menu",
+        "current weekly menu",
         "dinner options",
         "savoury food",
         "bengali meals",
@@ -1626,6 +1629,8 @@
       "client_confirmed_date": "2026-09-08",
       "triggers": [
         "how long to deliver",
+        "how much time do you take to deliver sondesh",
+        "how long do you take to deliver sondesh",
         "dispatch time",
         "how fast",
         "how fast can you deliver",
@@ -1742,6 +1747,72 @@
       "response": "Hi! Thank you for getting in touch.\n\nWe request you to always pre order. So that way the delivery time can be at your convenience subject to our kitchen timings. If you are unable to pre order, once your order is confirmed, we usually dispatch it from our kitchen in Sushant Lok, Gurgaon within 45 minutes.\n\nDelivery time after that depends on the Porter rider's travel time, which varies based on traffic and the time of day.\n\nOur kitchen is open 10:00 AM – 7:30 PM every day. You may also call +91 87965 51990 or DM to pre order.",
       "escalate": false,
       "source_ref": "client confirmation 2026-09-08 (Somdeb Ji)"
+    },
+    {
+      "id": "pricing_value_context",
+      "triggers": [
+        "price is high",
+        "prices are high",
+        "too expensive",
+        "quite expensive",
+        "why is it so expensive"
+      ],
+      "response": "A small note on our pricing — our listed prices are inclusive of GST, packaging, platform charges and all other costs. Only Porter delivery is extra (at actuals). When comparing prices, please compare the final amount you pay — not just the menu price.",
+      "escalate": false,
+      "source_ref": "client Q&A script > pricing objection"
+    },
+    {
+      "id": "chicken_kosha_price",
+      "triggers": [
+        "chicken kosha price",
+        "price of chicken kosha",
+        "what is the price of chicken kosha",
+        "how much is chicken kosha"
+      ],
+      "response": "We use certified organic chicken for chicken kosha. It is ₹400 per portion.\n\nWe also have a CHICKEN BENGALI BENTO priced at ₹400. It will have luchi, Contai dhaba chicken, norom pak sondesh made by us, tomato aamshotto khejur chatni.\n\nSharing pictures of how a BENGALI BENTO looks like.\n\nAlso sharing the rest of the menu.",
+      "escalate": false,
+      "media_status": "BLOCKED_PENDING_CLIENT_ASSETS",
+      "source_ref": "client Q&A script > chicken kosha"
+    },
+    {
+      "id": "sondesh_details",
+      "triggers": [
+        "tell me more about sondesh",
+        "tell me about sondesh",
+        "what is sondesh",
+        "sondesh details"
+      ],
+      "response": "Hi thanks for getting in touch.\n\nAt Camellia.artisanal, every Sondesh is made from scratch using time-tested traditional recipes. We work with small-batch artisanal farmers, trusted dairies, and carefully selected partners — never general retail sourcing. An all women team makes the sondesh for you.\n\nWe currently offer two collections:\n\nCollection 1. Aamar Mishti আমার মিষ্টি indulgence — satisfying your tiny sweet cravings at home or work. Good dairy milk. Partially mechanised, made in-house at our kitchen.\n\nCollection 2. Signature collection — mishti for special occasions, gifting and when you are in the mood to give yourself a treat. Made using desi A2 cow milk that has not been industrially processed. The mishti is completely hand crafted end to end.\n\nPorter charges are on actuals.\n\nWe also prepare and deliver freshly cooked Bengali meals across Delhi NCR. Everything is cooked fresh in small batches, and some dishes are available only in limited quantities. If you would like a recommendation based on whether you prefer vegetarian, fish or meat, just let me know — I would be happy to help.",
+      "escalate": false,
+      "media_status": "BLOCKED_PENDING_CLIENT_ASSETS",
+      "source_ref": "client Q&A script > tell me more about sondesh"
+    },
+    {
+      "id": "sondesh_unfamiliar",
+      "triggers": [
+        "sondesh unfamiliar",
+        "sondesh is unfamiliar",
+        "new to sondesh",
+        "never tried sondesh",
+        "what is this sondesh"
+      ],
+      "response": "Hey! So glad this caught your eye 😊\n\nOur Sondesh is soft, fresh and delicately sweet, with freshly prepared chhana — Bengal's fresh milk cheese — at its heart. We handcraft it with fresh milk in classic as well as contemporary natural flavours.\n\nIf this is your first time, tell me what flavours you enjoy — traditional, fruity, floral or chocolatey — and I will help you choose your first box.\n\nWe deliver across Delhi NCR.\n\nWe currently offer two collections: Aamar Mishti for everyday indulgence and the Signature collection for special occasions and gifting. Porter charges are on actuals.\n\nWe also prepare and deliver freshly cooked Bengali meals across Delhi NCR.",
+      "escalate": false,
+      "media_status": "BLOCKED_PENDING_CLIENT_ASSETS",
+      "source_ref": "client Q&A script > Sondesh unfamiliar (new category)"
+    },
+    {
+      "id": "minimum_sondesh_quantity",
+      "triggers": [
+        "why is the minimum order 9 pieces",
+        "minimum order 9 pieces",
+        "minimum order quantity 9",
+        "why minimum 250g sondesh",
+        "multiples of 9 pieces"
+      ],
+      "response": "Let me try to explain why the minimum order quantity is 9 in a flavour.\n\n1. I tailor make all Sondesh based on orders I receive.\n2. When I cook, any chhana dough less than 250 grams becomes grainy even at the minimum heat level on my home gas stove, so the texture changes and becomes unpleasant.\n3. In short, the texture becomes bad if I cook less than 250g at a time = 9 pieces. Hope you understand.\n4. Hence requesting to place orders in multiples of 9 pieces per flavour.",
+      "escalate": false,
+      "source_ref": "client Q&A script > minimum Sondesh quantity"
     },
     {
       "id": "kolkata_expansion_info",

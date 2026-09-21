@@ -61,7 +61,8 @@ def test_subscription_delivery_uses_one_safe_primary_instagram_payload(tmp_path,
 
     assert len(sent) == 1
     assert not escalated.called
-    assert sent[0]["text"] == _template_response("subscription_details")
+    from camellia.client_qa import REGISTRY_BY_ID
+    assert sent[0]["text"] == REGISTRY_BY_ID["subscription_details_client"].answer
     assert sent[0]["image_url"] == ["/images/Everyday%20Meal%20Subscription%20Rate%20Chart.jpeg"]
     assert "45 minutes" not in sent[0]["text"]
     assert "à la carte" not in sent[0]["text"].lower()
@@ -77,7 +78,8 @@ def test_sondesh_dispatch_uses_exact_confirmed_copy_and_modified_copy_stays_quar
 
     assert len(sent) == 1
     assert not escalated.called
-    assert sent[0]["text"] == CLIENT_CONFIRMED_EXACT_RESPONSES["sondesh_dispatch_time"]
+    from camellia.client_qa import REGISTRY_BY_ID
+    assert sent[0]["text"] == REGISTRY_BY_ID["sondesh_delivery_time"].answer
     assert sent[0]["image_url"] is None
 
     approved = CLIENT_CONFIRMED_EXACT_RESPONSES["sondesh_dispatch_time"]
@@ -100,7 +102,13 @@ def test_home_table_routes_reach_instagram_without_handoff(tmp_path, monkeypatch
 
     assert len(sent) == 1
     assert not escalated.called
-    assert sent[0]["text"] == _template_response(template_id)
+    from camellia.client_qa import REGISTRY_BY_ID
+    source_id = {
+        "bengali_home_table_details": "home_table_details",
+        "bengali_home_table_pricing": "home_table_price",
+        "bengali_home_table_payment": "home_table_payment",
+    }[template_id]
+    assert sent[0]["text"] == REGISTRY_BY_ID[source_id].answer
     assert sent[0]["image_url"] is None
 
 

@@ -61,7 +61,7 @@ shelf-life claims, or dispatch estimates.
 ## 5. Admin login and daily operation
 
 Open the authenticated `/admin` portal over HTTPS. Browser login uses the
-configured admin username/password hash and production MFA. Machine-only
+configured admin username/password hash. Machine-only
 Admin API calls use the separate `ADMIN_API_KEY`; the legacy `ADMIN_PIN` is
 not a browser or API authentication path.
 
@@ -114,9 +114,11 @@ bounded durable outbox path; external WhatsApp alerts are not sent by this
 service.
 
 While a handoff is `WAITING_FOR_HUMAN`, autonomous AI replies are suppressed.
-The operator must explicitly resume the handoff before chatbot behavior can
-continue. A notification failure must not be represented to the customer as a
-successful handoff.
+Generic support handoffs do not include a `wa.me` link; booking, order,
+payment, and purchase-related handoffs may include the separately approved
+manual continuation. The operator must explicitly resume the handoff before
+chatbot behavior can continue. A notification failure must not be represented
+to the customer as a successful handoff.
 
 ## 7. Health verification
 

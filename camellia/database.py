@@ -254,14 +254,6 @@ class Database:
             );
             """)
             cursor.execute("""
-            CREATE TABLE IF NOT EXISTS admin_recovery_codes (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                code_hash TEXT NOT NULL UNIQUE,
-                created_at REAL NOT NULL,
-                used_at REAL
-            );
-            """)
-            cursor.execute("""
             CREATE TABLE IF NOT EXISTS admin_security_audit (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 event_type TEXT NOT NULL,
@@ -620,16 +612,31 @@ class Database:
                 knowledge_gap INTEGER DEFAULT 0,
                 escalation_status TEXT,
                 route_source TEXT,
+                decision_lane TEXT,
+                state_context_used INTEGER DEFAULT 0,
+                source_context_influenced INTEGER DEFAULT 0,
+                handoff_reason TEXT,
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
             """)
             # An existing deployment's table predates route_source; add it
             # without disturbing rows already written.
             cursor.execute("PRAGMA table_info(message_route_audit)")
-            if "route_source" not in {row[1] for row in cursor.fetchall()}:
+            route_audit_columns = {row[1] for row in cursor.fetchall()}
+            if "route_source" not in route_audit_columns:
                 cursor.execute(
                     "ALTER TABLE message_route_audit ADD COLUMN route_source TEXT"
                 )
+            for column, declaration in (
+                ("decision_lane", "TEXT"),
+                ("state_context_used", "INTEGER DEFAULT 0"),
+                ("source_context_influenced", "INTEGER DEFAULT 0"),
+                ("handoff_reason", "TEXT"),
+            ):
+                if column not in route_audit_columns:
+                    cursor.execute(
+                        f"ALTER TABLE message_route_audit ADD COLUMN {column} {declaration}"
+                    )
 
             # Instagram -> WhatsApp handoff references. handoff_ref is the
             # opaque customer-facing token ("CAM-48371"); nothing else in this
@@ -651,6 +658,9 @@ class Database:
                 unresolved_topic TEXT,
                 status TEXT NOT NULL DEFAULT 'CREATED',
                 escalation_id INTEGER,
+                instagram_username TEXT,
+                query_summary TEXT,
+                contact_mode TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 expires_at TIMESTAMP
@@ -658,6 +668,20 @@ class Database:
             """)
             self._ensure_column(cursor, "cross_channel_handoffs", "customer_username", "TEXT")
             self._ensure_column(cursor, "cross_channel_handoffs", "customer_external_id", "TEXT")
+            # These fields make the generic-callback versus purchase-handoff
+            # contract durable.  Add them for existing volumes without
+            # rewriting or deleting handoff history.
+            cursor.execute("PRAGMA table_info(cross_channel_handoffs)")
+            handoff_columns = {row[1] for row in cursor.fetchall()}
+            for column, declaration in (
+                ("instagram_username", "TEXT"),
+                ("query_summary", "TEXT"),
+                ("contact_mode", "TEXT"),
+            ):
+                if column not in handoff_columns:
+                    cursor.execute(
+                        f"ALTER TABLE cross_channel_handoffs ADD COLUMN {column} {declaration}"
+                    )
 
             # Admin notification state is deliberately separate from the
             # handoff lifecycle. Reading a notification must never mutate a
@@ -2903,6 +2927,9 @@ class Database:
         expires_at: Optional[str],
         customer_username: Optional[str] = None,
         customer_external_id: Optional[str] = None,
+        instagram_username: Optional[str] = None,
+        query_summary: Optional[str] = None,
+        contact_mode: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Records a new opaque handoff reference. Never overwrites one."""
         with self.get_connection() as conn:
@@ -2911,14 +2938,15 @@ class Database:
                 INSERT INTO cross_channel_handoffs (
                     handoff_ref, source_channel, source_user_id, reason, summary,
                     known_entities, customer_username, customer_external_id,
-                    unresolved_topic, status, escalation_id, expires_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'CREATED', ?, ?)
+                    unresolved_topic, status, escalation_id,
+                    instagram_username, query_summary, contact_mode, expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'CREATED', ?, ?, ?, ?, ?)
                 """,
                 (
                     handoff_ref, source_channel, source_user_id, reason, summary,
                     json.dumps(known_entities or {}, ensure_ascii=False),
                     customer_username, customer_external_id, unresolved_topic,
-                    escalation_id, expires_at,
+                    escalation_id, instagram_username, query_summary, contact_mode, expires_at,
                 ),
             )
             conn.commit()
@@ -2938,6 +2966,9 @@ class Database:
         expires_at: Optional[str],
         customer_username: Optional[str] = None,
         customer_external_id: Optional[str] = None,
+        instagram_username: Optional[str] = None,
+        query_summary: Optional[str] = None,
+        contact_mode: Optional[str] = None,
     ) -> tuple[Dict[str, Any], bool]:
         """Atomically reuse or create one active handoff for a customer.
 
@@ -2959,13 +2990,17 @@ class Database:
                 (source_channel, source_user_id),
             ).fetchone()
             if existing:
-                if customer_username or customer_external_id:
+                if any((customer_username, customer_external_id, instagram_username, query_summary, contact_mode)):
                     conn.execute(
                         "UPDATE cross_channel_handoffs SET "
                         "customer_username=COALESCE(?, customer_username), "
                         "customer_external_id=COALESCE(?, customer_external_id), "
+                        "instagram_username=COALESCE(?, instagram_username), "
+                        "query_summary=COALESCE(?, query_summary), "
+                        "contact_mode=COALESCE(?, contact_mode), "
                         "updated_at=CURRENT_TIMESTAMP WHERE handoff_ref = ?",
-                        (customer_username, customer_external_id, existing["handoff_ref"]),
+                        (customer_username, customer_external_id, instagram_username,
+                         query_summary, contact_mode, existing["handoff_ref"]),
                     )
                     existing = conn.execute(
                         "SELECT * FROM cross_channel_handoffs WHERE handoff_ref = ?",
@@ -2979,14 +3014,15 @@ class Database:
                 INSERT INTO cross_channel_handoffs (
                     handoff_ref, source_channel, source_user_id, reason, summary,
                     known_entities, customer_username, customer_external_id,
-                    unresolved_topic, status, escalation_id, expires_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'CREATED', ?, ?)
+                    unresolved_topic, status, escalation_id,
+                    instagram_username, query_summary, contact_mode, expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'CREATED', ?, ?, ?, ?, ?)
                 """,
                 (
                     handoff_ref, source_channel, source_user_id, reason, summary,
                     json.dumps(known_entities or {}, ensure_ascii=False),
                     customer_username, customer_external_id, unresolved_topic,
-                    escalation_id, expires_at,
+                    escalation_id, instagram_username, query_summary, contact_mode, expires_at,
                 ),
             )
             created = conn.execute(
@@ -4009,6 +4045,10 @@ class Database:
         knowledge_gap: bool,
         escalation_status: Optional[str],
         route_source: Optional[str] = None,
+        decision_lane: Optional[str] = None,
+        state_context_used: bool = False,
+        source_context_influenced: bool = False,
+        handoff_reason: Optional[str] = None,
     ) -> int:
         """Records why a customer-facing route was selected.
 
@@ -4023,14 +4063,17 @@ class Database:
                 INSERT INTO message_route_audit (
                     user_id, channel, user_message, route, intents, entities,
                     confidence, knowledge_ids, actions, llm_called, fallback_used,
-                    grounding_result, knowledge_gap, escalation_status, route_source
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    grounding_result, knowledge_gap, escalation_status, route_source,
+                    decision_lane, state_context_used, source_context_influenced, handoff_reason
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 str(user_id), str(channel), user_message, route,
                 json.dumps(intents or []), json.dumps(entities or {}, ensure_ascii=False),
                 confidence, json.dumps(knowledge_ids or []), json.dumps(actions or []),
                 int(bool(llm_called)), int(bool(fallback_used)), grounding_result,
                 int(bool(knowledge_gap)), escalation_status, route_source,
+                decision_lane, int(bool(state_context_used)),
+                int(bool(source_context_influenced)), handoff_reason,
             ))
             conn.commit()
             return int(cursor.lastrowid)
@@ -4640,39 +4683,6 @@ class Database:
     def revoke_admin_sessions_for_user(self, username: str, now: float) -> None:
         with self.get_connection() as conn:
             conn.execute("UPDATE admin_sessions SET revoked_at=? WHERE username=? AND revoked_at IS NULL", (now, username))
-            conn.commit()
-
-    def seed_admin_recovery_codes(self, code_hashes: List[str], now: float) -> None:
-        if not code_hashes:
-            return
-        with self.get_connection() as conn:
-            conn.executemany(
-                "INSERT OR IGNORE INTO admin_recovery_codes (code_hash, created_at) VALUES (?, ?)",
-                ((code_hash, now) for code_hash in code_hashes if code_hash),
-            )
-            conn.commit()
-
-    def consume_admin_recovery_code(self, code: str, verify_hash, now: float) -> bool:
-        with self.get_connection() as conn:
-            rows = conn.execute(
-                "SELECT id, code_hash FROM admin_recovery_codes WHERE used_at IS NULL ORDER BY id"
-            ).fetchall()
-            for row in rows:
-                if verify_hash(code, row["code_hash"]):
-                    updated = conn.execute(
-                        "UPDATE admin_recovery_codes SET used_at=? WHERE id=? AND used_at IS NULL",
-                        (now, row["id"]),
-                    )
-                    conn.commit()
-                    return updated.rowcount == 1
-        return False
-
-    def add_admin_recovery_code(self, code_hash: str, now: float) -> None:
-        with self.get_connection() as conn:
-            conn.execute(
-                "INSERT INTO admin_recovery_codes (code_hash, created_at) VALUES (?, ?)",
-                (code_hash, now),
-            )
             conn.commit()
 
     def record_admin_security_event(
