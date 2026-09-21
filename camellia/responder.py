@@ -27,6 +27,12 @@ from camellia import menu_dates
 from camellia.menu_images import current_url as current_menu_image
 from camellia import semantic_fallback
 from camellia.understanding import BusinessAction, Intent, understanding_engine
+from camellia.conversation_resolver import (
+    ContextResolution,
+    explicit_entity,
+    pending_for_response,
+    resolve as resolve_conversation_context,
+)
 from camellia.knowledge import HUMAN_ONLY_INTENTS, approved_knowledge
 from camellia.content_integrity import (
     ALACARTE_SONDESH_ADDON_COPY,
@@ -366,8 +372,8 @@ VAGUE_FILLER_WORDS = {
 # what was just discussed, these fall straight to the human handover even
 # though the answer is obvious from the previous turn.
 BARE_PRICE_RE = re.compile(
-    r'^(how much|hw much|howmuch|price|prices|cost|rate|kitna|kitne|kitne ka|'
-    r'what.?s the price|whats the price|what is the price|price\??)[\s\?\.\!]*$',
+    r'^(how much|hw much|howmuch|price|prices|pricing|cost|rate|kitna|kitne|kitne ka|'
+    r'what.?s the price|whats the price|what is the price|what.?s the pricing|what is the pricing|price\??)[\s\?\.\!]*$',
     re.IGNORECASE
 )
 
@@ -377,9 +383,9 @@ BARE_PRICE_RE = re.compile(
 # flavour, a pack size or a time ("real vanilla price", "how much time for
 # meals") is deliberately not a match: those have their own answers.
 BARE_PRICE_QUESTION_RE = re.compile(
-    r"(?:price|prices|cost|rate|how much|kitna|kitne|kitne ka|kitna padega|"
+    r"(?:price|prices|pricing|cost|rate|how much|kitna|kitne|kitne ka|kitna padega|"
     r"kitne paise|daam|iska price|what does it cost|what is the price|"
-    r"what.?s the price)",
+    r"what.?s the price|what is the pricing|what.?s the pricing)",
     re.IGNORECASE,
 )
 
@@ -975,11 +981,268 @@ class DeterministicResponder:
         """
         if not config.is_slow_reply_notice_active:
             return False
-        if template_id == "ad_gate_blocked" or not (response_text or "").strip():
+        if template_id == "ad_gate_blocked" or (template_id or "").startswith("learned_") or not (response_text or "").strip():
             return False
         if not latency_monitor.is_degraded():
             return False
         return not session_memory.get_facts(user_id, channel).get("slow_notice_sent")
+
+    @staticmethod
+    def _asset_key(item: Any) -> str:
+        if isinstance(item, dict):
+            return str(item.get("url") or item.get("image_url") or item.get("path") or "")
+        return str(item or "")
+
+    def _remember_conversation_state(
+        self, user_id: str, channel: str, message: str,
+        response: str, template_id: Optional[str], images: Any,
+    ) -> None:
+        """Record only routing metadata for the next conversational turn."""
+        facts = session_memory.get_facts(user_id, channel)
+        facts["last_bot_question"] = response if (response or "").rstrip().endswith("?") else None
+        facts["last_answer_id"] = template_id
+        facts["last_assets_sent"] = [self._asset_key(item) for item in (images or []) if self._asset_key(item)] if isinstance(images, list) else ([self._asset_key(images)] if images else [])
+        facts["active_asset"] = facts["last_assets_sent"][0] if len(facts["last_assets_sent"]) == 1 else None
+        facts.update(pending_for_response(template_id, response or "", images))
+        if facts.get("pending_clarification") == "delivery_area":
+            facts["awaiting_area_confirmation"] = True
+        topic = TOPIC_MAP.get(template_id or "")
+        if topic:
+            facts["active_topic"] = topic
+        elif template_id and template_id.startswith("source_"):
+            facts["active_topic"] = facts.get("last_topic")
+        if facts.get("last_topic"):
+            facts["active_topic"] = facts["last_topic"]
+        facts["active_intent"] = template_id
+        facts["updated_at"] = time.time()
+
+    def _contextual_resolution(
+        self, message: str, user_id: str, channel: str,
+    ) -> Optional[Tuple[str, bool, Optional[str], Optional[Any]]]:
+        """Resolve a terse turn before the model or broad trigger matcher.
+
+        This is intentionally a bridge into existing approved templates.  It
+        does not produce an answer and it does not rewrite canonical content.
+        """
+        facts = session_memory.get_facts(user_id, channel)
+        resolution = resolve_conversation_context(message, facts)
+        current_entity = explicit_entity(message)
+        if current_entity:
+            # Establish the current subject before a model/trigger route runs.
+            # This makes a terse but explicit opener such as "combo" or
+            # "Bengali meal" the active topic for its next follow-up.
+            topic_map = {
+                "SONDESH": "sondesh_general",
+                "BENGALI_MEAL": "savoury",
+                "SUBSCRIPTION": "subscription",
+            }
+            prior_topic = facts.get("last_topic") or facts.get("active_topic")
+            normalized_message = " ".join(str(message or "").lower().split())
+            crosssell_preserve = (
+                (current_entity == "BENGALI_MEAL" and prior_topic in {"aamar_mishti", "signature", "sondesh_general"}
+                 and re.search(r"\b(also|too|as well|cook meals|prepare meals|make meals)\b", normalized_message))
+                or
+                (current_entity == "SONDESH" and prior_topic == "savoury"
+                 and re.search(r"\b(also|too|along with|with meal|with meals|sweets?\s+along)\b", normalized_message))
+            )
+            subject_words = set(re.findall(r"\b[a-z]+\b", normalized_message))
+            subject_only = bool(subject_words) and not (
+                subject_words - {
+                    "a", "an", "the", "please", "pls", "yes", "yeah", "yep", "sure",
+                    "okay", "ok", "one", "that", "this", "it", "me", "my", "want",
+                    "would", "like", "send", "share", "show", "give", "can", "you",
+                    "could", "again", "sondesh", "sandesh", "mishti", "mithai", "sweet",
+                    "sweets", "bengali", "meal", "meals", "food", "khana", "lunch",
+                    "dinner", "savoury", "savory", "bento", "combo", "subscription",
+                    "subscriptions", "plan", "tiffin", "veg", "vegetarian", "niramish",
+                    "non", "chicken", "mangsho", "fish", "mutton",
+                }
+            )
+            contextual_subject = bool(
+                resolution.kind in {"clarification_selection", "correction", "topic_switch"}
+                or subject_only
+            )
+            if current_entity in topic_map and contextual_subject and not crosssell_preserve:
+                facts["active_entity"] = current_entity
+                facts["active_topic"] = topic_map[current_entity]
+                facts["last_topic"] = topic_map[current_entity]
+                facts["explicit_topic_override"] = topic_map[current_entity]
+                # Named current entities are safer on the deterministic
+                # canonical path than in a fresh model interpretation.  The
+                # legacy matcher still decides the approved template; this
+                # only prevents a generic NLU route from swallowing a
+                # product-specific question or a cross-sell.
+                facts["skip_structured_nlu"] = True
+            elif crosssell_preserve:
+                facts["active_entity"] = current_entity
+                facts["skip_structured_nlu"] = True
+        if not resolution.resolved:
+            named_collection = (
+                "aamar_mishti_collection" if re.search(r"\baamar\s+mishti\b", str(message), re.I)
+                else "signature_collection" if re.search(r"\bsignature\b", str(message), re.I)
+                else None
+            )
+            draft = facts.get("order_draft") or {}
+            if (
+                named_collection
+                and not draft.get("flavour")
+                and not draft.get("collection")
+                and re.search(r"\b(?:250|500|1000)\s*(?:g|kg)\b", str(message), re.I)
+            ):
+                template = self._template_by_id(named_collection) or {}
+                text, images = self._format_dynamic_response(
+                    named_collection, template.get("response") or "",
+                    user_id=user_id, channel=channel, user_message=message,
+                )
+                return text, True, named_collection, images
+            return None
+
+        if resolution.kind == "followup_price":
+            topic = resolution.entity
+            if topic == "savoury":
+                facts["awaiting_menu_choice"] = True
+                return (
+                    "Our Bengali meals are priced per dish, and the menu changes every week 🍱\n\n"
+                    "Would you like this week's *Veg* or *Non-Veg* menu? I'll send it across with prices.",
+                    True, "context_meal_price_followup", None,
+                )
+            if topic == "subscription":
+                template = self._template_by_id("subscription_details") or {}
+                text, images = self._format_dynamic_response(
+                    "subscription_details", template.get("response") or "",
+                    user_id=user_id, channel=channel, user_message=message,
+                )
+                return text, True, "subscription_details", images
+            if topic in TOPIC_PRICE_HINT:
+                # Existing topic hint path owns the exact approved answer.
+                facts["skip_structured_nlu"] = True
+                return None
+
+        if resolution.kind == "followup_delivery":
+            # Let the established delivery-time/area handlers apply their
+            # safety allowlists; this hook only prevents NLU from consuming a
+            # clearly contextual fragment.
+            if resolution.entity in {"savoury", "bento"}:
+                return self._resolve_response("delivery time", user_id, channel)
+
+        if resolution.kind == "asset_request":
+            topic = str(resolution.entity or facts.get("active_topic") or facts.get("last_topic") or "").lower()
+            if resolution.asset == "chart" and topic == "subscription":
+                template = self._template_by_id("subscription_details") or {}
+                text = "Here is the subscription price chart again."
+                _ignored, images = self._format_dynamic_response(
+                    "subscription_details", template.get("response") or "",
+                    user_id=user_id, channel=channel, user_message=message,
+                )
+                return text, True, "asset_request_subscription_chart", images
+            if resolution.asset in {"menu", "active"} and topic in {"savoury", "bento"}:
+                template_id = "know_more"
+                template = self._template_by_id(template_id) or {}
+                _ignored, images = self._format_dynamic_response(
+                    template_id, template.get("response") or "",
+                    user_id=user_id, channel=channel, user_message=message,
+                )
+                return "Here is the menu again.", True, "asset_request_menu", images
+            if resolution.asset == "active" and facts.get("last_answer_id"):
+                template_id = str(facts["last_answer_id"])
+                template = self._template_by_id(template_id) or {}
+                if template.get("response"):
+                    _ignored, images = self._format_dynamic_response(
+                        template_id, template["response"], user_id=user_id,
+                        channel=channel, user_message=message,
+                    )
+                    if images:
+                        return "Here it is again.", True, "asset_request", images
+            return None
+
+        if resolution.kind == "clarification_selection":
+            selected = resolution.entity
+            pending = facts.get("pending_clarification")
+            clarification_intent = facts.get("clarification_intent")
+            concrete_collection = (
+                "aamar_mishti_collection" if re.search(r"\baamar\s+mishti\b", str(message), re.I)
+                else "signature_collection" if re.search(r"\bsignature\b", str(message), re.I)
+                else None
+            )
+            if concrete_collection and re.search(r"\b(?:250|500|1000)\s*(?:g|kg)\b", str(message), re.I):
+                template = self._template_by_id(concrete_collection) or {}
+                text, images = self._format_dynamic_response(
+                    concrete_collection, template.get("response") or "",
+                    user_id=user_id, channel=channel, user_message=message,
+                )
+                facts["pending_clarification"] = None
+                facts["clarification_options"] = []
+                facts["presented_options"] = []
+                return text, True, concrete_collection, images
+            if (
+                pending == "product_topic"
+                and re.fullmatch(r"(?:option\s*)?(?:1|2|3|first|second|third|last)(?:\s+one)?[?.!]*", message.strip(), re.I)
+                and facts.get("active_topic") in {"aamar_mishti", "signature", "sondesh_general"}
+            ):
+                # Existing Sondesh collection selection remains authoritative
+                # when the customer is already in a Sondesh conversation;
+                # the generic product prompt must not reinterpret it as meals.
+                facts["skip_structured_nlu"] = True
+                return None
+            facts["pending_clarification"] = None
+            facts["clarification_options"] = []
+            facts["presented_options"] = []
+            if pending == "product_price":
+                if selected == "BENGALI_MEAL":
+                    facts["last_topic"] = facts["active_topic"] = "savoury"
+                    facts["last_intents"] = ["product_price"]
+                    if message.strip().lower() == "meals":
+                        facts["awaiting_menu_choice"] = True
+                        return (
+                            "Our Bengali meals are priced per dish, and the menu changes every week 🍱\n\n"
+                            "Would you like this week's *Veg* or *Non-Veg* menu? I'll send it across with prices.",
+                            True, "context_meal_price_followup", None,
+                        )
+                    template = self._template_by_id("savoury_food_intro") or {}
+                    text, images = self._format_dynamic_response(
+                        "savoury_food_intro", template.get("response") or "",
+                        user_id=user_id, channel=channel, user_message=message,
+                    )
+                    return text, True, "savoury_food_intro", images
+                if selected == "SONDESH":
+                    facts["last_topic"] = facts["active_topic"] = "sondesh_general"
+                    template = self._template_by_id("sondesh_price_detailed") or {}
+                    text, images = self._format_dynamic_response(
+                        "sondesh_price_detailed", template.get("response") or "",
+                        user_id=user_id, channel=channel, user_message=message,
+                    )
+                    return text, True, "sondesh_price_detailed", images
+            if pending == "menu_choice":
+                hint = "non veg menu" if selected == "NON_VEGETARIAN" else "veg menu"
+                return self._resolve_response(hint, user_id, channel)
+            if pending == "sondesh_collection":
+                template_id = "signature_collection" if selected == "SIGNATURE" else "aamar_mishti_collection"
+                template = self._template_by_id(template_id) or {}
+                text, images = self._format_dynamic_response(
+                    template_id, template.get("response") or "",
+                    user_id=user_id, channel=channel, user_message=message,
+                )
+                return text, True, template_id, images
+            if pending == "product_topic":
+                if selected == "BENGALI_MEAL":
+                    facts["last_topic"] = facts["active_topic"] = "savoury"
+                    template = self._template_by_id("savoury_food_intro") or {}
+                    text, images = self._format_dynamic_response(
+                        "savoury_food_intro", template.get("response") or "",
+                        user_id=user_id, channel=channel, user_message=message,
+                    )
+                    return text, True, "savoury_food_intro", images
+                if selected == "SONDESH":
+                    facts["last_topic"] = facts["active_topic"] = "sondesh_general"
+                    template = self._template_by_id("sondesh_price_general") or self._template_by_id("know_more") or {}
+                    template_id = template.get("id") or "know_more"
+                    text, images = self._format_dynamic_response(
+                        template_id, template.get("response") or "",
+                        user_id=user_id, channel=channel, user_message=message,
+                    )
+                    return text, True, template_id, images
+
+        return None
 
     def _conversation_request(self, message, user_id, channel, structured_owns_price=False):
         """Small conversation repairs, before broad keyword matching.
@@ -1032,11 +1295,19 @@ class DeterministicResponder:
             facts["awaiting_product_price"] = True
             return finish("Would you like prices for Sondesh or Bengali Meals?", "price_clarify_product")
         if facts.get("awaiting_product_price"):
-            if text in {"meals", "meal", "food", "khana", "bengali meals"}:
+            if text in {
+                "meals", "meal", "food", "khana", "bengali meal", "bengali meals",
+                "the meal", "meals please", "meal please", "bengali one",
+            }:
                 facts["awaiting_product_price"] = False
                 facts["last_topic"] = "savoury"
-                facts["awaiting_menu_choice"] = True
-                return finish("Would you like the vegetarian or non-vegetarian menu with prices?", "context_meal_price_followup")
+                tmpl = self._template_by_id("savoury_food_intro")
+                if tmpl.get("response") and not tmpl.get("escalate"):
+                    reply, images = self._format_dynamic_response(
+                        tmpl["id"], tmpl["response"], user_id=user_id,
+                        channel=channel, user_message=message,
+                    )
+                    return finish(reply, tmpl["id"], images)
             if text in {"sondesh", "sweets", "mishti", "mithai"}:
                 facts["awaiting_product_price"] = False
                 facts["last_topic"] = "sondesh_general"
@@ -1296,7 +1567,11 @@ class DeterministicResponder:
         intro_greeting_prefix: str = "",
     ) -> Optional[Tuple[str, bool, str, Optional[Any]]]:
         """Resolve every substantive request through intent/entity knowledge."""
-        if not _structured_nlu_enabled_for(user_id, channel) or not understanding_engine.should_analyze(user_message):
+        if (
+            not config.SEMANTIC_ROUTER_ENABLED
+            or not _structured_nlu_enabled_for(user_id, channel)
+            or not understanding_engine.should_analyze(user_message)
+        ):
             return None
 
         facts = session_memory.get_facts(user_id, channel)
@@ -1463,6 +1738,16 @@ class DeterministicResponder:
             self.qa_data.get("templates", []),
             serviceable_location=serviceable,
         )
+        # A typed unknown is not itself the final route.  Give the existing
+        # ACTIVE learned-knowledge layer its promised last refusal after
+        # canonical knowledge declines the message; otherwise structured NLU
+        # manufactured a handoff before that layer could answer an approved
+        # staff-added question.
+        if not resolution.items and not (explicit_gap or subtopic_gap or amenity_gap or parking_gap):
+            facts["knowledge_sufficient"] = False
+            facts["last_knowledge_sufficiency"] = {intent: False for intent in intents}
+            facts["last_grounding"] = "deterministic_approved"
+            return None
         replies: List[str] = []
         approved_facts: List[str] = []
         images: List[Any] = []
@@ -1523,6 +1808,8 @@ class DeterministicResponder:
         if "subscription_booking_steps" in used_templates:
             facts["awaiting_subscription_booking"] = False
             facts["subscription_context"] = True
+        if facts.get("explicit_topic_override"):
+            facts["last_topic"] = facts["active_topic"] = facts["explicit_topic_override"]
 
         missing = list(dict.fromkeys(resolution.missing_intents))
         if result.requires_human and not missing:
@@ -1702,6 +1989,13 @@ class DeterministicResponder:
             else:
                 response_text = self._generic_fallback()
 
+        # Persist the structured turn contract after the reply is finalized so
+        # the next message can answer the exact question/options/assets just
+        # presented.  This is metadata only; it cannot modify the reply.
+        self._remember_conversation_state(
+            user_id, channel, user_message, response_text, template_id, image_url,
+        )
+
         try:
             audit_facts = session_memory.get_facts(user_id, channel)
             self._record_answer_sufficiency(audit_facts, template_id, was_matched)
@@ -1823,6 +2117,8 @@ class DeterministicResponder:
             "last_grounding": None,
             "structured_nlu_provider_failed": False,
             "last_route_source": None,
+            "explicit_topic_override": None,
+            "skip_structured_nlu": False,
         })
         # Each turn gets a fresh source-use audit value.  The source route
         # itself remains available for a later genuine follow-up; only this
@@ -1862,6 +2158,11 @@ class DeterministicResponder:
             r"[?!.,]+$", "", " ".join((semantic_remainder or user_message).lower().split())
         ).strip()
         is_relevant_slot_answer = (
+            (
+                facts.get("pending_clarification") in {"product_price", "product_topic", "menu_choice"}
+                and bool(explicit_subject_match)
+            )
+            or
             (
                 facts.get("awaiting_area_confirmation")
                 and _looks_like_an_area_answer(user_message)
@@ -1917,6 +2218,33 @@ class DeterministicResponder:
                     explicit_subject_match.group(0) if explicit_subject_match else "canonical_context",
                     interrupted_flags,
                 )
+
+        # Resolve active clarifications and asset requests before structured
+        # NLU.  Short turns are answers to the bot's immediately preceding
+        # question more often than they are standalone requests; sending them
+        # through a fresh classifier was the source of the false CAMs and
+        # repeated subscription/menu replies.  Explicit subjects have already
+        # interrupted stale flows above, so current text still wins.
+        if config.CONVERSATION_IMPROVEMENTS_ENABLED:
+            contextual = self._contextual_resolution(user_message, user_id, channel)
+            if contextual is not None:
+                return contextual
+
+        # Ordinals have no business meaning on their own.  They are only
+        # selections while the bot has an active option list; otherwise a
+        # broad "option 2" trigger must not guess a Sondesh collection.
+        if re.fullmatch(
+            r"(?:option\s*)?(?:1|2|3|first|second|third|last)(?:\s+one)?[?.!]*",
+            lowered_text,
+            re.IGNORECASE,
+        ) and not (
+            facts.get("pending_clarification")
+            or facts.get("clarification_options")
+            or facts.get("presented_options")
+        ):
+            fallback = self._generic_fallback()
+            session_memory.add_turn(user_id, channel, user_message, fallback)
+            return fallback, False, None, None
 
         ad_product = product_for_ad(referral_ad_id, referral_ad_title) or facts.get("ad_product")
         if ad_product:
@@ -2542,10 +2870,34 @@ class DeterministicResponder:
             session_memory.add_turn(user_id, channel, user_message, response_text)
             return response_text, True, "opening_hours", images
 
+        # These two deterministic guards must run before structured NLU.  The
+        # model's broad product/delivery labels can otherwise consume an
+        # already-approved relocation or out-of-area question.
+        if KOLKATA_UNAMBIGUOUS_RE.search(lowered_text) or (
+            KOLKATA_MOVE_VERB_RE.search(lowered_text) and KOLKATA_SUBJECT_RE.search(lowered_text)
+        ):
+            tmpl = self._template_by_id("kolkata_expansion_info")
+            if tmpl and tmpl.get("response"):
+                response_text = tmpl["response"]
+                if intro_greeting_prefix:
+                    response_text = intro_greeting_prefix + response_text
+                session_memory.add_turn(user_id, channel, user_message, response_text)
+                return response_text, True, "kolkata_expansion_info", None
+
+        if OUT_OF_AREA_GENERIC_RE.search(lowered_text):
+            tmpl = self._template_by_id("delivery_out_of_area")
+            if tmpl and tmpl.get("response"):
+                response_text = tmpl["response"]
+                if intro_greeting_prefix:
+                    response_text = intro_greeting_prefix + response_text
+                session_memory.add_turn(user_id, channel, user_message, response_text)
+                return response_text, True, "delivery_out_of_area", None
+
         if (
             not active_conversation_flow
             and not explicit_subject_in_detail_wrapper
             and not ORDER_READY_RE.fullmatch(lowered_text)
+            and not facts.get("skip_structured_nlu")
         ):
             structured = self._structured_nlu_response(
                 user_message, user_id, channel, intro_greeting_prefix,
@@ -2561,8 +2913,9 @@ class DeterministicResponder:
         # well, not only of the intent/entity path.
         if OUT_OF_SCOPE_TOPIC_RE.search(lowered_text):
             facts["last_route_source"] = "explicit_rule"
+            facts["last_fallback_used"] = bool(facts.get("structured_nlu_provider_failed"))
             facts["last_intents"] = [Intent.BUSINESS_POLICY_UNKNOWN.value]
-            facts["last_knowledge_sufficiency"] = {Intent.UNKNOWN.value: False}
+            facts["last_knowledge_sufficiency"] = {Intent.BUSINESS_POLICY_UNKNOWN.value: False}
             facts["knowledge_sufficient"] = False
             facts["last_actions"] = [
                 BusinessAction.ESCALATE_TO_TEAM.value, BusinessAction.SEND_RESPONSE.value,
@@ -2856,35 +3209,6 @@ class DeterministicResponder:
                         response_text = intro_greeting_prefix + response_text
                     session_memory.add_turn(user_id, channel, user_message, response_text)
                     return response_text, True, "sondesh_dispatch_time", None
-
-        # The Kolkata reassurance question arrives in far more shapes than a
-        # trigger list can enumerate — "is gurgaon kitchen closing", "will
-        # the recipes change after you move", "who runs the kitchen after
-        # you leave" — and several of those share words with unrelated
-        # guards: "kitchen" with the pickup-address guard, "gurgaon" with
-        # the delivery-area answer, "founder" with the staff-contact guard.
-        # Whichever of those matched on raw overlap, so a customer worried
-        # about the move got an address or a name instead of the answer
-        # that actually addresses moving.
-        if KOLKATA_UNAMBIGUOUS_RE.search(lowered_text) or (
-            KOLKATA_MOVE_VERB_RE.search(lowered_text) and KOLKATA_SUBJECT_RE.search(lowered_text)
-        ):
-            tmpl = self._template_by_id("kolkata_expansion_info")
-            if tmpl and tmpl.get("response"):
-                response_text = tmpl["response"]
-                if intro_greeting_prefix:
-                    response_text = intro_greeting_prefix + response_text
-                session_memory.add_turn(user_id, channel, user_message, response_text)
-                return response_text, True, "kolkata_expansion_info", None
-
-        if OUT_OF_AREA_GENERIC_RE.search(lowered_text):
-            tmpl = self._template_by_id("delivery_out_of_area")
-            if tmpl and tmpl.get("response"):
-                response_text = tmpl["response"]
-                if intro_greeting_prefix:
-                    response_text = intro_greeting_prefix + response_text
-                session_memory.add_turn(user_id, channel, user_message, response_text)
-                return response_text, True, "delivery_out_of_area", None
 
         # Check if user message contains substantive business inquiry
         has_business_query = bool(

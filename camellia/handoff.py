@@ -154,6 +154,7 @@ def get_or_create_handoff(
     facts: Dict[str, Any],
     escalation_id: Optional[int] = None,
     include_order: bool = False,
+    customer_identity: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Returns the customer's active handoff, creating one only if needed.
 
@@ -195,6 +196,8 @@ def get_or_create_handoff(
         unresolved_topic=unresolved_topic,
         escalation_id=escalation_id,
         expires_at=expires_at,
+        customer_username=(customer_identity or {}).get("customer_username"),
+        customer_external_id=(customer_identity or {}).get("customer_external_id") or user_id,
     )
     if newly_created:
         log.info("Created handoff %s for channel=%s user_hash=%s (%s).", reference, channel, _user_hash(user_id), reason)
