@@ -29,7 +29,7 @@ from slowapi.errors import RateLimitExceeded
 # against a pre-.env environment and seed the wrong paths.
 from camellia.config import config, STARTUP_ACTIONS
 from camellia.database import db
-from camellia.ad_gate import EntryPoint, ad_gate, describe_entry_point
+from camellia.ad_gate import EntryPoint, ad_gate, describe_entry_point, fetch_instagram_username
 from camellia.ice_breakers import (
     DEFAULT_ICE_BREAKERS,
     MAX_ICE_BREAKERS,
@@ -545,6 +545,9 @@ def _process_instagram_event(
         facts = session_memory.get_facts(sender_id, "instagram")
         active_handoff = db.get_active_handoff("instagram", sender_id)
         if active_handoff:
+            safe_username = normalize_instagram_username(instagram_username)
+            if safe_username:
+                db.update_handoff_username(active_handoff["handoff_ref"], safe_username)
             # A customer message remains durable context, but cannot wake the
             # autonomous responder or create a second ticket while staff own
             # the conversation. Only the authenticated resume endpoint below
@@ -766,11 +769,14 @@ def _process_instagram_event(
             is_order_handoff = template_id in (
                 "order_draft_receipt", "order_next_steps", "client_approved_order_ready_handoff",
             )
+            resolved_username = normalize_instagram_username(instagram_username)
+            if not resolved_username:
+                resolved_username = _lookup_instagram_username(sender_id)
             handoff = get_or_create_handoff(
                 user_id=sender_id, channel="instagram", reason=reason,
                 user_message=customer_message, facts=facts,
                 include_order=is_order_handoff,
-                instagram_username=instagram_username,
+                instagram_username=resolved_username,
                 query_summary=customer_query_summary(
                     customer_message, contact_mode=contact_mode, reason=reason,
                 ),
@@ -1049,6 +1055,7 @@ def _handle_shared_attachment(
     sender_id: str,
     reel_identity: Optional[Dict[str, str]],
     post_media_id: Optional[str] = None,
+    instagram_username: Optional[str] = None,
 ) -> None:
     """
     Establishes source context where there is any, then answers the
@@ -1090,6 +1097,7 @@ def _handle_shared_attachment(
                 shared_reel=reel_identity,
                 shared_post_id=post_media_id,
                 shared_source_type="reel" if reel_identity else "post",
+                instagram_username=instagram_username,
             )
         except Exception:
             log.exception("Could not resolve shared media for %s.", sender_id)
@@ -1383,6 +1391,44 @@ def _safe_identifier_hash(value: Any) -> Optional[str]:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12] if raw else None
 
 
+_INSTAGRAM_USERNAME_CACHE: Dict[str, Tuple[float, Optional[str]]] = {}
+_INSTAGRAM_USERNAME_CACHE_TTL_SECONDS = 300.0
+
+
+def _lookup_instagram_username(sender_id: str) -> Optional[str]:
+    """Return a cached, validated handle for one exact sender ID."""
+    sender = str(sender_id or "").strip()
+    if not sender:
+        return None
+    now = time.monotonic()
+    cached = _INSTAGRAM_USERNAME_CACHE.get(sender)
+    if cached and now - cached[0] < _INSTAGRAM_USERNAME_CACHE_TTL_SECONDS:
+        return cached[1]
+    username = normalize_instagram_username(fetch_instagram_username(sender))
+    if len(_INSTAGRAM_USERNAME_CACHE) >= 1024:
+        _INSTAGRAM_USERNAME_CACHE.pop(next(iter(_INSTAGRAM_USERNAME_CACHE)))
+    _INSTAGRAM_USERNAME_CACHE[sender] = (now, username)
+    return username
+
+
+def _instagram_username_from_event(messaging_event: Dict[str, Any]) -> Optional[str]:
+    """Extract only an explicit handle supplied alongside a webhook sender."""
+    message = messaging_event.get("message") or {}
+    for sender in (
+        messaging_event.get("sender"),
+        messaging_event.get("from"),
+        message.get("sender"),
+        message.get("from"),
+    ):
+        if not isinstance(sender, dict):
+            continue
+        for key in ("instagram_username", "username", "user_name"):
+            username = normalize_instagram_username(sender.get(key))
+            if username:
+                return username
+    return None
+
+
 def _safe_instagram_event_shape(messaging_event: dict) -> Dict[str, Any]:
     """Describe an event without retaining customer text or raw payload."""
     message = messaging_event.get("message") or {}
@@ -1424,6 +1470,7 @@ def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks
 
         for messaging_event in events:
             is_ad_qualified, sender_id, message_text, ad_id = ad_gate.inspect_and_gate_message(messaging_event)
+            instagram_username = _instagram_username_from_event(messaging_event)
             entry_point = describe_entry_point(messaging_event)
             message = messaging_event.get("message") or {}
             log.info(
@@ -1505,6 +1552,7 @@ def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks
                         background_args = (sender_id, "", ad_id, entry_point)
                     background_tasks.add_task(
                         background_fn, *background_args,
+                        **({"instagram_username": instagram_username} if instagram_username else {}),
                     )
                     results.append({
                         "sender_id": sender_id,
@@ -1549,6 +1597,7 @@ def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks
                 background_tasks.add_task(
                     _process_instagram_event, sender_id, message_text, ad_id, entry_point,
                     shared_reel, shared_post_id, shared_source_type,
+                    **({"instagram_username": instagram_username} if instagram_username else {}),
                 )
                 results.append({
                     "sender_id": sender_id,
@@ -1559,7 +1608,8 @@ def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks
                 })
                 continue
             background_tasks.add_task(
-                _process_instagram_event, sender_id, message_text, ad_id, entry_point
+                _process_instagram_event, sender_id, message_text, ad_id, entry_point,
+                **({"instagram_username": instagram_username} if instagram_username else {}),
             )
             results.append({
                 "sender_id": sender_id,
@@ -3376,10 +3426,21 @@ def get_admin_handoffs(
             visible_statuses.add("RESUMED")
         if requested_status is None and row_status not in visible_statuses:
             continue
+        row = dict(row)
+        customer_display_name = _safe_admin_handoff_label(row)
+        if (
+            customer_display_name == "Instagram customer"
+            and str(row.get("source_channel") or "").lower() == "instagram"
+        ):
+            resolved_username = _lookup_instagram_username(str(row.get("source_user_id") or ""))
+            if resolved_username:
+                db.update_handoff_username(str(row.get("handoff_ref") or ""), resolved_username)
+                row["instagram_username"] = resolved_username
+                customer_display_name = resolved_username
         handoff_ref = str(row.get("handoff_ref") or "")
         handoffs.append({
             "handoff_ref": handoff_ref,
-            "customer_display_name": _safe_admin_handoff_label(row),
+            "customer_display_name": customer_display_name,
             "source_channel": row.get("source_channel"),
             "reason": row.get("reason") or "Human support requested",
             "summary": row.get("summary") or "",
@@ -7670,7 +7731,7 @@ THIS WEEK'S BENGAL SPECIALS
             const statusClass = status === 'RESUMED' ? '' : ' waiting';
             const customer = handoffCustomerIdentity(item);
             return `<article class="handoff-card${unseenClass}" tabindex="0" data-handoff-ref="${escapeHtml(item.handoff_ref || '')}">
-                <div class="handoff-card-top"><div><div class="handoff-name">Customer: ${escapeHtml(customer)}</div><div class="handoff-ref">${escapeHtml(item.handoff_ref || 'CAM')}</div></div><span class="ig-media-status${statusClass}">${escapeHtml(status)}</span></div>
+                <div class="handoff-card-top"><div><div class="handoff-name">Customer: ${escapeHtml(customer)}</div><div class="handoff-ref">Reference: ${escapeHtml(item.handoff_ref || 'CAM')}</div></div><span class="ig-media-status${statusClass}">${escapeHtml(status)}</span></div>
                 <div class="handoff-summary">${escapeHtml(item.reason || 'Human support requested')}${item.summary && !compact ? `\n${escapeHtml(item.summary)}` : ''}</div>
                 <div class="handoff-meta">${escapeHtml(formatAdminTimestamp(item.created_at))}${item.unresolved_topic ? ` · ${escapeHtml(item.unresolved_topic)}` : ''}</div>
                 <button class="btn-secondary" type="button" data-handoff-open="${escapeHtml(item.handoff_ref || '')}" style="justify-self:start;padding:7px 10px;font-size:.74rem;">Open handoff</button>
@@ -7755,7 +7816,7 @@ THIS WEEK'S BENGAL SPECIALS
             document.getElementById('contentDetailsType').innerText = 'Customer handoff';
             document.getElementById('contentDetailsTitle').innerText = `Customer: ${handoffCustomerIdentity(item)}`;
             document.getElementById('contentDetailsPreview').innerHTML = '<div style="font-size:3rem;color:#8b97a8;">↗</div>';
-            document.getElementById('contentDetailsFacts').innerHTML = [['Customer', handoffCustomerIdentity(item)], ['CAM reference', item.handoff_ref], ['Status', status], ['Reason', item.reason], ['Summary', item.summary || '—'], ['Created', formatAdminTimestamp(item.created_at)], ['Updated', formatAdminTimestamp(item.updated_at || item.created_at)]].map(([label, value]) => `<div class="drawer-fact"><span class="drawer-fact-label">${escapeHtml(label)}</span><span class="drawer-fact-value">${escapeHtml(value)}</span></div>`).join('');
+            document.getElementById('contentDetailsFacts').innerHTML = [['Customer', handoffCustomerIdentity(item)], ['Reference', item.handoff_ref], ['Status', status], ['Reason', item.reason], ['Summary', item.summary || '—'], ['Created', formatAdminTimestamp(item.created_at)], ['Updated', formatAdminTimestamp(item.updated_at || item.created_at)]].map(([label, value]) => `<div class="drawer-fact"><span class="drawer-fact-label">${escapeHtml(label)}</span><span class="drawer-fact-value">${escapeHtml(value)}</span></div>`).join('');
             const resumeAction = status === 'WAITING_FOR_HUMAN' || status === 'CREATED'
                 ? `<button class="btn-secondary" type="button" onclick="resumeAdminHandoff('${escapeHtml(item.handoff_ref)}')">Resume CAM</button>`
                 : '<span class="ig-media-muted">Read-only history — this CAM is already resumed.</span>';

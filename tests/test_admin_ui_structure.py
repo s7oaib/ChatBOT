@@ -623,6 +623,9 @@ def test_handoff_notifications_are_global_and_persistent(page):
 
 def test_handoff_identity_and_current_menu_actions_are_wired(page):
     assert "Customer: ${escapeHtml(customer)}" in page
+    assert "return `@${value.replace(/^@+/, '')}`;" in page
+    assert "Reference: ${escapeHtml(item.handoff_ref || 'CAM')}" in page
+    assert "['Reference', item.handoff_ref]" in page
     assert "function handoffCustomerIdentity" in page
     assert "function showGroup(group, selectedTabId = null)" in page
     assert "panel.id === selectedTabId" in page
