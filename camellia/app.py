@@ -92,6 +92,17 @@ from camellia.assisted_resolution import create_suggestion
 from camellia.auto_resolve import simulate_auto_resolve
 from camellia.content_integrity import apply_confirmed_menu_facts, apply_safe_content_remediations
 from camellia.instagram_story_sync import sync_instagram_stories, story_sync_loop
+from camellia.instagram_oauth import (
+    STATE_COOKIE as INSTAGRAM_OAUTH_STATE_COOKIE,
+    STATE_TTL_SECONDS as INSTAGRAM_OAUTH_STATE_TTL_SECONDS,
+    InstagramOAuthError,
+    build_authorization_url,
+    error_page as instagram_oauth_error_page,
+    exchange_and_verify,
+    issue_state,
+    success_page as instagram_oauth_success_page,
+    validate_state,
+)
 
 log = get_logger("camellia.app")
 
@@ -372,7 +383,8 @@ async def add_security_headers(request: Request, call_next):
 async def admin_session_middleware(request: Request, call_next):
     """Load server-side admin sessions and enforce browser CSRF protection."""
     public_paths = {"/admin", "/admin/dashboard", "/admin/login", "/admin/verify-pin"}
-    if not request.url.path.startswith("/admin"):
+    protected_non_admin_paths = {"/auth/instagram/start"}
+    if not request.url.path.startswith("/admin") and request.url.path not in protected_non_admin_paths:
         return await call_next(request)
     if request.url.path in public_paths:
         return await call_next(request)
@@ -470,6 +482,97 @@ def require_web_tester() -> None:
     """
     if not config.ENABLE_WEB_TESTER:
         raise HTTPException(status_code=404, detail="Web tester is disabled. Set ENABLE_WEB_TESTER=true in environment variables.")
+
+
+@app.get("/auth/instagram/start")
+def start_instagram_oauth(
+    request: Request,
+    x_admin_key: Optional[str] = Header(None),
+):
+    """Start Instagram Login from an already authenticated Admin session."""
+    _require_secure_admin_request(request)
+    require_admin(x_admin_key)
+    try:
+        state = issue_state(config.INSTAGRAM_APP_SECRET)
+        url = build_authorization_url(
+            config.INSTAGRAM_APP_ID, config.INSTAGRAM_REDIRECT_URI, state
+        )
+    except InstagramOAuthError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    response = RedirectResponse(url=url, status_code=302)
+    response.set_cookie(
+        INSTAGRAM_OAUTH_STATE_COOKIE,
+        state,
+        max_age=INSTAGRAM_OAUTH_STATE_TTL_SECONDS,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+        path="/auth/instagram",
+    )
+    return response
+
+
+@app.get("/auth/instagram/callback", response_class=HTMLResponse)
+async def instagram_oauth_callback(
+    request: Request,
+    code: Optional[str] = Query(None),
+    state: Optional[str] = Query(None),
+    error: Optional[str] = Query(None),
+    error_reason: Optional[str] = Query(None),
+    error_description: Optional[str] = Query(None),
+):
+    """Exchange and verify Instagram Login without rendering credentials."""
+    response_kwargs = {"headers": {"Cache-Control": "no-store"}}
+    cookie_state = request.cookies.get(INSTAGRAM_OAUTH_STATE_COOKIE)
+    valid_state = False
+    try:
+        valid_state = validate_state(
+            state,
+            cookie_state,
+            config.INSTAGRAM_APP_SECRET,
+        )
+    except InstagramOAuthError:
+        valid_state = False
+    if not valid_state:
+        response = HTMLResponse(
+            instagram_oauth_error_page("This Instagram connection link is invalid or expired."),
+            status_code=400,
+            **response_kwargs,
+        )
+        response.delete_cookie(INSTAGRAM_OAUTH_STATE_COOKIE, path="/auth/instagram")
+        return response
+    if error or error_reason or error_description:
+        response = HTMLResponse(
+            instagram_oauth_error_page("Instagram authorization was cancelled or denied."),
+            status_code=400,
+            **response_kwargs,
+        )
+        response.delete_cookie(INSTAGRAM_OAUTH_STATE_COOKIE, path="/auth/instagram")
+        return response
+    if not code or len(code) > 4096 or any(char.isspace() for char in code):
+        response = HTMLResponse(
+            instagram_oauth_error_page("Instagram authorization code is missing or invalid."),
+            status_code=400,
+            **response_kwargs,
+        )
+        response.delete_cookie(INSTAGRAM_OAUTH_STATE_COOKIE, path="/auth/instagram")
+        return response
+    try:
+        identity = await exchange_and_verify(
+            app_id=config.INSTAGRAM_APP_ID,
+            app_secret=config.INSTAGRAM_APP_SECRET,
+            redirect_uri=config.INSTAGRAM_REDIRECT_URI,
+            code=code,
+            expected_username=config.INSTAGRAM_EXPECTED_USERNAME,
+        )
+        body = instagram_oauth_success_page(identity)
+        status_code = 200
+    except InstagramOAuthError as exc:
+        body = instagram_oauth_error_page(str(exc))
+        status_code = 502
+    response = HTMLResponse(body, status_code=status_code, **response_kwargs)
+    response.delete_cookie(INSTAGRAM_OAUTH_STATE_COOKIE, path="/auth/instagram")
+    return response
 
 # --------------------------------------------------------------------------
 # Root / Health Check / Favicon

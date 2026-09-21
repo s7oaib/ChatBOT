@@ -257,6 +257,18 @@ class Config:
     # When set, webhook entries must belong to this exact Instagram account.
     # Leaving it blank preserves compatibility with existing integrations.
     INSTAGRAM_ACCOUNT_ID: str = os.getenv("INSTAGRAM_ACCOUNT_ID", "").strip()
+    # Instagram Login has its own app credentials. Do not silently reuse the
+    # webhook/Page app secret: a code issued for one app cannot be exchanged by
+    # another app, even when both are owned by the same Meta account.
+    INSTAGRAM_APP_ID: str = os.getenv("INSTAGRAM_APP_ID", "").strip()
+    INSTAGRAM_APP_SECRET: str = _env_secret("INSTAGRAM_APP_SECRET")
+    INSTAGRAM_REDIRECT_URI: str = os.getenv(
+        "INSTAGRAM_REDIRECT_URI",
+        "https://web-production-0cad70.up.railway.app/auth/instagram/callback",
+    ).strip()
+    INSTAGRAM_EXPECTED_USERNAME: str = os.getenv(
+        "INSTAGRAM_EXPECTED_USERNAME", "camellia.artisanal"
+    ).strip().casefold()
     INSTAGRAM_PAGE_ID: str = os.getenv("INSTAGRAM_PAGE_ID", "")
     INSTAGRAM_ACCESS_TOKEN: str = os.getenv("INSTAGRAM_ACCESS_TOKEN", "")
     INSTAGRAM_API_VERSION: str = _resolve_graph_api_version(
