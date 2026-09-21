@@ -103,6 +103,7 @@ from camellia.instagram_oauth import (
     success_page as instagram_oauth_success_page,
     validate_state,
 )
+from camellia.instagram_identity import resolve_instagram_identity
 
 log = get_logger("camellia.app")
 
@@ -622,6 +623,8 @@ def _process_instagram_event(
     shared_post_id: Optional[str] = None,
     shared_source_type: Optional[str] = None,
     instagram_username: Optional[str] = None,
+    customer_identity: Optional[Dict[str, Any]] = None,
+    resolve_identity: bool = False,
 ) -> None:
     """
     Matches, logs, escalates and replies for one Instagram DM.
@@ -637,6 +640,13 @@ def _process_instagram_event(
     frees the loop and lets several customers be handled at once.
     """
     try:
+        identity_was_supplied = customer_identity is not None
+        identity = customer_identity or (
+            resolve_instagram_identity(sender_id).as_record()
+            if resolve_identity else
+            {"customer_external_id": sender_id, "customer_username": None}
+        )
+        identity["customer_external_id"] = identity.get("customer_external_id") or sender_id
         facts = session_memory.get_facts(sender_id, "instagram")
         active_handoff = db.get_active_handoff("instagram", sender_id)
         if active_handoff:
@@ -646,6 +656,12 @@ def _process_instagram_event(
             # removes this gate.
             entry = entry_point or EntryPoint()
             customer_message = str(message_text or "").strip() or "[shared media]"
+            if identity.get("customer_username") or identity.get("customer_external_id"):
+                db.update_handoff_identity(
+                    active_handoff["handoff_ref"],
+                    customer_username=identity.get("customer_username"),
+                    customer_external_id=identity.get("customer_external_id"),
+                )
             db.log_conversation(
                 sender_id, "instagram", customer_message, "", False,
                 "waiting_for_human", message_source=entry.source, ad_id=ad_id,
@@ -870,6 +886,7 @@ def _process_instagram_event(
                     customer_message, contact_mode=contact_mode, reason=reason,
                 ),
                 contact_mode=contact_mode,
+                customer_identity=identity,
             )
             # A repeated "human"/"can someone help" against an already-active
             # handoff reuses the reference (above) and must not re-alert
@@ -882,6 +899,8 @@ def _process_instagram_event(
                     reason=reason,
                     context_data={
                         "ad_id": ad_id, "sender_id": sender_id, "template_id": template_id,
+                        "customer_username": identity.get("customer_username"),
+                        "customer_external_id": identity.get("customer_external_id"),
                         "handoff_ref": handoff["handoff_ref"],
                         "handoff_summary": staff_summary(handoff),
                     },
@@ -893,6 +912,11 @@ def _process_instagram_event(
                 response_text = customer_facing_notice(
                     finalized_order=template_id == "order_next_steps"
                 )
+                if contact_mode == "support_callback" and identity_was_supplied:
+                    response_text = (
+                        f"{response_text}\n\nPlease quote reference {handoff['handoff_ref']} "
+                        "when you follow up with our team."
+                    )
             link_message = (
                 customer_facing_link_message(handoff["handoff_ref"], order_summary)
                 if contact_mode == "whatsapp_order" else None
@@ -935,7 +959,10 @@ def _process_instagram_event(
     except Exception:
         # A background task that raises disappears silently, and the customer
         # is left with no reply and nothing in the logs explaining why.
-        log.exception("Failed to process Instagram message from %s.", sender_id)
+        log.exception(
+            "Failed to process Instagram message from sender_hash=%s.",
+            _safe_identifier_hash(sender_id),
+        )
 
 
 # Webhook events the bot received and did not answer. Kept in memory and
@@ -1017,7 +1044,10 @@ def _reply_to_unreadable_attachment(
             inbound_message_id=conversation_id, response_type="attachment_notice",
         )
     except Exception:
-        log.exception("Failed to answer an unreadable attachment from %s.", sender_id)
+        log.exception(
+            "Failed to answer an unreadable attachment from sender_hash=%s.",
+            _safe_identifier_hash(sender_id),
+        )
 
 
 def _apply_source_context(sender_id: str, route: Dict[str, Any], match_method: str) -> None:
@@ -1082,7 +1112,10 @@ def _establish_shared_reel_context(sender_id: str, identity: Dict[str, str]) -> 
     except Exception:
         # Context is a nicety; the attachment reply below is not allowed to
         # fail because of it.
-        log.exception("Could not establish shared-reel context for %s.", sender_id)
+        log.exception(
+            "Could not establish shared-reel context for sender_hash=%s.",
+            _safe_identifier_hash(sender_id),
+        )
         return False
 
 
@@ -1136,7 +1169,10 @@ def _establish_shared_post_context(sender_id: str, post_media_id: str) -> bool:
         )
         return True
     except Exception:
-        log.exception("Could not establish shared-post context for %s.", sender_id)
+        log.exception(
+            "Could not establish shared-post context for sender_hash=%s.",
+            _safe_identifier_hash(sender_id),
+        )
         return False
 
 
@@ -1187,7 +1223,10 @@ def _handle_shared_attachment(
                 shared_source_type="reel" if reel_identity else "post",
             )
         except Exception:
-            log.exception("Could not resolve shared media for %s.", sender_id)
+            log.exception(
+                "Could not resolve shared media for sender_hash=%s.",
+                _safe_identifier_hash(sender_id),
+            )
             _reply_to_unreadable_attachment(
                 sender_id,
                 source_type="reel" if reel_identity else "post",
@@ -1622,6 +1661,7 @@ def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks
                         background_args = (sender_id, "", ad_id, entry_point)
                     background_tasks.add_task(
                         background_fn, *background_args,
+                        **({"resolve_identity": True} if background_fn is _process_instagram_event else {}),
                     )
                     results.append({
                         "sender_id": sender_id,
@@ -1666,6 +1706,7 @@ def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks
                 background_tasks.add_task(
                     _process_instagram_event, sender_id, message_text, ad_id, entry_point,
                     shared_reel, shared_post_id, shared_source_type,
+                    None, None, True,
                 )
                 results.append({
                     "sender_id": sender_id,
@@ -1676,7 +1717,8 @@ def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks
                 })
                 continue
             background_tasks.add_task(
-                _process_instagram_event, sender_id, message_text, ad_id, entry_point
+                _process_instagram_event, sender_id, message_text, ad_id, entry_point,
+                None, None, None, None, None, True,
             )
             results.append({
                 "sender_id": sender_id,
@@ -3470,7 +3512,10 @@ def get_escalations_list(limit: int = 50, status: Optional[str] = None, x_admin_
 
 
 def _safe_admin_handoff_label(handoff: Dict[str, Any]) -> str:
-    """Choose an operator-friendly label without ever falling back to Meta ID."""
+    """Choose an authenticated operator label with an ID-only fallback."""
+    username = str(handoff.get("customer_username") or "").strip().lstrip("@")
+    if username and username != str(handoff.get("source_user_id") or ""):
+        return f"@{username}"
     try:
         known = json.loads(handoff.get("known_entities") or "{}")
     except (TypeError, ValueError):
@@ -3480,8 +3525,9 @@ def _safe_admin_handoff_label(handoff: Dict[str, Any]) -> str:
     for key in ("instagram_username", "username", "display_name", "customer_name"):
         value = str(known.get(key) or "").strip()
         if value and value != str(handoff.get("source_user_id") or ""):
-            return value
-    return "Instagram customer"
+            return value if value.startswith("@") else f"@{value}"
+    external_id = str(handoff.get("customer_external_id") or handoff.get("source_user_id") or "").strip()
+    return external_id or "Instagram customer"
 
 
 @app.get("/admin/handoffs")
@@ -3493,9 +3539,10 @@ def get_admin_handoffs(
 ):
     """Return safe, durable handoff notifications for the Admin shell.
 
-    The raw Instagram sender identifier is intentionally omitted. CAM status
-    remains read-only here; lifecycle changes continue through the existing
-    resume endpoint.
+    This is an authenticated operational view. The Instagram sender ID is
+    retained as the stable customer identity even when username lookup fails.
+    CAM status remains read-only here; lifecycle changes continue through the
+    existing resume endpoint.
     """
     require_admin(x_admin_key, x_admin_pin)
     requested_status = str(status or "").strip().upper() or None
@@ -3514,6 +3561,12 @@ def get_admin_handoffs(
         handoffs.append({
             "handoff_ref": handoff_ref,
             "customer_display_name": _safe_admin_handoff_label(row),
+            "customer_username": row.get("customer_username"),
+            "customer_external_id": (
+                row.get("customer_external_id") or row.get("source_user_id")
+                if str(row.get("source_channel") or "").lower() == "instagram"
+                else None
+            ),
             "source_channel": row.get("source_channel"),
             "reason": row.get("reason") or "Human support requested",
             "summary": row.get("summary") or "",
@@ -7683,7 +7736,7 @@ THIS WEEK'S BENGAL SPECIALS
         function renderHandoffCard(item, compact = false) {
             const unseenClass = item.seen ? '' : ' unseen';
             return `<article class="handoff-card${unseenClass}" tabindex="0" data-handoff-ref="${escapeHtml(item.handoff_ref || '')}">
-                <div class="handoff-card-top"><div><div class="handoff-name">${escapeHtml(item.customer_display_name || 'Instagram customer')}</div><div class="handoff-ref">${escapeHtml(item.handoff_ref || 'CAM')}</div></div><span class="ig-media-status waiting">${escapeHtml(item.status || 'WAITING_FOR_HUMAN')}</span></div>
+                <div class="handoff-card-top"><div><div class="handoff-name">Customer: ${escapeHtml(item.customer_display_name || 'Instagram customer')}</div>${item.customer_external_id ? `<div class="handoff-id">Instagram ID: ${escapeHtml(item.customer_external_id)}</div>` : ''}<div class="handoff-ref">${escapeHtml(item.handoff_ref || 'CAM')}</div></div><span class="ig-media-status waiting">${escapeHtml(item.status || 'WAITING_FOR_HUMAN')}</span></div>
                 <div class="handoff-summary">${escapeHtml(item.reason || 'Human support requested')}${item.summary && !compact ? `\n${escapeHtml(item.summary)}` : ''}</div>
                 <div class="handoff-meta">${escapeHtml(formatAdminTimestamp(item.created_at))}${item.unresolved_topic ? ` · ${escapeHtml(item.unresolved_topic)}` : ''}</div>
             </article>`;
@@ -7757,7 +7810,7 @@ THIS WEEK'S BENGAL SPECIALS
             document.getElementById('contentDetailsType').innerText = 'Customer handoff';
             document.getElementById('contentDetailsTitle').innerText = item.customer_display_name || 'Instagram customer';
             document.getElementById('contentDetailsPreview').innerHTML = '<div style="font-size:3rem;color:#8b97a8;">↗</div>';
-            document.getElementById('contentDetailsFacts').innerHTML = [['CAM reference', item.handoff_ref], ['Status', item.status || 'WAITING_FOR_HUMAN'], ['Reason', item.reason], ['Summary', item.summary || '—'], ['Created', formatAdminTimestamp(item.created_at)]].map(([label, value]) => `<div class="drawer-fact"><span class="drawer-fact-label">${escapeHtml(label)}</span><span class="drawer-fact-value">${escapeHtml(value)}</span></div>`).join('');
+            document.getElementById('contentDetailsFacts').innerHTML = [['Customer', item.customer_display_name || '—'], ['Instagram ID', item.customer_external_id || '—'], ['CAM reference', item.handoff_ref], ['Status', item.status || 'WAITING_FOR_HUMAN'], ['Reason', item.reason], ['Summary', item.summary || '—'], ['Created', formatAdminTimestamp(item.created_at)]].map(([label, value]) => `<div class="drawer-fact"><span class="drawer-fact-label">${escapeHtml(label)}</span><span class="drawer-fact-value">${escapeHtml(value)}</span></div>`).join('');
             document.getElementById('contentDetailsActions').innerHTML = `<button class="btn-secondary" type="button" onclick="resumeAdminHandoff('${escapeHtml(item.handoff_ref)}')">Resume CAM</button><button class="btn-secondary" type="button" onclick="switchTab('tab-handoffs', null); closeContentDetails();">Open Handoffs</button>`;
             drawer.classList.add('open'); backdrop.classList.add('open'); drawer.setAttribute('aria-hidden', 'false'); backdrop.setAttribute('aria-hidden', 'false'); document.getElementById('contentDetailsClose').focus();
         }

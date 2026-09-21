@@ -78,6 +78,20 @@ class SessionMemoryManager:
                 "decision_lane": None,
                 "route_trace": {},
                 "last_handoff_reason": None,
+                # Structured conversation state.  These fields are routing
+                # metadata only; customer-facing copy remains in approved QA.
+                "active_topic": None,
+                "active_entity": None,
+                "active_intent": None,
+                "pending_clarification": None,
+                "clarification_options": [],
+                "clarification_intent": None,
+                "presented_options": [],
+                "last_bot_question": None,
+                "last_answer_id": None,
+                "last_assets_sent": [],
+                "active_asset": None,
+                "updated_at": current_time,
                 "last_escalation_status": None,
                 "cart": [],
                 "order_draft": {
@@ -140,11 +154,15 @@ class SessionMemoryManager:
             "last_fallback_used", "last_grounding", "decision_lane", "route_trace",
             "last_handoff_reason", "last_escalation_status",
             "last_nlu_confidence", "last_nlu_reason",
+            "active_topic", "active_entity", "active_intent",
+            "pending_clarification", "clarification_options", "clarification_intent", "presented_options",
+            "last_bot_question", "last_answer_id", "last_assets_sent", "active_asset",
             "cart", "order_draft",
         }
         for key in transient:
             facts[key] = defaults[key]
         session["last_updated"] = current_time
+        session["facts"]["updated_at"] = current_time
         return session
 
     def get_session(self, user_id: str, channel: str) -> Dict[str, Any]:
@@ -203,6 +221,7 @@ class SessionMemoryManager:
             "quantity": 1
         }
         session["last_updated"] = time.time()
+        session["facts"]["updated_at"] = session["last_updated"]
         self._persist(user_id, channel)
 
     def extract_and_update_facts(self, user_id: str, channel: str, text: str) -> Dict[str, Any]:
@@ -330,6 +349,7 @@ class SessionMemoryManager:
                 pass
 
         session["last_updated"] = time.time()
+        session["facts"]["updated_at"] = session["last_updated"]
         self._persist(user_id, channel)
         return facts
 

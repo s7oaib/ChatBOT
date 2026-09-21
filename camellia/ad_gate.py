@@ -40,6 +40,8 @@ class EntryPoint:
     media_id: Optional[str] = None
     from_ad_click: bool = False    # this event carried the ad referral itself
     raw_payload: Optional[str] = None
+    sender_id: Optional[str] = None
+    customer_username: Optional[str] = None
 
 
 def _referral_of(messaging_event: Dict[str, Any]) -> Dict[str, Any]:
@@ -81,6 +83,12 @@ def describe_entry_point(messaging_event: Dict[str, Any]) -> EntryPoint:
     story = reply_to.get("story") if isinstance(reply_to, dict) else None
     media_id = str(story.get("id")) if isinstance(story, dict) and story.get("id") else None
     story_mention = message_obj.get("story_mention") or messaging_event.get("story_mention")
+    sender_obj = messaging_event.get("sender") or messaging_event.get("from") or {}
+    sender_id = sender_obj.get("id") if isinstance(sender_obj, dict) else None
+    customer_username = (
+        str(sender_obj.get("username")).strip().lstrip("@")
+        if isinstance(sender_obj, dict) and sender_obj.get("username") else None
+    )
 
     payload = postback_obj.get("payload")
     if postback_obj:
@@ -106,6 +114,8 @@ def describe_entry_point(messaging_event: Dict[str, Any]) -> EntryPoint:
         media_id=media_id,
         from_ad_click=from_ad_click,
         raw_payload=str(payload) if payload else None,
+        sender_id=str(sender_id) if sender_id else None,
+        customer_username=customer_username,
     )
 
 def fetch_message_details_fallback(mid: str) -> Tuple[Optional[str], Optional[str]]:

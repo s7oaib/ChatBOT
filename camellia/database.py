@@ -653,6 +653,8 @@ class Database:
                 reason TEXT,
                 summary TEXT,
                 known_entities TEXT,
+                customer_username TEXT,
+                customer_external_id TEXT,
                 unresolved_topic TEXT,
                 status TEXT NOT NULL DEFAULT 'CREATED',
                 escalation_id INTEGER,
@@ -678,6 +680,8 @@ class Database:
                     cursor.execute(
                         f"ALTER TABLE cross_channel_handoffs ADD COLUMN {column} {declaration}"
                     )
+            self._ensure_column(cursor, "cross_channel_handoffs", "customer_username", "TEXT")
+            self._ensure_column(cursor, "cross_channel_handoffs", "customer_external_id", "TEXT")
 
             # Admin notification state is deliberately separate from the
             # handoff lifecycle. Reading a notification must never mutate a
@@ -2924,6 +2928,8 @@ class Database:
         instagram_username: Optional[str] = None,
         query_summary: Optional[str] = None,
         contact_mode: Optional[str] = None,
+        customer_username: Optional[str] = None,
+        customer_external_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Records a new opaque handoff reference. Never overwrites one."""
         with self.get_connection() as conn:
@@ -2932,13 +2938,15 @@ class Database:
                 INSERT INTO cross_channel_handoffs (
                     handoff_ref, source_channel, source_user_id, reason, summary,
                     known_entities, unresolved_topic, status, escalation_id,
-                    instagram_username, query_summary, contact_mode, expires_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'CREATED', ?, ?, ?, ?, ?)
+                    instagram_username, query_summary, contact_mode, expires_at,
+                    customer_username, customer_external_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'CREATED', ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     handoff_ref, source_channel, source_user_id, reason, summary,
                     json.dumps(known_entities or {}, ensure_ascii=False), unresolved_topic,
                     escalation_id, instagram_username, query_summary, contact_mode, expires_at,
+                    customer_username, customer_external_id,
                 ),
             )
             conn.commit()
@@ -2959,6 +2967,8 @@ class Database:
         instagram_username: Optional[str] = None,
         query_summary: Optional[str] = None,
         contact_mode: Optional[str] = None,
+        customer_username: Optional[str] = None,
+        customer_external_id: Optional[str] = None,
     ) -> tuple[Dict[str, Any], bool]:
         """Atomically reuse or create one active handoff for a customer.
 
@@ -2980,6 +2990,18 @@ class Database:
                 (source_channel, source_user_id),
             ).fetchone()
             if existing:
+                if customer_username or customer_external_id:
+                    conn.execute(
+                        "UPDATE cross_channel_handoffs SET "
+                        "customer_username=COALESCE(?, customer_username), "
+                        "customer_external_id=COALESCE(?, customer_external_id), "
+                        "updated_at=CURRENT_TIMESTAMP WHERE handoff_ref = ?",
+                        (customer_username, customer_external_id, existing["handoff_ref"]),
+                    )
+                    existing = conn.execute(
+                        "SELECT * FROM cross_channel_handoffs WHERE handoff_ref = ?",
+                        (existing["handoff_ref"],),
+                    ).fetchone()
                 conn.commit()
                 return dict(existing), False
 
@@ -2988,13 +3010,15 @@ class Database:
                 INSERT INTO cross_channel_handoffs (
                     handoff_ref, source_channel, source_user_id, reason, summary,
                     known_entities, unresolved_topic, status, escalation_id,
-                    instagram_username, query_summary, contact_mode, expires_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'CREATED', ?, ?, ?, ?, ?)
+                    instagram_username, query_summary, contact_mode, expires_at,
+                    customer_username, customer_external_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'CREATED', ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     handoff_ref, source_channel, source_user_id, reason, summary,
                     json.dumps(known_entities or {}, ensure_ascii=False), unresolved_topic,
                     escalation_id, instagram_username, query_summary, contact_mode, expires_at,
+                    customer_username, customer_external_id,
                 ),
             )
             created = conn.execute(
@@ -3003,6 +3027,20 @@ class Database:
             ).fetchone()
             conn.commit()
             return dict(created), True
+
+    def update_handoff_identity(
+        self, handoff_ref: str, *, customer_username: Optional[str], customer_external_id: Optional[str],
+    ) -> None:
+        """Enrich an existing CAM without changing its lifecycle or dedup key."""
+        with self.get_connection() as conn:
+            conn.execute(
+                "UPDATE cross_channel_handoffs SET "
+                "customer_username=COALESCE(?, customer_username), "
+                "customer_external_id=COALESCE(?, customer_external_id), "
+                "updated_at=CURRENT_TIMESTAMP WHERE handoff_ref = ?",
+                (customer_username, customer_external_id, handoff_ref),
+            )
+            conn.commit()
 
     def get_handoff_by_ref(self, handoff_ref: str) -> Optional[Dict[str, Any]]:
         """Looks up a handoff by its customer-facing reference."""
@@ -3855,6 +3893,20 @@ class Database:
             )
             cursor.execute("DELETE FROM escalations WHERE user_id = ?", (user_id,))
             removed_escalations = cursor.rowcount
+            handoff_refs = [
+                row["handoff_ref"] for row in cursor.execute(
+                    "SELECT handoff_ref FROM cross_channel_handoffs WHERE source_user_id = ?",
+                    (user_id,),
+                ).fetchall()
+            ]
+            if handoff_refs:
+                placeholders = ",".join("?" for _ in handoff_refs)
+                cursor.execute(
+                    f"DELETE FROM admin_handoff_views WHERE handoff_ref IN ({placeholders})",
+                    tuple(handoff_refs),
+                )
+            cursor.execute("DELETE FROM cross_channel_handoffs WHERE source_user_id = ?", (user_id,))
+            removed_handoffs = cursor.rowcount
             cursor.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
             removed_sessions = cursor.rowcount
             conn.commit()
@@ -3862,6 +3914,7 @@ class Database:
         return {
             "conversations": max(removed_conversations, 0),
             "escalations": max(removed_escalations, 0),
+            "handoffs": max(removed_handoffs, 0),
             "sessions": max(removed_sessions, 0),
         }
 
