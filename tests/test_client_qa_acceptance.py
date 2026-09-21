@@ -12,7 +12,7 @@ from camellia.session_memory import session_memory
         ("price is high", "pricing_value_context"),
         ("what is the price of chicken kosha", "chicken_kosha_price"),
         ("how much time do you take to deliver sondesh", "sondesh_dispatch_time"),
-        ("tell me more about sondesh", "sondesh_details"),
+        ("tell me more about sondesh", "sondesh_tell_me_more"),
         ("sondesh is unfamiliar to me", "sondesh_unfamiliar"),
         ("why is the minimum order 9 pieces 250g for some flavours", "minimum_sondesh_quantity"),
         ("share weekly menu", "savoury_food_intro"),
@@ -41,7 +41,7 @@ def test_sondesh_overview_uses_available_menu_assets():
         referral_source="ADS",
     )
     assert matched is True
-    assert template_id == "sondesh_details"
+    assert template_id == "sondesh_tell_me_more"
     assert images
 
 

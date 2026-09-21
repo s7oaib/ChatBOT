@@ -213,7 +213,7 @@ _CLIENT_QA_TEMPLATE_IDS = {
     "chicken_kosha_price_client": "chicken_kosha_price",
     "sondesh_delivery_time": "sondesh_dispatch_time",
     "sondesh_price_client": "sondesh_price_detailed",
-    "sondesh_details_client": "sondesh_details",
+    "sondesh_details_client": "sondesh_tell_me_more",
     "sondesh_unfamiliar_client": "sondesh_unfamiliar",
     "delivery_out_of_area_client": "delivery_out_of_area",
     "order_prebook": "alacarte_prebooking_steps",
@@ -939,6 +939,7 @@ TOPIC_MAP = {
     "mahua_signature_special": "signature",
     "sondesh_price_detailed": "sondesh_general",
     "sondesh_details": "sondesh_general",
+    "sondesh_tell_me_more": "sondesh_general",
     "sondesh_unfamiliar": "sondesh_general",
     "product_overview": "sondesh_general",
     "know_more": "sondesh_general",
@@ -1433,7 +1434,7 @@ class DeterministicResponder:
         if re.search(r"\b(?:how much time do you take to deliver sondesh|how long do you take to deliver sondesh)\b", text):
             special_template_ids.append("sondesh_dispatch_time")
         if re.search(r"\b(?:tell me more about sondesh|tell me about sondesh|what is sondesh|sondesh details)\b", text):
-            special_template_ids.append("sondesh_details")
+            special_template_ids.append("sondesh_tell_me_more")
         if re.search(r"\b(?:sondesh unfamiliar|sondesh is unfamiliar|new to sondesh|never tried sondesh|what is this sondesh)\b", text):
             special_template_ids.append("sondesh_unfamiliar")
         if re.search(r"\b(?:why is the minimum order 9 pieces|minimum order 9 pieces|minimum order quantity 9|why minimum 250g sondesh|multiples of 9 pieces)\b", text):
@@ -1442,10 +1443,14 @@ class DeterministicResponder:
             special_template_ids.append("savoury_food_intro")
         if special_template_ids:
             template_id = special_template_ids[0]
-            template = self._template_by_id(template_id) or {}
+            canonical_template_id = (
+                "sondesh_details" if template_id == "sondesh_tell_me_more" else template_id
+            )
+            template = self._template_by_id(canonical_template_id) or {}
             response = template.get("response") or self._generic_fallback()
             response, images = self._format_dynamic_response(
-                template_id, response, user_id=user_id, channel=channel, user_message=message,
+                canonical_template_id, response,
+                user_id=user_id, channel=channel, user_message=message,
             )
             response, images = self._apply_crosssell_nudges(
                 template_id, response, images, session_memory.get_facts(user_id, channel),
@@ -2439,10 +2444,6 @@ class DeterministicResponder:
                 and not semantic_fallback._IDENTITY_QUESTION_RE.search(lowered_text)
             )
             or source_context_blocks_client_qa
-            or (
-                source_route_active
-                and explicit_client_subject
-            )
             or BULK_CONTEXT_RE.search(lowered_text)
             or (
                 facts.get("active_product_context")
@@ -2498,6 +2499,21 @@ class DeterministicResponder:
                 "client_qa_missing_assets": asset_missing,
                 "client_qa_handoff_exact": entry.qa_id == "order_ready_handoff",
             })
+            if entry.qa_id == "sondesh_details_client":
+                # An explicit canonical Sondesh FAQ is a fresh subject. It
+                # must clear an older product-choice prompt and source context
+                # before the next turn can be interpreted as a follow-up.
+                facts.update({
+                    "pending_clarification": None,
+                    "clarification_options": [],
+                    "presented_options": [],
+                    "last_bot_question": None,
+                    "active_entity": "SONDESH",
+                    "active_topic": "sondesh_general",
+                    "last_topic": "sondesh_general",
+                    "source_context_superseded": True,
+                    "source_context_used": False,
+                })
             client_topic = TOPIC_MAP.get(_CLIENT_QA_TEMPLATE_IDS.get(entry.qa_id, ""))
             if client_topic:
                 facts["last_topic"] = client_topic
@@ -4005,11 +4021,14 @@ class DeterministicResponder:
                         "speak to", "talk to", "contact person", "point of contact",
                         "who do i contact", "who should i contact", "connect me",
                     },
+                    # A menu request naming "vegetarian" is not a dietary
+                    # policy question. Require a dietary anchor before this
+                    # guard can outrank the approved menu route.
                     "GUARD_dietary_suitability": {
                         "vegan", "egg", "eggless", "gluten", "lactose", "dietary",
                         "is it vegetarian", "is this vegetarian", "are they vegetarian",
                         "pure veg", "fully vegetarian", "100% vegetarian",
-                    }
+                    },
                 }
                 anchors = guard_anchors.get(tmpl_id, set())
                 if anchors and not any(a in lowered_text for a in anchors):
@@ -5078,7 +5097,7 @@ class DeterministicResponder:
                 # each collection note and its matching menu card.
                 target_images = self._collection_cards_static(img_aamar_mishti, img_signature_sondesh)
 
-        elif template_id in ["sondesh_details", "sondesh_unfamiliar"]:
+        elif template_id in ["sondesh_details", "sondesh_tell_me_more", "sondesh_unfamiliar"]:
             target_images = self._collection_cards_static(img_aamar_mishti, img_signature_sondesh)
             if current_weekly_img:
                 target_images.append({"url": current_weekly_img, "caption": None})

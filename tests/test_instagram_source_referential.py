@@ -333,7 +333,7 @@ def test_composite_greeting_keeps_menu_and_handoff_intents(deterministic_respond
     ("hi tell me more about Kanchagolla", "kanchagolla"),
     ("tell me more about Kanchagolla", "kanchagolla"),
     ("tell me more about Jolbhora", "jolbhora"),
-        ("tell me more about Sondesh", "sondesh_details"),
+        ("tell me more about Sondesh", "sondesh_tell_me_more"),
 ])
 def test_named_subject_precedes_generic_detail_nlu(
     deterministic_responder, monkeypatch, text, expected,
