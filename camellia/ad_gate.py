@@ -162,6 +162,45 @@ def fetch_message_details_fallback(mid: str) -> Tuple[Optional[str], Optional[st
 
     return None, None
 
+
+def fetch_instagram_username(sender_id: str) -> Optional[str]:
+    """Resolve the username for an exact Instagram-scoped sender ID.
+
+    Instagram webhook events normally identify the customer by scoped ID, not
+    by handle.  The User Profile API is the supported fallback when the event
+    itself does not carry ``sender.username``.  Only the username is returned;
+    identifiers and Graph response details stay out of logs.
+    """
+    sender = str(sender_id or "").strip()
+    token = (config.INSTAGRAM_ACCESS_TOKEN or "").strip()
+    sender_hash = hashlib.sha256(sender.encode("utf-8")).hexdigest()[:12] if sender else None
+    if not sender or not token:
+        return None
+
+    host = "graph.instagram.com" if token.startswith("IGAA") else "graph.facebook.com"
+    url = f"https://{host}/{config.INSTAGRAM_API_VERSION}/{sender}"
+    try:
+        with httpx.Client(timeout=5.0) as client:
+            response = client.get(
+                url,
+                params={"fields": "username", "access_token": token},
+            )
+        if response.status_code != 200:
+            log.info(
+                "Instagram profile lookup unavailable for sender_hash=%s status=%s.",
+                sender_hash, response.status_code,
+            )
+            return None
+        payload = response.json()
+        username = payload.get("username") if isinstance(payload, dict) else None
+        return str(username).strip().lstrip("@") if username else None
+    except Exception as exc:
+        log.info(
+            "Instagram profile lookup failed for sender_hash=%s error=%s.",
+            sender_hash, type(exc).__name__,
+        )
+        return None
+
 class AdGate:
     """Instagram Ad-Referral Hard Gate Processor.
     

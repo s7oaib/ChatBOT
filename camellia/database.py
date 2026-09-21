@@ -3042,6 +3042,35 @@ class Database:
             )
             conn.commit()
 
+    def update_handoff_username(self, handoff_ref: str, instagram_username: str) -> bool:
+        """Safely backfill a verified username onto an open CAM.
+
+        A handle resolved from the exact sender ID is allowed to fill an
+        empty field (or a legacy copy of that same sender ID), but never
+        overwrites a different stored handle or a closed historical record.
+        """
+        reference = str(handoff_ref or "").strip()
+        username = str(instagram_username or "").strip().lstrip("@").strip()
+        if not reference or not username:
+            return False
+        with self.get_connection() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE cross_channel_handoffs
+                SET instagram_username = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE handoff_ref = ?
+                  AND status NOT IN ('RESOLVED', 'EXPIRED')
+                  AND (
+                      instagram_username IS NULL
+                      OR TRIM(instagram_username) = ''
+                      OR instagram_username = source_user_id
+                  )
+                """,
+                (username, reference),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
     def resume_handoff(self, handoff_ref: str) -> Optional[Dict[str, Any]]:
         """Close the waiting gate through an explicit operator action."""
         with self.get_connection() as conn:
