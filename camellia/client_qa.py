@@ -202,6 +202,15 @@ def match(message: str, facts: Optional[Dict[str, Any]] = None) -> Optional[Appr
     normalized = _normalise_question(text)
     state = facts or {}
     home = _home_context(text, state)
+    # A named product in the current message is a new subject, even when a
+    # previous Home Table exchange left that context in session memory. Keep
+    # an explicit Home Table phrase authoritative when it is present in the
+    # current message itself.
+    if (
+        re.search(r"\b(?:jolbhora|kanchagolla|sondesh|mishti|mithai|nolen\s+gur|aamar|signature|bento)\b", text, re.I)
+        and not re.search(r"\b(?:bengali|kolkata)\s+home\s+(?:table|lunch)|home\s+table\b", text, re.I)
+    ):
+        home = False
 
     def result(entry_id: str, kind: str = "paraphrase") -> Optional[ApprovedMatch]:
         entry = _find(entry_id)
