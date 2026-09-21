@@ -341,6 +341,12 @@ def match(message: str, facts: Optional[Dict[str, Any]] = None) -> Optional[Appr
     # explicit subject boundary in the main responder owns those names; this
     # compact registry owns the approved Sondesh category blocks.
     if named_sondesh:
+        # The client has explicitly approved the long Sondesh introduction for
+        # this exact customer wording. Keep the distinct SONDESH_PRICE record
+        # for its other price paraphrases, but do not let the legacy price
+        # preface win for this production trigger.
+        if normalized == _normalise_question("Whats the price of sondesh?"):
+            return _result("SONDESH_DETAILS", "exact")
         if re.search(r"\b(?:how\s+much\s+time|how\s+long|delivery\s+time|dispatch|deliver)\b", text, re.I):
             return _result("SONDESH_DELIVERY_TIME")
         if re.search(r"\b(?:price|cost|how\s+much|rate|pieces|box)\b", text, re.I):
