@@ -421,11 +421,13 @@ class MenuParser:
         # rest, including a date printed in large type across the header.
         prompt = (
             "You are an OCR data extraction AI reading a printed food menu flyer.\n\n"
-            "Return ONE JSON object containing ALL SIX of these keys, every time:\n"
+            "Return ONE JSON object containing ALL EIGHT of these keys, every time:\n"
             '  "week_of"            - the date range printed near the top of the flyer, copied verbatim\n'
             '                         (e.g. "28th August - 3rd September, 2026" or "19, 20, 21 June").\n'
             "                         Use null ONLY if no date is printed anywhere. Never invent one.\n"
             '  "service_window"     - e.g. "Friday Lunch - Thursday Dinner", or null if not printed.\n'
+            '  "start_date"        - ISO date YYYY-MM-DD when the flyer has a clear start date, otherwise null.\n'
+            '  "end_date"          - ISO date YYYY-MM-DD when the flyer has a clear end date, otherwise null.\n'
             '  "vegetarian"         - list of vegetarian dishes.\n'
             '  "non_vegetarian"     - list of non-vegetarian dishes.\n'
             '  "bengali_bento"      - list of bento/combo boxes, or [].\n'
@@ -440,10 +442,10 @@ class MenuParser:
             # upload died on json_validate_failed and burned the minute. Names
             # and prices alone come in around half that. Descriptions are
             # filled in afterwards by _apply_extracted_data_to_menu.
-            "Add no keys beyond those three. Output compact JSON with no line breaks\n"
+            "Add no keys beyond those eight. Output compact JSON with no line breaks\n"
             "and no indentation.\n\n"
             "Read the flyer header FIRST and fill in week_of before extracting any dishes.\n"
-            "Return strict JSON with all six keys present."
+            "Return strict JSON with all eight keys present."
         )
         payload = {
             "model": config.GROQ_VISION_MODEL,
@@ -580,6 +582,12 @@ class MenuParser:
             service_window = (data.get("service_window") or "").strip()
             if service_window:
                 current_week["service_window"] = service_window
+            start_date = (data.get("start_date") or "").strip()
+            end_date = (data.get("end_date") or "").strip()
+            if start_date:
+                current_week["start_date"] = start_date
+            if end_date:
+                current_week["end_date"] = end_date
 
             with open(menu_path, "w", encoding="utf-8") as f:
                 json.dump(menu_data, f, indent=2, ensure_ascii=False)
@@ -599,6 +607,8 @@ class MenuParser:
                 # on an upload where the model could not read a date itself.
                 "week_of": current_week.get("week_of"),
                 "service_window": current_week.get("service_window"),
+                "start_date": current_week.get("start_date"),
+                "end_date": current_week.get("end_date"),
             }
         return {"status": "failed", "reason": "weekly_menus not found in menu.json"}
 

@@ -114,9 +114,11 @@ bounded durable outbox path; external WhatsApp alerts are not sent by this
 service.
 
 While a handoff is `WAITING_FOR_HUMAN`, autonomous AI replies are suppressed.
-Generic support handoffs do not include a `wa.me` link; booking, order,
-payment, and purchase-related handoffs may include the separately approved
-manual continuation. The operator must explicitly resume the handoff before
+Generic support and inquiry handoffs do not include a `wa.me` link. The
+separately approved manual continuation is available only when durable order
+state is explicitly `BOOKED`, `CONFIRMED`, or `FINALIZED`; booking, payment,
+event, price, and pre-book wording alone does not qualify. The operator must
+explicitly resume the handoff before
 chatbot behavior can continue. A notification failure must not be represented
 to the customer as a successful handoff.
 

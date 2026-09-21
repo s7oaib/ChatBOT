@@ -153,18 +153,18 @@ def test_manager_contact_is_informational(tmp_path, monkeypatch, message):
 def test_ready_to_order_still_hands_off_after_informational_contact_fix(tmp_path, monkeypatch):
     database = _fixtures(tmp_path)
     sent, escalated = _run_instagram(monkeypatch, database, "finalise it")
-    assert len(sent) == 2
+    assert len(sent) == 1
     assert escalated.called
-    assert any("wa.me" in payload["text"] for payload in sent)
+    assert all("wa.me" not in payload["text"] for payload in sent)
 
 
 def test_home_table_booking_remains_a_manager_handoff(tmp_path, monkeypatch):
     sent, escalated = _run_instagram(
         monkeypatch, _fixtures(tmp_path), "I want to book the Home Table"
     )
-    assert len(sent) == 2
+    assert len(sent) == 1
     assert escalated.called
-    assert any("wa.me" in payload["text"] for payload in sent)
+    assert all("wa.me" not in payload["text"] for payload in sent)
 
 
 @pytest.mark.parametrize("message", [

@@ -161,7 +161,7 @@ def test_a_flyer_save_failure_is_reported_rather_than_silently_swallowed():
     assert "flyer_notice" not in body, "must not claim the photo is live when it is not"
 
 
-def test_a_stale_dish_list_does_not_suppress_this_weeks_photo():
+def test_a_stale_dish_list_does_not_make_the_uploaded_photo_current():
     """
     The regression the split created. menu.json keeps last week's date when
     extraction fails, and the card used to be gated on that date — so the
@@ -178,7 +178,7 @@ def test_a_stale_dish_list_does_not_suppress_this_weeks_photo():
     responder.reload_templates()
 
     url, _ = responder._current_weekly_image(today_weekday=0)
-    assert url == weekly_flyer.get()["url"], "this week's photo was hidden by last week's text"
+    assert url is None, "an expired configured menu must not send an uploaded photo"
 
 
 def test_an_undated_flyer_stops_being_shown_once_it_is_stale():

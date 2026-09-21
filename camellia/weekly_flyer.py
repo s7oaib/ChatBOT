@@ -143,6 +143,8 @@ def save(
     mime_type: str,
     week_of: Optional[str] = None,
     service_window: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Persists an uploaded photo as the current weekly menu card.
@@ -177,7 +179,11 @@ def save(
     # Thursday Dinner))" — nested brackets and no date. If it does not parse as
     # a date it is not one, and the generic caption reads better than a label.
     week_of = (week_of or "").strip()
-    has_real_date = menu_dates.parse_week_end_date(week_of) is not None
+    has_real_date = bool(menu_dates.parse_menu_date_range({
+        "week_of": week_of,
+        "start_date": start_date,
+        "end_date": end_date,
+    }))
     caption = (
         f"*This Week's Menu* ({week_of}) — freshly cooked in small batches, updated just for you!"
         if has_real_date else random.choice(CAPTIONS)
@@ -188,6 +194,8 @@ def save(
         "caption": caption,
         "week_of": week_of or None,
         "service_window": (service_window or "").strip() or None,
+        "start_date": (start_date or "").strip() or None,
+        "end_date": (end_date or "").strip() or None,
         "uploaded_at": uploaded_at,
     }
     try:

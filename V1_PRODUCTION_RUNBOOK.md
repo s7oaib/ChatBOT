@@ -38,9 +38,11 @@ override copy change.
 
 ## CAM / human handoff
 
-Instagram order or sensitive requests may create/reuse a CAM reference and a
-WhatsApp handoff link. Confirm required order fields are present and that
-completed handoffs do not leak stale order state into a new conversation.
+Instagram order or sensitive requests may create/reuse a CAM reference. A
+WhatsApp handoff link is allowed only when durable order state is explicitly
+`BOOKED`, `CONFIRMED`, or `FINALIZED`; inquiry wording alone is not sufficient.
+Confirm required order fields are present and that completed handoffs do not
+leak stale order state into a new conversation.
 
 ## WhatsApp HUMAN ONLY
 

@@ -29,7 +29,7 @@ from slowapi.errors import RateLimitExceeded
 # against a pre-.env environment and seed the wrong paths.
 from camellia.config import config, STARTUP_ACTIONS
 from camellia.database import db
-from camellia.ad_gate import EntryPoint, ad_gate, describe_entry_point
+from camellia.ad_gate import EntryPoint, ad_gate, describe_entry_point, fetch_instagram_username
 from camellia.ice_breakers import (
     DEFAULT_ICE_BREAKERS,
     MAX_ICE_BREAKERS,
@@ -47,6 +47,7 @@ from camellia.handoff import (
     get_or_create_handoff,
     is_human_help_request,
     mark_referred,
+    normalize_instagram_username,
     retire_order_state,
     staff_summary,
 )
@@ -77,6 +78,7 @@ from camellia import menu_manager
 from camellia import menu_images
 from camellia import menu_catalogue
 from camellia.menu_catalogue import MenuCatalogueError
+from camellia import client_qa
 from camellia.session_memory import session_memory
 from camellia.monitoring import get_logger, delivery_monitor, latency_monitor, classify_instagram_delivery
 from camellia.admin_security import (
@@ -157,33 +159,13 @@ def _set_admin_cookies(response: Response, session_token: str, csrf_token: str) 
 
 def _prune_expired_weekly_menus() -> None:
     """
-    Drops weekly menus whose printed dates have passed.
+    Retained compatibility hook for deployments that called the old pruner.
 
-    Runs at startup rather than only on upload because the stale entries are
-    already sitting in menu.json on the volume, where no code change can reach
-    them — the file outlives every deploy by design. The newest entry is never
-    removed even when expired: it is the slot the next upload writes into, and
-    an expired newest week is handled at reply time by telling the customer the
-    menu is being updated.
-
-    Non-fatal by construction. A menu file that cannot be read or written must
-    leave the bot answering from whatever it already has rather than refusing
-    to start.
+    Menu history is durable content now: date resolution marks expired and
+    future rows inactive without deleting or rewriting them. This function is
+    intentionally non-mutating.
     """
-    try:
-        with open(config.MENU_JSON_PATH, "r", encoding="utf-8") as f:
-            menu_data = json.load(f)
-        weekly = menu_data.get("weekly_menus") or []
-        kept, removed = menu_dates.prune_expired_weeks(weekly)
-        if not removed:
-            return
-        menu_data["weekly_menus"] = kept
-        with open(config.MENU_JSON_PATH, "w", encoding="utf-8") as f:
-            json.dump(menu_data, f, indent=2, ensure_ascii=False)
-        responder.reload_data()
-        log.info("Removed %s expired weekly menu(s): %s", len(removed), ", ".join(removed))
-    except Exception:
-        log.exception("Could not prune expired weekly menus; leaving menu.json untouched.")
+    return None
 
 
 @asynccontextmanager
@@ -371,7 +353,14 @@ async def add_security_headers(request: Request, call_next):
 @app.middleware("http")
 async def admin_session_middleware(request: Request, call_next):
     """Load server-side admin sessions and enforce browser CSRF protection."""
-    public_paths = {"/admin", "/admin/dashboard", "/admin/login", "/admin/verify-pin"}
+    # Browser-only compatibility entry points never expose data; they redirect
+    # into the authenticated shell so old bookmarks have a useful landing
+    # place instead of a dead 403 page.
+    public_paths = {
+        "/admin", "/admin/dashboard", "/admin/login", "/admin/verify-pin",
+        "/admin/content-routing", "/admin/instagram-content-routing",
+        "/admin/legacy",
+    }
     if not request.url.path.startswith("/admin"):
         return await call_next(request)
     if request.url.path in public_paths:
@@ -537,6 +526,9 @@ def _process_instagram_event(
         facts = session_memory.get_facts(sender_id, "instagram")
         active_handoff = db.get_active_handoff("instagram", sender_id)
         if active_handoff:
+            safe_username = normalize_instagram_username(instagram_username)
+            if safe_username:
+                db.update_handoff_username(active_handoff["handoff_ref"], safe_username)
             # A customer message remains durable context, but cannot wake the
             # autonomous responder or create a second ticket while staff own
             # the conversation. Only the authenticated resume endpoint below
@@ -739,7 +731,7 @@ def _process_instagram_event(
         )
         if needs_escalation:
             contact_mode = handoff_contact_mode(
-                customer_message, template_id=template_id,
+                customer_message, template_id=template_id, facts=facts,
             )
             reason = (
                 "Order Confirmation & Intake Request"
@@ -758,11 +750,14 @@ def _process_instagram_event(
             is_order_handoff = template_id in (
                 "order_draft_receipt", "order_next_steps", "client_approved_order_ready_handoff",
             )
+            resolved_username = normalize_instagram_username(instagram_username)
+            if not resolved_username:
+                resolved_username = _lookup_instagram_username(sender_id)
             handoff = get_or_create_handoff(
                 user_id=sender_id, channel="instagram", reason=reason,
                 user_message=customer_message, facts=facts,
                 include_order=is_order_handoff,
-                instagram_username=instagram_username,
+                instagram_username=resolved_username,
                 query_summary=customer_query_summary(
                     customer_message, contact_mode=contact_mode, reason=reason,
                 ),
@@ -791,7 +786,10 @@ def _process_instagram_event(
                     finalized_order=template_id == "order_next_steps"
                 )
             link_message = (
-                customer_facing_link_message(handoff["handoff_ref"], order_summary)
+                customer_facing_link_message(
+                    handoff["handoff_ref"], order_summary,
+                    order_state=handoff.get("order_state"),
+                )
                 if contact_mode == "whatsapp_order" else None
             )
             mark_referred(handoff["handoff_ref"])
@@ -1041,6 +1039,7 @@ def _handle_shared_attachment(
     sender_id: str,
     reel_identity: Optional[Dict[str, str]],
     post_media_id: Optional[str] = None,
+    instagram_username: Optional[str] = None,
 ) -> None:
     """
     Establishes source context where there is any, then answers the
@@ -1082,6 +1081,7 @@ def _handle_shared_attachment(
                 shared_reel=reel_identity,
                 shared_post_id=post_media_id,
                 shared_source_type="reel" if reel_identity else "post",
+                instagram_username=instagram_username,
             )
         except Exception:
             log.exception("Could not resolve shared media for %s.", sender_id)
@@ -1375,6 +1375,44 @@ def _safe_identifier_hash(value: Any) -> Optional[str]:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12] if raw else None
 
 
+_INSTAGRAM_USERNAME_CACHE: Dict[str, Tuple[float, Optional[str]]] = {}
+_INSTAGRAM_USERNAME_CACHE_TTL_SECONDS = 300.0
+
+
+def _lookup_instagram_username(sender_id: str) -> Optional[str]:
+    """Return a cached, validated handle for one exact sender ID."""
+    sender = str(sender_id or "").strip()
+    if not sender:
+        return None
+    now = time.monotonic()
+    cached = _INSTAGRAM_USERNAME_CACHE.get(sender)
+    if cached and now - cached[0] < _INSTAGRAM_USERNAME_CACHE_TTL_SECONDS:
+        return cached[1]
+    username = normalize_instagram_username(fetch_instagram_username(sender))
+    if len(_INSTAGRAM_USERNAME_CACHE) >= 1024:
+        _INSTAGRAM_USERNAME_CACHE.pop(next(iter(_INSTAGRAM_USERNAME_CACHE)))
+    _INSTAGRAM_USERNAME_CACHE[sender] = (now, username)
+    return username
+
+
+def _instagram_username_from_event(messaging_event: Dict[str, Any]) -> Optional[str]:
+    """Extract only an explicit handle supplied alongside a webhook sender."""
+    message = messaging_event.get("message") or {}
+    for sender in (
+        messaging_event.get("sender"),
+        messaging_event.get("from"),
+        message.get("sender"),
+        message.get("from"),
+    ):
+        if not isinstance(sender, dict):
+            continue
+        for key in ("instagram_username", "username", "user_name"):
+            username = normalize_instagram_username(sender.get(key))
+            if username:
+                return username
+    return None
+
+
 def _safe_instagram_event_shape(messaging_event: dict) -> Dict[str, Any]:
     """Describe an event without retaining customer text or raw payload."""
     message = messaging_event.get("message") or {}
@@ -1416,6 +1454,7 @@ def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks
 
         for messaging_event in events:
             is_ad_qualified, sender_id, message_text, ad_id = ad_gate.inspect_and_gate_message(messaging_event)
+            instagram_username = _instagram_username_from_event(messaging_event)
             entry_point = describe_entry_point(messaging_event)
             message = messaging_event.get("message") or {}
             log.info(
@@ -1497,6 +1536,7 @@ def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks
                         background_args = (sender_id, "", ad_id, entry_point)
                     background_tasks.add_task(
                         background_fn, *background_args,
+                        **({"instagram_username": instagram_username} if instagram_username else {}),
                     )
                     results.append({
                         "sender_id": sender_id,
@@ -1509,6 +1549,7 @@ def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks
                 if reason == "attachment_only" and is_ad_qualified:
                     background_tasks.add_task(
                         _handle_shared_attachment, sender_id, None, None,
+                        **({"instagram_username": instagram_username} if instagram_username else {}),
                     )
                     results.append({
                         "sender_id": sender_id,
@@ -1541,6 +1582,7 @@ def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks
                 background_tasks.add_task(
                     _process_instagram_event, sender_id, message_text, ad_id, entry_point,
                     shared_reel, shared_post_id, shared_source_type,
+                    **({"instagram_username": instagram_username} if instagram_username else {}),
                 )
                 results.append({
                     "sender_id": sender_id,
@@ -1551,7 +1593,8 @@ def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks
                 })
                 continue
             background_tasks.add_task(
-                _process_instagram_event, sender_id, message_text, ad_id, entry_point
+                _process_instagram_event, sender_id, message_text, ad_id, entry_point,
+                **({"instagram_username": instagram_username} if instagram_username else {}),
             )
             results.append({
                 "sender_id": sender_id,
@@ -2663,7 +2706,7 @@ def get_admin_security_audit(limit: int = 100):
 
 @app.get("/admin/menu/active")
 def get_active_menu(x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
-    """Returns the currently active menu JSON data."""
+    """Returns the date-selected current menu plus the untouched catalogue."""
     require_admin(x_admin_key, x_admin_pin)
     try:
         with open(config.MENU_JSON_PATH, "r", encoding="utf-8") as f:
@@ -2671,9 +2714,35 @@ def get_active_menu(x_admin_key: Optional[str] = Header(None), x_admin_pin: Opti
         # Surfaced so the dashboard can show staff which week is actually
         # live, since the flyer photo and the dish text are now two separate
         # things that both have to agree with what was last uploaded.
+        resolution = menu_dates.resolve_current_menu(data.get("weekly_menus") or [])
+        start, end = resolution["date_range"] or (None, None)
+        date_ranges = []
+        for index, weekly_menu in enumerate(data.get("weekly_menus") or []):
+            menu_range = menu_dates.parse_menu_date_range(weekly_menu, today=resolution["today"])
+            range_start, range_end = menu_range or (None, None)
+            date_ranges.append({
+                "index": index,
+                "start_date": range_start.isoformat() if range_start else None,
+                "end_date": range_end.isoformat() if range_end else None,
+                "active": index == resolution["index"],
+                "status": "invalid_date" if menu_range is None else (
+                    "active" if menu_dates.menu_is_active(weekly_menu, today=resolution["today"])
+                    else "outside_range"
+                ),
+            })
         return {
             "status": "success",
             "menu": data,
+            "current_menu": resolution["menu"],
+            "current_menu_index": resolution["index"],
+            "current_menu_status": resolution["status"],
+            "current_date": resolution["today"].isoformat(),
+            "current_date_range": {
+                "start_date": start.isoformat() if start else None,
+                "end_date": end.isoformat() if end else None,
+            },
+            "menu_date_ranges": date_ranges,
+            "invalid_date_indexes": resolution["invalid_date_indexes"],
             "weekly_flyer": weekly_flyer.get(),
             # Superseded flyers, newest first, already pruned to the two-week
             # window. Shown in the dashboard so the kitchen can see what a
@@ -3167,6 +3236,8 @@ async def upload_menu_image(
             image_bytes, mime_type,
             week_of=result.get("week_of"),
             service_window=result.get("service_window"),
+            start_date=result.get("start_date"),
+            end_date=result.get("end_date"),
         )
         # A new flyer is an explicit instruction to make this week's menu
         # visible again, including when OCR could not read the dish rows.
@@ -3320,6 +3391,11 @@ def get_escalations_list(limit: int = 50, status: Optional[str] = None, x_admin_
 
 def _safe_admin_handoff_label(handoff: Dict[str, Any]) -> str:
     """Choose an operator-friendly label without ever falling back to Meta ID."""
+    source_user_id = str(handoff.get("source_user_id") or "")
+    for value in (handoff.get("instagram_username"),):
+        candidate = normalize_instagram_username(value)
+        if candidate and candidate != source_user_id:
+            return candidate
     try:
         known = json.loads(handoff.get("known_entities") or "{}")
     except (TypeError, ValueError):
@@ -3327,9 +3403,9 @@ def _safe_admin_handoff_label(handoff: Dict[str, Any]) -> str:
     if not isinstance(known, dict):
         known = {}
     for key in ("instagram_username", "username", "display_name", "customer_name"):
-        value = str(known.get(key) or "").strip()
-        if value and value != str(handoff.get("source_user_id") or ""):
-            return value
+        candidate = normalize_instagram_username(known.get(key))
+        if candidate and candidate != source_user_id:
+            return candidate
     return "Instagram customer"
 
 
@@ -3337,6 +3413,7 @@ def _safe_admin_handoff_label(handoff: Dict[str, Any]) -> str:
 def get_admin_handoffs(
     limit: int = 50,
     status: Optional[str] = None,
+    include_resumed: bool = False,
     x_admin_key: Optional[str] = Header(None),
     x_admin_pin: Optional[str] = Header(None),
 ):
@@ -3357,12 +3434,26 @@ def get_admin_handoffs(
         # CREATED is included because the accepted flow promotes it to
         # WAITING_FOR_HUMAN after notification delivery; neither state should
         # make the operator miss a fresh CAM.
-        if requested_status is None and row_status not in {"CREATED", "WAITING_FOR_HUMAN"}:
+        visible_statuses = {"CREATED", "WAITING_FOR_HUMAN"}
+        if include_resumed:
+            visible_statuses.add("RESUMED")
+        if requested_status is None and row_status not in visible_statuses:
             continue
+        row = dict(row)
+        customer_display_name = _safe_admin_handoff_label(row)
+        if (
+            customer_display_name == "Instagram customer"
+            and str(row.get("source_channel") or "").lower() == "instagram"
+        ):
+            resolved_username = _lookup_instagram_username(str(row.get("source_user_id") or ""))
+            if resolved_username:
+                db.update_handoff_username(str(row.get("handoff_ref") or ""), resolved_username)
+                row["instagram_username"] = resolved_username
+                customer_display_name = resolved_username
         handoff_ref = str(row.get("handoff_ref") or "")
         handoffs.append({
             "handoff_ref": handoff_ref,
-            "customer_display_name": _safe_admin_handoff_label(row),
+            "customer_display_name": customer_display_name,
             "source_channel": row.get("source_channel"),
             "reason": row.get("reason") or "Human support requested",
             "summary": row.get("summary") or "",
@@ -4903,6 +4994,42 @@ def get_templates(x_admin_key: Optional[str] = Header(None), x_admin_pin: Option
         log.error("Failed to read qa_templates.json: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
 
+
+@app.get("/admin/canonical-qa")
+def get_canonical_qa_registry(
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """Read-only view of the client-approved canonical QA registry.
+
+    This endpoint intentionally has no update method. Canonical answers come
+    from the approved source file; operator-authored Q&A remains separate in
+    the editable Custom Q&A library.
+    """
+    require_admin(x_admin_key, x_admin_pin)
+    entries = []
+    for entry in client_qa.REGISTRY:
+        entries.append({
+            "canonical_id": entry.canonical_id,
+            "legacy_id": entry.qa_id,
+            "lane": entry.lane,
+            "intent": entry.intent,
+            "entity": entry.entity,
+            "topic": entry.topic,
+            "canonical_question": entry.canonical_question,
+            "aliases": list(entry.aliases),
+            "context_requirements": entry.context_requirements_dict,
+            "canonical_answer": entry.canonical_answer,
+            "actions": list(entry.actions),
+            "assets": list(entry.asset_keys),
+            "source": entry.provenance,
+            "status": entry.status,
+            "business_fact_guard": entry.business_fact_guard,
+            "editable": False,
+            "generation_allowed": False,
+        })
+    return {"status": "success", "registry": client_qa.registry_summary(), "entries": entries}
+
 @app.post("/admin/templates")
 async def update_templates(request: Request, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
     """Updates Q&A templates in qa_templates.json and hot-reloads the responder."""
@@ -5185,6 +5312,16 @@ async def update_menu(request: Request, x_admin_key: Optional[str] = Header(None
             current_week["is_published"] = True
             if "week" in body:
                 current_week["week"] = body["week"]
+            if "start_date" in body:
+                current_week["start_date"] = body.get("start_date")
+            if "end_date" in body:
+                current_week["end_date"] = body.get("end_date")
+            if "start_date" in body or "end_date" in body:
+                if menu_dates.parse_menu_date_range(current_week) is None:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Menu start_date/end_date must contain a valid ISO date range.",
+                    )
             if veg_items is not None:
                 current_week["vegetarian"] = veg_items
             if nonveg_items is not None:
@@ -5199,6 +5336,8 @@ async def update_menu(request: Request, x_admin_key: Optional[str] = Header(None
             return {"status": "success", "message": "Weekly menu updated and responder hot-reloaded successfully."}
         else:
             return {"status": "failed", "reason": "No weekly_menus block found in menu.json"}
+    except HTTPException:
+        raise
     except Exception as e:
         log.error("Failed to update menu: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
@@ -5932,6 +6071,20 @@ def get_admin_dashboard():
         .gallery-toolbar .field-control { flex: 1 1 240px; min-width: 180px; }
         .gallery-view-toggle { padding: 8px 11px; border: 1px solid var(--border); background: #fff; color: var(--text-muted); border-radius: 8px; font-size: .76rem; font-weight: 700; cursor: pointer; }
         .gallery-view-toggle.active { background: var(--primary); border-color: var(--primary); color: #fff; }
+        .admin-breadcrumb { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin:-8px 0 18px; color:var(--text-muted); font-size:.78rem; }
+        .admin-breadcrumb button { border:0; background:transparent; color:var(--primary); padding:0; font:inherit; font-weight:800; cursor:pointer; }
+        .content-subnav { display:flex; gap:6px; flex-wrap:wrap; margin:-6px 0 16px; padding-bottom:12px; border-bottom:1px solid #eef0f3; }
+        .content-subnav button { border:1px solid var(--border); background:#fff; color:var(--text-muted); border-radius:8px; padding:8px 12px; font-size:.78rem; font-weight:800; cursor:pointer; }
+        .content-subnav button.active { background:var(--primary); border-color:var(--primary); color:#fff; }
+        .health-indicators { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:10px; margin-top:14px; }
+        .health-indicator { border:1px solid var(--border); border-radius:10px; padding:11px 12px; background:#fff; }
+        .health-indicator-label { display:block; color:var(--text-muted); font-size:.68rem; font-weight:800; text-transform:uppercase; letter-spacing:.05em; }
+        .health-indicator-value { display:block; margin-top:4px; color:var(--text-dark); font-weight:700; font-size:.86rem; overflow-wrap:anywhere; }
+        .qa-architecture { border:1px solid #d8e0eb; border-radius:14px; padding:16px; margin:0 0 18px; background:#f8fafc; }
+        .qa-architecture-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:10px; margin-top:12px; }
+        .qa-architecture-item { border:1px solid #e1e7ef; border-radius:10px; padding:11px; background:#fff; }
+        .qa-architecture-item b { display:block; color:var(--primary); font-size:.82rem; margin-bottom:4px; }
+        .qa-architecture-item span { color:var(--text-muted); font-size:.76rem; line-height:1.45; }
         .content-drawer-backdrop { display: none; position: fixed; inset: 0; z-index: 1200; background: rgba(18,24,34,.38); }
         .content-drawer { position: fixed; z-index: 1201; top: 0; right: 0; width: min(460px, 94vw); height: 100vh; overflow-y: auto; background: #fff; box-shadow: -12px 0 35px rgba(19,27,40,.18); transform: translateX(105%); transition: transform .2s ease; padding: 26px; }
         .content-drawer.open { transform: translateX(0); }
@@ -5966,7 +6119,12 @@ def get_admin_dashboard():
         @media (max-width: 660px) { .main-container { display:block; padding: 18px 14px 36px; } .main-container > .admin-sidebar { min-height:0; margin: -18px -14px 18px; position: sticky; top:0; z-index:800; padding: 6px; border-right:0; border-bottom:1px solid #303847; } .admin-sidebar .tabs-nav { flex-direction:row; overflow-x:auto; } .admin-sidebar .tab-btn { min-width:48px; flex:0 0 48px; } .admin-kpi-grid { grid-template-columns: 1fr 1fr; gap: 9px; } .admin-kpi { padding: 12px; } .admin-kpi-value { font-size: 1.4rem; } .instagram-gallery { grid-template-columns: 1fr 1fr; gap: 9px; } .instagram-gallery .ig-media-preview { height: 140px; } .instagram-gallery .ig-media-main, .instagram-gallery .ig-media-facts, .instagram-gallery .ig-media-actions { padding-left: 10px; padding-right: 10px; } }
         
         /* Main Layout */
-        .main-container { max-width: 1100px; width: 100%; margin: 24px auto; padding: 0 20px 40px; flex: 1; }
+        /* The admin shell owns the full viewport. Keep the content grid
+           adjacent to the persistent sidebar instead of centering a second
+           1100px canvas inside it. */
+        .main-container { max-width: none; width: 100%; margin: 0; padding: 28px clamp(14px, 2vw, 32px) 48px; display: grid; grid-template-columns: minmax(220px, 248px) minmax(0, 1fr); align-items: start; gap: 18px; flex: 1; }
+        .main-container > .panel-card, .main-container > details { grid-column: 2; min-width: 0; }
+        .main-container > .admin-sidebar { grid-column: 1; grid-row: 1 / span 20; position: sticky; top: 0; min-height: calc(100vh - 132px); }
         
         /* Navigation Tabs */
         .tabs-nav {
@@ -6105,6 +6263,13 @@ def get_admin_dashboard():
             20%, 60% { transform: translateX(-8px); }
             40%, 80% { transform: translateX(8px); }
         }
+        @media (max-width: 980px) {
+            .main-container { grid-template-columns: 82px minmax(0, 1fr); gap: 12px; }
+            .admin-sidebar-label, .admin-sidebar .tab-btn span.nav-label { display: none; }
+            .admin-sidebar .tab-btn { justify-content: center; padding: 10px 6px; font-size: 1.05rem; position: relative; }
+            .admin-nav-badge { position: absolute; margin: -22px 0 0 18px; }
+            .admin-kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        }
         @media (max-width: 768px) {
             header { padding: 14px 16px; flex-direction: column; gap: 10px; align-items: stretch; }
             .status-bar { padding: 8px 16px; gap: 6px; font-size: 0.76rem; }
@@ -6113,6 +6278,18 @@ def get_admin_dashboard():
             .tabs-nav { justify-content: flex-start; gap: 4px; padding: 4px; }
             .tab-btn { padding: 10px 8px; font-size: 0.8rem; gap: 4px; }
             .panel-card { padding: 20px 16px; }
+        }
+        @media (max-width: 660px) {
+            .main-container { display: block; padding: 18px 14px 36px; }
+            .main-container > .admin-sidebar { min-height: 0; margin: -18px -14px 18px; position: sticky; top: 0; z-index: 800; padding: 6px; border-right: 0; border-bottom: 1px solid #303847; }
+            .admin-sidebar .tabs-nav { flex-direction: row; overflow-x: auto; }
+            .admin-sidebar .tab-btn { min-width: 48px; flex: 0 0 48px; }
+            .admin-kpi-grid { grid-template-columns: 1fr 1fr; gap: 9px; }
+            .admin-kpi { padding: 12px; }
+            .admin-kpi-value { font-size: 1.4rem; }
+            .instagram-gallery { grid-template-columns: 1fr 1fr; gap: 9px; }
+            .instagram-gallery .ig-media-preview { height: 140px; }
+            .instagram-gallery .ig-media-main, .instagram-gallery .ig-media-facts, .instagram-gallery .ig-media-actions { padding-left: 10px; padding-right: 10px; }
         }
     </style>
 </head>
@@ -6211,7 +6388,12 @@ def get_admin_dashboard():
         </div>
 
         <div id="tab-instagram-content" class="panel-card" data-group="instagram_content" style="display:none;">
-            <div class="admin-page-heading"><div><h2>Instagram Posts &amp; Reels</h2><p>Visual routing gallery for exact Meta content IDs. Click a card to inspect the mapping without losing your place.</p></div><button class="btn-secondary" type="button" onclick="loadInstagramContentGallery()">↻ Refresh</button></div>
+            <div class="admin-page-heading"><div><h2>Instagram Posts &amp; Reels</h2><p>Visual workspace for exact Meta content IDs. Inspect content, manage routing, and keep Stories in their own workspace.</p></div><button class="btn-secondary" type="button" onclick="loadInstagramContentGallery()">↻ Refresh</button></div>
+            <div class="content-subnav" aria-label="Posts and Reels views">
+                <button class="active" type="button" data-content-subview="gallery" onclick="setInstagramContentSubview('gallery')">Gallery</button>
+                <button type="button" data-content-subview="routing" onclick="setInstagramContentSubview('routing')">Routing</button>
+                <button type="button" data-content-subview="list" onclick="setInstagramContentSubview('list')">List</button>
+            </div>
             <div class="gallery-toolbar" aria-label="Post and Reel filters">
                 <input class="field-control" id="igContentSearch" type="search" placeholder="Search exact ID, topic, or route" autocomplete="off">
                 <button class="ig-media-filter active" data-content-filter="all" type="button" onclick="setInstagramContentFilter('all')">All</button>
@@ -6232,10 +6414,11 @@ def get_admin_dashboard():
         </div>
 
         <div id="tab-settings" class="panel-card" data-group="settings" style="display:none;">
-            <div class="admin-page-heading"><div><h2>Settings / Health</h2><p>Operational checks and guarded links for the existing Admin configuration. Authentication, CSRF, sessions, and production controls are unchanged.</p></div></div>
+            <div class="admin-page-heading"><div><h2>Settings / Health</h2><p>Operational checks read the existing <code>/health</code> contract. Safe indicators are shown here; secrets, raw customer identifiers, and legacy MFA fields are not.</p></div></div>
             <div class="admin-kpi-grid" style="grid-template-columns:repeat(2,minmax(0,1fr));"><div class="admin-kpi"><div class="admin-kpi-label">Admin session</div><div class="admin-kpi-value" style="font-size:1.2rem;">Protected</div><div class="admin-kpi-note">Username/password session with CSRF protection</div></div><div class="admin-kpi"><div class="admin-kpi-label">Story auto sync</div><div class="admin-kpi-value" style="font-size:1.2rem;">Existing setting</div><div class="admin-kpi-note">No new sync behavior is enabled by this redesign</div></div></div>
             <div id="settingsHealthResult" class="result-box" role="status">Health status will be checked when this view opens.</div>
-            <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;"><button class="btn-secondary" type="button" onclick="loadSettingsHealth()">Check health</button><button class="btn-secondary" type="button" onclick="lockPortal()">Lock portal</button></div>
+            <div id="settingsHealthIndicators" class="health-indicators" aria-live="polite"></div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;"><button class="btn-secondary" id="settingsHealthRefresh" type="button" onclick="loadSettingsHealth()">↻ Refresh</button><button class="btn-secondary" type="button" onclick="lockPortal()">Lock portal</button></div>
         </div>
 
         <!-- Customers and Answers used to be their own top-level tabs. Every
@@ -6245,27 +6428,17 @@ def get_admin_dashboard():
              and writing the exact same candidate_templates/escalations/
              learned_knowledge/knowledge_gaps tables through the exact same
              endpoints. Nothing about those tables or endpoints changed; only
-             which screen a client reaches them from did. The two panels
-             stay in the DOM, unstyled into the normal flow, reachable only
-             from here — for regression comparison during this transition,
-             not for daily use. -->
-        <details style="margin: 10px 0 0; font-size: 0.82rem; color: var(--text-muted);">
-            <summary style="cursor:pointer; user-select:none;">⚙️ Advanced / Legacy Views (debugging only)</summary>
-            <div style="display:flex; gap:8px; margin-top:8px; flex-wrap:wrap;">
-                <button class="btn-secondary" type="button" onclick="switchTab('tab-stats', null)">Open Legacy Customers View</button>
-                <button class="btn-secondary" type="button" onclick="switchTab('tab-candidates', null)">Open Legacy Answers View</button>
-            </div>
-            <p style="margin-top:6px;">These are the old per-workflow screens, kept only so a real discrepancy against AI Resolution &amp; Answers can be checked during this transition. Use the 🤖 AI Resolution &amp; Answers tab above for normal work.</p>
-        </details>
-
+             which screen a client reaches them from did. The compatibility
+             panels remain available to existing in-page code, but the normal
+             UI no longer exposes an Advanced / Legacy entry point. -->
         <!-- MENU tab, panel 2 of 4: same job, for when there is no photo -->
         <div id="tab-image" class="panel-card" data-group="menu">
             <div class="admin-page-heading">
-                <div><h2>Menu</h2><p>Your first-class home for the live menu, menu assets, and publishing controls. The chatbot keeps its existing data model and publish safeguards.</p></div>
-                <div style="display:flex;gap:8px;flex-wrap:wrap;"><button class="btn-secondary" type="button" onclick="switchTab('tab-menu-manager', null)">Manage catalogue</button><button class="btn-secondary" type="button" onclick="switchTab('tab-active', null)">View live menu</button></div>
+                <div><h2>Menu</h2><p>Your first-class home for the current customer menu, menu assets, and publishing controls. The chatbot keeps its existing data model and publish safeguards.</p></div>
+                <div style="display:flex;gap:8px;flex-wrap:wrap;"><button class="btn-secondary" type="button" onclick="switchTab('tab-menu-manager', null)">Manage catalogue</button><button class="btn-secondary" type="button" onclick="switchTab('tab-active', null)">View current menu</button></div>
             </div>
             <div class="admin-kpi-grid" style="grid-template-columns:repeat(3,minmax(0,1fr));">
-                <div class="admin-kpi"><div class="admin-kpi-label">Live menu</div><div class="admin-kpi-value" style="font-size:1.25rem;">Active</div><div class="admin-kpi-note">Current customer-facing menu</div></div>
+                <div class="admin-kpi"><div class="admin-kpi-label">Current menu</div><div class="admin-kpi-value" id="menuCurrentStatus" style="font-size:1.25rem;">Checking</div><div class="admin-kpi-note">Current customer-facing menu</div></div>
                 <div class="admin-kpi"><div class="admin-kpi-label">Assets</div><div class="admin-kpi-value" style="font-size:1.25rem;">Managed</div><div class="admin-kpi-note">Preview, publish, archive, restore</div></div>
                 <div class="admin-kpi"><div class="admin-kpi-label">Publishing</div><div class="admin-kpi-value" style="font-size:1.25rem;">Guarded</div><div class="admin-kpi-note">Draft review stays in place</div></div>
             </div>
@@ -6302,10 +6475,11 @@ def get_admin_dashboard():
             <div id="imageResult" class="result-box"></div>
         </div>
 
-        <div id="tab-ad-routing" class="panel-card" data-group="menu" style="display: none;">
+        <div id="tab-ad-routing" class="panel-card" data-group="instagram_content" style="display: none;">
+            <div class="admin-breadcrumb"><button type="button" onclick="setInstagramContentSubview('gallery')">← Back to Posts &amp; Reels</button><span>/</span><b>Routing</b></div>
             <div class="panel-header">
-                <h2>📣 Instagram Content Routing</h2>
-                <p>Connect an Instagram post, reel, or ad to a Topic. Story routing is managed separately in the dedicated Instagram Stories tab.</p>
+                <h2>📣 Posts &amp; Reels Routing</h2>
+                <p>Connect an Instagram post or reel to a Topic using the exact Meta ID derived from its canonical link. Story routing remains in Instagram Stories.</p>
             </div>
             <div class="ad-routing-form">
                 <div>
@@ -6562,11 +6736,12 @@ THIS WEEK'S BENGAL SPECIALS
 
         <!-- MENU tab, panel 4 of 4: what the bot is serving right now -->
         <div id="tab-active" class="panel-card" data-group="menu" style="display: none;">
+            <div class="admin-breadcrumb"><button type="button" onclick="switchTab('tab-image', null)">← Back to Menu</button><span>/</span><b>Current Menu</b></div>
             <div class="panel-header">
                 <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
                     <div>
-                        <h2>🍱 What the bot is serving right now</h2>
-                        <p>Real-time view of all dishes currently served by the Instagram assistant.</p>
+                        <h2>🍱 Current Menu</h2>
+                        <p>Read-only view of the menu currently served by the customer assistant.</p>
                     </div>
                     <div style="display: flex; gap: 8px;">
                         <button class="btn-secondary" onclick="loadActiveMenu()">🔄 Refresh View</button>
@@ -6585,11 +6760,12 @@ THIS WEEK'S BENGAL SPECIALS
              made live by Save & Publish. camellia/menu_manager.py owns
              validation/persistence/reload; this is its admin UI. -->
         <div id="tab-menu-manager" class="panel-card" data-group="menu_manager" style="display: none;">
+            <div class="admin-breadcrumb"><button type="button" onclick="switchTab('tab-image', null)">← Back to Menu</button><span>/</span><b>Menu Catalogue</b></div>
             <div class="panel-header">
                 <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px; flex-wrap:wrap;">
                     <div>
-                        <h2>📋 Menu Manager</h2>
-                        <p>Edit any menu the chatbot uses. Changes are a draft until you press Save &amp; Publish — the bot keeps answering with the current live menu until then.</p>
+                        <h2>📋 Menu Catalogue</h2>
+                        <p>Edit any menu the chatbot uses. Changes are a draft until you press Save &amp; Publish — the bot keeps answering with the current published menu until then.</p>
                     </div>
                     <button class="btn-primary" type="button" onclick="openMenuModal()" style="white-space:nowrap;">+ Add New Menu</button>
                 </div>
@@ -6882,6 +7058,35 @@ THIS WEEK'S BENGAL SPECIALS
                 </div>
             </div>
 
+            <section class="qa-architecture" aria-labelledby="qaArchitectureTitle">
+                <h3 id="qaArchitectureTitle" style="margin:0;color:var(--primary);">Authoritative approved QA model</h3>
+                <p style="margin:6px 0 0;color:var(--text-muted);font-size:.82rem;line-height:1.5;">Canonical answers are the production source of truth. The assistant may classify and ground a request, but it cannot freely rewrite an approved answer; human edits remain explicit, versioned, and subject to the existing approval rules.</p>
+                <div class="qa-architecture-grid">
+                    <div class="qa-architecture-item"><b>EXACT_APPROVED</b><span>Use the matching canonical answer when an approved intent and required context are present.</span></div>
+                    <div class="qa-architecture-item"><b>GROUNDED_APPROVED</b><span>Use only approved facts for a grounded comparison or follow-up; do not invent missing facts.</span></div>
+                    <div class="qa-architecture-item"><b>INSUFFICIENT_KNOWLEDGE</b><span>Escalate when the approved knowledge, context, or business rule is insufficient.</span></div>
+                    <div class="qa-architecture-item"><b>Intent overrides stale state</b><span>Explicit intent wins over stale menu, Story, Home Table, pre-book, or payment context.</span></div>
+                    <div class="qa-architecture-item"><b>Context-sensitive handling</b><span>Home Table, pre-booking, and payment answers require the matching context before they can win.</span></div>
+                    <div class="qa-architecture-item"><b>Answer record</b><span>Paraphrases/aliases, canonical approved answer, context requirements, asset/action requirements, source/provenance, and active/inactive status are retained.</span></div>
+                </div>
+            </section>
+
+            <section id="canonicalQaRegistry" aria-labelledby="canonicalQaRegistryTitle" style="margin:0 0 18px; padding:14px; border:1px solid var(--border); border-radius:12px; background:#F8FAFC;">
+                <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; flex-wrap:wrap;">
+                    <div>
+                        <h3 id="canonicalQaRegistryTitle" style="margin:0;color:var(--primary);">Client-approved canonical registry</h3>
+                        <p style="margin:6px 0 0;color:var(--text-muted);font-size:.82rem;line-height:1.5;">Read-only production routing records. Explicit entity and intent beat stale Story or session context; superseded source variants remain visible for audit history.</p>
+                    </div>
+                    <span id="canonicalQaRegistryMeta" class="badge">Loading…</span>
+                </div>
+                <div style="overflow-x:auto;margin-top:12px;">
+                    <table class="data-table" aria-label="Client-approved canonical QA registry">
+                        <thead><tr><th>Canonical ID</th><th>Lane</th><th>Intent / Entity</th><th>Question / Aliases</th><th>Approved Answer</th><th>Context</th><th>Actions / Assets</th><th>Source / Status</th></tr></thead>
+                        <tbody id="canonicalQaRegistryBody"><tr><td colspan="8" style="text-align:center;color:#888;">Loading approved registry…</td></tr></tbody>
+                    </table>
+                </div>
+            </section>
+
             <div style="margin-bottom:12px;">
                 <div id="responseLibrarySearchWrap" style="position:relative; max-width:560px;">
                     <input type="text" id="customQaSearch" class="field-control" placeholder="🔎 Search questions, triggers, answers, category or template ID…" autocomplete="off" style="max-width:560px;" oninput="scheduleResponseLibrarySearch()" onkeydown="responseLibrarySearchKeydown(event)">
@@ -6922,7 +7127,7 @@ THIS WEEK'S BENGAL SPECIALS
             <div id="systemResponseLibrary" style="margin:0 0 18px; padding:14px; border:1px solid var(--border); border-radius:12px; background:#FCFBFA;">
                 <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; flex-wrap:wrap;">
                     <h3 style="margin:0; color:var(--primary);">System Templates</h3>
-                    <span style="font-size:.78rem; color:var(--text-muted);">Triggers and protected runtime logic are read-only; response copy can be safely overridden.</span>
+                    <span style="font-size:.78rem; color:var(--text-muted);">Triggers and canonical runtime logic are read-only; any human edit is explicit and versioned. The LLM cannot rewrite approved answers.</span>
                 </div>
                 <div id="systemResponseLibraryCards" style="display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:10px; margin-top:10px;"></div>
             </div>
@@ -7343,6 +7548,12 @@ THIS WEEK'S BENGAL SPECIALS
             // whole group has to be on screen to match — otherwise only the
             // leading panel shows and the rest look like they do not exist.
             showGroup('dashboard');
+            const requested = new URLSearchParams(window.location.search).get('tab');
+            const requestedTab = QUERY_TAB_ALIASES[requested] || (requested && TAB_GROUPS[requested] ? requested : null);
+            if (requestedTab) {
+                switchTab(requestedTab, null, { updateHistory: false });
+                if (requested === 'content-routing' || requested === 'posts-reels-routing') setInstagramContentSubview('routing', false);
+            }
             refreshReaderStatus();
             checkAdminSession();
             setupDragAndDrop();
@@ -7362,6 +7573,12 @@ THIS WEEK'S BENGAL SPECIALS
             document.getElementById('contentDetailsClose')?.addEventListener('click', closeContentDetails);
             document.getElementById('contentDetailsBackdrop')?.addEventListener('click', closeContentDetails);
             document.addEventListener('keydown', event => { if (event.key === 'Escape') { closeContentDetails(); toggleHandoffPopover(false); } });
+            window.addEventListener('popstate', () => {
+                const value = new URLSearchParams(window.location.search).get('tab');
+                const tab = QUERY_TAB_ALIASES[value] || (value && TAB_GROUPS[value] ? value : 'tab-dashboard');
+                switchTab(tab, null, { updateHistory: false });
+                if (value === 'content-routing' || value === 'posts-reels-routing') setInstagramContentSubview('routing', false);
+            });
         });
 
         async function loginAdmin() {
@@ -7428,7 +7645,7 @@ THIS WEEK'S BENGAL SPECIALS
         const TAB_GROUPS = {
             'tab-dashboard': 'dashboard',
             'tab-image': 'menu',
-            'tab-ad-routing': 'menu',
+            'tab-ad-routing': 'instagram_content',
             'tab-paste': 'menu',
             'tab-sheets': 'menu',
             'tab-active': 'menu',
@@ -7446,19 +7663,57 @@ THIS WEEK'S BENGAL SPECIALS
             'tab-custom-qa': 'custom_qa'
         };
 
-        function showGroup(group) {
+        const PRIMARY_TAB_BY_GROUP = {
+            dashboard: 'tab-dashboard', menu: 'tab-image', menu_manager: 'tab-menu-manager',
+            instagram_stories: 'tab-instagram-stories', instagram_content: 'tab-instagram-content',
+            handoffs: 'tab-handoffs', settings: 'tab-settings', customers: 'tab-ai-resolution',
+            answers: 'tab-ai-resolution', ai_resolution: 'tab-ai-resolution', custom_qa: 'tab-custom-qa',
+        };
+
+        const QUERY_TAB_ALIASES = {
+            dashboard: 'tab-dashboard', menu: 'tab-image', 'menu-catalogue': 'tab-menu-manager',
+            'current-menu': 'tab-active', 'content-routing': 'tab-instagram-content',
+            'posts-reels-routing': 'tab-instagram-content', 'ai-resolution': 'tab-ai-resolution',
+            legacy: 'tab-ai-resolution',
+        };
+
+        let instagramContentSubview = 'gallery';
+
+        function setTabUrl(tabId, push = true) {
+            const url = new URL(window.location.href);
+            const queryValue = tabId === 'tab-instagram-content' && instagramContentSubview === 'routing'
+                ? 'content-routing'
+                : tabId.replace(/^tab-/, '');
+            url.searchParams.set('tab', queryValue);
+            if (push) window.history.pushState({ tab: queryValue }, '', url);
+            else window.history.replaceState({ tab: queryValue }, '', url);
+        }
+
+        function activatePrimaryNav(group) {
+            const primaryId = PRIMARY_TAB_BY_GROUP[group];
+            const button = primaryId ? [...document.querySelectorAll('.admin-sidebar .tab-btn')].find(item => item.getAttribute('onclick')?.includes(`'${primaryId}'`)) : null;
+            document.querySelectorAll('.tab-btn').forEach(item => item.classList.remove('active'));
+            if (button) button.classList.add('active');
+        }
+
+        function showGroup(group, selectedTabId = null) {
             document.querySelectorAll('.panel-card').forEach(panel => {
-                panel.style.display = (panel.dataset.group === group) ? 'block' : 'none';
+                let visible = panel.dataset.group === group;
+                if (group === 'menu' && selectedTabId) visible = visible && panel.id === selectedTabId;
+                if (group === 'instagram_content' && panel.id === 'tab-ad-routing') visible = visible && instagramContentSubview === 'routing';
+                if (group === 'instagram_content' && panel.id === 'tab-instagram-content') visible = visible && instagramContentSubview !== 'routing';
+                panel.style.display = visible ? 'block' : 'none';
             });
             syncInstagramStoryAutoRefresh();
         }
 
-        function switchTab(tabId, el) {
-            document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
-            if (el) el.classList.add('active');
-
+        function switchTab(tabId, el, options = {}) {
             const group = TAB_GROUPS[tabId];
-            showGroup(group);
+            if (!group) return;
+            if (el) { document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active')); el.classList.add('active'); }
+            else activatePrimaryNav(group);
+            showGroup(group, group === 'menu' ? tabId : null);
+            if (options.updateHistory !== false) setTabUrl(tabId);
 
             // Everything in the group is on screen at once, so everything in it
             // needs its data.
@@ -7473,6 +7728,19 @@ THIS WEEK'S BENGAL SPECIALS
             if (group === 'handoffs') { loadHandoffs(); }
             if (group === 'dashboard') { loadDashboardOverview(); }
             if (group === 'settings') { loadSettingsHealth(); }
+        }
+
+        function setInstagramContentSubview(view, updateHistory = true) {
+            instagramContentSubview = ['gallery', 'routing', 'list'].includes(view) ? view : 'gallery';
+            document.querySelectorAll('[data-content-subview]').forEach(button => button.classList.toggle('active', button.dataset.contentSubview === instagramContentSubview));
+            document.querySelectorAll('[data-content-filter]').forEach(button => button.classList.toggle('active', button.dataset.contentFilter === igContentFilter));
+            const tabId = 'tab-instagram-content';
+            if (instagramContentSubview === 'list') setInstagramContentView('table');
+            else if (instagramContentSubview === 'gallery') setInstagramContentView(igContentView === 'table' ? 'gallery' : igContentView);
+            showGroup('instagram_content');
+            activatePrimaryNav('instagram_content');
+            if (updateHistory) setTabUrl(tabId);
+            if (instagramContentSubview === 'routing') loadAdRoutes();
         }
 
         let adminHandoffs = [];
@@ -7491,7 +7759,7 @@ THIS WEEK'S BENGAL SPECIALS
             if (!adminAuthenticated) return;
             try {
                 const responses = await Promise.all([
-                    fetch('/admin/handoffs?limit=100', { headers: getAuthHeaders() }),
+                    fetch('/admin/handoffs?limit=100&include_resumed=true', { headers: getAuthHeaders() }),
                     fetch('/admin/menu/active', { headers: getAuthHeaders() }),
                     fetch('/admin/instagram-story-sources', { headers: getAuthHeaders() }),
                     fetch('/admin/instagram-routes', { headers: getAuthHeaders() }),
@@ -7501,7 +7769,12 @@ THIS WEEK'S BENGAL SPECIALS
                 const [handoffResp, menuResp, storyResp, routeResp, analyticsResp, healthResp] = responses;
                 const [handoffData, menuData, storyData, routeData, analyticsData, healthData] = await Promise.all(responses.map(response => response.json().catch(() => ({}))));
                 if (handoffResp.ok) setDashboardValue('dashHandoffs', handoffData.unread_count ?? handoffData.count ?? 0);
-                if (menuResp.ok) setDashboardValue('dashMenuStatus', menuData.menu ? 'Live' : 'Check');
+                if (menuResp.ok) {
+                    const weeks = Array.isArray(menuData.menu?.weekly_menus) ? menuData.menu.weekly_menus : [];
+                    const week = menuData.current_menu || null;
+                    const dishes = week ? (week.vegetarian || []).length + (week.non_vegetarian || []).length : 0;
+                    setDashboardValue('dashMenuStatus', menuData.current_menu_status === 'active' && dishes > 0 ? 'Published' : 'No active menu');
+                }
                 if (storyResp.ok) {
                     const stories = storyData.story_sources || [];
                     setDashboardValue('dashStories', stories.filter(item => String(item.story_status || 'ACTIVE').toUpperCase() === 'ACTIVE' && !Number(item.admin_deleted || 0)).length);
@@ -7531,11 +7804,21 @@ THIS WEEK'S BENGAL SPECIALS
 
         function renderHandoffCard(item, compact = false) {
             const unseenClass = item.seen ? '' : ' unseen';
+            const status = String(item.status || 'WAITING_FOR_HUMAN').toUpperCase();
+            const statusClass = status === 'RESUMED' ? '' : ' waiting';
+            const customer = handoffCustomerIdentity(item);
             return `<article class="handoff-card${unseenClass}" tabindex="0" data-handoff-ref="${escapeHtml(item.handoff_ref || '')}">
-                <div class="handoff-card-top"><div><div class="handoff-name">${escapeHtml(item.customer_display_name || 'Instagram customer')}</div><div class="handoff-ref">${escapeHtml(item.handoff_ref || 'CAM')}</div></div><span class="ig-media-status waiting">${escapeHtml(item.status || 'WAITING_FOR_HUMAN')}</span></div>
+                <div class="handoff-card-top"><div><div class="handoff-name">Customer: ${escapeHtml(customer)}</div><div class="handoff-ref">Reference: ${escapeHtml(item.handoff_ref || 'CAM')}</div></div><span class="ig-media-status${statusClass}">${escapeHtml(status)}</span></div>
                 <div class="handoff-summary">${escapeHtml(item.reason || 'Human support requested')}${item.summary && !compact ? `\n${escapeHtml(item.summary)}` : ''}</div>
                 <div class="handoff-meta">${escapeHtml(formatAdminTimestamp(item.created_at))}${item.unresolved_topic ? ` · ${escapeHtml(item.unresolved_topic)}` : ''}</div>
+                <button class="btn-secondary" type="button" data-handoff-open="${escapeHtml(item.handoff_ref || '')}" style="justify-self:start;padding:7px 10px;font-size:.74rem;">Open handoff</button>
             </article>`;
+        }
+
+        function handoffCustomerIdentity(item) {
+            const value = String(item?.customer_display_name || '').trim();
+            if (!value || value === 'Instagram customer') return 'Instagram customer';
+            return `@${value.replace(/^@+/, '')}`;
         }
 
         function renderHandoffs() {
@@ -7547,6 +7830,9 @@ THIS WEEK'S BENGAL SPECIALS
                 card.addEventListener('click', () => openHandoffDetails(card.dataset.handoffRef));
                 card.addEventListener('keydown', event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openHandoffDetails(card.dataset.handoffRef); } });
             });
+            document.querySelectorAll('[data-handoff-open]').forEach(button => {
+                button.addEventListener('click', event => { event.stopPropagation(); openHandoffDetails(button.dataset.handoffOpen); });
+            });
         }
 
         function updateHandoffBadges(unreadCount) {
@@ -7556,7 +7842,7 @@ THIS WEEK'S BENGAL SPECIALS
         async function loadHandoffs() {
             if (!adminAuthenticated) return;
             try {
-                const response = await fetch('/admin/handoffs?limit=100', { headers: getAuthHeaders() });
+                const response = await fetch('/admin/handoffs?limit=100&include_resumed=true', { headers: getAuthHeaders() });
                 const data = await response.json().catch(() => ({}));
                 if (!response.ok) throw new Error(data.detail || 'Could not load handoffs.');
                 const previousRefs = new Set(adminHandoffs.filter(item => !item.seen).map(item => item.handoff_ref));
@@ -7578,7 +7864,7 @@ THIS WEEK'S BENGAL SPECIALS
         function showHandoffToast(item) {
             const stack = document.getElementById('adminToastStack');
             if (!stack) return;
-            const toast = document.createElement('div'); toast.className = 'handoff-toast'; toast.innerHTML = `<b>New handoff</b><br>${escapeHtml(item.customer_display_name || 'Instagram customer')} · ${escapeHtml(item.reason || 'Human support requested')}`;
+            const toast = document.createElement('div'); toast.className = 'handoff-toast'; toast.innerHTML = `<b>New handoff</b><br>Customer: ${escapeHtml(handoffCustomerIdentity(item))} · Reference: ${escapeHtml(item.handoff_ref || 'CAM')} · ${escapeHtml(item.reason || 'Human support requested')}`;
             toast.addEventListener('click', () => { openHandoffDetails(item.handoff_ref); toast.remove(); });
             stack.appendChild(toast); setTimeout(() => toast.remove(), 8000);
         }
@@ -7603,11 +7889,15 @@ THIS WEEK'S BENGAL SPECIALS
             const item = adminHandoffs.find(entry => entry.handoff_ref === ref); if (!item) return;
             markHandoffSeen(ref);
             const drawer = document.getElementById('contentDetailsDrawer'); const backdrop = document.getElementById('contentDetailsBackdrop');
+            const status = String(item.status || 'WAITING_FOR_HUMAN').toUpperCase();
             document.getElementById('contentDetailsType').innerText = 'Customer handoff';
-            document.getElementById('contentDetailsTitle').innerText = item.customer_display_name || 'Instagram customer';
+            document.getElementById('contentDetailsTitle').innerText = `Customer: ${handoffCustomerIdentity(item)}`;
             document.getElementById('contentDetailsPreview').innerHTML = '<div style="font-size:3rem;color:#8b97a8;">↗</div>';
-            document.getElementById('contentDetailsFacts').innerHTML = [['CAM reference', item.handoff_ref], ['Status', item.status || 'WAITING_FOR_HUMAN'], ['Reason', item.reason], ['Summary', item.summary || '—'], ['Created', formatAdminTimestamp(item.created_at)]].map(([label, value]) => `<div class="drawer-fact"><span class="drawer-fact-label">${escapeHtml(label)}</span><span class="drawer-fact-value">${escapeHtml(value)}</span></div>`).join('');
-            document.getElementById('contentDetailsActions').innerHTML = `<button class="btn-secondary" type="button" onclick="resumeAdminHandoff('${escapeHtml(item.handoff_ref)}')">Resume CAM</button><button class="btn-secondary" type="button" onclick="switchTab('tab-handoffs', null); closeContentDetails();">Open Handoffs</button>`;
+            document.getElementById('contentDetailsFacts').innerHTML = [['Customer', handoffCustomerIdentity(item)], ['Reference', item.handoff_ref], ['Status', status], ['Reason', item.reason], ['Summary', item.summary || '—'], ['Created', formatAdminTimestamp(item.created_at)], ['Updated', formatAdminTimestamp(item.updated_at || item.created_at)]].map(([label, value]) => `<div class="drawer-fact"><span class="drawer-fact-label">${escapeHtml(label)}</span><span class="drawer-fact-value">${escapeHtml(value)}</span></div>`).join('');
+            const resumeAction = status === 'WAITING_FOR_HUMAN' || status === 'CREATED'
+                ? `<button class="btn-secondary" type="button" onclick="resumeAdminHandoff('${escapeHtml(item.handoff_ref)}')">Resume CAM</button>`
+                : '<span class="ig-media-muted">Read-only history — this CAM is already resumed.</span>';
+            document.getElementById('contentDetailsActions').innerHTML = `${resumeAction}<button class="btn-secondary" type="button" onclick="switchTab('tab-handoffs', null); closeContentDetails();">Open Handoffs</button>`;
             drawer.classList.add('open'); backdrop.classList.add('open'); drawer.setAttribute('aria-hidden', 'false'); backdrop.setAttribute('aria-hidden', 'false'); document.getElementById('contentDetailsClose').focus();
         }
 
@@ -7643,7 +7933,9 @@ THIS WEEK'S BENGAL SPECIALS
         }
 
         function openAdminRoute(route) {
-            closeContentDetails(); switchTab('tab-image', null); setTimeout(() => editInstagramRoute(Number(route.routing_id)), 0);
+            closeContentDetails();
+            setInstagramContentSubview('routing');
+            setTimeout(() => editInstagramRoute(Number(route.routing_id)), 0);
         }
 
         function renderInstagramContentCard(route) {
@@ -7703,8 +7995,37 @@ THIS WEEK'S BENGAL SPECIALS
         }
 
         async function loadSettingsHealth() {
-            const box = document.getElementById('settingsHealthResult'); if (!box) return;
-            try { const response = await fetch('/health'); const data = await response.json().catch(() => ({})); box.className = response.ok ? 'result-box success' : 'result-box error'; box.innerText = response.ok ? `Healthy · ${data.status || 'ok'}` : 'Health check needs attention.'; } catch (error) { box.className = 'result-box error'; box.innerText = 'Health check unavailable.'; }
+            const box = document.getElementById('settingsHealthResult');
+            const indicators = document.getElementById('settingsHealthIndicators');
+            const refresh = document.getElementById('settingsHealthRefresh');
+            if (!box) return;
+            box.style.display = 'block'; box.className = 'result-box info'; box.innerText = 'Checking /health…';
+            if (refresh) { refresh.disabled = true; refresh.innerText = 'Checking…'; }
+            if (indicators) indicators.innerHTML = '';
+            try {
+                const response = await fetch('/health', { cache: 'no-store' });
+                const data = await response.json().catch(() => ({}));
+                const status = String(data.status || (response.ok ? 'healthy' : 'degraded')).toLowerCase();
+                const label = status === 'healthy' ? 'Healthy' : status === 'degraded' ? 'Degraded' : 'Unavailable';
+                box.className = `result-box ${status === 'healthy' ? 'success' : 'error'}`;
+                box.innerText = `${label} · ${response.status}`;
+                const safe = [
+                    ['App health', label],
+                    ['Answering', data.answering?.ready ? 'Ready' : 'Needs attention'],
+                    ['Durable storage', data.storage?.database?.expected_durable ? 'Durable' : 'Check volume'],
+                    ['Instagram delivery', data.reply_delivery?.mode || (data.outbound_delivery?.healthy ? 'Available' : 'Needs attention')],
+                    ['Webhook signatures', data.webhook_signature || 'Unknown'],
+                    ['Auth readiness', data.admin_auth?.password_configured && data.admin_auth?.https_required !== false ? 'Ready' : 'Needs attention'],
+                    ['Failure counters', data.instagram_outbound?.failures_last_24h ?? data.outbound_delivery?.failures_last_24h ?? 0],
+                ];
+                if (data.web_push) safe.push(['Web Push', data.web_push.status || data.web_push.ready || 'Not configured']);
+                if (indicators) indicators.innerHTML = safe.map(([name, value]) => `<div class="health-indicator"><span class="health-indicator-label">${escapeHtml(name)}</span><span class="health-indicator-value">${escapeHtml(value)}</span></div>`).join('');
+            } catch (error) {
+                box.className = 'result-box error'; box.innerText = 'Health check unavailable — could not reach /health.';
+                if (indicators) indicators.innerHTML = '<div class="health-indicator"><span class="health-indicator-label">App health</span><span class="health-indicator-value">Unknown</span></div>';
+            } finally {
+                if (refresh) { refresh.disabled = false; refresh.innerText = '↻ Refresh'; }
+            }
         }
 
         // MENU MANAGER tab: every menu is edited as a draft (server-side, in
@@ -9199,7 +9520,7 @@ THIS WEEK'S BENGAL SPECIALS
             const resBox = document.getElementById('pasteResult');
             resBox.className = 'result-box info';
             resBox.style.display = 'block';
-            resBox.innerHTML = '🗑️ Discarded. The live menu was never touched.';
+            resBox.innerHTML = '🗑️ Discarded. The current published menu was never touched.';
         }
 
         async function publishMenuReview() {
@@ -9410,20 +9731,27 @@ Non-Veg:
         // MENU tab: what is live now
         async function loadActiveMenu() {
             const container = document.getElementById('activeMenuContent');
+            const statusBadge = document.getElementById('menuCurrentStatus');
+            if (!container) return;
+            container.innerHTML = '<p class="ig-media-muted">Loading current menu…</p>';
+            if (statusBadge) statusBadge.innerText = 'Checking';
             try {
                 const resp = await fetch('/admin/menu/active', { headers: getAuthHeaders() });
-                if (!resp.ok) throw new Error('Auth error or failed to load');
-                const data = await resp.json();
-                const menu = data.menu;
+                const data = await resp.json().catch(() => ({}));
+                if (!resp.ok) throw new Error(data.detail || `Could not load current menu (${resp.status}).`);
+                const menu = data.menu && typeof data.menu === 'object' ? data.menu : { weekly_menus: [] };
+                if (!Array.isArray(menu.weekly_menus)) menu.weekly_menus = [];
+                const currentWeek = data.current_menu || null;
+                const currentDishCount = currentWeek ? ((currentWeek.vegetarian || []).length + (currentWeek.non_vegetarian || []).length) : 0;
+                const currentIsPublished = Boolean(currentWeek && data.current_menu_status === 'active' && currentWeek.is_published !== false && currentDishCount > 0);
+                if (statusBadge) statusBadge.innerText = currentIsPublished ? 'Published' : 'No active menu';
 
                 // The flyer photo and the dish text are now two separate
                 // things that both have to agree with the last upload, so
                 // show staff which week is actually live rather than leaving
                 // them to guess from the photo alone.
                 const flyerWeekOf = data.weekly_flyer && data.weekly_flyer.week_of;
-                const menuWeekOf = (menu.weekly_menus && menu.weekly_menus.length > 0)
-                    ? menu.weekly_menus[menu.weekly_menus.length - 1].week_of
-                    : null;
+                const menuWeekOf = currentWeek ? currentWeek.week_of : null;
                 // Superseded flyers, still reachable by a customer asking for
                 // "previous menus" until they age out of the two-week window.
                 const archiveEl = document.getElementById('flyerArchive');
@@ -9460,14 +9788,16 @@ Non-Veg:
 
                 const activeFlyerWeekEl = document.getElementById('activeFlyerWeek');
                 if (activeFlyerWeekEl) {
-                    const weekLabel = flyerWeekOf || menuWeekOf;
+                    const dateRange = data.current_date_range || {};
+                    const dateLabel = dateRange.start_date
+                        ? `${dateRange.start_date}${dateRange.end_date && dateRange.end_date !== dateRange.start_date ? ` – ${dateRange.end_date}` : ''}`
+                        : '';
+                    const weekLabel = dateLabel || flyerWeekOf || menuWeekOf;
                     // The flyer photo and the dish list are two separate things,
                     // and removing every dish leaves the photo up. The label used
                     // to keep announcing that week as active regardless, which
                     // reads as "the menu is live" when nothing is actually live.
-                    const labelWeek = menu.weekly_menus && menu.weekly_menus.length
-                        ? menu.weekly_menus[menu.weekly_menus.length - 1]
-                        : null;
+                    const labelWeek = currentWeek;
                     const liveDishCount = labelWeek
                         ? ((labelWeek.vegetarian || []).length + (labelWeek.non_vegetarian || []).length)
                         : 0;
@@ -9475,25 +9805,24 @@ Non-Veg:
                         activeFlyerWeekEl.innerText = '';
                     } else if (labelWeek && labelWeek.is_published === false) {
                         activeFlyerWeekEl.innerText = '🚫 Hidden from chatbot customers — upload or publish a replacement to make it live.';
-                    } else if (liveDishCount > 0) {
-                        activeFlyerWeekEl.innerText = `📅 Active menu: ${weekLabel}`;
+                    } else if (data.current_menu_status === 'active' && liveDishCount > 0) {
+                        activeFlyerWeekEl.innerText = `📅 Active menu dates: ${weekLabel} (business date ${data.current_date})`;
                     } else {
-                        activeFlyerWeekEl.innerText = `📅 Menu photo still up: ${weekLabel} — but no dishes are live. Upload this week's photo, or use Reset to Baseline to take the photo down too.`;
+                        activeFlyerWeekEl.innerText = `📅 Menu photo still up: ${weekLabel} — but no date-active dishes are live. Check the configured menu dates.`;
                     }
                 }
 
                 let html = '';
                 let totalCount = 0;
 
-                if (menu.weekly_menus && menu.weekly_menus.length > 0) {
-                    const currentWeek = menu.weekly_menus[menu.weekly_menus.length - 1];
+                if (currentWeek) {
                     const veg = currentWeek.vegetarian || [];
                     const nonveg = currentWeek.non_vegetarian || [];
-                    totalCount = veg.length + nonveg.length;
+                    totalCount = currentIsPublished ? veg.length + nonveg.length : 0;
                     // Kept so Remove can send back the dishes that survive.
                     // update-menu replaces a whole list, so the button needs
                     // the other dishes as much as the one being dropped.
-                    liveMenu = { vegetarian: veg, non_vegetarian: nonveg };
+                    liveMenu = currentIsPublished ? { vegetarian: veg, non_vegetarian: nonveg } : { vegetarian: [], non_vegetarian: [] };
 
                     html += `<h3 style="color: var(--primary); margin-top: 10px; font-size: 1.1rem;">🌱 Vegetarian Weekly Specials (${veg.length})</h3>`;
                     html += '<div class="menu-grid">';
@@ -9532,10 +9861,18 @@ Non-Veg:
                     html += '</div>';
                 }
 
-                container.innerHTML = html;
+                if (!currentIsPublished) {
+                    container.innerHTML = '<div class="result-box info" style="display:block;">No published menu is currently serving customers. No current menu is active for today\'s date. The existing menu history is preserved; publish or upload a menu with a valid date range.</div>';
+                    liveMenu = { vegetarian: [], non_vegetarian: [] };
+                } else {
+                    container.innerHTML = html;
+                }
                 document.getElementById('activeCountBadge').innerText = `${totalCount} dishes`;
             } catch (err) {
-                container.innerHTML = '<p style="color: red;">Failed to load active menu. Please check your PIN.</p>';
+                if (statusBadge) statusBadge.innerText = 'Unavailable';
+                container.innerHTML = `<div class="result-box error" style="display:block;">Could not load the current menu. ${escapeHtml(err.message || 'Please try again.')}</div>`;
+                const countBadge = document.getElementById('activeCountBadge');
+                if (countBadge) countBadge.innerText = 'Unavailable';
             }
         }
 
@@ -9550,7 +9887,7 @@ Non-Veg:
             if (!dish) return;
 
             const remaining = (liveMenu.vegetarian.length + liveMenu.non_vegetarian.length) - 1;
-            let question = `Remove "${dish.item}" from the live menu? Customers will stop being offered it straight away.`;
+            let question = `Remove "${dish.item}" from the current published menu? Customers will stop being offered it straight away.`;
             if (remaining === 0) {
                 // Worth spelling out: an empty menu is not an obvious outcome
                 // of pressing Remove on one dish, and the bot has nothing to
@@ -10468,15 +10805,18 @@ Non-Veg:
             try {
                 const sourceFilter = document.getElementById('cqaSourceFilter').value;
                 const customSource = sourceFilter === 'system_template' ? '' : sourceFilter;
-                const [resp, systemResp] = await Promise.all([
+                const [resp, systemResp, canonicalResp] = await Promise.all([
                     fetch(`/admin/custom-qa?status=${encodeURIComponent(customQaStatusFilter)}${customSource ? `&source=${encodeURIComponent(customSource)}` : ''}&limit=500`, { headers: getAuthHeaders() }),
                     fetch(`/admin/response-library?status=${encodeURIComponent(customQaStatusFilter)}${sourceFilter ? `&source=${encodeURIComponent(sourceFilter)}` : ''}&limit=500`, { headers: getAuthHeaders() }),
+                    fetch('/admin/canonical-qa', { headers: getAuthHeaders() }),
                 ]);
-                if (!resp.ok || !systemResp.ok) throw new Error('failed');
+                if (!resp.ok || !systemResp.ok || !canonicalResp.ok) throw new Error('failed');
                 const data = await resp.json();
                 const systemData = await systemResp.json();
+                const canonicalData = await canonicalResp.json();
                 customQaItems = data.items || [];
                 systemResponseItems = (systemData.items || []).filter(i => i.kind === 'system_template');
+                renderCanonicalQaRegistry(canonicalData);
 
                 const topicSelect = document.getElementById('cqaTopicFilter');
                 const currentTopic = topicSelect.value;
@@ -10490,6 +10830,36 @@ Non-Veg:
             } catch (err) {
                 tbody.innerHTML = '<tr><td colspan="9" style="text-align: center; color: red;">Failed to load Custom Q&amp;A.</td></tr>';
             }
+        }
+
+        function renderCanonicalQaRegistry(data) {
+            const body = document.getElementById('canonicalQaRegistryBody');
+            const meta = document.getElementById('canonicalQaRegistryMeta');
+            if (!body) return;
+            const entries = data.entries || [];
+            const summary = data.registry || {};
+            if (meta) meta.textContent = `${summary.active_entry_count || 0} active · ${entries.length} records · read-only`;
+            if (!entries.length) {
+                body.innerHTML = '<tr><td colspan="8" style="text-align:center;color:#888;">No canonical records loaded.</td></tr>';
+                return;
+            }
+            body.innerHTML = entries.map(item => {
+                const aliases = (item.aliases || []).map(escapeHtml).join(', ') || '—';
+                const context = item.context_requirements || {};
+                const contextText = `${context.topic || item.entity || 'general'}${context.required === 'true' ? ' · exact source required' : ''}`;
+                const actions = [...(item.actions || []), ...(item.assets || []).map(asset => `asset:${asset}`)];
+                const statusClass = item.status === 'ACTIVE' ? 'badge-veg' : 'badge-nonveg';
+                return `<tr>
+                    <td style="white-space:nowrap;"><b>${escapeHtml(item.canonical_id || '')}</b><br><small style="color:var(--text-muted);">legacy: ${escapeHtml(item.legacy_id || '')}</small></td>
+                    <td><span class="badge">${escapeHtml(item.lane || '')}</span></td>
+                    <td>${escapeHtml(item.intent || '')}<br><small>${escapeHtml(item.entity || '')}</small></td>
+                    <td style="min-width:220px;"><b>${escapeHtml(item.canonical_question || '')}</b><br><small style="color:var(--text-muted);">${aliases}</small></td>
+                    <td style="min-width:280px;max-width:420px;white-space:pre-wrap;font-size:.78rem;">${escapeHtml(item.canonical_answer || '')}</td>
+                    <td style="font-size:.78rem;">${escapeHtml(contextText)}</td>
+                    <td style="font-size:.76rem;">${escapeHtml(actions.join(', ') || '—')}</td>
+                    <td style="font-size:.76rem;"><span class="badge ${statusClass}">${escapeHtml(item.status || '')}</span><br>${escapeHtml(item.source?.heading || '')}<br><small>${escapeHtml(item.source?.path || '')}</small></td>
+                </tr>`;
+            }).join('');
         }
 
         function setCustomQaStatusFilter(status) {
@@ -11138,6 +11508,19 @@ Non-Veg:
             "Expires": "0",
         },
     )
+
+
+@app.get("/admin/content-routing")
+@app.get("/admin/instagram-content-routing")
+def redirect_legacy_content_routing():
+    """Keep old routing bookmarks inside Posts & Reels → Routing."""
+    return RedirectResponse(url="/admin?tab=content-routing", status_code=307)
+
+
+@app.get("/admin/legacy")
+def redirect_legacy_admin_view():
+    """Retire the old aggregate view without breaking a saved bookmark."""
+    return RedirectResponse(url="/admin?tab=ai-resolution", status_code=307)
 
 # --------------------------------------------------------------------------
 # Interactive Web Chat Tester Endpoint (/chat)

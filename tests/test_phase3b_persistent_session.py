@@ -23,6 +23,13 @@ def _run_same_user(tmp_path, monkeypatch):
 
     monkeypatch.setattr(app_module, "db", database)
     monkeypatch.setattr(responder_module, "db", database)
+    from datetime import timedelta
+    from camellia.menu_dates import business_today
+    today = business_today()
+    responder_module.responder.menu_data["weekly_menus"][-1].update({
+        "start_date": (today - timedelta(days=1)).isoformat(),
+        "end_date": (today + timedelta(days=5)).isoformat(),
+    })
     monkeypatch.setattr(handoff_module, "db", database)
 
     def capture(recipient, text, image_url=None, **kwargs):
@@ -65,13 +72,13 @@ def test_same_user_phase3b_sequence_preserves_explicit_subject_boundaries(tmp_pa
             assert len(sent) == len(database.get_conversations(user_id=user_id, channel="instagram"))
 
         row = _send(database, user_id, "I want to book the Home Table")
-        assert row["template_id"] == "instagram_whatsapp_handoff"
+        assert row["template_id"] == "instagram_support_handoff"
         assert len(escalated) == 1
-        assert len(sent) == 9
+        assert len(sent) == 8
 
         row = _send(database, user_id, "Tell me about the subscription")
         assert row["template_id"] == "waiting_for_human"
-        assert len(sent) == 9
+        assert len(sent) == 8
         waiting = database.get_active_handoff("instagram", user_id)
         assert waiting is not None
         database.resume_handoff(waiting["handoff_ref"])

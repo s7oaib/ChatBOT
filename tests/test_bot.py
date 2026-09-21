@@ -20,6 +20,17 @@ from camellia.responder import responder
 from camellia.escalator import escalator
 from camellia.app import app
 
+def _activate_legacy_menu_in_memory():
+    """Give legacy response tests an explicit dated fixture without touching disk."""
+    from datetime import timedelta
+    from camellia.menu_dates import business_today
+    today = business_today()
+    if responder.menu_data.get("weekly_menus"):
+        responder.menu_data["weekly_menus"][-1].update({
+            "start_date": (today - timedelta(days=1)).isoformat(),
+            "end_date": (today + timedelta(days=5)).isoformat(),
+        })
+
 class TestCamelliaBot(unittest.TestCase):
 
     @classmethod
@@ -36,11 +47,13 @@ class TestCamelliaBot(unittest.TestCase):
                 os.remove(TEST_DB_PATH)
             except Exception:
                 pass
+        responder.reload_data()
 
     def setUp(self):
         # Ensure Ad-Gate and AI testing are isolated from .env overrides
         config.BYPASS_AD_GATE = False
         config.GROQ_ENABLED = False
+        _activate_legacy_menu_in_memory()
         from camellia.ai_responder import ai_responder
         ai_responder._groq_cooldown_until = 0.0
         from camellia.session_memory import session_memory
@@ -2470,6 +2483,8 @@ class TestClarifyBeforeEscalating(unittest.TestCase):
             self.assertNotEqual(tmpl, "clarify_request")
 
 class TestInteractiveMenuFlow(unittest.TestCase):
+    def setUp(self):
+        _activate_legacy_menu_in_memory()
     """
     A menu question shows the card with a short teaser and invites a choice,
     then each choice leads somewhere real rather than to a human handover.

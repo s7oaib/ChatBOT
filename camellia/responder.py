@@ -231,6 +231,53 @@ _CANONICAL_ROUTE_HINT_RE = re.compile(
 )
 
 
+def _ordered_client_asset_payload(
+    entry: client_qa.ApprovedQA,
+    asset_map: Dict[str, List[str]],
+) -> Tuple[str, List[Dict[str, Any]]]:
+    """Convert parsed QA segments into the existing ordered media contract.
+
+    The responder's public return shape stays ``(text, matched, route,
+    image_url)`` for compatibility.  The media value can nevertheless carry
+    ordered text/media/text: leading text remains the outer text, while text
+    after an asset becomes that asset's caption.  ``send_instagram_reply``
+    already sends those captions in order, and the web tester renders the same
+    flags, so Sondesh/menu card sequencing keeps its established behavior.
+    """
+    segments = tuple(entry.response_segments or ())
+    if not segments or not any(kind == "asset" for kind, _value in segments):
+        return entry.answer, []
+
+    leading_text: List[str] = []
+    payload: List[Dict[str, Any]] = []
+    seen_urls = set()
+    for kind, value in segments:
+        if kind == "text":
+            text = str(value or "").strip()
+            if not text:
+                continue
+            if payload:
+                previous = payload[-1]
+                previous["caption"] = "\n\n".join(
+                    part for part in (previous.get("caption"), text) if part
+                )
+            else:
+                leading_text.append(text)
+            continue
+
+        if kind != "asset":
+            continue
+        for url in asset_map.get(value, ()):
+            if not url or url in seen_urls:
+                continue
+            seen_urls.add(url)
+            payload.append({"url": url})
+
+    if leading_text and payload:
+        payload[0]["text_first"] = True
+    return "\n\n".join(leading_text), payload
+
+
 # The flower strip lives in text_rules so database.py can use it too — the
 # reply path is not the only place text reaches the client's people.
 _FLOWER_RE = FLOWER_RE
@@ -2089,8 +2136,56 @@ class DeterministicResponder:
             and not explicit_client_subject
         )
         client_qa_candidate = client_qa.match(user_message, facts)
+        explicit_client_intent = bool(
+            client_qa_candidate
+            and client_qa_candidate.entry
+            and client_qa_candidate.entry.canonical_id in {"BEST_TIME_TO_BOOK"}
+            and client_qa_candidate.match_kind in {"exact", "paraphrase"}
+        )
+        if explicit_client_intent and source_context_blocks_client_qa:
+            source_context_blocks_client_qa = False
+        relevant_active_state = bool(
+            facts.get("active_product_context")
+            or facts.get("subscription_context")
+            or facts.get("order_flow_context")
+            or (
+                isinstance(facts.get("source_route"), dict)
+                and facts["source_route"].get("active", True)
+                and not facts.get("source_context_superseded")
+            )
+            or str(facts.get("last_topic") or "").casefold() in {
+                "bento", "sondesh", "savoury", "subscription", "ordering",
+            }
+        )
+        if (
+            channel == "instagram"
+            and client_qa_candidate
+            and client_qa_candidate.entry is None
+            and client_qa_candidate.clarification
+            and not relevant_active_state
+        ):
+            facts.update({
+                "last_route_source": "ambiguity_resolver",
+                "last_intents": ["clarification_required"],
+                "last_entities": {},
+                "last_knowledge_ids": [],
+                "last_actions": [BusinessAction.SEND_RESPONSE.value],
+                "knowledge_sufficient": True,
+                "last_grounding": "clarification",
+                "decision_lane": "CLARIFICATION_REQUIRED",
+                "last_llm_called": False,
+                "last_fallback_used": False,
+                "client_qa_id": None,
+                "client_qa_match_kind": "clarification",
+            })
+            session_memory.add_turn(user_id, channel, user_message, client_qa_candidate.clarification)
+            # Keep the established public route ID for analytics and clients;
+            # the new lane/trace still records that this was a deterministic
+            # ambiguity clarification rather than an approved fact answer.
+            return client_qa_candidate.clarification, True, "price_clarify_product", None
         client_qa_flow_candidate = bool(
             client_qa_candidate
+            and client_qa_candidate.entry
             and client_qa_candidate.entry.qa_id in {"alacarte_prebook", "order_prebook"}
         )
         client_qa_excluded = bool(
@@ -2115,18 +2210,16 @@ class DeterministicResponder:
                 and not semantic_fallback._IDENTITY_QUESTION_RE.search(lowered_text)
             )
             or source_context_blocks_client_qa
-            or (
-                source_route_active
-                and explicit_client_subject
-            )
             or BULK_CONTEXT_RE.search(lowered_text)
             or (
                 facts.get("active_product_context")
                 and not explicit_client_subject
+                and not explicit_client_intent
             )
             or (
                 facts.get("ad_product")
                 and not explicit_client_subject
+                and not explicit_client_intent
                 and bool(_CANONICAL_ROUTE_HINT_RE.search(lowered_text))
             )
         )
@@ -2137,8 +2230,9 @@ class DeterministicResponder:
         )
         if client_match:
             entry = client_match.entry
-            asset_urls: List[str] = []
+            asset_urls: Any = []
             asset_missing: List[str] = []
+            current_weekly_asset, _weekly_caption = self._current_weekly_image(today_weekday=0)
             asset_map = {
                 "sondesh_addon_images": [
                     "/images/sondesh_addon_01.jpeg",
@@ -2150,34 +2244,41 @@ class DeterministicResponder:
                 ],
                 "aamar_menu": ["/images/AAMAR%20MISHTI.jpeg"],
                 "signature_menu": ["/images/Signature%20Sondesh.jpeg"],
-                "weekly_menu": [current_menu_image("weekly_vegetarian", "/images/From%20Friday.jpeg")],
+                "weekly_menu": [current_weekly_asset] if current_weekly_asset else [],
             }
             for asset_key in client_match.asset_keys:
                 values = [value for value in asset_map.get(asset_key, []) if value]
                 if not values:
-                    asset_missing.append(asset_key)
+                    # A dated weekly menu can legitimately be absent between
+                    # ranges. Omit that optional card rather than escalating a
+                    # valid approved answer; never substitute an expired or
+                    # weekday-selected image.
+                    if asset_key != "weekly_menu":
+                        asset_missing.append(asset_key)
                 else:
                     asset_urls.extend(values)
             facts.update({
                 "last_route_source": "client_approved_qa",
                 "last_intents": [entry.qa_id],
-                "last_entities": {"client_qa_id": entry.qa_id},
-                "last_knowledge_ids": [f"client_qa:{entry.qa_id}"],
+                "last_entities": {"client_qa_id": entry.qa_id, "canonical_id": entry.canonical_id, "entity": entry.entity},
+                "last_knowledge_ids": [f"client_qa:{entry.canonical_id}"],
                 "last_actions": [BusinessAction.SEND_RESPONSE.value],
                 "knowledge_sufficient": not bool(asset_missing),
                 "last_grounding": "asset-missing" if asset_missing else "exact_approved",
                 "last_llm_called": False,
                 "last_fallback_used": False,
                 "client_qa_id": entry.qa_id,
+                "client_qa_canonical_id": entry.canonical_id,
                 "client_qa_match_kind": client_match.match_kind,
                 "client_qa_asset_status": "ASSET-MISSING" if asset_missing else "available",
                 "client_qa_missing_assets": asset_missing,
                 "client_qa_handoff_exact": entry.qa_id == "order_ready_handoff",
+                "client_qa_response_segments": [kind for kind, _value in entry.response_segments],
             })
             client_topic = TOPIC_MAP.get(_CLIENT_QA_TEMPLATE_IDS.get(entry.qa_id, ""))
             if client_topic:
                 facts["last_topic"] = client_topic
-            if entry.qa_id in {"bento_details_client", "bento_price_client"}:
+            if entry.canonical_id in {"BENTO_DETAILS", "BENTO_PRICE"}:
                 facts["active_product_context"] = "bento"
             if entry.context == "home_table" and (
                 facts.get("source_route")
@@ -2208,6 +2309,15 @@ class DeterministicResponder:
                 return handoff, False, "client_approved_asset_missing", None
             template_id = _CLIENT_QA_TEMPLATE_IDS.get(entry.qa_id)
             response_text = entry.answer
+            # The exact subscription pricing route is a text -> chart ->
+            # manager response.  Preserve the canonical source wording while
+            # returning only the leading text here; the ordered media payload
+            # carries the manager paragraph after the chart.
+            if entry.qa_id == "subscription_price":
+                ordered_text, ordered_assets = _ordered_client_asset_payload(entry, asset_map)
+                if ordered_assets:
+                    response_text = ordered_text
+                    asset_urls = ordered_assets
             if template_id in ALACARTE_SONDESH_ADDON_TEMPLATES:
                 response_text, asset_urls = self._apply_crosssell_nudges(
                     template_id,
@@ -3970,6 +4080,7 @@ class DeterministicResponder:
             # was attached to it above.
             if (
                 facts.get("alacarte_sondesh_addon_sent")
+                and tmpl_id in ALACARTE_SONDESH_ADDON_TEMPLATES
                 and ALACARTE_SONDESH_ADDON_COPY not in response_text
             ):
                 response_text = response_text.rstrip() + "\n\n" + ALACARTE_SONDESH_ADDON_COPY
@@ -4386,25 +4497,31 @@ class DeterministicResponder:
 
     def _current_week(self) -> Dict[str, Any]:
         """
-        The live weekly menu block — always the last entry, matching every
-        write path (photo upload, pasted text, Sheet sync, the dashboard).
+        The date-active weekly menu block. Resolution is centralized so text,
+        image assets, ordering, and admin use the same calendar rule.
         """
-        weekly_menus = self.menu_data.get("weekly_menus", [])
-        return weekly_menus[-1] if weekly_menus else {}
+        weekly_menus = self._menu_data_for_resolution().get("weekly_menus", [])
+        return menu_dates.resolve_current_menu(weekly_menus).get("menu") or {}
+
+    def _menu_data_for_resolution(self) -> Dict[str, Any]:
+        """Read menu data for lightweight responder instances used in tests."""
+        data = getattr(self, "menu_data", None)
+        if isinstance(data, dict):
+            return data
+        try:
+            with open(config.MENU_JSON_PATH, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        except (OSError, TypeError, json.JSONDecodeError):
+            data = {}
+        return data if isinstance(data, dict) else {}
 
     def _weekly_menu_expired(self) -> bool:
         """
-        True once the printed date range on the live menu has passed.
-
-        Nothing dated has been uploaded yet on a fresh deployment, and
-        undated text never expires, so this stays False until a real flyer
-        with a readable date range goes stale.
+        True when there is no published menu whose configured date includes
+        today's local business date.
         """
-        current_week = self._current_week()
-        return (
-            not current_week.get("is_published", True)
-            or menu_dates.is_expired(current_week.get("week_of"))
-        )
+        resolution = menu_dates.resolve_current_menu(self._menu_data_for_resolution().get("weekly_menus", []))
+        return resolution.get("status") != "active"
 
     def _current_weekly_image(self, today_weekday: int) -> Tuple[Optional[str], Optional[str]]:
         """
@@ -4412,22 +4529,14 @@ class DeterministicResponder:
         operator's own upload rather than one of the two fixed images shipped
         with the repo.
 
-        An uploaded flyer takes priority over the day-of-week Till Thursday /
-        From Friday rotation, because it is more current by definition — the
-        operator posted it precisely to reflect what changed. The rotation is
-        the fallback for a deployment where nothing has been uploaded yet.
-
-        Returns no card at all once the menu's printed dates have passed. The
-        static fallback is not a substitute there: it is a picture of a menu
-        too, and sending any dish photo for a week that has ended is the exact
-        thing expiry exists to prevent.
+        An uploaded flyer or managed image is returned only when the centralized
+        date resolver has found a published menu active today. A built-in card
+        is a display fallback inside that valid range; weekday labels never
+        decide whether the menu is current.
         """
-        # An uploaded flyer is judged on its own printed date (or, when that
-        # could not be read, on when it was uploaded). menu.json's week no
-        # longer gets a veto here: since the photo is saved even when text
-        # extraction fails, the two can legitimately disagree, and letting a
-        # stale text date suppress this week's photo is exactly the "upload
-        # did nothing" failure the split exists to prevent.
+        resolution = menu_dates.resolve_current_menu(self._menu_data_for_resolution().get("weekly_menus", []))
+        if resolution.get("status") != "active":
+            return None, None
         # A deliberately published Menu Manager image wins immediately and is
         # read from durable metadata on every request; no process restart is
         # needed. An explicitly archived image returns no card.
@@ -4439,14 +4548,10 @@ class DeterministicResponder:
 
         uploaded = weekly_flyer.get()
         if uploaded:
-            if not weekly_flyer.is_current(uploaded):
-                return None, None
-            return uploaded["url"], uploaded.get("caption")
-        if self._weekly_menu_expired():
-            return None, None
-        img_till_thursday = "/images/Till%20Thursday.jpeg"
-        img_from_friday = "/images/From%20Friday.jpeg"
-        fallback = img_from_friday if today_weekday in [4, 5, 6] else img_till_thursday
+            if menu_dates.parse_menu_date_range(uploaded) and weekly_flyer.is_current(uploaded):
+                return uploaded["url"], uploaded.get("caption")
+        current_week = resolution.get("menu") or {}
+        fallback = current_week.get("menu_image_from_friday") or current_week.get("menu_image_till_thursday")
         return fallback, None
 
     def _detect_relevant_images(self, user_message: str) -> Optional[Any]:
@@ -4701,13 +4806,6 @@ class DeterministicResponder:
                 return _WEEKLY_MENU_BEING_UPDATED, None
 
             target_images = current_weekly_img
-            # The last entry is "current" everywhere else that touches this
-            # array — every write path (photo upload, pasted text, Sheet sync,
-            # the admin dashboard's own JS) treats weekly_menus[-1] as the live
-            # week. This was the one place still picking weekly_menus[0] on
-            # Monday-Thursday, so an uploaded menu's dishes and date reached
-            # customers only on Fri/Sat/Sun — four days out of seven, an
-            # upload silently had no effect on what this reply showed.
             current_week = self._current_week()
 
             week_name = current_week.get("week_of", "Current Rotation")

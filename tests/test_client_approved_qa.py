@@ -49,7 +49,7 @@ def test_exact_questions_return_their_canonical_ids_and_source_copy():
         ("How to pay", {"home_table_context": True}, "home_table_payment"),
         ("whats the price", {}, "general_price"),
         ("Can you tell me more about this", {}, "general_details"),
-        ("WHAT ARE THE NEXT STEPS TO PRE BOOK?", {}, "alacarte_prebook"),
+        ("WHAT ARE THE NEXT STEPS TO PRE BOOK?", {}, "order_prebook"),
         ("What is the price of SUBSCRIPTION - HOME FOOD AWAY FROM HOME", {}, "subscription_price"),
         ("Tell me more about SUBSCRIPTION - HOME FOOD AWAY FROM HOME", {}, "subscription_details_client"),
         ("PRICE IS HIGH", {}, "price_is_high"),
@@ -69,7 +69,13 @@ def test_exact_questions_return_their_canonical_ids_and_source_copy():
     for question, facts, expected_id in cases:
         result = _match(question, facts)
         assert result.entry.qa_id == expected_id
-        assert result.entry.answer == client_qa.REGISTRY_BY_ID[expected_id].answer
+        expected_answer = client_qa.REGISTRY_BY_ID[expected_id].answer
+        if expected_id == "sondesh_price_client" and question == "Whats the price of sondesh?":
+            # This exact production wording is an approved copy exception:
+            # it uses the long Sondesh introduction while retaining the
+            # price route for its other paraphrases.
+            expected_answer = client_qa.REGISTRY_BY_ID["sondesh_details_client"].answer
+        assert result.entry.answer == expected_answer
 
 
 def test_paraphrases_keep_the_same_canonical_answer_id():
@@ -133,7 +139,7 @@ def test_every_canonical_source_block_resolves_through_the_real_responder(monkey
         ("home_table_payment", "How to pay", {"home_table_context": True}),
         ("general_price", "whats the price", {}),
         ("general_details", "Can you tell me more about this", {}),
-        ("alacarte_prebook", "WHAT ARE THE NEXT STEPS TO PRE BOOK?", {}),
+        ("order_prebook", "WHAT ARE THE NEXT STEPS TO PRE BOOK?", {}),
         ("subscription_price", "What is the price of SUBSCRIPTION - HOME FOOD AWAY FROM HOME", {}),
         ("subscription_details_client", "Tell me more about SUBSCRIPTION - HOME FOOD AWAY FROM HOME", {}),
         ("price_is_high", "PRICE IS HIGH", {}),

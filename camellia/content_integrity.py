@@ -428,7 +428,8 @@ LEGACY_RESPONSES = {
 
 def _week(menu_data: Mapping[str, Any]) -> Mapping[str, Any]:
     weeks = menu_data.get("weekly_menus") or []
-    return weeks[-1] if weeks else {}
+    from camellia import menu_dates
+    return menu_dates.resolve_current_menu(weeks).get("menu") or {}
 
 
 def _weekly_text(title: str, emoji: str, entries: Iterable[Mapping[str, Any]], closing: str) -> str:

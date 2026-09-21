@@ -139,39 +139,26 @@ def test_repeated_explicit_human_requests_reuse_cam_and_alert_once():
     assert all("someone will get back to you shortly" in reply for reply in replies[:1])
 
 
-def test_verified_order_receipt_adds_concise_order_handoff_and_reuses_cam():
+def test_unbooked_order_receipt_adds_concise_callback_handoff_and_reuses_cam():
     user_id = "policy_ig_order_handoff_" + uuid.uuid4().hex[:8]
     session_memory.clear_session(user_id, "instagram")
     with patch.object(app, "send_instagram_reply") as send_reply, patch.object(
         app.escalator, "handle_escalation", return_value={"escalation_id": 1},
     ) as escalate, patch.object(config, "WHATSAPP_BUSINESS_NUMBER", "919800000000"):
         app._process_instagram_event(user_id, "I want Jolbhora 250g", "ad-1")
-        receipt, order_link = [call.args[1] for call in send_reply.call_args_list[-2:]]
+        receipt = send_reply.call_args.args[1]
         sent_before_waiting = send_reply.call_count
         app._process_instagram_event(user_id, "I need an agent", "ad-1")
 
     assert "ORDER DRAFT RECEIPT" in receipt
     assert "Continue on WhatsApp" in receipt
     assert "https://wa.me/" not in receipt
-    assert order_link.startswith("Continue on WhatsApp:\nhttps://wa.me/")
+    assert send_reply.call_count == sent_before_waiting
     assert "we'll contact you" not in receipt.lower()
     assert "they'll connect with you" not in receipt.lower()
     assert "whatsapp/call shortly" not in receipt.lower()
 
-    link = re.search(r"https://wa\.me/[^\s]+", order_link).group(0)
-    decoded = urllib.parse.unquote(link)
-    assert "Ref: CAM-" in decoded
-    assert "Collection: Aamar Mishti Collection" in decoded
-    assert "Item: Jolbhora Sondesh" in decoded
-    assert "Pack: 250g" in decoded
-    assert "Quantity: 1 box" in decoded
-    assert "Estimated Item Total: ₹750" in decoded
-    assert "Courier" not in decoded
-    assert "Final Total" not in decoded
-    assert user_id not in decoded
-    assert "address" not in decoded.lower()
     assert escalate.call_count == 1
-    assert send_reply.call_count == sent_before_waiting
     waiting_rows = db.get_conversations(user_id=user_id, channel="instagram")
     assert waiting_rows[0]["template_id"] == "waiting_for_human"
     assert waiting_rows[0]["bot_response"] == ""
@@ -183,7 +170,7 @@ def test_instagram_bulk_event_request_escalates():
     )
     reply_text = send_reply.call_args.args[1]
     assert escalate.called
-    assert "wa.me" in reply_text
+    assert "wa.me" not in reply_text
 
 
 def test_instagram_order_example_offers_handoff_not_a_whatsapp_order_bot():
@@ -193,8 +180,12 @@ def test_instagram_order_example_offers_handoff_not_a_whatsapp_order_bot():
     send_reply, _escalate = _ask_instagram(
         "policy_ig_order_example", "I want 50 boxes of Jolbhora for a wedding in Delhi",
     )
-    reference = re.search(r"CAM-\d{5,6}", send_reply.call_args.args[1]).group(0)
-    known = json.loads(db.get_handoff_by_ref(reference)["known_entities"])
+    user_id = next(
+        row["source_user_id"] for row in db.get_handoffs(limit=200)
+        if row["source_user_id"].startswith("policy_ig_order_example_")
+    )
+    handoff = db.get_active_handoff("instagram", user_id)
+    known = json.loads(handoff["known_entities"])
     assert known.get("product") == "Jolbhora"
     assert known.get("event") == "wedding"
     assert known.get("location") == "Delhi"
@@ -235,15 +226,15 @@ def test_duplicate_instagram_escalation_does_not_create_duplicate_handoffs():
     assert len(rows) == 1
 
 
-def test_booking_human_request_keeps_approved_whatsapp_handoff():
+def test_booking_human_request_without_booked_state_uses_callback_handoff():
     send_reply, escalate = _ask_instagram(
         "policy_ig_booking_human", "I want to book this, can I talk to someone?",
     )
     reply_text = send_reply.call_args.args[1]
     assert escalate.called
-    assert "wa.me" in reply_text
-    handoff_ref = re.search(r"CAM-\d{5,6}", urllib.parse.unquote(reply_text)).group(0)
-    assert db.get_handoff_by_ref(handoff_ref)["contact_mode"] == "whatsapp_order"
+    assert "wa.me" not in reply_text
+    handoff_ref = re.search(r"CAM-\d{5,6}", urllib.parse.unquote(reply_text))
+    assert handoff_ref is None
 
 
 def test_instagram_chatbot_enabled_default_is_true():

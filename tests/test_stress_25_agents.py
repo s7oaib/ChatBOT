@@ -45,6 +45,13 @@ class Test25AgentStressScenarios(unittest.TestCase):
         # Reset session memory and initialize DB before each agent test
         db.init_db()
         self.responder = DeterministicResponder()
+        from datetime import timedelta
+        from camellia.menu_dates import business_today
+        today = business_today()
+        self.responder.menu_data["weekly_menus"][-1].update({
+            "start_date": (today - timedelta(days=1)).isoformat(),
+            "end_date": (today + timedelta(days=5)).isoformat(),
+        })
         session_memory._sessions.clear()
 
     def test_agent_01_bengali_native_speaker(self):

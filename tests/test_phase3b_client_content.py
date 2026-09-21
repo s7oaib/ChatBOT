@@ -4,6 +4,17 @@ import uuid
 
 import pytest
 
+
+@pytest.fixture(autouse=True)
+def dated_legacy_menu():
+    from datetime import timedelta
+    from camellia import menu_dates
+    today = menu_dates.business_today()
+    responder.menu_data["weekly_menus"][-1].update({
+        "start_date": (today - timedelta(days=1)).isoformat(),
+        "end_date": (today + timedelta(days=5)).isoformat(),
+    })
+
 from camellia.responder import responder
 from camellia.session_memory import session_memory
 
