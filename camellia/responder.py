@@ -2136,6 +2136,14 @@ class DeterministicResponder:
             and not explicit_client_subject
         )
         client_qa_candidate = client_qa.match(user_message, facts)
+        explicit_client_intent = bool(
+            client_qa_candidate
+            and client_qa_candidate.entry
+            and client_qa_candidate.entry.canonical_id in {"BEST_TIME_TO_BOOK"}
+            and client_qa_candidate.match_kind in {"exact", "paraphrase"}
+        )
+        if explicit_client_intent and source_context_blocks_client_qa:
+            source_context_blocks_client_qa = False
         relevant_active_state = bool(
             facts.get("active_product_context")
             or facts.get("subscription_context")
@@ -2206,10 +2214,12 @@ class DeterministicResponder:
             or (
                 facts.get("active_product_context")
                 and not explicit_client_subject
+                and not explicit_client_intent
             )
             or (
                 facts.get("ad_product")
                 and not explicit_client_subject
+                and not explicit_client_intent
                 and bool(_CANONICAL_ROUTE_HINT_RE.search(lowered_text))
             )
         )
@@ -4064,6 +4074,7 @@ class DeterministicResponder:
             # was attached to it above.
             if (
                 facts.get("alacarte_sondesh_addon_sent")
+                and tmpl_id in ALACARTE_SONDESH_ADDON_TEMPLATES
                 and ALACARTE_SONDESH_ADDON_COPY not in response_text
             ):
                 response_text = response_text.rstrip() + "\n\n" + ALACARTE_SONDESH_ADDON_COPY

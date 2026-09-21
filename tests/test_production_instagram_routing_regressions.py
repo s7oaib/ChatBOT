@@ -32,6 +32,7 @@ def test_best_time_to_book_exact_phrase_beats_stale_finalized_order_state():
     assert template_id == "savoury_best_time_to_book"
     assert text == BEST_TIME_REPLY
     assert images is None
+    assert session_memory.get_facts("prod-regression-best-time-stale", "instagram")["client_qa_canonical_id"] == "BEST_TIME_TO_BOOK"
     assert "Manager of Kitchens" not in text
     assert "invoice" not in text.lower()
 
@@ -46,6 +47,20 @@ def test_best_time_to_book_case_and_punctuation_variants_are_deterministic():
         assert matched is True
         assert template_id == "savoury_best_time_to_book"
         assert text == BEST_TIME_REPLY
+
+
+def test_best_time_to_book_never_reuses_a_stale_sondesh_addon():
+    text, matched, template_id, images = _respond(
+        "whats the BEST TIME TO BOOK",
+        "prod-regression-best-time-addon-state",
+        {"alacarte_sondesh_addon_sent": True},
+    )
+
+    assert matched is True
+    assert template_id == "savoury_best_time_to_book"
+    assert text == BEST_TIME_REPLY
+    assert "Norom Pak Sondesh" not in text
+    assert images is None
 
 
 def test_exact_sondesh_price_phrase_uses_one_approved_long_answer():
