@@ -691,7 +691,7 @@ HOME_TABLE_BOOKING_RE = re.compile(
     re.IGNORECASE,
 )
 PAYMENT_QUERY_RE = re.compile(
-    r'\b(?:how\s+to\s+pay|how\s+do\s+i\s+pay|how\s+can\s+i\s+pay|'
+    r'\b(?:how\s+to\s+pay|how\s+2\s+pay|how\s+do\s+i\s+pay|how\s+can\s+i\s+pay|'
     r'payment(?:\s+details?|\s+method(?:s)?|\s+options?)?|pay(?:ment)?\s+details?|'
     r'bank\s+transfer|upi|qr(?:\s+code)?|gpay|paytm|phonepe|net\s+banking|'
     r'credit\s+card|debit\s+card|cash\s+on\s+delivery|\bcod\b)\b',
@@ -1056,12 +1056,23 @@ class DeterministicResponder:
                     "dinner", "savoury", "savory", "bento", "combo", "subscription",
                     "subscriptions", "plan", "tiffin", "veg", "vegetarian", "niramish",
                     "non", "chicken", "mangsho", "fish", "mutton",
+                    "menu",
                 }
             )
             contextual_subject = bool(
                 resolution.kind in {"clarification_selection", "correction", "topic_switch"}
                 or subject_only
             )
+            # These are established deterministic meal-introduction phrasings;
+            # keep them on the exact weekly-menu/image path instead of allowing
+            # a broad model label such as ``menu_request`` to choose know_more.
+            if current_entity == "BENGALI_MEAL" and re.search(
+                r"\b(lunch\s+menu|dinner\s+options|savoury\s+food|bengali\s+meals?|lunch\s+options|"
+                r"dinner\s+menu|savoury\s+menu|bengali\s+(?:lunch|dinner)|savoury\s+dishes|"
+                r"savoury\s+ordering)\b",
+                normalized_message,
+            ):
+                facts["skip_structured_nlu"] = True
             if current_entity in topic_map and contextual_subject and not crosssell_preserve:
                 facts["active_entity"] = current_entity
                 facts["active_topic"] = topic_map[current_entity]
@@ -1113,6 +1124,13 @@ class DeterministicResponder:
                     user_id=user_id, channel=channel, user_message=message,
                 )
                 return text, True, "subscription_details", images
+            if topic == "bento":
+                template = self._template_by_id("bento_details") or {}
+                text, images = self._format_dynamic_response(
+                    "bento_details", template.get("response") or "",
+                    user_id=user_id, channel=channel, user_message=message,
+                )
+                return text, True, "bento_details", images
             if topic in TOPIC_PRICE_HINT:
                 # Existing topic hint path owns the exact approved answer.
                 facts["skip_structured_nlu"] = True
@@ -1743,6 +1761,16 @@ class DeterministicResponder:
         # canonical knowledge declines the message; otherwise structured NLU
         # manufactured a handoff before that layer could answer an approved
         # staff-added question.
+        if not resolution.items:
+            learned_match = db.search_learned_knowledge(user_message)
+            learned_answer = (learned_match or {}).get("verified_answer", "").strip()
+            if learned_answer:
+                facts["knowledge_sufficient"] = True
+                facts["last_knowledge_ids"] = [f"learned_knowledge#{learned_match.get('id')}"]
+                facts["last_knowledge_sufficiency"] = {intent: True for intent in intents}
+                facts["last_grounding"] = "learned_knowledge"
+                session_memory.add_turn(user_id, channel, user_message, learned_answer)
+                return learned_answer, True, f"learned_{learned_match.get('id')}", None
         if not resolution.items and not (explicit_gap or subtopic_gap or amenity_gap or parking_gap):
             facts["knowledge_sufficient"] = False
             facts["last_knowledge_sufficiency"] = {intent: False for intent in intents}
@@ -2893,6 +2921,22 @@ class DeterministicResponder:
                 session_memory.add_turn(user_id, channel, user_message, response_text)
                 return response_text, True, "delivery_out_of_area", None
 
+        # Payment details are a protected canonical guard. Resolve them before
+        # structured NLU so an LLM can never paraphrase or narrow the approved
+        # payment methods based on the wording of the question.
+        if (
+            PAYMENT_QUERY_RE.search(lowered_text)
+            and not OUT_OF_SCOPE_TOPIC_RE.search(lowered_text)
+            and not self.check_explicit_escalation_triggers(user_message)
+        ):
+            payment_template = self._template_by_id("GUARD_payment_method")
+            payment_response = payment_template.get("response") or self._generic_fallback()
+            facts["last_topic"] = "payment"
+            facts["last_route_source"] = "canonical_payment"
+            facts["source_context_used"] = False
+            session_memory.add_turn(user_id, channel, user_message, payment_response)
+            return payment_response, True, "GUARD_payment_method", None
+
         if (
             not active_conversation_flow
             and not explicit_subject_in_detail_wrapper
@@ -3687,7 +3731,12 @@ class DeterministicResponder:
                 tmpl_id, response_text, image_url, facts, user_message,
             )
 
-            if tmpl_id not in {"greeting", "sondesh_price_detailed", "previous_menus"} and config.is_ai_enabled and ai_responder.get_active_provider() != "none":
+            if (
+                tmpl_id not in {"greeting", "sondesh_price_detailed", "previous_menus"}
+                and not tmpl_id.startswith("GUARD_")
+                and config.is_ai_enabled
+                and ai_responder.get_active_provider() != "none"
+            ):
                 try:
                     user_ctx = f"Customer Name: {facts.get('name', 'Unknown')}"
                     # The turns so far, without this message — add_turn runs
