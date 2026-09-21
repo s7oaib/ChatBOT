@@ -30,6 +30,11 @@ class ApprovedQA:
     source: Tuple[Tuple[str, str], ...] = ()
     actions: Tuple[str, ...] = ()
     asset_keys: Tuple[str, ...] = ()
+    # Ordered source segments retain the placement of operational asset
+    # markers. ``answer`` remains the marker-free canonical copy used by
+    # audits and existing callers; transports may use these segments when a
+    # customer-facing reply must interleave text and media.
+    response_segments: Tuple[Tuple[str, str], ...] = ()
     lane: str = "EXACT_APPROVED"
     status: str = "ACTIVE"
     business_fact_guard: Optional[str] = None
@@ -184,27 +189,50 @@ _PLACEHOLDER_ASSETS = {
 }
 
 
-def _clean_answer(raw_lines: Sequence[str]) -> Tuple[str, Tuple[str, ...]]:
+def _clean_answer(
+    raw_lines: Sequence[str],
+) -> Tuple[str, Tuple[str, ...], Tuple[Tuple[str, str], ...]]:
     assets: List[str] = []
     kept: List[str] = []
+    segments: List[Tuple[str, str]] = []
+    segment_lines: List[str] = []
+
+    def flush_text_segment() -> None:
+        if not segment_lines:
+            return
+        segment = "\n".join(segment_lines).strip()
+        segment = re.sub(r"\n[ \t]*\n(?:[ \t]*\n)+", "\n\n", segment)
+        if segment:
+            segments.append(("text", segment))
+        segment_lines.clear()
+
     for raw_line in raw_lines:
         line = raw_line.rstrip()
         marker = line.strip()
         asset = _PLACEHOLDER_ASSETS.get(marker)
         if asset:
+            flush_text_segment()
             assets.append(asset)
+            segments.append(("asset", asset))
             continue
         # Obsolete generic support instruction: the current architecture uses
         # CAM. Manual WhatsApp is represented only on booking/order records.
         if marker == "ADD LINK TO WHATSAPP":
             continue
         kept.append(line)
+        segment_lines.append(line)
+    flush_text_segment()
     answer = "\n".join(kept).strip()
     answer = re.sub(r"\n[ \t]*\n(?:[ \t]*\n)+", "\n\n", answer)
-    return answer, tuple(dict.fromkeys(assets))
+    return answer, tuple(dict.fromkeys(assets)), tuple(segments)
 
 
-def _metadata(definition: _Definition, assets: Tuple[str, ...], line_number: int) -> ApprovedQA:
+def _metadata(
+    definition: _Definition,
+    assets: Tuple[str, ...],
+    response_segments: Tuple[Tuple[str, str], ...],
+    line_number: int,
+) -> ApprovedQA:
     requirements = {"source_type": "none", "topic": definition.context, "required": "false"}
     if definition.context == "home_table":
         requirements.update(source_type="instagram_story_post_reel", topic="bengali_home_table", required="true")
@@ -224,6 +252,7 @@ def _metadata(definition: _Definition, assets: Tuple[str, ...], line_number: int
         source=(("path", str(SOURCE_PATH)), ("heading", definition.question), ("occurrence", str(definition.occurrence)), ("line", str(line_number))),
         actions=tuple(dict.fromkeys(actions)),
         asset_keys=assets,
+        response_segments=response_segments,
         status=definition.status,
         business_fact_guard=definition.guard,
     )
@@ -259,18 +288,18 @@ def parse_source(source_text: Optional[str] = None) -> Tuple[ApprovedQA, ...]:
                 if _line_key(lines[index]) == marker_key:
                     end = min(end, index)
                     break
-        answer, assets = _clean_answer(lines[start + 1:end])
+        answer, assets, response_segments = _clean_answer(lines[start + 1:end])
         if definition.qa_id in {"bento_details_client", "bento_price_client"} and re.search(r"sharing our full menu for the week below", answer, re.I):
             assets = tuple(dict.fromkeys((*assets, "weekly_menu")))
-        entry = _metadata(definition, assets, start + 1)
+        entry = _metadata(definition, assets, response_segments, start + 1)
         entries.append(ApprovedQA(**{**entry.__dict__, "answer": answer}))
 
     order_ready_index = next((index for index, line in enumerate(lines) if _line_key(line) == _line_key(_ORDER_READY_MARKER)), None)
     if order_ready_index is not None and not any(item.qa_id == "order_ready_handoff" for item in entries):
         definition = next(item for item in _DEFINITIONS if item.qa_id == "order_ready_handoff")
         next_heading = next((index for index, _item in positions if index > order_ready_index), len(lines))
-        answer, assets = _clean_answer(lines[order_ready_index + 1:next_heading])
-        entry = _metadata(definition, assets, order_ready_index + 1)
+        answer, assets, response_segments = _clean_answer(lines[order_ready_index + 1:next_heading])
+        entry = _metadata(definition, assets, response_segments, order_ready_index + 1)
         entries.append(ApprovedQA(**{**entry.__dict__, "answer": answer}))
     return tuple(entries)
 
@@ -331,7 +360,7 @@ def match(message: str, facts: Optional[Dict[str, Any]] = None) -> Optional[Appr
     if re.search(r"\b(?:minimum|multiples?\s+of\s+(?:nine|9)|9\s*pieces|250\s*g)\b", text, re.I) and re.search(r"\b(?:flavou?r|sondesh|order)\b", text, re.I):
         return _result("SONDESH_MINIMUM_ORDER_REASON")
     if re.search(r"\bsubscriptions?\b|\bmeal\s+plan\b|\beveryday\s+meal\b|\bhome\s+food\s+away\s+from\s+home\b", text, re.I):
-        return _result("SUBSCRIPTION_PRICE" if re.search(r"\b(?:price|cost|rate|how\s+much)\b", text, re.I) else "SUBSCRIPTION_DETAILS")
+        return _result("SUBSCRIPTION_PRICE" if re.search(r"\b(?:prices?|cost|rates?|how\s+much)\b", text, re.I) else "SUBSCRIPTION_DETAILS")
     if re.search(r"\bchicken\s+kosha\b", text, re.I):
         return _result("CHICKEN_KOSHA_PRICE")
     if re.search(r"\b(?:bengali\s+bento|bento)\b", text, re.I) and not re.search(r"\b(?:without|no|remove|replace|substitut|customi[sz]|cheapest|lowest|how\s+much\s+more|difference|cheaper)\b", text, re.I):
