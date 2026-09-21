@@ -6,6 +6,7 @@ import pytest
 
 from camellia import client_qa
 from camellia.config import config
+from camellia.handoff import handoff_contact_mode
 from camellia.responder import responder
 from camellia.session_memory import session_memory
 
@@ -149,6 +150,8 @@ def test_generic_support_has_no_whatsapp_link_but_booking_is_marked_manual():
     assert "MANUAL_WHATSAPP_HANDOFF" in current.actions
     assert "wa.me" not in current.answer.lower()
     assert "MANUAL_WHATSAPP_HANDOFF" not in client_qa.REGISTRY_BY_CANONICAL_ID["GENERAL_CAMELLIA_DETAILS"].actions
+    assert handoff_contact_mode("Can you cater my wedding for 100 people?") == "support_callback"
+    assert handoff_contact_mode("I want to place an order for a Bengali Bento") == "whatsapp_order"
 
 
 def test_admin_exposes_canonical_registry_as_read_only(monkeypatch):

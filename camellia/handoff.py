@@ -35,8 +35,7 @@ _PURCHASE_HANDOFF_RE = re.compile(
     r"\b(?:book(?:ing)?|order|ordering|purchase|buy|payment|pay|invoice|"
     r"pre[- ]?order|pre[- ]?book|checkout|reserve|reservation|seat|"
     r"place\s+(?:an?\s+)?order|ready\s+to\s+place|bulk\s+order|"
-    r"custom\s+order|\d+\s*(?:boxes?|pieces?|guests?|people|kg)\b|"
-    r"event\s+(?:order|catering))\b",
+    r"custom\s+order|\d+\s*(?:boxes?|pieces?|kg)\b)\b",
     re.IGNORECASE,
 )
 _HUMAN_HELP_RE = re.compile(
