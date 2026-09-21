@@ -1872,16 +1872,24 @@ def send_instagram_reply(
     )
     cards_first = any(caption for _, caption in captioned) and not text_first
 
-    if not config.INSTAGRAM_ACCESS_TOKEN:
-        msg_type = f"IMAGE x{len(images)}" if images else "TEXT"
-        log.info(
-            "[MOCK IG OUTBOUND] type=%s recipient_hash=%s text_length=%d",
-            msg_type, _safe_identifier_hash(recipient_id), len(text or ""),
-        )
-        return {"mock": True, "status": "sent", "recipient": recipient_id, "type": msg_type}
+    try:
+        auth_mode = config.instagram_auth_mode()
+    except ValueError as exc:
+        log.error("Instagram outbound configuration is invalid: %s", exc)
+        return {"status": "failed", "error": str(exc)}
 
-    token = config.INSTAGRAM_ACCESS_TOKEN.strip()
-    if token.startswith("IGAA"):
+    token = (config.INSTAGRAM_ACCESS_TOKEN or "").strip()
+    if not token:
+        log.error(
+            "Instagram outbound is not configured: access token is missing "
+            "for auth_mode=%s.", auth_mode,
+        )
+        return {
+            "status": "failed",
+            "error": f"INSTAGRAM_ACCESS_TOKEN is not set for auth mode {auth_mode}.",
+        }
+
+    if auth_mode == "instagram_login":
         url = f"https://graph.instagram.com/{config.INSTAGRAM_API_VERSION}/me/messages"
     else:
         page_id = config.INSTAGRAM_PAGE_ID or "me"
@@ -2429,9 +2437,9 @@ def _webhook_signature_status() -> str:
 
 
 def _instagram_profile_url_and_identity() -> Tuple[str, str]:
-    """The messenger_profile URL for whichever token flavour is configured."""
-    token = (config.INSTAGRAM_ACCESS_TOKEN or "").strip()
-    if token.startswith("IGAA"):
+    """The messenger_profile URL for the explicitly configured auth mode."""
+    auth_mode = config.instagram_auth_mode()
+    if auth_mode == "instagram_login":
         return (
             f"https://graph.instagram.com/{config.INSTAGRAM_API_VERSION}/me/messenger_profile",
             "instagram_login_token (graph.instagram.com/me)",
@@ -2492,17 +2500,31 @@ def instagram_token_status(force: bool = False) -> Dict[str, Any]:
     `unknown` is deliberately not an alarm. A network blip must not be
     reported as a dead credential, or the warning stops meaning anything.
     """
+    try:
+        auth_mode = config.instagram_auth_mode()
+    except ValueError as exc:
+        return {"state": "configuration_error", "detail": str(exc)}
+
     token = (config.INSTAGRAM_ACCESS_TOKEN or "").strip()
     if not token:
-        return {"state": "not_configured", "detail": "INSTAGRAM_ACCESS_TOKEN is not set."}
+        return {
+            "state": "not_configured",
+            "auth_mode": auth_mode,
+            "detail": "INSTAGRAM_ACCESS_TOKEN is not set.",
+        }
 
     now = time.time()
     cached = _ig_token_state.get("result")
-    if not force and cached and (now - _ig_token_state["checked_at"]) < _IG_TOKEN_TTL_SECONDS:
+    if (
+        not force
+        and cached
+        and cached.get("auth_mode") == auth_mode
+        and (now - _ig_token_state["checked_at"]) < _IG_TOKEN_TTL_SECONDS
+    ):
         return {**cached, "checked_seconds_ago": round(now - _ig_token_state["checked_at"], 1)}
 
     url, identity = _instagram_profile_url_and_identity()
-    result = _check_instagram_token(token, url, identity)
+    result = {**_check_instagram_token(token, url, identity), "auth_mode": auth_mode}
     _ig_token_state["result"] = result
     _ig_token_state["checked_at"] = now
     if result["state"] == "invalid":
@@ -2575,6 +2597,10 @@ def health_check():
         warnings.append(
             f"Menu is at {storage['menu']['path']} with no GOOGLE_SHEET_CSV_URL set — "
             "menu edits are lost on every deploy."
+        )
+    if instagram_token.get("state") == "configuration_error":
+        warnings.append(
+            f"Instagram outbound auth configuration is invalid: {instagram_token.get('detail')}"
         )
     if instagram_token.get("state") == "invalid":
         # A warning rather than a 503, on purpose. This genuinely is an outage

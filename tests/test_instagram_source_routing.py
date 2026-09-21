@@ -55,6 +55,7 @@ def test_graph_lookup_verifies_media_without_inventing_metadata(monkeypatch):
                 return Response({"instagram_business_account": {"id": "ig-1"}})
             return Response({"data": [{"id": "media-1", "media_type": "VIDEO", "permalink": "https://instagram.com/reel/DdAnO6MTok1/", "thumbnail_url": "https://cdn.example/thumb.jpg", "caption": "Verified caption"}]})
     monkeypatch.setattr(config, "INSTAGRAM_ACCESS_TOKEN", "token")
+    monkeypatch.setattr(config, "INSTAGRAM_AUTH_MODE", "legacy_page")
     monkeypatch.setattr(config, "INSTAGRAM_PAGE_ID", "page-1")
     monkeypatch.setattr("camellia.instagram_routing.httpx.Client", lambda *args, **kwargs: Client())
     result = lookup_instagram_media(normalize_instagram_url("https://instagram.com/reel/DdAnO6MTok1/"))

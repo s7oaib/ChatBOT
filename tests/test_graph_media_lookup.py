@@ -54,7 +54,8 @@ class _FakeClient:
         return False
 
 
-def test_an_instagram_login_token_uses_graph_instagram_directly():
+def test_an_instagram_login_mode_uses_graph_instagram_directly(monkeypatch):
+    monkeypatch.setattr(instagram_routing.config, "INSTAGRAM_AUTH_MODE", "instagram_login")
     client = _FakeClient({})
     url = _media_list_url(client, "IGAAabc123", "v21.0")
     assert url == "https://graph.instagram.com/v21.0/me/media"
@@ -62,7 +63,8 @@ def test_an_instagram_login_token_uses_graph_instagram_directly():
     assert client.asked == []
 
 
-def test_a_page_token_still_resolves_through_the_linked_business_account():
+def test_a_legacy_page_mode_still_resolves_through_the_linked_business_account(monkeypatch):
+    monkeypatch.setattr(instagram_routing.config, "INSTAGRAM_AUTH_MODE", "legacy_page")
     client = _FakeClient({
         "https://graph.facebook.com": _FakeResponse(
             {"instagram_business_account": {"id": "17841400000000000"}}
@@ -73,7 +75,8 @@ def test_a_page_token_still_resolves_through_the_linked_business_account():
     assert client.asked and client.asked[0].startswith("https://graph.facebook.com/")
 
 
-def test_a_page_token_with_no_linked_account_is_unavailable():
+def test_a_legacy_page_mode_with_no_linked_account_is_unavailable(monkeypatch):
+    monkeypatch.setattr(instagram_routing.config, "INSTAGRAM_AUTH_MODE", "legacy_page")
     client = _FakeClient({"https://graph.facebook.com": _FakeResponse({})})
     assert _media_list_url(client, "EAATpagetoken", "v21.0") is None
 
@@ -81,6 +84,7 @@ def test_a_page_token_with_no_linked_account_is_unavailable():
 def test_lookup_verifies_a_permalink_over_the_instagram_host(monkeypatch):
     """End to end with an IGAA token: the post is found and its id returned."""
     monkeypatch.setattr(instagram_routing.config, "INSTAGRAM_ACCESS_TOKEN", "IGAAtoken")
+    monkeypatch.setattr(instagram_routing.config, "INSTAGRAM_AUTH_MODE", "instagram_login")
 
     captured = {}
 
@@ -104,6 +108,7 @@ def test_lookup_verifies_a_permalink_over_the_instagram_host(monkeypatch):
 
 def test_a_permalink_absent_from_the_account_is_not_invented(monkeypatch):
     monkeypatch.setattr(instagram_routing.config, "INSTAGRAM_ACCESS_TOKEN", "IGAAtoken")
+    monkeypatch.setattr(instagram_routing.config, "INSTAGRAM_AUTH_MODE", "instagram_login")
 
     class _Client(_FakeClient):
         def get(self, url, params=None):
@@ -119,6 +124,7 @@ def test_a_permalink_absent_from_the_account_is_not_invented(monkeypatch):
 
 def test_a_transport_failure_is_reported_not_guessed(monkeypatch):
     monkeypatch.setattr(instagram_routing.config, "INSTAGRAM_ACCESS_TOKEN", "IGAAtoken")
+    monkeypatch.setattr(instagram_routing.config, "INSTAGRAM_AUTH_MODE", "instagram_login")
 
     class _Client(_FakeClient):
         def get(self, url, params=None):

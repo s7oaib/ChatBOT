@@ -163,6 +163,7 @@ still goes out as text, built from `menu.json`'s structured items.
 ## Secrets — set in the dashboard, never committed
 
 `META_APP_SECRET`, `META_VERIFY_TOKEN`, `INSTAGRAM_ACCESS_TOKEN`,
+`INSTAGRAM_AUTH_MODE`,
 `INSTAGRAM_ACCOUNT_ID`, `INSTAGRAM_PAGE_ID`, `WHATSAPP_BUSINESS_NUMBER`,
 `ADMIN_API_KEY`, `ADMIN_PIN`, `GROQ_API_KEY`.
 

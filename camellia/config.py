@@ -94,6 +94,15 @@ def _resolve_path(env_var: str, default: Path, must_exist: bool = False) -> str:
 
 _GRAPH_API_VERSION_RE = re.compile(r"^v\d+\.\d+$")
 _DEFAULT_INSTAGRAM_API_VERSION = "v25.0"
+_INSTAGRAM_AUTH_MODES = frozenset({"instagram_login", "legacy_page"})
+
+
+def _resolve_instagram_auth_mode() -> str:
+    """Read the Graph credential family without inferring it from a token."""
+    raw = os.getenv("INSTAGRAM_AUTH_MODE")
+    # Instagram Login is the safe default for this Instagram-only service.
+    # Legacy Page-token behavior is available only when explicitly selected.
+    return "instagram_login" if raw is None else raw.strip().casefold()
 
 
 def _resolve_graph_api_version(env_var: str, default: str) -> str:
@@ -269,6 +278,10 @@ class Config:
     INSTAGRAM_EXPECTED_USERNAME: str = os.getenv(
         "INSTAGRAM_EXPECTED_USERNAME", "camellia.artisanal"
     ).strip().casefold()
+    # Never infer this from the credential prefix: Meta token formats are not
+    # a stable API contract. Production must set this explicitly; the default
+    # keeps an unset local environment on the modern Instagram Login path.
+    INSTAGRAM_AUTH_MODE: str = _resolve_instagram_auth_mode()
     INSTAGRAM_PAGE_ID: str = os.getenv("INSTAGRAM_PAGE_ID", "")
     INSTAGRAM_ACCESS_TOKEN: str = os.getenv("INSTAGRAM_ACCESS_TOKEN", "")
     INSTAGRAM_API_VERSION: str = _resolve_graph_api_version(
@@ -382,6 +395,14 @@ class Config:
         if not self.GROQ_ENABLED:
             return False
         return bool(self.GROQ_API_KEY)
+
+    def instagram_auth_mode(self) -> str:
+        """Return the configured Graph credential family or fail closed."""
+        mode = str(self.INSTAGRAM_AUTH_MODE or "").strip().casefold()
+        if mode not in _INSTAGRAM_AUTH_MODES:
+            allowed = ", ".join(sorted(_INSTAGRAM_AUTH_MODES))
+            raise ValueError(f"INSTAGRAM_AUTH_MODE must be one of: {allowed}.")
+        return mode
 
 config = Config()
 

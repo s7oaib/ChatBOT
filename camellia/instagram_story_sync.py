@@ -72,7 +72,7 @@ def _resolve_stories_endpoint(
     client: httpx.Client, token: str, version: str,
 ) -> Tuple[Optional[str], Optional[str], Optional[Dict[str, Any]]]:
     """Resolve the connected professional account and its owned Stories edge."""
-    if token.startswith("IGAA"):
+    if config.instagram_auth_mode() == "instagram_login":
         base = f"https://graph.instagram.com/{version}"
         profile = client.get(
             f"{base}/me", params={"fields": "id", "access_token": token}

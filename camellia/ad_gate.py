@@ -111,7 +111,8 @@ def describe_entry_point(messaging_event: Dict[str, Any]) -> EntryPoint:
 def fetch_message_details_fallback(mid: str) -> Tuple[Optional[str], Optional[str]]:
     """
     Fallback Graph API lookup for message_edit events missing sender/from fields.
-    GET https://graph.facebook.com/{version}/{mid}?fields=from,to,message&access_token={token}
+    GET against the host selected by INSTAGRAM_AUTH_MODE for
+    `{version}/{mid}?fields=from,to,message`.
     """
     token = config.INSTAGRAM_ACCESS_TOKEN
     mid_hash = hashlib.sha256(str(mid or "").encode("utf-8")).hexdigest()[:12] if mid else None
@@ -121,7 +122,12 @@ def fetch_message_details_fallback(mid: str) -> Tuple[Optional[str], Optional[st
         log.warning("Graph API fallback skipped for message_hash=%s: missing mid or access token.", mid_hash)
         return None, None
 
-    url = f"https://graph.facebook.com/{config.INSTAGRAM_API_VERSION}/{mid}"
+    host = (
+        "graph.instagram.com"
+        if config.instagram_auth_mode() == "instagram_login"
+        else "graph.facebook.com"
+    )
+    url = f"https://{host}/{config.INSTAGRAM_API_VERSION}/{mid}"
     params = {
         "fields": "from,to,message",
         "access_token": token
