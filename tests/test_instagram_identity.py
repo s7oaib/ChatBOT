@@ -61,10 +61,11 @@ def test_username_available_is_stored_and_authenticated_admin_can_display_it():
     item = next(entry for entry in response.json()["handoffs"] if entry["handoff_ref"] == handoff_ref)
     assert item["customer_display_name"] == "@bengalifoodie"
     assert item["customer_username"] == "bengalifoodie"
-    assert item["customer_external_id"] == sender_id
+    assert "customer_external_id" not in item
+    assert sender_id not in str(item)
 
 
-def test_username_unavailable_degrades_to_sender_id_not_anonymous_customer():
+def test_username_unavailable_degrades_to_safe_anonymous_customer_label():
     sender_id = _sender_id()
     _user_id, handoff_ref = _create_cam({
         "customer_external_id": sender_id,
@@ -73,9 +74,9 @@ def test_username_unavailable_degrades_to_sender_id_not_anonymous_customer():
     with patch.object(app_module, "require_admin", lambda *args, **kwargs: None):
         response = TestClient(app_module.app).get("/admin/handoffs?limit=200")
     item = next(entry for entry in response.json()["handoffs"] if entry["handoff_ref"] == handoff_ref)
-    assert item["customer_external_id"] == sender_id
-    assert item["customer_display_name"] == sender_id
-    assert item["customer_display_name"] != "Instagram customer"
+    assert "customer_external_id" not in item
+    assert item["customer_display_name"] == "Instagram customer"
+    assert sender_id not in str(item)
 
 
 def test_identity_lookup_returns_username_without_exposing_provider_payload(monkeypatch):

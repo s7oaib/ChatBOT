@@ -47,6 +47,7 @@ from camellia.handoff import (
     get_or_create_handoff,
     is_human_help_request,
     mark_referred,
+    normalize_instagram_username,
     retire_order_state,
     staff_summary,
 )
@@ -383,7 +384,14 @@ async def add_security_headers(request: Request, call_next):
 @app.middleware("http")
 async def admin_session_middleware(request: Request, call_next):
     """Load server-side admin sessions and enforce browser CSRF protection."""
-    public_paths = {"/admin", "/admin/dashboard", "/admin/login", "/admin/verify-pin"}
+    # Browser-only compatibility entry points never expose data; they redirect
+    # into the authenticated shell so old bookmarks have a useful landing
+    # place instead of a dead 403 page.
+    public_paths = {
+        "/admin", "/admin/dashboard", "/admin/login", "/admin/verify-pin",
+        "/admin/content-routing", "/admin/instagram-content-routing",
+        "/admin/legacy",
+    }
     protected_non_admin_paths = {"/auth/instagram/start"}
     if not request.url.path.startswith("/admin") and request.url.path not in protected_non_admin_paths:
         return await call_next(request)
@@ -3512,10 +3520,14 @@ def get_escalations_list(limit: int = 50, status: Optional[str] = None, x_admin_
 
 
 def _safe_admin_handoff_label(handoff: Dict[str, Any]) -> str:
-    """Choose an authenticated operator label with an ID-only fallback."""
-    username = str(handoff.get("customer_username") or "").strip().lstrip("@")
-    if username and username != str(handoff.get("source_user_id") or ""):
-        return f"@{username}"
+    """Choose an operator-friendly label without ever falling back to Meta ID."""
+    source_user_id = str(handoff.get("source_user_id") or "")
+    candidate = normalize_instagram_username(handoff.get("instagram_username"))
+    if candidate and candidate != source_user_id:
+        return candidate
+    candidate = normalize_instagram_username(handoff.get("customer_username"))
+    if candidate and candidate != source_user_id:
+        return f"@{candidate}"
     try:
         known = json.loads(handoff.get("known_entities") or "{}")
     except (TypeError, ValueError):
@@ -3523,26 +3535,25 @@ def _safe_admin_handoff_label(handoff: Dict[str, Any]) -> str:
     if not isinstance(known, dict):
         known = {}
     for key in ("instagram_username", "username", "display_name", "customer_name"):
-        value = str(known.get(key) or "").strip()
-        if value and value != str(handoff.get("source_user_id") or ""):
-            return value if value.startswith("@") else f"@{value}"
-    external_id = str(handoff.get("customer_external_id") or handoff.get("source_user_id") or "").strip()
-    return external_id or "Instagram customer"
+        candidate = normalize_instagram_username(known.get(key))
+        if candidate and candidate != source_user_id:
+            return candidate
+    return "Instagram customer"
 
 
 @app.get("/admin/handoffs")
 def get_admin_handoffs(
     limit: int = 50,
     status: Optional[str] = None,
+    include_resumed: bool = False,
     x_admin_key: Optional[str] = Header(None),
     x_admin_pin: Optional[str] = Header(None),
 ):
     """Return safe, durable handoff notifications for the Admin shell.
 
-    This is an authenticated operational view. The Instagram sender ID is
-    retained as the stable customer identity even when username lookup fails.
-    CAM status remains read-only here; lifecycle changes continue through the
-    existing resume endpoint.
+    The raw Instagram sender identifier is intentionally omitted. CAM status
+    remains read-only here; lifecycle changes continue through the existing
+    resume endpoint.
     """
     require_admin(x_admin_key, x_admin_pin)
     requested_status = str(status or "").strip().upper() or None
@@ -3555,18 +3566,16 @@ def get_admin_handoffs(
         # CREATED is included because the accepted flow promotes it to
         # WAITING_FOR_HUMAN after notification delivery; neither state should
         # make the operator miss a fresh CAM.
-        if requested_status is None and row_status not in {"CREATED", "WAITING_FOR_HUMAN"}:
+        visible_statuses = {"CREATED", "WAITING_FOR_HUMAN"}
+        if include_resumed:
+            visible_statuses.add("RESUMED")
+        if requested_status is None and row_status not in visible_statuses:
             continue
         handoff_ref = str(row.get("handoff_ref") or "")
         handoffs.append({
             "handoff_ref": handoff_ref,
             "customer_display_name": _safe_admin_handoff_label(row),
             "customer_username": row.get("customer_username"),
-            "customer_external_id": (
-                row.get("customer_external_id") or row.get("source_user_id")
-                if str(row.get("source_channel") or "").lower() == "instagram"
-                else None
-            ),
             "source_channel": row.get("source_channel"),
             "reason": row.get("reason") or "Human support requested",
             "summary": row.get("summary") or "",
@@ -6136,6 +6145,20 @@ def get_admin_dashboard():
         .gallery-toolbar .field-control { flex: 1 1 240px; min-width: 180px; }
         .gallery-view-toggle { padding: 8px 11px; border: 1px solid var(--border); background: #fff; color: var(--text-muted); border-radius: 8px; font-size: .76rem; font-weight: 700; cursor: pointer; }
         .gallery-view-toggle.active { background: var(--primary); border-color: var(--primary); color: #fff; }
+        .admin-breadcrumb { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin:-8px 0 18px; color:var(--text-muted); font-size:.78rem; }
+        .admin-breadcrumb button { border:0; background:transparent; color:var(--primary); padding:0; font:inherit; font-weight:800; cursor:pointer; }
+        .content-subnav { display:flex; gap:6px; flex-wrap:wrap; margin:-6px 0 16px; padding-bottom:12px; border-bottom:1px solid #eef0f3; }
+        .content-subnav button { border:1px solid var(--border); background:#fff; color:var(--text-muted); border-radius:8px; padding:8px 12px; font-size:.78rem; font-weight:800; cursor:pointer; }
+        .content-subnav button.active { background:var(--primary); border-color:var(--primary); color:#fff; }
+        .health-indicators { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:10px; margin-top:14px; }
+        .health-indicator { border:1px solid var(--border); border-radius:10px; padding:11px 12px; background:#fff; }
+        .health-indicator-label { display:block; color:var(--text-muted); font-size:.68rem; font-weight:800; text-transform:uppercase; letter-spacing:.05em; }
+        .health-indicator-value { display:block; margin-top:4px; color:var(--text-dark); font-weight:700; font-size:.86rem; overflow-wrap:anywhere; }
+        .qa-architecture { border:1px solid #d8e0eb; border-radius:14px; padding:16px; margin:0 0 18px; background:#f8fafc; }
+        .qa-architecture-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:10px; margin-top:12px; }
+        .qa-architecture-item { border:1px solid #e1e7ef; border-radius:10px; padding:11px; background:#fff; }
+        .qa-architecture-item b { display:block; color:var(--primary); font-size:.82rem; margin-bottom:4px; }
+        .qa-architecture-item span { color:var(--text-muted); font-size:.76rem; line-height:1.45; }
         .content-drawer-backdrop { display: none; position: fixed; inset: 0; z-index: 1200; background: rgba(18,24,34,.38); }
         .content-drawer { position: fixed; z-index: 1201; top: 0; right: 0; width: min(460px, 94vw); height: 100vh; overflow-y: auto; background: #fff; box-shadow: -12px 0 35px rgba(19,27,40,.18); transform: translateX(105%); transition: transform .2s ease; padding: 26px; }
         .content-drawer.open { transform: translateX(0); }
@@ -6170,7 +6193,12 @@ def get_admin_dashboard():
         @media (max-width: 660px) { .main-container { display:block; padding: 18px 14px 36px; } .main-container > .admin-sidebar { min-height:0; margin: -18px -14px 18px; position: sticky; top:0; z-index:800; padding: 6px; border-right:0; border-bottom:1px solid #303847; } .admin-sidebar .tabs-nav { flex-direction:row; overflow-x:auto; } .admin-sidebar .tab-btn { min-width:48px; flex:0 0 48px; } .admin-kpi-grid { grid-template-columns: 1fr 1fr; gap: 9px; } .admin-kpi { padding: 12px; } .admin-kpi-value { font-size: 1.4rem; } .instagram-gallery { grid-template-columns: 1fr 1fr; gap: 9px; } .instagram-gallery .ig-media-preview { height: 140px; } .instagram-gallery .ig-media-main, .instagram-gallery .ig-media-facts, .instagram-gallery .ig-media-actions { padding-left: 10px; padding-right: 10px; } }
         
         /* Main Layout */
-        .main-container { max-width: 1100px; width: 100%; margin: 24px auto; padding: 0 20px 40px; flex: 1; }
+        /* The admin shell owns the full viewport. Keep the content grid
+           adjacent to the persistent sidebar instead of centering a second
+           1100px canvas inside it. */
+        .main-container { max-width: none; width: 100%; margin: 0; padding: 28px clamp(14px, 2vw, 32px) 48px; display: grid; grid-template-columns: minmax(220px, 248px) minmax(0, 1fr); align-items: start; gap: 18px; flex: 1; }
+        .main-container > .panel-card, .main-container > details { grid-column: 2; min-width: 0; }
+        .main-container > .admin-sidebar { grid-column: 1; grid-row: 1 / span 20; position: sticky; top: 0; min-height: calc(100vh - 132px); }
         
         /* Navigation Tabs */
         .tabs-nav {
@@ -6309,6 +6337,13 @@ def get_admin_dashboard():
             20%, 60% { transform: translateX(-8px); }
             40%, 80% { transform: translateX(8px); }
         }
+        @media (max-width: 980px) {
+            .main-container { grid-template-columns: 82px minmax(0, 1fr); gap: 12px; }
+            .admin-sidebar-label, .admin-sidebar .tab-btn span.nav-label { display: none; }
+            .admin-sidebar .tab-btn { justify-content: center; padding: 10px 6px; font-size: 1.05rem; position: relative; }
+            .admin-nav-badge { position: absolute; margin: -22px 0 0 18px; }
+            .admin-kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        }
         @media (max-width: 768px) {
             header { padding: 14px 16px; flex-direction: column; gap: 10px; align-items: stretch; }
             .status-bar { padding: 8px 16px; gap: 6px; font-size: 0.76rem; }
@@ -6317,6 +6352,18 @@ def get_admin_dashboard():
             .tabs-nav { justify-content: flex-start; gap: 4px; padding: 4px; }
             .tab-btn { padding: 10px 8px; font-size: 0.8rem; gap: 4px; }
             .panel-card { padding: 20px 16px; }
+        }
+        @media (max-width: 660px) {
+            .main-container { display: block; padding: 18px 14px 36px; }
+            .main-container > .admin-sidebar { min-height: 0; margin: -18px -14px 18px; position: sticky; top: 0; z-index: 800; padding: 6px; border-right: 0; border-bottom: 1px solid #303847; }
+            .admin-sidebar .tabs-nav { flex-direction: row; overflow-x: auto; }
+            .admin-sidebar .tab-btn { min-width: 48px; flex: 0 0 48px; }
+            .admin-kpi-grid { grid-template-columns: 1fr 1fr; gap: 9px; }
+            .admin-kpi { padding: 12px; }
+            .admin-kpi-value { font-size: 1.4rem; }
+            .instagram-gallery { grid-template-columns: 1fr 1fr; gap: 9px; }
+            .instagram-gallery .ig-media-preview { height: 140px; }
+            .instagram-gallery .ig-media-main, .instagram-gallery .ig-media-facts, .instagram-gallery .ig-media-actions { padding-left: 10px; padding-right: 10px; }
         }
     </style>
 </head>
@@ -6415,7 +6462,12 @@ def get_admin_dashboard():
         </div>
 
         <div id="tab-instagram-content" class="panel-card" data-group="instagram_content" style="display:none;">
-            <div class="admin-page-heading"><div><h2>Instagram Posts &amp; Reels</h2><p>Visual routing gallery for exact Meta content IDs. Click a card to inspect the mapping without losing your place.</p></div><button class="btn-secondary" type="button" onclick="loadInstagramContentGallery()">↻ Refresh</button></div>
+            <div class="admin-page-heading"><div><h2>Instagram Posts &amp; Reels</h2><p>Visual workspace for exact Meta content IDs. Inspect content, manage routing, and keep Stories in their own workspace.</p></div><button class="btn-secondary" type="button" onclick="loadInstagramContentGallery()">↻ Refresh</button></div>
+            <div class="content-subnav" aria-label="Posts and Reels views">
+                <button class="active" type="button" data-content-subview="gallery" onclick="setInstagramContentSubview('gallery')">Gallery</button>
+                <button type="button" data-content-subview="routing" onclick="setInstagramContentSubview('routing')">Routing</button>
+                <button type="button" data-content-subview="list" onclick="setInstagramContentSubview('list')">List</button>
+            </div>
             <div class="gallery-toolbar" aria-label="Post and Reel filters">
                 <input class="field-control" id="igContentSearch" type="search" placeholder="Search exact ID, topic, or route" autocomplete="off">
                 <button class="ig-media-filter active" data-content-filter="all" type="button" onclick="setInstagramContentFilter('all')">All</button>
@@ -6436,10 +6488,11 @@ def get_admin_dashboard():
         </div>
 
         <div id="tab-settings" class="panel-card" data-group="settings" style="display:none;">
-            <div class="admin-page-heading"><div><h2>Settings / Health</h2><p>Operational checks and guarded links for the existing Admin configuration. Authentication, CSRF, sessions, and production controls are unchanged.</p></div></div>
+            <div class="admin-page-heading"><div><h2>Settings / Health</h2><p>Operational checks read the existing <code>/health</code> contract. Safe indicators are shown here; secrets, raw customer identifiers, and legacy MFA fields are not.</p></div></div>
             <div class="admin-kpi-grid" style="grid-template-columns:repeat(2,minmax(0,1fr));"><div class="admin-kpi"><div class="admin-kpi-label">Admin session</div><div class="admin-kpi-value" style="font-size:1.2rem;">Protected</div><div class="admin-kpi-note">Username/password session with CSRF protection</div></div><div class="admin-kpi"><div class="admin-kpi-label">Story auto sync</div><div class="admin-kpi-value" style="font-size:1.2rem;">Existing setting</div><div class="admin-kpi-note">No new sync behavior is enabled by this redesign</div></div></div>
             <div id="settingsHealthResult" class="result-box" role="status">Health status will be checked when this view opens.</div>
-            <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;"><button class="btn-secondary" type="button" onclick="loadSettingsHealth()">Check health</button><button class="btn-secondary" type="button" onclick="lockPortal()">Lock portal</button></div>
+            <div id="settingsHealthIndicators" class="health-indicators" aria-live="polite"></div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;"><button class="btn-secondary" id="settingsHealthRefresh" type="button" onclick="loadSettingsHealth()">↻ Refresh</button><button class="btn-secondary" type="button" onclick="lockPortal()">Lock portal</button></div>
         </div>
 
         <!-- Customers and Answers used to be their own top-level tabs. Every
@@ -6449,27 +6502,17 @@ def get_admin_dashboard():
              and writing the exact same candidate_templates/escalations/
              learned_knowledge/knowledge_gaps tables through the exact same
              endpoints. Nothing about those tables or endpoints changed; only
-             which screen a client reaches them from did. The two panels
-             stay in the DOM, unstyled into the normal flow, reachable only
-             from here — for regression comparison during this transition,
-             not for daily use. -->
-        <details style="margin: 10px 0 0; font-size: 0.82rem; color: var(--text-muted);">
-            <summary style="cursor:pointer; user-select:none;">⚙️ Advanced / Legacy Views (debugging only)</summary>
-            <div style="display:flex; gap:8px; margin-top:8px; flex-wrap:wrap;">
-                <button class="btn-secondary" type="button" onclick="switchTab('tab-stats', null)">Open Legacy Customers View</button>
-                <button class="btn-secondary" type="button" onclick="switchTab('tab-candidates', null)">Open Legacy Answers View</button>
-            </div>
-            <p style="margin-top:6px;">These are the old per-workflow screens, kept only so a real discrepancy against AI Resolution &amp; Answers can be checked during this transition. Use the 🤖 AI Resolution &amp; Answers tab above for normal work.</p>
-        </details>
-
+             which screen a client reaches them from did. The compatibility
+             panels remain available to existing in-page code, but the normal
+             UI no longer exposes an Advanced / Legacy entry point. -->
         <!-- MENU tab, panel 2 of 4: same job, for when there is no photo -->
         <div id="tab-image" class="panel-card" data-group="menu">
             <div class="admin-page-heading">
-                <div><h2>Menu</h2><p>Your first-class home for the live menu, menu assets, and publishing controls. The chatbot keeps its existing data model and publish safeguards.</p></div>
-                <div style="display:flex;gap:8px;flex-wrap:wrap;"><button class="btn-secondary" type="button" onclick="switchTab('tab-menu-manager', null)">Manage catalogue</button><button class="btn-secondary" type="button" onclick="switchTab('tab-active', null)">View live menu</button></div>
+                <div><h2>Menu</h2><p>Your first-class home for the current customer menu, menu assets, and publishing controls. The chatbot keeps its existing data model and publish safeguards.</p></div>
+                <div style="display:flex;gap:8px;flex-wrap:wrap;"><button class="btn-secondary" type="button" onclick="switchTab('tab-menu-manager', null)">Manage catalogue</button><button class="btn-secondary" type="button" onclick="switchTab('tab-active', null)">View current menu</button></div>
             </div>
             <div class="admin-kpi-grid" style="grid-template-columns:repeat(3,minmax(0,1fr));">
-                <div class="admin-kpi"><div class="admin-kpi-label">Live menu</div><div class="admin-kpi-value" style="font-size:1.25rem;">Active</div><div class="admin-kpi-note">Current customer-facing menu</div></div>
+                <div class="admin-kpi"><div class="admin-kpi-label">Current menu</div><div class="admin-kpi-value" id="menuCurrentStatus" style="font-size:1.25rem;">Checking</div><div class="admin-kpi-note">Current customer-facing menu</div></div>
                 <div class="admin-kpi"><div class="admin-kpi-label">Assets</div><div class="admin-kpi-value" style="font-size:1.25rem;">Managed</div><div class="admin-kpi-note">Preview, publish, archive, restore</div></div>
                 <div class="admin-kpi"><div class="admin-kpi-label">Publishing</div><div class="admin-kpi-value" style="font-size:1.25rem;">Guarded</div><div class="admin-kpi-note">Draft review stays in place</div></div>
             </div>
@@ -6506,10 +6549,11 @@ def get_admin_dashboard():
             <div id="imageResult" class="result-box"></div>
         </div>
 
-        <div id="tab-ad-routing" class="panel-card" data-group="menu" style="display: none;">
+        <div id="tab-ad-routing" class="panel-card" data-group="instagram_content" style="display: none;">
+            <div class="admin-breadcrumb"><button type="button" onclick="setInstagramContentSubview('gallery')">← Back to Posts &amp; Reels</button><span>/</span><b>Routing</b></div>
             <div class="panel-header">
-                <h2>📣 Instagram Content Routing</h2>
-                <p>Connect an Instagram post, reel, or ad to a Topic. Story routing is managed separately in the dedicated Instagram Stories tab.</p>
+                <h2>📣 Posts &amp; Reels Routing</h2>
+                <p>Connect an Instagram post or reel to a Topic using the exact Meta ID derived from its canonical link. Story routing remains in Instagram Stories.</p>
             </div>
             <div class="ad-routing-form">
                 <div>
@@ -6766,11 +6810,12 @@ THIS WEEK'S BENGAL SPECIALS
 
         <!-- MENU tab, panel 4 of 4: what the bot is serving right now -->
         <div id="tab-active" class="panel-card" data-group="menu" style="display: none;">
+            <div class="admin-breadcrumb"><button type="button" onclick="switchTab('tab-image', null)">← Back to Menu</button><span>/</span><b>Current Menu</b></div>
             <div class="panel-header">
                 <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
                     <div>
-                        <h2>🍱 What the bot is serving right now</h2>
-                        <p>Real-time view of all dishes currently served by the Instagram assistant.</p>
+                        <h2>🍱 Current Menu</h2>
+                        <p>Read-only view of the menu currently served by the customer assistant.</p>
                     </div>
                     <div style="display: flex; gap: 8px;">
                         <button class="btn-secondary" onclick="loadActiveMenu()">🔄 Refresh View</button>
@@ -6789,11 +6834,12 @@ THIS WEEK'S BENGAL SPECIALS
              made live by Save & Publish. camellia/menu_manager.py owns
              validation/persistence/reload; this is its admin UI. -->
         <div id="tab-menu-manager" class="panel-card" data-group="menu_manager" style="display: none;">
+            <div class="admin-breadcrumb"><button type="button" onclick="switchTab('tab-image', null)">← Back to Menu</button><span>/</span><b>Menu Catalogue</b></div>
             <div class="panel-header">
                 <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px; flex-wrap:wrap;">
                     <div>
-                        <h2>📋 Menu Manager</h2>
-                        <p>Edit any menu the chatbot uses. Changes are a draft until you press Save &amp; Publish — the bot keeps answering with the current live menu until then.</p>
+                        <h2>📋 Menu Catalogue</h2>
+                        <p>Edit any menu the chatbot uses. Changes are a draft until you press Save &amp; Publish — the bot keeps answering with the current published menu until then.</p>
                     </div>
                     <button class="btn-primary" type="button" onclick="openMenuModal()" style="white-space:nowrap;">+ Add New Menu</button>
                 </div>
@@ -7086,6 +7132,19 @@ THIS WEEK'S BENGAL SPECIALS
                 </div>
             </div>
 
+            <section class="qa-architecture" aria-labelledby="qaArchitectureTitle">
+                <h3 id="qaArchitectureTitle" style="margin:0;color:var(--primary);">Authoritative approved QA model</h3>
+                <p style="margin:6px 0 0;color:var(--text-muted);font-size:.82rem;line-height:1.5;">Canonical answers are the production source of truth. The assistant may classify and ground a request, but it cannot freely rewrite an approved answer; human edits remain explicit, versioned, and subject to the existing approval rules.</p>
+                <div class="qa-architecture-grid">
+                    <div class="qa-architecture-item"><b>EXACT_APPROVED</b><span>Use the matching canonical answer when an approved intent and required context are present.</span></div>
+                    <div class="qa-architecture-item"><b>GROUNDED_APPROVED</b><span>Use only approved facts for a grounded comparison or follow-up; do not invent missing facts.</span></div>
+                    <div class="qa-architecture-item"><b>INSUFFICIENT_KNOWLEDGE</b><span>Escalate when the approved knowledge, context, or business rule is insufficient.</span></div>
+                    <div class="qa-architecture-item"><b>Intent overrides stale state</b><span>Explicit intent wins over stale menu, Story, Home Table, pre-book, or payment context.</span></div>
+                    <div class="qa-architecture-item"><b>Context-sensitive handling</b><span>Home Table, pre-booking, and payment answers require the matching context before they can win.</span></div>
+                    <div class="qa-architecture-item"><b>Answer record</b><span>Paraphrases/aliases, canonical approved answer, context requirements, asset/action requirements, source/provenance, and active/inactive status are retained.</span></div>
+                </div>
+            </section>
+
             <div style="margin-bottom:12px;">
                 <div id="responseLibrarySearchWrap" style="position:relative; max-width:560px;">
                     <input type="text" id="customQaSearch" class="field-control" placeholder="🔎 Search questions, triggers, answers, category or template ID…" autocomplete="off" style="max-width:560px;" oninput="scheduleResponseLibrarySearch()" onkeydown="responseLibrarySearchKeydown(event)">
@@ -7126,7 +7185,7 @@ THIS WEEK'S BENGAL SPECIALS
             <div id="systemResponseLibrary" style="margin:0 0 18px; padding:14px; border:1px solid var(--border); border-radius:12px; background:#FCFBFA;">
                 <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; flex-wrap:wrap;">
                     <h3 style="margin:0; color:var(--primary);">System Templates</h3>
-                    <span style="font-size:.78rem; color:var(--text-muted);">Triggers and protected runtime logic are read-only; response copy can be safely overridden.</span>
+                    <span style="font-size:.78rem; color:var(--text-muted);">Triggers and canonical runtime logic are read-only; any human edit is explicit and versioned. The LLM cannot rewrite approved answers.</span>
                 </div>
                 <div id="systemResponseLibraryCards" style="display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:10px; margin-top:10px;"></div>
             </div>
@@ -7547,6 +7606,12 @@ THIS WEEK'S BENGAL SPECIALS
             // whole group has to be on screen to match — otherwise only the
             // leading panel shows and the rest look like they do not exist.
             showGroup('dashboard');
+            const requested = new URLSearchParams(window.location.search).get('tab');
+            const requestedTab = QUERY_TAB_ALIASES[requested] || (requested && TAB_GROUPS[requested] ? requested : null);
+            if (requestedTab) {
+                switchTab(requestedTab, null, { updateHistory: false });
+                if (requested === 'content-routing' || requested === 'posts-reels-routing') setInstagramContentSubview('routing', false);
+            }
             refreshReaderStatus();
             checkAdminSession();
             setupDragAndDrop();
@@ -7566,6 +7631,12 @@ THIS WEEK'S BENGAL SPECIALS
             document.getElementById('contentDetailsClose')?.addEventListener('click', closeContentDetails);
             document.getElementById('contentDetailsBackdrop')?.addEventListener('click', closeContentDetails);
             document.addEventListener('keydown', event => { if (event.key === 'Escape') { closeContentDetails(); toggleHandoffPopover(false); } });
+            window.addEventListener('popstate', () => {
+                const value = new URLSearchParams(window.location.search).get('tab');
+                const tab = QUERY_TAB_ALIASES[value] || (value && TAB_GROUPS[value] ? value : 'tab-dashboard');
+                switchTab(tab, null, { updateHistory: false });
+                if (value === 'content-routing' || value === 'posts-reels-routing') setInstagramContentSubview('routing', false);
+            });
         });
 
         async function loginAdmin() {
@@ -7632,7 +7703,7 @@ THIS WEEK'S BENGAL SPECIALS
         const TAB_GROUPS = {
             'tab-dashboard': 'dashboard',
             'tab-image': 'menu',
-            'tab-ad-routing': 'menu',
+            'tab-ad-routing': 'instagram_content',
             'tab-paste': 'menu',
             'tab-sheets': 'menu',
             'tab-active': 'menu',
@@ -7650,19 +7721,57 @@ THIS WEEK'S BENGAL SPECIALS
             'tab-custom-qa': 'custom_qa'
         };
 
-        function showGroup(group) {
+        const PRIMARY_TAB_BY_GROUP = {
+            dashboard: 'tab-dashboard', menu: 'tab-image', menu_manager: 'tab-menu-manager',
+            instagram_stories: 'tab-instagram-stories', instagram_content: 'tab-instagram-content',
+            handoffs: 'tab-handoffs', settings: 'tab-settings', customers: 'tab-ai-resolution',
+            answers: 'tab-ai-resolution', ai_resolution: 'tab-ai-resolution', custom_qa: 'tab-custom-qa',
+        };
+
+        const QUERY_TAB_ALIASES = {
+            dashboard: 'tab-dashboard', menu: 'tab-image', 'menu-catalogue': 'tab-menu-manager',
+            'current-menu': 'tab-active', 'content-routing': 'tab-instagram-content',
+            'posts-reels-routing': 'tab-instagram-content', 'ai-resolution': 'tab-ai-resolution',
+            legacy: 'tab-ai-resolution',
+        };
+
+        let instagramContentSubview = 'gallery';
+
+        function setTabUrl(tabId, push = true) {
+            const url = new URL(window.location.href);
+            const queryValue = tabId === 'tab-instagram-content' && instagramContentSubview === 'routing'
+                ? 'content-routing'
+                : tabId.replace(/^tab-/, '');
+            url.searchParams.set('tab', queryValue);
+            if (push) window.history.pushState({ tab: queryValue }, '', url);
+            else window.history.replaceState({ tab: queryValue }, '', url);
+        }
+
+        function activatePrimaryNav(group) {
+            const primaryId = PRIMARY_TAB_BY_GROUP[group];
+            const button = primaryId ? [...document.querySelectorAll('.admin-sidebar .tab-btn')].find(item => item.getAttribute('onclick')?.includes(`'${primaryId}'`)) : null;
+            document.querySelectorAll('.tab-btn').forEach(item => item.classList.remove('active'));
+            if (button) button.classList.add('active');
+        }
+
+        function showGroup(group, selectedTabId = null) {
             document.querySelectorAll('.panel-card').forEach(panel => {
-                panel.style.display = (panel.dataset.group === group) ? 'block' : 'none';
+                let visible = panel.dataset.group === group;
+                if (group === 'menu' && selectedTabId) visible = visible && panel.id === selectedTabId;
+                if (group === 'instagram_content' && panel.id === 'tab-ad-routing') visible = visible && instagramContentSubview === 'routing';
+                if (group === 'instagram_content' && panel.id === 'tab-instagram-content') visible = visible && instagramContentSubview !== 'routing';
+                panel.style.display = visible ? 'block' : 'none';
             });
             syncInstagramStoryAutoRefresh();
         }
 
-        function switchTab(tabId, el) {
-            document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
-            if (el) el.classList.add('active');
-
+        function switchTab(tabId, el, options = {}) {
             const group = TAB_GROUPS[tabId];
-            showGroup(group);
+            if (!group) return;
+            if (el) { document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active')); el.classList.add('active'); }
+            else activatePrimaryNav(group);
+            showGroup(group, group === 'menu' ? tabId : null);
+            if (options.updateHistory !== false) setTabUrl(tabId);
 
             // Everything in the group is on screen at once, so everything in it
             // needs its data.
@@ -7677,6 +7786,19 @@ THIS WEEK'S BENGAL SPECIALS
             if (group === 'handoffs') { loadHandoffs(); }
             if (group === 'dashboard') { loadDashboardOverview(); }
             if (group === 'settings') { loadSettingsHealth(); }
+        }
+
+        function setInstagramContentSubview(view, updateHistory = true) {
+            instagramContentSubview = ['gallery', 'routing', 'list'].includes(view) ? view : 'gallery';
+            document.querySelectorAll('[data-content-subview]').forEach(button => button.classList.toggle('active', button.dataset.contentSubview === instagramContentSubview));
+            document.querySelectorAll('[data-content-filter]').forEach(button => button.classList.toggle('active', button.dataset.contentFilter === igContentFilter));
+            const tabId = 'tab-instagram-content';
+            if (instagramContentSubview === 'list') setInstagramContentView('table');
+            else if (instagramContentSubview === 'gallery') setInstagramContentView(igContentView === 'table' ? 'gallery' : igContentView);
+            showGroup('instagram_content');
+            activatePrimaryNav('instagram_content');
+            if (updateHistory) setTabUrl(tabId);
+            if (instagramContentSubview === 'routing') loadAdRoutes();
         }
 
         let adminHandoffs = [];
@@ -7695,7 +7817,7 @@ THIS WEEK'S BENGAL SPECIALS
             if (!adminAuthenticated) return;
             try {
                 const responses = await Promise.all([
-                    fetch('/admin/handoffs?limit=100', { headers: getAuthHeaders() }),
+                    fetch('/admin/handoffs?limit=100&include_resumed=true', { headers: getAuthHeaders() }),
                     fetch('/admin/menu/active', { headers: getAuthHeaders() }),
                     fetch('/admin/instagram-story-sources', { headers: getAuthHeaders() }),
                     fetch('/admin/instagram-routes', { headers: getAuthHeaders() }),
@@ -7705,7 +7827,12 @@ THIS WEEK'S BENGAL SPECIALS
                 const [handoffResp, menuResp, storyResp, routeResp, analyticsResp, healthResp] = responses;
                 const [handoffData, menuData, storyData, routeData, analyticsData, healthData] = await Promise.all(responses.map(response => response.json().catch(() => ({}))));
                 if (handoffResp.ok) setDashboardValue('dashHandoffs', handoffData.unread_count ?? handoffData.count ?? 0);
-                if (menuResp.ok) setDashboardValue('dashMenuStatus', menuData.menu ? 'Live' : 'Check');
+                if (menuResp.ok) {
+                    const weeks = Array.isArray(menuData.menu?.weekly_menus) ? menuData.menu.weekly_menus : [];
+                    const week = weeks.length ? weeks[weeks.length - 1] : null;
+                    const dishes = week ? (week.vegetarian || []).length + (week.non_vegetarian || []).length : 0;
+                    setDashboardValue('dashMenuStatus', week && week.is_published !== false && dishes > 0 ? 'Published' : 'No active menu');
+                }
                 if (storyResp.ok) {
                     const stories = storyData.story_sources || [];
                     setDashboardValue('dashStories', stories.filter(item => String(item.story_status || 'ACTIVE').toUpperCase() === 'ACTIVE' && !Number(item.admin_deleted || 0)).length);
@@ -7735,11 +7862,21 @@ THIS WEEK'S BENGAL SPECIALS
 
         function renderHandoffCard(item, compact = false) {
             const unseenClass = item.seen ? '' : ' unseen';
+            const status = String(item.status || 'WAITING_FOR_HUMAN').toUpperCase();
+            const statusClass = status === 'RESUMED' ? '' : ' waiting';
+            const customer = handoffCustomerIdentity(item);
             return `<article class="handoff-card${unseenClass}" tabindex="0" data-handoff-ref="${escapeHtml(item.handoff_ref || '')}">
-                <div class="handoff-card-top"><div><div class="handoff-name">Customer: ${escapeHtml(item.customer_display_name || 'Instagram customer')}</div>${item.customer_external_id ? `<div class="handoff-id">Instagram ID: ${escapeHtml(item.customer_external_id)}</div>` : ''}<div class="handoff-ref">${escapeHtml(item.handoff_ref || 'CAM')}</div></div><span class="ig-media-status waiting">${escapeHtml(item.status || 'WAITING_FOR_HUMAN')}</span></div>
+                <div class="handoff-card-top"><div><div class="handoff-name">Customer: ${escapeHtml(customer)}</div><div class="handoff-ref">${escapeHtml(item.handoff_ref || 'CAM')}</div></div><span class="ig-media-status${statusClass}">${escapeHtml(status)}</span></div>
                 <div class="handoff-summary">${escapeHtml(item.reason || 'Human support requested')}${item.summary && !compact ? `\n${escapeHtml(item.summary)}` : ''}</div>
                 <div class="handoff-meta">${escapeHtml(formatAdminTimestamp(item.created_at))}${item.unresolved_topic ? ` · ${escapeHtml(item.unresolved_topic)}` : ''}</div>
+                <button class="btn-secondary" type="button" data-handoff-open="${escapeHtml(item.handoff_ref || '')}" style="justify-self:start;padding:7px 10px;font-size:.74rem;">Open handoff</button>
             </article>`;
+        }
+
+        function handoffCustomerIdentity(item) {
+            const value = String(item?.customer_display_name || '').trim();
+            if (!value || value === 'Instagram customer') return 'Instagram customer';
+            return `@${value.replace(/^@+/, '')}`;
         }
 
         function renderHandoffs() {
@@ -7751,6 +7888,9 @@ THIS WEEK'S BENGAL SPECIALS
                 card.addEventListener('click', () => openHandoffDetails(card.dataset.handoffRef));
                 card.addEventListener('keydown', event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openHandoffDetails(card.dataset.handoffRef); } });
             });
+            document.querySelectorAll('[data-handoff-open]').forEach(button => {
+                button.addEventListener('click', event => { event.stopPropagation(); openHandoffDetails(button.dataset.handoffOpen); });
+            });
         }
 
         function updateHandoffBadges(unreadCount) {
@@ -7760,7 +7900,7 @@ THIS WEEK'S BENGAL SPECIALS
         async function loadHandoffs() {
             if (!adminAuthenticated) return;
             try {
-                const response = await fetch('/admin/handoffs?limit=100', { headers: getAuthHeaders() });
+                const response = await fetch('/admin/handoffs?limit=100&include_resumed=true', { headers: getAuthHeaders() });
                 const data = await response.json().catch(() => ({}));
                 if (!response.ok) throw new Error(data.detail || 'Could not load handoffs.');
                 const previousRefs = new Set(adminHandoffs.filter(item => !item.seen).map(item => item.handoff_ref));
@@ -7782,7 +7922,7 @@ THIS WEEK'S BENGAL SPECIALS
         function showHandoffToast(item) {
             const stack = document.getElementById('adminToastStack');
             if (!stack) return;
-            const toast = document.createElement('div'); toast.className = 'handoff-toast'; toast.innerHTML = `<b>New handoff</b><br>${escapeHtml(item.customer_display_name || 'Instagram customer')} · ${escapeHtml(item.reason || 'Human support requested')}`;
+            const toast = document.createElement('div'); toast.className = 'handoff-toast'; toast.innerHTML = `<b>New handoff</b><br>Customer: ${escapeHtml(handoffCustomerIdentity(item))} · ${escapeHtml(item.reason || 'Human support requested')}`;
             toast.addEventListener('click', () => { openHandoffDetails(item.handoff_ref); toast.remove(); });
             stack.appendChild(toast); setTimeout(() => toast.remove(), 8000);
         }
@@ -7807,11 +7947,15 @@ THIS WEEK'S BENGAL SPECIALS
             const item = adminHandoffs.find(entry => entry.handoff_ref === ref); if (!item) return;
             markHandoffSeen(ref);
             const drawer = document.getElementById('contentDetailsDrawer'); const backdrop = document.getElementById('contentDetailsBackdrop');
+            const status = String(item.status || 'WAITING_FOR_HUMAN').toUpperCase();
             document.getElementById('contentDetailsType').innerText = 'Customer handoff';
-            document.getElementById('contentDetailsTitle').innerText = item.customer_display_name || 'Instagram customer';
+            document.getElementById('contentDetailsTitle').innerText = `Customer: ${handoffCustomerIdentity(item)}`;
             document.getElementById('contentDetailsPreview').innerHTML = '<div style="font-size:3rem;color:#8b97a8;">↗</div>';
-            document.getElementById('contentDetailsFacts').innerHTML = [['Customer', item.customer_display_name || '—'], ['Instagram ID', item.customer_external_id || '—'], ['CAM reference', item.handoff_ref], ['Status', item.status || 'WAITING_FOR_HUMAN'], ['Reason', item.reason], ['Summary', item.summary || '—'], ['Created', formatAdminTimestamp(item.created_at)]].map(([label, value]) => `<div class="drawer-fact"><span class="drawer-fact-label">${escapeHtml(label)}</span><span class="drawer-fact-value">${escapeHtml(value)}</span></div>`).join('');
-            document.getElementById('contentDetailsActions').innerHTML = `<button class="btn-secondary" type="button" onclick="resumeAdminHandoff('${escapeHtml(item.handoff_ref)}')">Resume CAM</button><button class="btn-secondary" type="button" onclick="switchTab('tab-handoffs', null); closeContentDetails();">Open Handoffs</button>`;
+            document.getElementById('contentDetailsFacts').innerHTML = [['Customer', handoffCustomerIdentity(item)], ['CAM reference', item.handoff_ref], ['Status', status], ['Reason', item.reason], ['Summary', item.summary || '—'], ['Created', formatAdminTimestamp(item.created_at)], ['Updated', formatAdminTimestamp(item.updated_at || item.created_at)]].map(([label, value]) => `<div class="drawer-fact"><span class="drawer-fact-label">${escapeHtml(label)}</span><span class="drawer-fact-value">${escapeHtml(value)}</span></div>`).join('');
+            const resumeAction = status === 'WAITING_FOR_HUMAN' || status === 'CREATED'
+                ? `<button class="btn-secondary" type="button" onclick="resumeAdminHandoff('${escapeHtml(item.handoff_ref)}')">Resume CAM</button>`
+                : '<span class="ig-media-muted">Read-only history — this CAM is already resumed.</span>';
+            document.getElementById('contentDetailsActions').innerHTML = `${resumeAction}<button class="btn-secondary" type="button" onclick="switchTab('tab-handoffs', null); closeContentDetails();">Open Handoffs</button>`;
             drawer.classList.add('open'); backdrop.classList.add('open'); drawer.setAttribute('aria-hidden', 'false'); backdrop.setAttribute('aria-hidden', 'false'); document.getElementById('contentDetailsClose').focus();
         }
 
@@ -7847,7 +7991,9 @@ THIS WEEK'S BENGAL SPECIALS
         }
 
         function openAdminRoute(route) {
-            closeContentDetails(); switchTab('tab-image', null); setTimeout(() => editInstagramRoute(Number(route.routing_id)), 0);
+            closeContentDetails();
+            setInstagramContentSubview('routing');
+            setTimeout(() => editInstagramRoute(Number(route.routing_id)), 0);
         }
 
         function renderInstagramContentCard(route) {
@@ -7907,8 +8053,37 @@ THIS WEEK'S BENGAL SPECIALS
         }
 
         async function loadSettingsHealth() {
-            const box = document.getElementById('settingsHealthResult'); if (!box) return;
-            try { const response = await fetch('/health'); const data = await response.json().catch(() => ({})); box.className = response.ok ? 'result-box success' : 'result-box error'; box.innerText = response.ok ? `Healthy · ${data.status || 'ok'}` : 'Health check needs attention.'; } catch (error) { box.className = 'result-box error'; box.innerText = 'Health check unavailable.'; }
+            const box = document.getElementById('settingsHealthResult');
+            const indicators = document.getElementById('settingsHealthIndicators');
+            const refresh = document.getElementById('settingsHealthRefresh');
+            if (!box) return;
+            box.style.display = 'block'; box.className = 'result-box info'; box.innerText = 'Checking /health…';
+            if (refresh) { refresh.disabled = true; refresh.innerText = 'Checking…'; }
+            if (indicators) indicators.innerHTML = '';
+            try {
+                const response = await fetch('/health', { cache: 'no-store' });
+                const data = await response.json().catch(() => ({}));
+                const status = String(data.status || (response.ok ? 'healthy' : 'degraded')).toLowerCase();
+                const label = status === 'healthy' ? 'Healthy' : status === 'degraded' ? 'Degraded' : 'Unavailable';
+                box.className = `result-box ${status === 'healthy' ? 'success' : 'error'}`;
+                box.innerText = `${label} · ${response.status}`;
+                const safe = [
+                    ['App health', label],
+                    ['Answering', data.answering?.ready ? 'Ready' : 'Needs attention'],
+                    ['Durable storage', data.storage?.database?.expected_durable ? 'Durable' : 'Check volume'],
+                    ['Instagram delivery', data.reply_delivery?.mode || (data.outbound_delivery?.healthy ? 'Available' : 'Needs attention')],
+                    ['Webhook signatures', data.webhook_signature || 'Unknown'],
+                    ['Auth readiness', data.admin_auth?.password_configured && data.admin_auth?.https_required !== false ? 'Ready' : 'Needs attention'],
+                    ['Failure counters', data.instagram_outbound?.failures_last_24h ?? data.outbound_delivery?.failures_last_24h ?? 0],
+                ];
+                if (data.web_push) safe.push(['Web Push', data.web_push.status || data.web_push.ready || 'Not configured']);
+                if (indicators) indicators.innerHTML = safe.map(([name, value]) => `<div class="health-indicator"><span class="health-indicator-label">${escapeHtml(name)}</span><span class="health-indicator-value">${escapeHtml(value)}</span></div>`).join('');
+            } catch (error) {
+                box.className = 'result-box error'; box.innerText = 'Health check unavailable — could not reach /health.';
+                if (indicators) indicators.innerHTML = '<div class="health-indicator"><span class="health-indicator-label">App health</span><span class="health-indicator-value">Unknown</span></div>';
+            } finally {
+                if (refresh) { refresh.disabled = false; refresh.innerText = '↻ Refresh'; }
+            }
         }
 
         // MENU MANAGER tab: every menu is edited as a draft (server-side, in
@@ -9403,7 +9578,7 @@ THIS WEEK'S BENGAL SPECIALS
             const resBox = document.getElementById('pasteResult');
             resBox.className = 'result-box info';
             resBox.style.display = 'block';
-            resBox.innerHTML = '🗑️ Discarded. The live menu was never touched.';
+            resBox.innerHTML = '🗑️ Discarded. The current published menu was never touched.';
         }
 
         async function publishMenuReview() {
@@ -9614,11 +9789,20 @@ Non-Veg:
         // MENU tab: what is live now
         async function loadActiveMenu() {
             const container = document.getElementById('activeMenuContent');
+            const statusBadge = document.getElementById('menuCurrentStatus');
+            if (!container) return;
+            container.innerHTML = '<p class="ig-media-muted">Loading current menu…</p>';
+            if (statusBadge) statusBadge.innerText = 'Checking';
             try {
                 const resp = await fetch('/admin/menu/active', { headers: getAuthHeaders() });
-                if (!resp.ok) throw new Error('Auth error or failed to load');
-                const data = await resp.json();
-                const menu = data.menu;
+                const data = await resp.json().catch(() => ({}));
+                if (!resp.ok) throw new Error(data.detail || `Could not load current menu (${resp.status}).`);
+                const menu = data.menu && typeof data.menu === 'object' ? data.menu : { weekly_menus: [] };
+                if (!Array.isArray(menu.weekly_menus)) menu.weekly_menus = [];
+                const currentWeek = menu.weekly_menus.length ? menu.weekly_menus[menu.weekly_menus.length - 1] : null;
+                const currentDishCount = currentWeek ? ((currentWeek.vegetarian || []).length + (currentWeek.non_vegetarian || []).length) : 0;
+                const currentIsPublished = Boolean(currentWeek && currentWeek.is_published !== false && currentDishCount > 0);
+                if (statusBadge) statusBadge.innerText = currentIsPublished ? 'Published' : 'No active menu';
 
                 // The flyer photo and the dish text are now two separate
                 // things that both have to agree with the last upload, so
@@ -9693,11 +9877,11 @@ Non-Veg:
                     const currentWeek = menu.weekly_menus[menu.weekly_menus.length - 1];
                     const veg = currentWeek.vegetarian || [];
                     const nonveg = currentWeek.non_vegetarian || [];
-                    totalCount = veg.length + nonveg.length;
+                    totalCount = currentIsPublished ? veg.length + nonveg.length : 0;
                     // Kept so Remove can send back the dishes that survive.
                     // update-menu replaces a whole list, so the button needs
                     // the other dishes as much as the one being dropped.
-                    liveMenu = { vegetarian: veg, non_vegetarian: nonveg };
+                    liveMenu = currentIsPublished ? { vegetarian: veg, non_vegetarian: nonveg } : { vegetarian: [], non_vegetarian: [] };
 
                     html += `<h3 style="color: var(--primary); margin-top: 10px; font-size: 1.1rem;">🌱 Vegetarian Weekly Specials (${veg.length})</h3>`;
                     html += '<div class="menu-grid">';
@@ -9736,10 +9920,18 @@ Non-Veg:
                     html += '</div>';
                 }
 
-                container.innerHTML = html;
+                if (!currentIsPublished) {
+                    container.innerHTML = '<div class="result-box info" style="display:block;">No published menu is currently serving customers. The existing menu data is preserved; publish or upload a reviewed menu when ready.</div>';
+                    liveMenu = { vegetarian: [], non_vegetarian: [] };
+                } else {
+                    container.innerHTML = html;
+                }
                 document.getElementById('activeCountBadge').innerText = `${totalCount} dishes`;
             } catch (err) {
-                container.innerHTML = '<p style="color: red;">Failed to load active menu. Please check your PIN.</p>';
+                if (statusBadge) statusBadge.innerText = 'Unavailable';
+                container.innerHTML = `<div class="result-box error" style="display:block;">Could not load the current menu. ${escapeHtml(err.message || 'Please try again.')}</div>`;
+                const countBadge = document.getElementById('activeCountBadge');
+                if (countBadge) countBadge.innerText = 'Unavailable';
             }
         }
 
@@ -9754,7 +9946,7 @@ Non-Veg:
             if (!dish) return;
 
             const remaining = (liveMenu.vegetarian.length + liveMenu.non_vegetarian.length) - 1;
-            let question = `Remove "${dish.item}" from the live menu? Customers will stop being offered it straight away.`;
+            let question = `Remove "${dish.item}" from the current published menu? Customers will stop being offered it straight away.`;
             if (remaining === 0) {
                 // Worth spelling out: an empty menu is not an obvious outcome
                 // of pressing Remove on one dish, and the bot has nothing to
@@ -11342,6 +11534,19 @@ Non-Veg:
             "Expires": "0",
         },
     )
+
+
+@app.get("/admin/content-routing")
+@app.get("/admin/instagram-content-routing")
+def redirect_legacy_content_routing():
+    """Keep old routing bookmarks inside Posts & Reels → Routing."""
+    return RedirectResponse(url="/admin?tab=content-routing", status_code=307)
+
+
+@app.get("/admin/legacy")
+def redirect_legacy_admin_view():
+    """Retire the old aggregate view without breaking a saved bookmark."""
+    return RedirectResponse(url="/admin?tab=ai-resolution", status_code=307)
 
 # --------------------------------------------------------------------------
 # Interactive Web Chat Tester Endpoint (/chat)
