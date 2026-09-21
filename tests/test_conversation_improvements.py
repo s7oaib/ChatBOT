@@ -9,8 +9,15 @@ from camellia.session_memory import session_memory
 @pytest.fixture(autouse=True)
 def isolated():
     with patch.object(session_memory, "_sessions", type(session_memory._sessions)()), \
-         patch.object(config, "CONVERSATION_IMPROVEMENTS_ENABLED", True), \
-         patch.object(config, "STRUCTURED_NLU_ROLLOUT_PERCENT", 100):
+        patch.object(config, "CONVERSATION_IMPROVEMENTS_ENABLED", True), \
+        patch.object(config, "STRUCTURED_NLU_ROLLOUT_PERCENT", 100):
+        from datetime import timedelta
+        from camellia.menu_dates import business_today
+        today = business_today()
+        responder.menu_data["weekly_menus"][-1].update({
+            "start_date": (today - timedelta(days=1)).isoformat(),
+            "end_date": (today + timedelta(days=5)).isoformat(),
+        })
         yield
 
 

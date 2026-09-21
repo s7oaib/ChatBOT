@@ -146,8 +146,8 @@ def weekly_meal_entries() -> Dict[str, Dict[str, Any]]:
         with open(path, "r", encoding="utf-8") as f:
             weeks = json.load(f).get("weekly_menus") or []
         if weeks:
-            current = weeks[-1]
-            if not menu_dates.is_expired(current.get("week_of")):
+            current = menu_dates.resolve_current_menu(weeks).get("menu")
+            if current:
                 for section in ("vegetarian", "non_vegetarian"):
                     for item in current.get(section) or []:
                         name = (item.get("item") or "").strip()

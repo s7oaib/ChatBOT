@@ -1,4 +1,5 @@
 import json
+from datetime import timedelta
 
 from camellia.content_integrity import (
     HOME_TABLE_REMEDIATION_ACTOR,
@@ -9,11 +10,17 @@ from camellia.content_integrity import (
 )
 from camellia.database import Database
 from camellia.responder import DeterministicResponder
+from camellia.menu_dates import business_today
 
 
 def _fixtures(tmp_path):
     with open("data/menu.json", encoding="utf-8") as handle:
         menu = json.load(handle)
+    today = business_today()
+    menu["weekly_menus"][-1].update({
+        "start_date": (today - timedelta(days=1)).isoformat(),
+        "end_date": (today + timedelta(days=5)).isoformat(),
+    })
     with open("data/qa_templates.json", encoding="utf-8") as handle:
         templates = json.load(handle)["templates"]
     database = Database(str(tmp_path / "integrity.db"))

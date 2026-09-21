@@ -23,6 +23,13 @@ def _run_same_user(tmp_path, monkeypatch):
 
     monkeypatch.setattr(app_module, "db", database)
     monkeypatch.setattr(responder_module, "db", database)
+    from datetime import timedelta
+    from camellia.menu_dates import business_today
+    today = business_today()
+    responder_module.responder.menu_data["weekly_menus"][-1].update({
+        "start_date": (today - timedelta(days=1)).isoformat(),
+        "end_date": (today + timedelta(days=5)).isoformat(),
+    })
     monkeypatch.setattr(handoff_module, "db", database)
 
     def capture(recipient, text, image_url=None, **kwargs):

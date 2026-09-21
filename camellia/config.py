@@ -341,6 +341,11 @@ class Config:
     # Google Sheet CSV URL for Menu Updates (Option A in PRD)
     GOOGLE_SHEET_CSV_URL: str = os.getenv("GOOGLE_SHEET_CSV_URL", "")
 
+    # Menu activation is evaluated against the kitchen's business date, not
+    # the server's UTC date. Keep this configurable for a future site while
+    # retaining the restaurant's established India timezone by default.
+    BUSINESS_TIMEZONE: str = os.getenv("BUSINESS_TIMEZONE", "Asia/Kolkata")
+
     # AI Engine Config (Groq — fast inference, OpenAI-compatible chat API)
     GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
     GROQ_MODEL: str = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b")

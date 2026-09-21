@@ -24,7 +24,7 @@ from camellia.understanding import BusinessAction, Intent, UnderstandingResult
 # presentation or convenience layers over it.
 SOURCE_MAP: Dict[str, Dict[str, Any]] = {
     "weekly_menu": {
-        "source": "data/menu.json > weekly_menus[-1]",
+        "source": "data/menu.json > menu_dates.resolve_current_menu(weekly_menus)",
         "rendered_by": "responder._format_dynamic_response(weekly_menu_veg|weekly_menu_nonveg)",
         "also_appears_in": ["weekly flyer uploads (weekly_flyer.py)"],
         "precedence": "menu.json is authoritative for dish names and prices; a "

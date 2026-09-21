@@ -34,12 +34,22 @@ def isolated_menu(tmp_path, monkeypatch):
     or every test that runs afterward in this process sees this test's
     temporary data instead of the real menu."""
     import shutil
+    from datetime import timedelta
+    from camellia.menu_dates import business_today
     real_menu_path = config.MENU_JSON_PATH
     real_qa_path = config.QA_TEMPLATES_PATH
     menu_path = tmp_path / "menu.json"
     qa_path = tmp_path / "qa_templates.json"
     db_path = tmp_path / "test_menu_manager.db"
     shutil.copy(real_menu_path, menu_path)
+    menu_data = json.loads(menu_path.read_text(encoding="utf-8"))
+    today = business_today()
+    if menu_data.get("weekly_menus"):
+        menu_data["weekly_menus"][-1].update({
+            "start_date": (today - timedelta(days=1)).isoformat(),
+            "end_date": (today + timedelta(days=5)).isoformat(),
+        })
+        menu_path.write_text(json.dumps(menu_data, indent=2, ensure_ascii=False), encoding="utf-8")
     shutil.copy(real_qa_path, qa_path)
 
     monkeypatch.setattr(config, "MENU_JSON_PATH", str(menu_path))

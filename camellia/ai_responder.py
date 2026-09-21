@@ -8,6 +8,7 @@ from typing import Tuple, Dict, Any, List, Optional
 from camellia.config import config
 from camellia.database import db
 from camellia.monitoring import get_logger
+from camellia import menu_dates
 
 log = get_logger("camellia.ai_responder")
 
@@ -259,21 +260,21 @@ class AIResponder:
                 context_parts.append(f"Sondesh Collections, Flavours & Pricing: {json.dumps(collections, ensure_ascii=False)}")
 
             weekly = self.menu_data.get("weekly_menus", [])
-            if weekly:
+            current_week = menu_dates.resolve_current_menu(weekly).get("menu")
+            if current_week:
                 # Item names and prices only — the full JSON with descriptions
                 # measured 5.8k chars and is the least load-bearing detail for
                 # drafting a candidate answer.
-                for week in weekly:
-                    lines = []
-                    for key in ("vegetarian", "non_vegetarian", "bengali_bento", "combos"):
-                        for itm in week.get(key) or []:
-                            name = itm.get("item") or itm.get("name") or ""
-                            price = itm.get("price_inr", "")
-                            if name:
-                                lines.append(f"{name} ₹{price}")
-                    if lines:
-                        week_name = week.get("week_of", "Current Rotation")
-                        context_parts.append(f"{week_name}: " + "; ".join(lines))
+                lines = []
+                for key in ("vegetarian", "non_vegetarian", "bengali_bento", "combos"):
+                    for itm in current_week.get(key) or []:
+                        name = itm.get("item") or itm.get("name") or ""
+                        price = itm.get("price_inr", "")
+                        if name:
+                            lines.append(f"{name} ₹{price}")
+                if lines:
+                    week_name = current_week.get("week_of", "Current Rotation")
+                    context_parts.append(f"{week_name}: " + "; ".join(lines))
 
             delivery = self.menu_data.get("delivery", {})
             if delivery:

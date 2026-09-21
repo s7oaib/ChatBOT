@@ -1,4 +1,5 @@
 import io
+from datetime import date
 
 import pytest
 from PIL import Image
@@ -85,6 +86,7 @@ def test_weekly_vegetarian_publish_overrides_the_flyer_rotation(image_store, mon
     published = menu_images.publish("weekly_vegetarian")
 
     bot = responder_module.DeterministicResponder.__new__(responder_module.DeterministicResponder)
+    bot.menu_data = {"weekly_menus": [{"start_date": date.today().isoformat(), "end_date": date.today().isoformat()}]}
     image_url, caption = bot._current_weekly_image(today_weekday=0)
     assert image_url == published["image_path"]
     assert caption is None

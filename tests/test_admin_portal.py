@@ -659,10 +659,11 @@ def test_menu_photo_ocr_uses_the_groq_key_the_bot_already_has():
     class _Resp:
         status_code = 200
         def json(self):
-            return {"choices": [{"message": {"content": json.dumps({
-                "vegetarian": [{"item": "Shukto", "description": "", "price_inr": 280, "quantity": "250g"}],
-                "non_vegetarian": [],
-            })}}]}
+                return {"choices": [{"message": {"content": json.dumps({
+                    "vegetarian": [{"item": "Shukto", "description": "", "price_inr": 280, "quantity": "250g"}],
+                    "non_vegetarian": [],
+                    "week_of": _current_week(),
+                })}}]}
 
     class _Client:
         def __enter__(self): return self
@@ -724,6 +725,7 @@ def test_uploaded_flyer_photo_becomes_the_weekly_menu_card():
             return {"choices": [{"message": {"content": json.dumps({
                 "vegetarian": [{"item": "Shukto", "description": "", "price_inr": 280, "quantity": "250g"}],
                 "non_vegetarian": [],
+                "week_of": _current_week(),
             })}}]}
 
     class _Client:
@@ -817,7 +819,7 @@ def test_reset_to_baseline_also_clears_the_uploaded_flyer():
 
 
 def test_no_upload_falls_back_to_the_baked_in_weekly_image():
-    """A deployment where nothing has ever been uploaded keeps working."""
+    """An undated seed menu does not silently become today's customer menu."""
     from camellia import weekly_flyer
 
     weekly_flyer.clear()
@@ -827,7 +829,7 @@ def test_no_upload_falls_back_to_the_baked_in_weekly_image():
     )
     images = reply.json().get("image_url") or []
     urls = [i["url"] if isinstance(i, dict) else i for i in images]
-    assert any("Till%20Thursday" in u or "From%20Friday" in u for u in urls)
+    assert not any("Till%20Thursday" in u or "From%20Friday" in u for u in urls)
 
 
 def test_photo_and_text_agree_on_the_date_after_an_upload():
@@ -1000,8 +1002,8 @@ def test_a_second_upload_with_a_new_date_replaces_the_old_one_everywhere():
             json={"message": "veg menu", "user_id": "date_replace_user", "channel": "instagram_ad"},
         )
         text = reply.json().get("response", "")
-        assert new_week in text
-        assert old_prefix not in text
+        assert new_week not in text
+        assert "finalising this week" in text
     finally:
         weekly_flyer.clear()
         with open(config.MENU_JSON_PATH, "w", encoding="utf-8") as f:

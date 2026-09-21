@@ -2232,6 +2232,7 @@ class DeterministicResponder:
             entry = client_match.entry
             asset_urls: Any = []
             asset_missing: List[str] = []
+            current_weekly_asset, _weekly_caption = self._current_weekly_image(today_weekday=0)
             asset_map = {
                 "sondesh_addon_images": [
                     "/images/sondesh_addon_01.jpeg",
@@ -2243,12 +2244,17 @@ class DeterministicResponder:
                 ],
                 "aamar_menu": ["/images/AAMAR%20MISHTI.jpeg"],
                 "signature_menu": ["/images/Signature%20Sondesh.jpeg"],
-                "weekly_menu": [current_menu_image("weekly_vegetarian", "/images/From%20Friday.jpeg")],
+                "weekly_menu": [current_weekly_asset] if current_weekly_asset else [],
             }
             for asset_key in client_match.asset_keys:
                 values = [value for value in asset_map.get(asset_key, []) if value]
                 if not values:
-                    asset_missing.append(asset_key)
+                    # A dated weekly menu can legitimately be absent between
+                    # ranges. Omit that optional card rather than escalating a
+                    # valid approved answer; never substitute an expired or
+                    # weekday-selected image.
+                    if asset_key != "weekly_menu":
+                        asset_missing.append(asset_key)
                 else:
                     asset_urls.extend(values)
             facts.update({
@@ -4491,25 +4497,31 @@ class DeterministicResponder:
 
     def _current_week(self) -> Dict[str, Any]:
         """
-        The live weekly menu block — always the last entry, matching every
-        write path (photo upload, pasted text, Sheet sync, the dashboard).
+        The date-active weekly menu block. Resolution is centralized so text,
+        image assets, ordering, and admin use the same calendar rule.
         """
-        weekly_menus = self.menu_data.get("weekly_menus", [])
-        return weekly_menus[-1] if weekly_menus else {}
+        weekly_menus = self._menu_data_for_resolution().get("weekly_menus", [])
+        return menu_dates.resolve_current_menu(weekly_menus).get("menu") or {}
+
+    def _menu_data_for_resolution(self) -> Dict[str, Any]:
+        """Read menu data for lightweight responder instances used in tests."""
+        data = getattr(self, "menu_data", None)
+        if isinstance(data, dict):
+            return data
+        try:
+            with open(config.MENU_JSON_PATH, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        except (OSError, TypeError, json.JSONDecodeError):
+            data = {}
+        return data if isinstance(data, dict) else {}
 
     def _weekly_menu_expired(self) -> bool:
         """
-        True once the printed date range on the live menu has passed.
-
-        Nothing dated has been uploaded yet on a fresh deployment, and
-        undated text never expires, so this stays False until a real flyer
-        with a readable date range goes stale.
+        True when there is no published menu whose configured date includes
+        today's local business date.
         """
-        current_week = self._current_week()
-        return (
-            not current_week.get("is_published", True)
-            or menu_dates.is_expired(current_week.get("week_of"))
-        )
+        resolution = menu_dates.resolve_current_menu(self._menu_data_for_resolution().get("weekly_menus", []))
+        return resolution.get("status") != "active"
 
     def _current_weekly_image(self, today_weekday: int) -> Tuple[Optional[str], Optional[str]]:
         """
@@ -4517,22 +4529,14 @@ class DeterministicResponder:
         operator's own upload rather than one of the two fixed images shipped
         with the repo.
 
-        An uploaded flyer takes priority over the day-of-week Till Thursday /
-        From Friday rotation, because it is more current by definition — the
-        operator posted it precisely to reflect what changed. The rotation is
-        the fallback for a deployment where nothing has been uploaded yet.
-
-        Returns no card at all once the menu's printed dates have passed. The
-        static fallback is not a substitute there: it is a picture of a menu
-        too, and sending any dish photo for a week that has ended is the exact
-        thing expiry exists to prevent.
+        An uploaded flyer or managed image is returned only when the centralized
+        date resolver has found a published menu active today. A built-in card
+        is a display fallback inside that valid range; weekday labels never
+        decide whether the menu is current.
         """
-        # An uploaded flyer is judged on its own printed date (or, when that
-        # could not be read, on when it was uploaded). menu.json's week no
-        # longer gets a veto here: since the photo is saved even when text
-        # extraction fails, the two can legitimately disagree, and letting a
-        # stale text date suppress this week's photo is exactly the "upload
-        # did nothing" failure the split exists to prevent.
+        resolution = menu_dates.resolve_current_menu(self._menu_data_for_resolution().get("weekly_menus", []))
+        if resolution.get("status") != "active":
+            return None, None
         # A deliberately published Menu Manager image wins immediately and is
         # read from durable metadata on every request; no process restart is
         # needed. An explicitly archived image returns no card.
@@ -4544,14 +4548,10 @@ class DeterministicResponder:
 
         uploaded = weekly_flyer.get()
         if uploaded:
-            if not weekly_flyer.is_current(uploaded):
-                return None, None
-            return uploaded["url"], uploaded.get("caption")
-        if self._weekly_menu_expired():
-            return None, None
-        img_till_thursday = "/images/Till%20Thursday.jpeg"
-        img_from_friday = "/images/From%20Friday.jpeg"
-        fallback = img_from_friday if today_weekday in [4, 5, 6] else img_till_thursday
+            if menu_dates.parse_menu_date_range(uploaded) and weekly_flyer.is_current(uploaded):
+                return uploaded["url"], uploaded.get("caption")
+        current_week = resolution.get("menu") or {}
+        fallback = current_week.get("menu_image_from_friday") or current_week.get("menu_image_till_thursday")
         return fallback, None
 
     def _detect_relevant_images(self, user_message: str) -> Optional[Any]:
@@ -4806,13 +4806,6 @@ class DeterministicResponder:
                 return _WEEKLY_MENU_BEING_UPDATED, None
 
             target_images = current_weekly_img
-            # The last entry is "current" everywhere else that touches this
-            # array — every write path (photo upload, pasted text, Sheet sync,
-            # the admin dashboard's own JS) treats weekly_menus[-1] as the live
-            # week. This was the one place still picking weekly_menus[0] on
-            # Monday-Thursday, so an uploaded menu's dishes and date reached
-            # customers only on Fri/Sat/Sun — four days out of seven, an
-            # upload silently had no effect on what this reply showed.
             current_week = self._current_week()
 
             week_name = current_week.get("week_of", "Current Rotation")

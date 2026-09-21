@@ -159,33 +159,13 @@ def _set_admin_cookies(response: Response, session_token: str, csrf_token: str) 
 
 def _prune_expired_weekly_menus() -> None:
     """
-    Drops weekly menus whose printed dates have passed.
+    Retained compatibility hook for deployments that called the old pruner.
 
-    Runs at startup rather than only on upload because the stale entries are
-    already sitting in menu.json on the volume, where no code change can reach
-    them — the file outlives every deploy by design. The newest entry is never
-    removed even when expired: it is the slot the next upload writes into, and
-    an expired newest week is handled at reply time by telling the customer the
-    menu is being updated.
-
-    Non-fatal by construction. A menu file that cannot be read or written must
-    leave the bot answering from whatever it already has rather than refusing
-    to start.
+    Menu history is durable content now: date resolution marks expired and
+    future rows inactive without deleting or rewriting them. This function is
+    intentionally non-mutating.
     """
-    try:
-        with open(config.MENU_JSON_PATH, "r", encoding="utf-8") as f:
-            menu_data = json.load(f)
-        weekly = menu_data.get("weekly_menus") or []
-        kept, removed = menu_dates.prune_expired_weeks(weekly)
-        if not removed:
-            return
-        menu_data["weekly_menus"] = kept
-        with open(config.MENU_JSON_PATH, "w", encoding="utf-8") as f:
-            json.dump(menu_data, f, indent=2, ensure_ascii=False)
-        responder.reload_data()
-        log.info("Removed %s expired weekly menu(s): %s", len(removed), ", ".join(removed))
-    except Exception:
-        log.exception("Could not prune expired weekly menus; leaving menu.json untouched.")
+    return None
 
 
 @asynccontextmanager
@@ -2726,7 +2706,7 @@ def get_admin_security_audit(limit: int = 100):
 
 @app.get("/admin/menu/active")
 def get_active_menu(x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
-    """Returns the currently active menu JSON data."""
+    """Returns the date-selected current menu plus the untouched catalogue."""
     require_admin(x_admin_key, x_admin_pin)
     try:
         with open(config.MENU_JSON_PATH, "r", encoding="utf-8") as f:
@@ -2734,9 +2714,35 @@ def get_active_menu(x_admin_key: Optional[str] = Header(None), x_admin_pin: Opti
         # Surfaced so the dashboard can show staff which week is actually
         # live, since the flyer photo and the dish text are now two separate
         # things that both have to agree with what was last uploaded.
+        resolution = menu_dates.resolve_current_menu(data.get("weekly_menus") or [])
+        start, end = resolution["date_range"] or (None, None)
+        date_ranges = []
+        for index, weekly_menu in enumerate(data.get("weekly_menus") or []):
+            menu_range = menu_dates.parse_menu_date_range(weekly_menu, today=resolution["today"])
+            range_start, range_end = menu_range or (None, None)
+            date_ranges.append({
+                "index": index,
+                "start_date": range_start.isoformat() if range_start else None,
+                "end_date": range_end.isoformat() if range_end else None,
+                "active": index == resolution["index"],
+                "status": "invalid_date" if menu_range is None else (
+                    "active" if menu_dates.menu_is_active(weekly_menu, today=resolution["today"])
+                    else "outside_range"
+                ),
+            })
         return {
             "status": "success",
             "menu": data,
+            "current_menu": resolution["menu"],
+            "current_menu_index": resolution["index"],
+            "current_menu_status": resolution["status"],
+            "current_date": resolution["today"].isoformat(),
+            "current_date_range": {
+                "start_date": start.isoformat() if start else None,
+                "end_date": end.isoformat() if end else None,
+            },
+            "menu_date_ranges": date_ranges,
+            "invalid_date_indexes": resolution["invalid_date_indexes"],
             "weekly_flyer": weekly_flyer.get(),
             # Superseded flyers, newest first, already pruned to the two-week
             # window. Shown in the dashboard so the kitchen can see what a
@@ -3230,6 +3236,8 @@ async def upload_menu_image(
             image_bytes, mime_type,
             week_of=result.get("week_of"),
             service_window=result.get("service_window"),
+            start_date=result.get("start_date"),
+            end_date=result.get("end_date"),
         )
         # A new flyer is an explicit instruction to make this week's menu
         # visible again, including when OCR could not read the dish rows.
@@ -5304,6 +5312,16 @@ async def update_menu(request: Request, x_admin_key: Optional[str] = Header(None
             current_week["is_published"] = True
             if "week" in body:
                 current_week["week"] = body["week"]
+            if "start_date" in body:
+                current_week["start_date"] = body.get("start_date")
+            if "end_date" in body:
+                current_week["end_date"] = body.get("end_date")
+            if "start_date" in body or "end_date" in body:
+                if menu_dates.parse_menu_date_range(current_week) is None:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Menu start_date/end_date must contain a valid ISO date range.",
+                    )
             if veg_items is not None:
                 current_week["vegetarian"] = veg_items
             if nonveg_items is not None:
@@ -5318,6 +5336,8 @@ async def update_menu(request: Request, x_admin_key: Optional[str] = Header(None
             return {"status": "success", "message": "Weekly menu updated and responder hot-reloaded successfully."}
         else:
             return {"status": "failed", "reason": "No weekly_menus block found in menu.json"}
+    except HTTPException:
+        raise
     except Exception as e:
         log.error("Failed to update menu: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
@@ -7751,9 +7771,9 @@ THIS WEEK'S BENGAL SPECIALS
                 if (handoffResp.ok) setDashboardValue('dashHandoffs', handoffData.unread_count ?? handoffData.count ?? 0);
                 if (menuResp.ok) {
                     const weeks = Array.isArray(menuData.menu?.weekly_menus) ? menuData.menu.weekly_menus : [];
-                    const week = weeks.length ? weeks[weeks.length - 1] : null;
+                    const week = menuData.current_menu || null;
                     const dishes = week ? (week.vegetarian || []).length + (week.non_vegetarian || []).length : 0;
-                    setDashboardValue('dashMenuStatus', week && week.is_published !== false && dishes > 0 ? 'Published' : 'No active menu');
+                    setDashboardValue('dashMenuStatus', menuData.current_menu_status === 'active' && dishes > 0 ? 'Published' : 'No active menu');
                 }
                 if (storyResp.ok) {
                     const stories = storyData.story_sources || [];
@@ -9721,9 +9741,9 @@ Non-Veg:
                 if (!resp.ok) throw new Error(data.detail || `Could not load current menu (${resp.status}).`);
                 const menu = data.menu && typeof data.menu === 'object' ? data.menu : { weekly_menus: [] };
                 if (!Array.isArray(menu.weekly_menus)) menu.weekly_menus = [];
-                const currentWeek = menu.weekly_menus.length ? menu.weekly_menus[menu.weekly_menus.length - 1] : null;
+                const currentWeek = data.current_menu || null;
                 const currentDishCount = currentWeek ? ((currentWeek.vegetarian || []).length + (currentWeek.non_vegetarian || []).length) : 0;
-                const currentIsPublished = Boolean(currentWeek && currentWeek.is_published !== false && currentDishCount > 0);
+                const currentIsPublished = Boolean(currentWeek && data.current_menu_status === 'active' && currentWeek.is_published !== false && currentDishCount > 0);
                 if (statusBadge) statusBadge.innerText = currentIsPublished ? 'Published' : 'No active menu';
 
                 // The flyer photo and the dish text are now two separate
@@ -9731,9 +9751,7 @@ Non-Veg:
                 // show staff which week is actually live rather than leaving
                 // them to guess from the photo alone.
                 const flyerWeekOf = data.weekly_flyer && data.weekly_flyer.week_of;
-                const menuWeekOf = (menu.weekly_menus && menu.weekly_menus.length > 0)
-                    ? menu.weekly_menus[menu.weekly_menus.length - 1].week_of
-                    : null;
+                const menuWeekOf = currentWeek ? currentWeek.week_of : null;
                 // Superseded flyers, still reachable by a customer asking for
                 // "previous menus" until they age out of the two-week window.
                 const archiveEl = document.getElementById('flyerArchive');
@@ -9770,14 +9788,16 @@ Non-Veg:
 
                 const activeFlyerWeekEl = document.getElementById('activeFlyerWeek');
                 if (activeFlyerWeekEl) {
-                    const weekLabel = flyerWeekOf || menuWeekOf;
+                    const dateRange = data.current_date_range || {};
+                    const dateLabel = dateRange.start_date
+                        ? `${dateRange.start_date}${dateRange.end_date && dateRange.end_date !== dateRange.start_date ? ` – ${dateRange.end_date}` : ''}`
+                        : '';
+                    const weekLabel = dateLabel || flyerWeekOf || menuWeekOf;
                     // The flyer photo and the dish list are two separate things,
                     // and removing every dish leaves the photo up. The label used
                     // to keep announcing that week as active regardless, which
                     // reads as "the menu is live" when nothing is actually live.
-                    const labelWeek = menu.weekly_menus && menu.weekly_menus.length
-                        ? menu.weekly_menus[menu.weekly_menus.length - 1]
-                        : null;
+                    const labelWeek = currentWeek;
                     const liveDishCount = labelWeek
                         ? ((labelWeek.vegetarian || []).length + (labelWeek.non_vegetarian || []).length)
                         : 0;
@@ -9785,18 +9805,17 @@ Non-Veg:
                         activeFlyerWeekEl.innerText = '';
                     } else if (labelWeek && labelWeek.is_published === false) {
                         activeFlyerWeekEl.innerText = '🚫 Hidden from chatbot customers — upload or publish a replacement to make it live.';
-                    } else if (liveDishCount > 0) {
-                        activeFlyerWeekEl.innerText = `📅 Active menu: ${weekLabel}`;
+                    } else if (data.current_menu_status === 'active' && liveDishCount > 0) {
+                        activeFlyerWeekEl.innerText = `📅 Active menu dates: ${weekLabel} (business date ${data.current_date})`;
                     } else {
-                        activeFlyerWeekEl.innerText = `📅 Menu photo still up: ${weekLabel} — but no dishes are live. Upload this week's photo, or use Reset to Baseline to take the photo down too.`;
+                        activeFlyerWeekEl.innerText = `📅 Menu photo still up: ${weekLabel} — but no date-active dishes are live. Check the configured menu dates.`;
                     }
                 }
 
                 let html = '';
                 let totalCount = 0;
 
-                if (menu.weekly_menus && menu.weekly_menus.length > 0) {
-                    const currentWeek = menu.weekly_menus[menu.weekly_menus.length - 1];
+                if (currentWeek) {
                     const veg = currentWeek.vegetarian || [];
                     const nonveg = currentWeek.non_vegetarian || [];
                     totalCount = currentIsPublished ? veg.length + nonveg.length : 0;
@@ -9843,7 +9862,7 @@ Non-Veg:
                 }
 
                 if (!currentIsPublished) {
-                    container.innerHTML = '<div class="result-box info" style="display:block;">No published menu is currently serving customers. The existing menu data is preserved; publish or upload a reviewed menu when ready.</div>';
+                    container.innerHTML = '<div class="result-box info" style="display:block;">No published menu is currently serving customers. No current menu is active for today\'s date. The existing menu history is preserved; publish or upload a menu with a valid date range.</div>';
                     liveMenu = { vegetarian: [], non_vegetarian: [] };
                 } else {
                     container.innerHTML = html;
