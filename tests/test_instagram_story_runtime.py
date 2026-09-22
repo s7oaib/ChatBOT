@@ -305,7 +305,7 @@ class TestSimpleMappingEditPreservation:
             }));
         """))
         assert result["value"] == "__inherit__"
-        assert "Inherit topic default — Menu One" in result["options"]
+        assert "Existing Topic-linked menu" in result["options"]
 
     def test_post_reel_edit_prefills_and_preserves_advanced_values(self):
         result = _run_node(_seed_common_pickers() + textwrap.dedent("""
@@ -390,20 +390,16 @@ class TestInlineCreateAndEdit:
         assert result["body"]["active"] is False
         assert not any("/image/" in url for url in result["urls"])
 
-    def test_topic_edit_prefills_and_updates_existing_topic(self):
+    def test_topic_edit_renames_without_changing_legacy_metadata(self):
         result = _run_node(_seed_common_pickers() + textwrap.dedent("""
             igTopics[0].description = 'Original description';
             igTopics[0].active = true;
             igTopics[0].response_order = 'description_first';
             igTopics[0].knowledge_scope = [];
             openTopicModal('t1', 'igStoryTopicPicker');
-            const prefilled = {
-                name: document.getElementById('topicName').value,
-                description: document.getElementById('topicDescription').value,
-                defaultMenu: document.getElementById('topicDefaultMenu').value,
-            };
-            document.getElementById('topicDescription').value = 'Changed description';
-            queueFetch('/admin/instagram-topics/t1', 'PATCH', () => okResponse({ topic: { ...igTopics[0], description: 'Changed description' } }));
+            const prefilled = { name: document.getElementById('topicName').value };
+            document.getElementById('topicName').value = 'Renamed Topic';
+            queueFetch('/admin/instagram-topics/t1', 'PATCH', () => okResponse({ topic: { ...igTopics[0], name: 'Renamed Topic' } }));
             queueFetch('/admin/instagram-topics', 'GET', () => okResponse({ topics: igTopics }));
             queueFetch('/admin/menu-catalogue', 'GET', () => okResponse({ menus: igAllMenus, categories: ['Other'] }));
             submitTopic().then(() => {
@@ -411,14 +407,21 @@ class TestInlineCreateAndEdit:
                 console.log('RESULT::' + JSON.stringify({ prefilled, body: call.body }));
             });
         """))
-        assert result["prefilled"] == {
-            "name": "Topic One",
-            "description": "Original description",
-            "defaultMenu": "m1",
-        }
-        assert result["body"]["name"] == "Topic One"
-        assert result["body"]["description"] == "Changed description"
-        assert result["body"]["default_menu_id"] == "m1"
+        assert result["prefilled"] == {"name": "Topic One"}
+        assert result["body"] == {"name": "Renamed Topic"}
+
+    def test_manage_topics_lists_rename_and_safe_delete_actions(self):
+        result = _run_node(_seed_common_pickers() + textwrap.dedent("""
+            openManageTopics('igStoryTopicPicker');
+            console.log('RESULT::' + JSON.stringify({
+                visible: document.getElementById('manageTopicsModal').style.display,
+                list: document.getElementById('manageTopicsList').innerHTML,
+            }));
+        """))
+        assert result["visible"] == "flex"
+        assert "Topic One" in result["list"]
+        assert "data-topic-edit" in result["list"]
+        assert "data-topic-delete" in result["list"]
 
 
 # =====================================================================

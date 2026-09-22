@@ -618,8 +618,6 @@ def create_topic(
     description = (description or "").strip()
     if not name:
         raise InstagramTopicError("Topic name is required.")
-    if not description:
-        raise InstagramTopicError("Description is required.")
     response_order = str(response_order or "description_first").strip().lower()
     if response_order not in RESPONSE_ORDERS:
         raise InstagramTopicError("Reply order must be Description First or Menu First.")

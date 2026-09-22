@@ -190,6 +190,8 @@ Risk: Medium/High
 - Source-reference questions use only the saved Description; explicit business questions and later topic switches retain Q-005 approved-answer precedence.
 - Delete Mapping removes only chatbot context, retaining Instagram inventory, Topics, and menu assets.
 - Approved Instagram replies now preserve positional text/menu/image blocks; source-only events wait for an actual customer question so explicit business intent can win.
+- Source-only mapped or unmapped webhook events no longer create handoffs; short follow-ups use the mapped Topic's exact approved answer.
+- Normal Admin Topics are classification-only, with Add/Manage Topics separated from the source Description; Menu/Image selection and Auto Reply use a spaced, responsive single-column mapping layout.
 
 #### Deferred validation
 - Full UI visual/browser sweep and large gallery performance.

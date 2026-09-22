@@ -248,15 +248,14 @@ def test_instagram_stories_map_flow_uses_a_read_only_captured_id(page):
 
 def test_instagram_story_menu_choice_offers_inherit_none_and_active_menus(page):
     """
-    The client-facing selector represents all three persisted states without
-    exposing the internal menu-mode terminology.
+    New mappings default to no asset; legacy inherited links remain supported.
     """
     section = page[page.index('id="tab-instagram-stories"'):page.index('<!-- MENU tab, panel 3 of 4')]
     menu_select = section[section.index('id="igStoryMenuPicker"'):section.index('</select>', section.index('id="igStoryMenuPicker"'))]
-    assert '<option value="__inherit__">Inherit topic default</option>' in menu_select
-    assert '<option value="__none__">No menu</option>' in menu_select
-    assert "Menu / Attachments" in section
-    assert "Choose the menu customers should receive when this content starts the conversation." in section
+    assert '<option value="__none__">Choose menu or image</option>' in menu_select
+    assert 'Existing Topic-linked menu' in page
+    assert "Menu / Image" in section
+    assert 'id="igStoryMenuSelected"' in section
     assert "openMenuModal('igStoryMenuPicker')" in section
 
     save = page[page.index('async function saveInstagramStoryMapping'):page.index('async function setInstagramStoryActive')]
@@ -431,8 +430,8 @@ def test_instagram_routing_has_a_simple_client_first_default_view(page):
     assert ">Identify<" not in section
     assert "id=\"igTopicPicker\"" in section and "+ Add Topic" in section
     assert "Save Mapping" in section
-    assert "Menu / Attachments" in section
-    assert "Choose the menu customers should receive when this content starts the conversation." in section
+    assert "Menu / Image" in section
+    assert 'id="igMenuSelected"' in section
     assert "openMenuModal('igMenuPicker')" in section
     assert "Preview Reply" in section
     assert "Preview Customer Response" not in section
@@ -457,11 +456,12 @@ def test_topic_selectors_explain_empty_catalogues_and_refresh_together(page):
 
 def test_topic_and_menu_edit_actions_are_clear_and_metadata_only(page):
     story_section = page[page.index('id="tab-instagram-stories"'):page.index('<!-- MENU tab, panel 3 of 4')]
-    assert 'id="igStoryEditTopicButton"' in story_section
-    assert '>Edit Topic</button>' in story_section
-    assert 'id="igEditTopicButton"' in page
+    assert 'id="igStoryEditTopicButton"' not in story_section
+    assert 'openManageTopics(\'igStoryTopicPicker\')' in story_section
+    assert 'id="igEditTopicButton"' not in page
+    assert 'id="manageTopicsModal"' in page
     assert 'id="topicModalTitle">+ Add Topic</h3>' in page
-    assert "openMenuModal('topicDefaultMenu')" in page
+    assert 'id="topicDescription"' not in page
 
     catalogue = page[page.index('id="tab-menu-manager"'):page.index('<!-- CUSTOMERS tab')]
     assert "openMenuEditModal" in page
