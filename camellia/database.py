@@ -913,6 +913,36 @@ class Database:
             );
             """)
 
+            # Menu categories are operator-managed data, not application
+            # constants.  Menus retain their human-readable category string
+            # for backwards compatibility with existing routes and exports;
+            # category rename and delete/reassign operations update those
+            # strings atomically, so no catalogue row can point at a missing
+            # category.
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS menu_categories (
+                category_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                active INTEGER NOT NULL DEFAULT 1,
+                is_system INTEGER NOT NULL DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+            cursor.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_menu_categories_normalized_name "
+                "ON menu_categories(name COLLATE NOCASE)"
+            )
+            for name, is_system in (
+                ("Sondesh", False), ("Weekly Vegetarian", False),
+                ("Weekly Non-Vegetarian", False), ("Bento / Meal", False),
+                ("Subscription", False), ("Event", False), ("Other", True),
+            ):
+                cursor.execute(
+                    "INSERT OR IGNORE INTO menu_categories (name, active, is_system) VALUES (?, 1, ?)",
+                    (name, int(is_system)),
+                )
+
             # A hard-deleted built-in must not be recreated by the seed loop
             # below on the next process start. This table intentionally keeps
             # only the stable id and deletion audit fields; menu content,
@@ -1057,6 +1087,18 @@ class Database:
                         "VALUES (?, ?, ?, ?, 1, 1)",
                         (menu_id, name, category, description),
                     )
+
+            # A database upgraded from a version that allowed a category not
+            # in the initial seed still has a durable, selectable category
+            # after migration.  It is intentionally not re-created once an
+            # operator has deleted it: all menu rows are reassigned first.
+            for row in cursor.execute(
+                "SELECT DISTINCT TRIM(category) AS name FROM menu_catalogue WHERE TRIM(category) <> ''"
+            ).fetchall():
+                cursor.execute(
+                    "INSERT OR IGNORE INTO menu_categories (name, active, is_system) VALUES (?, 1, 0)",
+                    (row["name"],),
+                )
 
             self._create_indexes(cursor)
 
@@ -2008,6 +2050,124 @@ class Database:
         return dict(row)
 
     # --- Dynamic menu catalogue ---------------------------------------------
+
+    def list_menu_categories(self, include_inactive: bool = False) -> List[Dict[str, Any]]:
+        where = "" if include_inactive else "WHERE c.active = 1"
+        with self.get_connection() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT c.*, COUNT(m.menu_id) AS menu_count
+                FROM menu_categories c
+                LEFT JOIN menu_catalogue m ON m.category = c.name COLLATE NOCASE
+                {where}
+                GROUP BY c.category_id
+                ORDER BY c.name COLLATE NOCASE
+                """
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_menu_category(self, category_id: int) -> Optional[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM menu_categories WHERE category_id = ?", (category_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def find_menu_category_by_name(self, name: str) -> Optional[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM menu_categories WHERE name = ? COLLATE NOCASE", (name.strip(),)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def create_menu_category(self, name: str) -> Dict[str, Any]:
+        with self.get_connection() as conn:
+            try:
+                cursor = conn.execute(
+                    "INSERT INTO menu_categories (name, active, is_system) VALUES (?, 1, 0)", (name,)
+                )
+            except sqlite3.IntegrityError as exc:
+                raise ValueError("A category with that name already exists.") from exc
+            conn.commit()
+            row = conn.execute(
+                "SELECT * FROM menu_categories WHERE category_id = ?", (cursor.lastrowid,)
+            ).fetchone()
+        return dict(row)
+
+    def rename_menu_category(self, category_id: int, name: str) -> Optional[Dict[str, Any]]:
+        now = datetime.utcnow().isoformat()
+        with self.get_connection() as conn:
+            current = conn.execute(
+                "SELECT * FROM menu_categories WHERE category_id = ?", (category_id,)
+            ).fetchone()
+            if not current:
+                return None
+            duplicate = conn.execute(
+                "SELECT category_id FROM menu_categories WHERE name = ? COLLATE NOCASE AND category_id != ?",
+                (name, category_id),
+            ).fetchone()
+            if duplicate:
+                raise ValueError("A category with that name already exists.")
+            # Preserve every relationship while changing the display value.
+            conn.execute(
+                "UPDATE menu_catalogue SET category = ?, updated_at = ? WHERE category = ? COLLATE NOCASE",
+                (name, now, current["name"]),
+            )
+            conn.execute(
+                "UPDATE menu_categories SET name = ?, updated_at = ? WHERE category_id = ?",
+                (name, now, category_id),
+            )
+            conn.commit()
+            row = conn.execute(
+                "SELECT * FROM menu_categories WHERE category_id = ?", (category_id,)
+            ).fetchone()
+        return dict(row)
+
+    def menu_category_usage(self, category_id: int) -> Optional[Dict[str, Any]]:
+        category = self.get_menu_category(category_id)
+        if not category:
+            return None
+        with self.get_connection() as conn:
+            rows = conn.execute(
+                "SELECT menu_id, name, active FROM menu_catalogue WHERE category = ? COLLATE NOCASE ORDER BY name COLLATE NOCASE",
+                (category["name"],),
+            ).fetchall()
+        return {"category": category, "menus": [dict(row) for row in rows]}
+
+    def delete_menu_category(self, category_id: int, replacement_category_id: Optional[int] = None) -> Dict[str, Any]:
+        now = datetime.utcnow().isoformat()
+        with self.get_connection() as conn:
+            category = conn.execute(
+                "SELECT * FROM menu_categories WHERE category_id = ?", (category_id,)
+            ).fetchone()
+            if not category:
+                raise KeyError(category_id)
+            if category["is_system"]:
+                raise ValueError("This protected category cannot be deleted.")
+            menus = conn.execute(
+                "SELECT menu_id, name, active FROM menu_catalogue WHERE category = ? COLLATE NOCASE ORDER BY name COLLATE NOCASE",
+                (category["name"],),
+            ).fetchall()
+            if menus and replacement_category_id is None:
+                return {"deleted": False, "category": dict(category), "menus": [dict(row) for row in menus]}
+            replacement = None
+            if replacement_category_id is not None:
+                replacement = conn.execute(
+                    "SELECT * FROM menu_categories WHERE category_id = ? AND active = 1", (replacement_category_id,)
+                ).fetchone()
+                if not replacement or replacement["category_id"] == category_id:
+                    raise ValueError("Choose a different active replacement category.")
+            if menus:
+                conn.execute(
+                    "UPDATE menu_catalogue SET category = ?, updated_at = ? WHERE category = ? COLLATE NOCASE",
+                    (replacement["name"], now, category["name"]),
+                )
+            conn.execute("DELETE FROM menu_categories WHERE category_id = ?", (category_id,))
+            conn.commit()
+        return {
+            "deleted": True, "category": dict(category), "replacement": dict(replacement) if replacement else None,
+            "reassigned_menus": len(menus),
+        }
 
     def list_menu_catalogue(self, include_inactive: bool = True) -> List[Dict[str, Any]]:
         where = "" if include_inactive else "WHERE active = 1"

@@ -352,7 +352,7 @@ async def _human_notification_loop(stop_event: asyncio.Event) -> None:
 limiter = Limiter(key_func=get_remote_address, default_limits=["300/minute"])
 app = FastAPI(
     title="FastAPI Webhook Application for Camellia Artisanal — Instagram AI and human handoff",
-    version="1.0.0",
+    version="1.0.7",
     lifespan=lifespan
 )
 app.state.limiter = limiter
@@ -5466,7 +5466,91 @@ async def update_menu(request: Request, x_admin_key: Optional[str] = Header(None
 @app.get("/admin/menu-catalogue")
 def list_menu_catalogue_route(x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
     require_admin(x_admin_key, x_admin_pin)
-    return {"status": "success", "menus": menu_catalogue.list_menus(), "categories": menu_catalogue.CATEGORIES}
+    return {
+        "status": "success", "menus": menu_catalogue.list_menus(),
+        "categories": [category["name"] for category in menu_catalogue.list_categories()],
+    }
+
+
+@app.get("/admin/menu-categories")
+def list_menu_categories_route(x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    return {"status": "success", "categories": menu_catalogue.list_categories()}
+
+
+@app.post("/admin/menu-categories")
+async def create_menu_category_route(
+    request: Request, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None),
+):
+    require_admin(x_admin_key, x_admin_pin)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    try:
+        category = menu_catalogue.create_category(body.get("name"))
+    except MenuCatalogueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"status": "success", "category": category}
+
+
+@app.patch("/admin/menu-categories/{category_id}")
+async def update_menu_category_route(
+    category_id: int, request: Request,
+    x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None),
+):
+    require_admin(x_admin_key, x_admin_pin)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    try:
+        category = menu_catalogue.update_category(category_id, body.get("name"))
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Category not found.")
+    except MenuCatalogueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"status": "success", "category": category}
+
+
+@app.get("/admin/menu-categories/{category_id}/usage")
+def menu_category_usage_route(
+    category_id: int, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None),
+):
+    require_admin(x_admin_key, x_admin_pin)
+    try:
+        return {"status": "success", **menu_catalogue.category_usage(category_id)}
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Category not found.")
+
+
+@app.delete("/admin/menu-categories/{category_id}")
+async def delete_menu_category_route(
+    category_id: int, request: Request,
+    x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None),
+):
+    require_admin(x_admin_key, x_admin_pin)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    replacement_id = body.get("replacement_category_id")
+    try:
+        replacement_id = int(replacement_id) if replacement_id is not None else None
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Replacement category must be valid.")
+    try:
+        result = menu_catalogue.delete_category(category_id, replacement_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Category not found.")
+    except MenuCatalogueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if not result["deleted"]:
+        return JSONResponse(status_code=409, content={
+            "detail": "This category is in use. Choose a replacement category before deleting it.",
+            "category": result["category"], "menus": result["menus"],
+        })
+    return {"status": "success", **result}
 
 
 @app.get("/admin/menu-manager/images")
@@ -7545,7 +7629,12 @@ THIS WEEK'S BENGAL SPECIALS
             <label class="field-label">Menu Name *</label>
             <input class="field-control" id="menuName" placeholder="e.g. Meal Subscription" style="margin-bottom:10px;">
             <label class="field-label">Menu Type / Category</label>
-            <select class="field-control" id="menuCategory" style="margin-bottom:10px;"></select>
+            <div style="display:flex; gap:8px; align-items:flex-start; margin-bottom:10px;">
+                <select class="field-control" id="menuCategory" style="flex:1;"></select>
+                <button class="btn-secondary" type="button" onclick="openCategoryModal()">+ Add</button>
+                <button class="btn-secondary" type="button" onclick="openCategoryModal(document.getElementById('menuCategory').value)">Edit</button>
+                <button class="btn-danger" type="button" onclick="openCategoryDeleteModal()">Delete</button>
+            </div>
             <label class="field-label">Customer Description *</label>
             <textarea class="field-control" id="menuDescription" rows="3" placeholder="e.g. Weekly Bengali home-style meal subscription with rotating menus." style="margin-bottom:10px;"></textarea>
             <div id="menuImageField"><label class="field-label">Menu Image *</label><input type="file" id="menuImageFile" accept="image/jpeg,image/png,image/webp" style="margin-bottom:10px;"></div>
@@ -7556,6 +7645,27 @@ THIS WEEK'S BENGAL SPECIALS
                 <button class="btn-primary" id="menuModalSubmitButton" onclick="submitMenu()">Create Menu</button>
             </div>
             <div id="menuModalResult" class="result-box"></div>
+        </div>
+    </div>
+
+    <div id="menuCategoryModal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,.5); z-index:10000; justify-content:center; align-items:center; padding:20px;">
+        <div style="background:white; border-radius:16px; width:100%; max-width:420px; padding:24px; box-shadow:0 10px 30px rgba(0,0,0,.2);">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:14px;"><h3 id="menuCategoryModalTitle" style="margin:0; color:var(--primary);">+ Add Category</h3><button onclick="closeCategoryModal()" style="background:none;border:none;font-size:1.4rem;cursor:pointer;">&times;</button></div>
+            <input type="hidden" id="menuCategoryEditingId">
+            <label class="field-label">Category Name *</label>
+            <input class="field-control" id="menuCategoryName" maxlength="100" style="margin-bottom:14px;">
+            <div style="display:flex; gap:8px; justify-content:flex-end;"><button class="btn-secondary" onclick="closeCategoryModal()">Cancel</button><button class="btn-primary" onclick="submitCategory()">Save</button></div>
+            <div id="menuCategoryResult" class="result-box"></div>
+        </div>
+    </div>
+
+    <div id="menuCategoryDeleteModal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,.5); z-index:10000; justify-content:center; align-items:center; padding:20px;">
+        <div style="background:white; border-radius:16px; width:100%; max-width:480px; padding:24px; box-shadow:0 10px 30px rgba(0,0,0,.2);">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:14px;"><h3 style="margin:0;color:var(--danger);">Delete Category?</h3><button onclick="closeCategoryDeleteModal()" style="background:none;border:none;font-size:1.4rem;cursor:pointer;">&times;</button></div>
+            <div id="menuCategoryDeleteDetails" style="font-size:.85rem;line-height:1.55;margin-bottom:12px;"></div>
+            <div id="menuCategoryReplacementWrap" style="display:none; margin-bottom:14px;"><label class="field-label">Replacement Category *</label><select id="menuCategoryReplacement" class="field-control"></select></div>
+            <div style="display:flex;gap:8px;justify-content:flex-end;"><button class="btn-secondary" onclick="closeCategoryDeleteModal()">Cancel</button><button class="btn-danger" onclick="confirmCategoryDelete()">Delete Category</button></div>
+            <div id="menuCategoryDeleteResult" class="result-box"></div>
         </div>
     </div>
 
@@ -8419,6 +8529,7 @@ THIS WEEK'S BENGAL SPECIALS
         let igTopics = [];
         let igAllMenus = [];
         let igMenus = [];
+        let igMenuCategoryRecords = [];
         let igResponseOrder = 'description_first';
         let igMediaMetadata = { preview_url: null, media_type: null };
 
@@ -8489,16 +8600,20 @@ THIS WEEK'S BENGAL SPECIALS
 
         async function loadTopicsAndMenus() {
             try {
-                const [topicsResp, menusResp] = await Promise.all([
+                const [topicsResp, menusResp, categoriesResp] = await Promise.all([
                     fetch('/admin/instagram-topics', { headers: getAuthHeaders() }),
                     fetch('/admin/menu-catalogue', { headers: getAuthHeaders() }),
+                    fetch('/admin/menu-categories', { headers: getAuthHeaders() }),
                 ]);
                 const topicsData = await topicsResp.json();
                 const menusData = await menusResp.json();
+                const categoriesData = await categoriesResp.json();
+                if (!categoriesResp.ok) throw new Error(categoriesData.detail || 'Could not load menu categories.');
                 igTopics = topicsData.topics || [];
                 igAllMenus = menusData.menus || [];
                 igMenus = igAllMenus.filter(m => m.active);
-                window.igMenuCategories = menusData.categories || [];
+                igMenuCategoryRecords = categoriesData.categories || [];
+                window.igMenuCategories = igMenuCategoryRecords.map(category => category.name);
 
                 const activeTopics = igTopics.filter(t => t.active !== false);
                 const topicOptions = '<option value="">Select Topic</option>' + activeTopics.map(t =>
@@ -8803,6 +8918,100 @@ THIS WEEK'S BENGAL SPECIALS
             }
         }
 
+        function refreshMenuCategoryPicker(preferredName = '') {
+            const picker = document.getElementById('menuCategory');
+            if (!picker) return;
+            const selected = preferredName || picker.value;
+            picker.innerHTML = igMenuCategoryRecords.map(category =>
+                `<option value="${escapeHtml(category.name)}">${escapeHtml(category.name)}</option>`
+            ).join('');
+            picker.value = selected;
+            if (!picker.value && igMenuCategoryRecords.length) picker.value = igMenuCategoryRecords[0].name;
+        }
+
+        function closeCategoryModal() { document.getElementById('menuCategoryModal').style.display = 'none'; }
+        function openCategoryModal(categoryName = '') {
+            const category = categoryName ? igMenuCategoryRecords.find(item => item.name === categoryName) : null;
+            document.getElementById('menuCategoryModalTitle').innerText = category ? 'Edit Category' : '+ Add Category';
+            document.getElementById('menuCategoryEditingId').value = category ? category.category_id : '';
+            document.getElementById('menuCategoryName').value = category ? category.name : '';
+            document.getElementById('menuCategoryResult').style.display = 'none';
+            document.getElementById('menuCategoryModal').style.display = 'flex';
+            document.getElementById('menuCategoryName').focus();
+        }
+        async function submitCategory() {
+            const result = document.getElementById('menuCategoryResult');
+            const id = document.getElementById('menuCategoryEditingId').value;
+            const name = document.getElementById('menuCategoryName').value.trim();
+            try {
+                const response = await fetch(id ? `/admin/menu-categories/${encodeURIComponent(id)}` : '/admin/menu-categories', {
+                    method: id ? 'PATCH' : 'POST', headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name }),
+                });
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.detail || 'Could not save category.');
+                await loadTopicsAndMenus();
+                refreshMenuCategoryPicker(data.category.name);
+                closeCategoryModal();
+            } catch (err) {
+                result.style.display = 'block'; result.className = 'result-box error';
+                result.innerText = err.message || String(err);
+            }
+        }
+        function closeCategoryDeleteModal() { document.getElementById('menuCategoryDeleteModal').style.display = 'none'; }
+        async function openCategoryDeleteModal() {
+            const category = igMenuCategoryRecords.find(item => item.name === document.getElementById('menuCategory').value);
+            if (!category) return;
+            const result = document.getElementById('menuCategoryDeleteResult');
+            result.style.display = 'none';
+            if (category.is_system) {
+                document.getElementById('menuCategoryDeleteDetails').innerText = 'Other is the protected fallback category and cannot be deleted.';
+                document.getElementById('menuCategoryReplacementWrap').style.display = 'none';
+                document.querySelector('#menuCategoryDeleteModal .btn-danger').style.display = 'none';
+                document.getElementById('menuCategoryDeleteModal').style.display = 'flex';
+                return;
+            }
+            try {
+                const response = await fetch(`/admin/menu-categories/${encodeURIComponent(category.category_id)}/usage`, { headers: getAuthHeaders() });
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.detail || 'Could not check category usage.');
+                const menus = data.menus || [];
+                document.getElementById('menuCategoryDeleteDetails').innerHTML = menus.length
+                    ? `<b>${escapeHtml(category.name)}</b> is used by: <ul>${menus.map(menu => `<li>${escapeHtml(menu.name)}</li>`).join('')}</ul>These menus will be reassigned before deletion.`
+                    : `Delete <b>${escapeHtml(category.name)}</b>? This category is not currently used.`;
+                const wrap = document.getElementById('menuCategoryReplacementWrap');
+                wrap.style.display = menus.length ? 'block' : 'none';
+                document.getElementById('menuCategoryReplacement').innerHTML = igMenuCategoryRecords.filter(item => item.category_id !== category.category_id)
+                    .map(item => `<option value="${item.category_id}">${escapeHtml(item.name)}</option>`).join('');
+                const button = document.querySelector('#menuCategoryDeleteModal .btn-danger');
+                button.style.display = '';
+                button.dataset.categoryId = category.category_id;
+                button.dataset.hasUsage = menus.length ? '1' : '';
+                document.getElementById('menuCategoryDeleteModal').style.display = 'flex';
+            } catch (err) {
+                result.style.display = 'block'; result.className = 'result-box error'; result.innerText = err.message || String(err);
+                document.getElementById('menuCategoryDeleteModal').style.display = 'flex';
+            }
+        }
+        async function confirmCategoryDelete() {
+            const button = document.querySelector('#menuCategoryDeleteModal .btn-danger');
+            const result = document.getElementById('menuCategoryDeleteResult');
+            const replacement_category_id = button.dataset.hasUsage ? Number(document.getElementById('menuCategoryReplacement').value) : null;
+            try {
+                const response = await fetch(`/admin/menu-categories/${encodeURIComponent(button.dataset.categoryId)}`, {
+                    method: 'DELETE', headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ replacement_category_id }),
+                });
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.detail || 'Could not delete category.');
+                await loadTopicsAndMenus();
+                refreshMenuCategoryPicker(data.replacement ? data.replacement.name : 'Other');
+                closeCategoryDeleteModal();
+            } catch (err) {
+                result.style.display = 'block'; result.className = 'result-box error'; result.innerText = err.message || String(err);
+            }
+        }
+
         // + Add New Menu modal. Shared by Instagram Content Routing and the
         // Visual Menu Manager — a menu created from either place appears in
         // both, plus the Topic form's Default Menu dropdown, immediately.
@@ -8818,8 +9027,7 @@ THIS WEEK'S BENGAL SPECIALS
             document.getElementById('menuImageField').style.display = 'block';
             document.getElementById('menuMetadataHelp').style.display = 'none';
             document.getElementById('menuModalSubmitButton').innerText = 'Create Menu';
-            const categories = window.igMenuCategories || ['Sondesh','Weekly Vegetarian','Weekly Non-Vegetarian','Bento / Meal','Subscription','Event','Other'];
-            document.getElementById('menuCategory').innerHTML = categories.map(c => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join('');
+            refreshMenuCategoryPicker('Other');
             document.getElementById('menuModalResult').style.display = 'none';
             document.getElementById('menuModal').style.display = 'flex';
         }
@@ -8833,9 +9041,7 @@ THIS WEEK'S BENGAL SPECIALS
             document.getElementById('menuDescription').value = menu.description || '';
             document.getElementById('menuImageFile').value = '';
             document.getElementById('menuActive').checked = Boolean(menu.active);
-            const categories = window.igMenuCategories || ['Sondesh','Weekly Vegetarian','Weekly Non-Vegetarian','Bento / Meal','Subscription','Event','Other'];
-            document.getElementById('menuCategory').innerHTML = categories.map(c => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join('');
-            document.getElementById('menuCategory').value = menu.category || 'Other';
+            refreshMenuCategoryPicker(menu.category || 'Other');
             document.getElementById('menuImageField').style.display = 'none';
             document.getElementById('menuMetadataHelp').style.display = 'block';
             document.getElementById('menuModalSubmitButton').innerText = 'Save Changes';

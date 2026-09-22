@@ -20,12 +20,6 @@ from typing import Any, Dict, List, Optional
 
 from camellia.database import db
 
-CATEGORIES = [
-    "Sondesh", "Weekly Vegetarian", "Weekly Non-Vegetarian",
-    "Bento / Meal", "Subscription", "Event", "Other",
-]
-
-
 class MenuCatalogueError(ValueError):
     """A create/update request failed validation."""
 
@@ -65,6 +59,53 @@ def _slugify(name: str) -> str:
     return slug or "menu"
 
 
+def clean_category_name(name: str) -> str:
+    """Normalize an operator label without accepting control characters."""
+    cleaned = " ".join(str(name or "").split())
+    if not cleaned:
+        raise MenuCatalogueError("Category name is required.")
+    if len(cleaned) > 100:
+        raise MenuCatalogueError("Category name must be 100 characters or fewer.")
+    if any(ord(char) < 32 for char in cleaned):
+        raise MenuCatalogueError("Category name contains invalid characters.")
+    return cleaned
+
+
+def list_categories(include_inactive: bool = False) -> List[Dict[str, Any]]:
+    return db.list_menu_categories(include_inactive=include_inactive)
+
+
+def create_category(name: str) -> Dict[str, Any]:
+    try:
+        return db.create_menu_category(clean_category_name(name))
+    except ValueError as exc:
+        raise MenuCatalogueError(str(exc)) from exc
+
+
+def update_category(category_id: int, name: str) -> Dict[str, Any]:
+    try:
+        category = db.rename_menu_category(category_id, clean_category_name(name))
+    except ValueError as exc:
+        raise MenuCatalogueError(str(exc)) from exc
+    if not category:
+        raise KeyError(category_id)
+    return category
+
+
+def category_usage(category_id: int) -> Dict[str, Any]:
+    usage = db.menu_category_usage(category_id)
+    if not usage:
+        raise KeyError(category_id)
+    return usage
+
+
+def delete_category(category_id: int, replacement_category_id: Optional[int] = None) -> Dict[str, Any]:
+    try:
+        return db.delete_menu_category(category_id, replacement_category_id)
+    except ValueError as exc:
+        raise MenuCatalogueError(str(exc)) from exc
+
+
 def list_menus(include_inactive: bool = True) -> List[Dict[str, Any]]:
     return db.list_menu_catalogue(include_inactive=include_inactive)
 
@@ -80,7 +121,8 @@ def create_menu(name: str, category: str, description: str, active: bool = True)
         raise MenuCatalogueError("Menu name is required.")
     if not description:
         raise MenuCatalogueError("Customer description is required.")
-    category = category.strip() if (category or "").strip() in CATEGORIES else "Other"
+    selected_category = db.find_menu_category_by_name((category or "").strip())
+    category = selected_category["name"] if selected_category and selected_category["active"] else "Other"
 
     if db.find_menu_catalogue_entry_by_name(name):
         raise MenuCatalogueError(f"A menu named '{name}' already exists.")
@@ -141,8 +183,9 @@ def update_menu(
         description = description.strip()
         if not description:
             raise MenuCatalogueError("Customer description is required.")
-    if category is not None and category not in CATEGORIES:
-        category = "Other"
+    if category is not None:
+        selected_category = db.find_menu_category_by_name(category.strip())
+        category = selected_category["name"] if selected_category and selected_category["active"] else "Other"
     updated = db.update_menu_catalogue_entry(
         menu_id, name=name, category=category, description=description, active=active,
     )
