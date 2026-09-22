@@ -85,7 +85,34 @@ Risk: Low | Medium | High
 
 # Open queue
 
-No deferred items yet. Add the next implemented staging change as `Q-001`.
+### Q-001 — Instagram Media Gallery V2
+
+Status: IMPLEMENTED / VALIDATION_PENDING
+Commit: pending staging push
+Branch: `codex/staging-fast-dev-20260922`
+Risk: Medium
+
+#### Implemented
+- Additive durable `instagram_media` SQLite registry with exact Meta-ID uniqueness.
+- Paginated authenticated Admin API and route-mode editing (`DEFAULT`, `CUSTOM`, `DISABLED`).
+- Instagram-style Posts/Reels/Carousel gallery, technical detail drawer, and context-only caption label.
+- Manual Sync Now infrastructure that returns safe `NOT_CONFIGURED` without a Graph request when credentials are absent.
+- Staging-only fixture support, with Auto Sync and Auto Route explicitly OFF.
+
+#### Immediate checks already run
+- Python compile check for modified runtime files.
+- SQLite initialization, upsert, route-mode, and pagination smoke check.
+- `tests/test_instagram_source_routing.py` and `tests/test_admin_portal.py` (68 passed).
+- `git diff --check`.
+
+#### Deferred validation
+- Full migration and restart-durability regression.
+- 5,000-record gallery performance and pagination regression.
+- Graph pagination, token-expiry, permission failure, duplicate/upsert, and resync route-preservation tests.
+- Story, shared Reel, shared Post, and explicit-current-intent precedence regressions.
+- Admin auth/CSRF/security and privacy/logging validation for the new endpoints.
+- Webhook and canonical-QA byte comparison regressions.
+- Full repository suite, production Meta sync acceptance, and final deployment verification.
 
 ---
 
