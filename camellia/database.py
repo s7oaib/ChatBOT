@@ -913,6 +913,18 @@ class Database:
             );
             """)
 
+            # A hard-deleted built-in must not be recreated by the seed loop
+            # below on the next process start. This table intentionally keeps
+            # only the stable id and deletion audit fields; menu content,
+            # images, drafts, and versions are removed by the delete operation.
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS menu_deletion_tombstones (
+                menu_id TEXT PRIMARY KEY,
+                deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                deleted_by TEXT
+            );
+            """)
+
             # Instagram Content Routing topics: a reusable label an operator
             # picks once and every future route reuses, instead of retyping
             # the same topic as free text on each route. `priority_products`
@@ -1036,11 +1048,15 @@ class Database:
                  "This week's fresh non-vegetarian Bengali dishes."),
                 ("bento", "Bento / Meal Menu", "Bento / Meal", "Ready-to-eat Bengali meal boxes."),
             ):
-                cursor.execute(
-                    "INSERT OR IGNORE INTO menu_catalogue (menu_id, name, category, description, active, is_builtin) "
-                    "VALUES (?, ?, ?, ?, 1, 1)",
-                    (menu_id, name, category, description),
-                )
+                if not cursor.execute(
+                    "SELECT 1 FROM menu_deletion_tombstones WHERE menu_id = ?",
+                    (menu_id,),
+                ).fetchone():
+                    cursor.execute(
+                        "INSERT OR IGNORE INTO menu_catalogue (menu_id, name, category, description, active, is_builtin) "
+                        "VALUES (?, ?, ?, ?, 1, 1)",
+                        (menu_id, name, category, description),
+                    )
 
             self._create_indexes(cursor)
 
@@ -2005,6 +2021,156 @@ class Database:
         with self.get_connection() as conn:
             row = conn.execute("SELECT * FROM menu_catalogue WHERE menu_id = ?", (menu_id,)).fetchone()
         return dict(row) if row else None
+
+    def is_menu_deleted(self, menu_id: str) -> bool:
+        with self.get_connection() as conn:
+            return conn.execute(
+                "SELECT 1 FROM menu_deletion_tombstones WHERE menu_id = ?",
+                (menu_id,),
+            ).fetchone() is not None
+
+    def list_active_menu_references(self, menu_id: str) -> List[Dict[str, Any]]:
+        """Return customer-serving route/topic references that block deletion."""
+        with self.get_connection() as conn:
+            routes = conn.execute(
+                """
+                SELECT routing_id, source_type, media_id, ad_id, routing_topic
+                FROM instagram_source_routes
+                WHERE menu_id = ? AND active = 1 AND archived_at IS NULL
+                ORDER BY routing_id
+                """,
+                (menu_id,),
+            ).fetchall()
+            topics = conn.execute(
+                """
+                SELECT topic_id, name
+                FROM instagram_topics
+                WHERE default_menu_id = ? AND active = 1
+                ORDER BY topic_id
+                """,
+                (menu_id,),
+            ).fetchall()
+        return [
+            {
+                "type": "instagram_route",
+                "routing_id": int(row["routing_id"]),
+                "source_type": row["source_type"],
+                "media_id": row["media_id"],
+                "ad_id": row["ad_id"],
+                "routing_topic": row["routing_topic"],
+            }
+            for row in routes
+        ] + [
+            {
+                "type": "instagram_topic",
+                "topic_id": row["topic_id"],
+                "name": row["name"],
+            }
+            for row in topics
+        ]
+
+    def permanently_delete_menu(
+        self, menu_id: str, *, related_keys: Optional[List[str]] = None,
+        deleted_by: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Atomically remove one catalogue menu and all of its local state.
+
+        Active customer-facing references are checked before any mutation. Any
+        inactive/archived references are nulled in the same transaction so a
+        deleted menu can never leave a dangling route or Topic default.
+        """
+        keys = tuple(dict.fromkeys([menu_id, *(related_keys or [])]))
+        placeholders = ", ".join("?" for _ in keys)
+        with self.get_connection() as conn:
+            entry = conn.execute(
+                "SELECT * FROM menu_catalogue WHERE menu_id = ?", (menu_id,)
+            ).fetchone()
+            if not entry:
+                return None
+
+            routes = conn.execute(
+                """
+                SELECT routing_id, source_type, media_id, ad_id, routing_topic
+                FROM instagram_source_routes
+                WHERE menu_id = ? AND active = 1 AND archived_at IS NULL
+                ORDER BY routing_id
+                """,
+                (menu_id,),
+            ).fetchall()
+            topics = conn.execute(
+                """
+                SELECT topic_id, name
+                FROM instagram_topics
+                WHERE default_menu_id = ? AND active = 1
+                ORDER BY topic_id
+                """,
+                (menu_id,),
+            ).fetchall()
+            references = [
+                {
+                    "type": "instagram_route",
+                    "routing_id": int(row["routing_id"]),
+                    "source_type": row["source_type"],
+                    "media_id": row["media_id"],
+                    "ad_id": row["ad_id"],
+                    "routing_topic": row["routing_topic"],
+                }
+                for row in routes
+            ] + [
+                {"type": "instagram_topic", "topic_id": row["topic_id"], "name": row["name"]}
+                for row in topics
+            ]
+            if references:
+                return {"deleted": False, "entry": dict(entry), "references": references}
+
+            image_paths = [
+                row["image_path"]
+                for row in conn.execute(
+                    f"SELECT image_path FROM menu_image_versions WHERE menu_key IN ({placeholders})",
+                    keys,
+                ).fetchall()
+            ]
+            conn.execute(
+                f"DELETE FROM menu_image_versions WHERE menu_key IN ({placeholders})", keys
+            )
+            conn.execute(
+                f"DELETE FROM menu_drafts WHERE menu_key IN ({placeholders})", keys
+            )
+            conn.execute(
+                f"DELETE FROM menu_versions WHERE menu_key IN ({placeholders})", keys
+            )
+            # Archived/disabled records are not a reason to block deletion,
+            # but they must not retain a dead menu_id.
+            conn.execute(
+                """
+                UPDATE instagram_source_routes
+                SET menu_id = NULL,
+                    menu_mode = CASE WHEN menu_mode = 'SELECTED' THEN 'NONE' ELSE menu_mode END,
+                    updated_at = ?
+                WHERE menu_id = ?
+                """,
+                (datetime.utcnow().isoformat(), menu_id),
+            )
+            conn.execute(
+                "UPDATE instagram_topics SET default_menu_id = NULL, updated_at = ? WHERE default_menu_id = ?",
+                (datetime.utcnow().isoformat(), menu_id),
+            )
+            conn.execute("DELETE FROM menu_catalogue WHERE menu_id = ?", (menu_id,))
+            conn.execute(
+                """
+                INSERT INTO menu_deletion_tombstones (menu_id, deleted_at, deleted_by)
+                VALUES (?, ?, ?)
+                ON CONFLICT(menu_id) DO UPDATE SET deleted_at=excluded.deleted_at, deleted_by=excluded.deleted_by
+                """,
+                (menu_id, datetime.utcnow().isoformat(), deleted_by),
+            )
+            conn.commit()
+        return {
+            "deleted": True,
+            "entry": dict(entry),
+            "image_paths": image_paths,
+            "references_cleared": True,
+        }
 
     def find_menu_catalogue_entry_by_name(self, name: str) -> Optional[Dict[str, Any]]:
         with self.get_connection() as conn:

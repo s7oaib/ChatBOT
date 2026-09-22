@@ -359,6 +359,21 @@ app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 
+def _admin_maintenance_response() -> HTMLResponse:
+    return HTMLResponse(
+        content="""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="robots" content="noindex,nofollow">
+<title>Camellia Admin Portal — Currently Under Maintenance</title>
+<style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f7f4ef;color:#263238;font-family:system-ui,-apple-system,Segoe UI,sans-serif}.card{max-width:560px;margin:24px;padding:36px;border:1px solid #ded7cf;border-radius:18px;background:#fff;box-shadow:0 12px 36px #26323814}h1{margin:0 0 12px;font-size:1.65rem}p{margin:0;color:#5f6b70;line-height:1.6}</style></head>
+<body><main class="card"><h1>Camellia Admin Portal</h1><h2>Currently Under Maintenance</h2>
+<p>The Admin Portal is temporarily unavailable while updates and improvements are being completed.</p>
+<p>Please check back later.</p>
+<p>Customer-facing chatbot services continue to operate normally.</p></main></body></html>""",
+        status_code=503,
+        headers={"Retry-After": "3600"},
+    )
+
+
 # Security Headers Middleware (Clickjacking, MIME-sniffing, XSS protection)
 @app.middleware("http")
 async def add_security_headers(request: Request, call_next):
@@ -384,6 +399,27 @@ async def add_security_headers(request: Request, call_next):
 @app.middleware("http")
 async def admin_session_middleware(request: Request, call_next):
     """Load server-side admin sessions and enforce browser CSRF protection."""
+    # This check intentionally runs before public compatibility paths,
+    # authentication, redirects, and route handlers. It therefore closes old
+    # Admin bookmarks and every browser/machine Admin API with one static 503.
+    # A logout request still revokes the presented session and clears cookies,
+    # but it receives the same maintenance response and exposes no Admin data.
+    if (
+        config.ADMIN_MAINTENANCE_MODE
+        and request.url.path.startswith("/admin")
+    ):
+        if request.url.path == "/admin/logout":
+            session_token = request.cookies.get(ADMIN_SESSION_COOKIE, "")
+            if session_token:
+                try:
+                    db.revoke_admin_session(token_hash(session_token), time.time())
+                except Exception:
+                    log.warning("Could not revoke an Admin session during maintenance logout.")
+        response = _admin_maintenance_response()
+        if request.url.path == "/admin/logout":
+            response.delete_cookie(ADMIN_SESSION_COOKIE, path="/", secure=True, httponly=True, samesite="strict")
+            response.delete_cookie(ADMIN_CSRF_COOKIE, path="/", secure=True, httponly=False, samesite="strict")
+        return response
     # Browser-only compatibility entry points never expose data; they redirect
     # into the authenticated shell so old bookmarks have a useful landing
     # place instead of a dead 403 page.
@@ -5499,6 +5535,31 @@ async def update_menu_catalogue_entry_route(
     return {"status": "success", "menu": updated}
 
 
+@app.delete("/admin/menu-catalogue/{menu_id}/permanent")
+def permanently_delete_menu_catalogue_entry(
+    menu_id: str,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """Irreversibly delete a menu and every local asset/version it owns."""
+    require_admin(x_admin_key, x_admin_pin)
+    try:
+        deleted = menu_catalogue.permanently_delete_menu(menu_id, deleted_by=x_admin_key or "admin")
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"No menu '{menu_id}'")
+    except menu_catalogue.MenuCatalogueInUseError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"message": str(exc), "references": exc.references},
+        )
+    return {
+        "status": "deleted",
+        "menu_id": menu_id,
+        "image_files_removed": deleted.get("image_files_removed", 0),
+        "references_cleared": deleted.get("references_cleared", False),
+    }
+
+
 # --------------------------------------------------------------------------
 # Instagram Content Routing topics — a reusable Topic an operator picks once
 # instead of retyping the same routing_topic text on every route. Selecting
@@ -8135,7 +8196,7 @@ THIS WEEK'S BENGAL SPECIALS
                     const key = encodeURIComponent(m.menu_key);
                     const draftNotice = m.draft ? `<span style="color:var(--primary);font-weight:700;"> · Draft ready · pending publish</span>` : '';
                     const publishAction = m.draft ? `<button class="btn-primary" onclick="mmPublishImage('${key}')">Save &amp; Publish</button>` : '';
-                    return `<article class="visual-menu-card"><h3>${escapeHtml(m.title)}${m.category ? ` <span style="font-weight:400;font-size:0.75rem;color:var(--text-muted);">· ${escapeHtml(m.category)}</span>` : ''}</h3>${image}<div class="visual-menu-meta"><b>${escapeHtml(m.status || 'Active')}</b>${m.published_at ? ` · ${escapeHtml(m.published_at)}` : ''}${draftNotice}</div><div class="visual-menu-actions"><button class="btn-primary" onclick="mmReplaceImage('${key}')">Replace</button>${publishAction}<button class="btn-secondary" onclick="mmPreviewImage('${key}')">Preview</button><button class="btn-secondary" onclick="mmHistoryImage('${key}')">History</button><button class="btn-danger" onclick="mmArchiveImage('${key}')">Archive</button></div><div id="mm-image-history-${key}" style="padding:0 14px 12px"></div></article>`;
+                    return `<article class="visual-menu-card"><h3>${escapeHtml(m.title)}${m.category ? ` <span style="font-weight:400;font-size:0.75rem;color:var(--text-muted);">· ${escapeHtml(m.category)}</span>` : ''}</h3>${image}<div class="visual-menu-meta"><b>${escapeHtml(m.status || 'Active')}</b>${m.published_at ? ` · ${escapeHtml(m.published_at)}` : ''}${draftNotice}</div><div class="visual-menu-actions"><button class="btn-primary" onclick="mmReplaceImage('${key}')">Replace</button>${publishAction}<button class="btn-secondary" onclick="mmPreviewImage('${key}')">Preview</button><button class="btn-secondary" onclick="mmHistoryImage('${key}')">History</button><button class="btn-danger" onclick="mmArchiveImage('${key}')">Archive</button><button class="btn-danger" onclick="mmDeleteMenu('${key}', ${escapeHtml(JSON.stringify(m.title))})">Delete Permanently</button></div><div id="mm-image-history-${key}" style="padding:0 14px 12px"></div></article>`;
                 }).join('');
             } catch (err) {
                 grid.innerHTML = `<p style="color: var(--danger);">${escapeHtml(err.message || err)}</p>`;
@@ -8147,6 +8208,22 @@ THIS WEEK'S BENGAL SPECIALS
         async function mmPreviewImage(key){try{const response=await fetch(`/admin/menu-manager/menus/${key}/image/preview`,{headers:getAuthHeaders()});const data=await response.json();const msg=document.getElementById('mmMessage');msg.style.display='block';msg.className='result-box '+(response.ok?'info':'error');msg.innerHTML=response.ok?`<b>Current</b><br><img src="${escapeHtml(data.current||'')}" style="max-width:220px;max-height:260px"><br><b>New draft</b><br>${data.draft?`<img src="${escapeHtml(data.draft.image_path)}" style="max-width:220px;max-height:260px">`:'No draft saved.'}`:escapeHtml(data.detail||'Preview failed');}catch(error){mmImageMessage('error',error.message||'Preview failed.');}}
         async function mmPublishImage(key){try{const response=await fetch(`/admin/menu-manager/menus/${key}/image/publish`,{method:'POST',headers:getAuthHeaders()});const data=await response.json();mmImageMessage(response.ok?'success':'error',response.ok?'Published. Customers receive the new image immediately.':(data.detail||'Publish failed.'));if(response.ok)mmLoadMenuList();}catch(error){mmImageMessage('error',error.message||'Publish failed.');}}
         async function mmArchiveImage(key){if(!confirm('Are you sure you want to remove this menu from customer view?'))return;const response=await fetch(`/admin/menu-manager/menus/${key}/image/archive`,{method:'POST',headers:getAuthHeaders()});const data=await response.json();const msg=document.getElementById('mmMessage');msg.style.display='block';msg.className='result-box info';msg.innerText=response.ok?'Menu archived; it remains in History.':(data.detail||'Archive failed.');if(response.ok)mmLoadMenuList();}
+        async function mmDeleteMenu(key, title){
+            if(!confirm(`Permanently delete "${title}"? This removes the catalogue entry, published image, draft, and all history. This cannot be undone.`))return;
+            try {
+                const response=await fetch(`/admin/menu-catalogue/${key}/permanent`,{method:'DELETE',headers:getAuthHeaders()});
+                const data=await response.json();
+                if(!response.ok){
+                    const detail=data.detail;
+                    const message=typeof detail==='string'?detail:(detail&&detail.message)||'Could not delete this menu.';
+                    mmImageMessage('error',message);
+                    return;
+                }
+                mmCurrentKey=null;
+                mmImageMessage('success',`"${title}" was permanently deleted. It cannot be restored.`);
+                await mmLoadMenuList();
+            } catch(error) { mmImageMessage('error','Could not delete this menu. Please try again.'); }
+        }
         async function mmHistoryImage(key){const response=await fetch(`/admin/menu-manager/menus/${key}/image/history`,{headers:getAuthHeaders()});const data=await response.json();const box=document.getElementById(`mm-image-history-${key}`);box.innerHTML=(data.versions||[]).map(v=>`<div style="margin:7px 0"><img src="${escapeHtml(v.image_path)}" style="width:70px;height:50px;object-fit:cover;vertical-align:middle;border-radius:4px"><span style="font-size:.78rem">Version ${v.version} — ${escapeHtml(v.status)}</span>${v.status!=='current'?` <button class="btn-secondary" onclick="mmRestoreImage('${key}',${v.id})">Restore</button>`:''}</div>`).join('')||'<small>No image history yet.</small>';}
         async function mmRestoreImage(key,versionId){const response=await fetch(`/admin/menu-manager/menus/${key}/image/restore/${versionId}`,{method:'POST',headers:getAuthHeaders()});const data=await response.json();const msg=document.getElementById('mmMessage');msg.style.display='block';msg.className=response.ok?'result-box success':'result-box error';msg.innerText=response.ok?'Previous menu restored.':(data.detail||'Restore failed.');if(response.ok)mmLoadMenuList();}
 

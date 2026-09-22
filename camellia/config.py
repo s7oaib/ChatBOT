@@ -142,6 +142,11 @@ class Config:
     ADMIN_USERNAME: str = _env_secret("ADMIN_USERNAME")
     ADMIN_PASSWORD_HASH: str = _env_secret("ADMIN_PASSWORD_HASH")
     ADMIN_REQUIRE_HTTPS: bool = os.getenv("ADMIN_REQUIRE_HTTPS", "true").lower() in ("true", "1", "t", "yes")
+    # Deliberate operational lock for the browser Admin portal and every
+    # /admin API. Keep the default off so a deployment is reversible by config
+    # alone; production can set this to true while an Admin release is in
+    # progress without affecting customer-facing bot traffic.
+    ADMIN_MAINTENANCE_MODE: bool = os.getenv("ADMIN_MAINTENANCE_MODE", "false").lower() in ("true", "1", "t", "yes")
     try:
         ADMIN_SESSION_IDLE_SECONDS: int = max(300, int(os.getenv("ADMIN_SESSION_IDLE_SECONDS", "1800")))
     except ValueError:

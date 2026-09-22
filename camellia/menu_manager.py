@@ -68,6 +68,14 @@ MANAGEABLE_MENUS: Dict[str, Dict[str, Any]] = {
     },
 }
 
+_CATALOGUE_KEYS = {
+    "collections.aamar_mishti": "aamar_mishti",
+    "collections.signature_collection": "signature",
+    "weekly.vegetarian": "weekly_vegetarian",
+    "weekly.non_vegetarian": "weekly_non_vegetarian",
+    "weekly.bengali_bento": "bento",
+}
+
 # Seed data for the two collections: menu.json's own "collections" block
 # predates this feature and was never actually read by the chatbot (the
 # approved reply was a hand-written string in qa_templates.json), so the
@@ -149,7 +157,7 @@ class MenuValidationError(ValueError):
 
 def _menu_entry(menu_key: str) -> Dict[str, Any]:
     entry = MANAGEABLE_MENUS.get(menu_key)
-    if not entry:
+    if not entry or not db.get_menu_catalogue_entry(_CATALOGUE_KEYS.get(menu_key, menu_key)):
         raise KeyError(menu_key)
     return entry
 
@@ -158,6 +166,8 @@ def list_menus() -> List[Dict[str, Any]]:
     """Registry + live item counts + whether a draft is waiting, for the tab's landing view."""
     out = []
     for menu_key, entry in MANAGEABLE_MENUS.items():
+        if not db.get_menu_catalogue_entry(_CATALOGUE_KEYS.get(menu_key, menu_key)):
+            continue
         items = get_published_items(menu_key)
         draft = db.get_menu_draft(menu_key)
         out.append({

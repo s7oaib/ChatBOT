@@ -52,7 +52,26 @@ def _key(menu_key: str) -> str:
 
 def _known(menu_key: str) -> bool:
     """Whether menu_key is a real, registered menu — dynamic, never hardcoded."""
-    return db.get_menu_catalogue_entry(menu_key) is not None
+    return db.get_menu_catalogue_entry(_key(menu_key)) is not None
+
+
+def remove_persisted_files(image_paths: list[str]) -> int:
+    """Delete only files from this feature's private upload directory."""
+    removed = 0
+    root = os.path.realpath(_dir())
+    for image_path in image_paths:
+        raw = str(image_path or "").split("?", 1)[0]
+        if not raw.startswith("/uploads/menu-images/"):
+            continue
+        candidate = os.path.realpath(os.path.join(root, os.path.basename(raw)))
+        if not candidate.startswith(root + os.sep):
+            continue
+        try:
+            os.remove(candidate)
+            removed += 1
+        except FileNotFoundError:
+            pass
+    return removed
 
 
 def validate_image(data: bytes, content_type: str) -> str:
@@ -143,6 +162,7 @@ def current_weekly() -> Optional[Dict[str, Any]]:
     rows = [
         row
         for key in WEEKLY_MENU_KEYS
+        if _known(key)
         if (row := db.get_menu_image_current(key)) is not None
     ]
     return max(rows, key=_published_sort_key) if rows else None
@@ -150,7 +170,7 @@ def current_weekly() -> Optional[Dict[str, Any]]:
 
 def has_weekly_archive() -> bool:
     """Whether any managed weekly image has history but no current row."""
-    return any(db.has_menu_image_archive(key) for key in WEEKLY_MENU_KEYS)
+    return any(_known(key) and db.has_menu_image_archive(key) for key in WEEKLY_MENU_KEYS)
 
 
 def current_weekly_url(fallback: Optional[str] = None) -> Optional[str]:
@@ -228,6 +248,8 @@ def preview(menu_key: str) -> Dict[str, Any]:
 
 def publish(menu_key: str) -> Dict[str, Any]:
     menu_key = _key(menu_key)
+    if not _known(menu_key):
+        raise KeyError(menu_key)
     row = db.publish_menu_image(menu_key)
     if not row:
         raise ValueError("Save a draft image before publishing.")
@@ -249,16 +271,22 @@ def archive(menu_key: str) -> Optional[Dict[str, Any]]:
 
 def history(menu_key: str) -> list[Dict[str, Any]]:
     menu_key = _key(menu_key)
+    if not _known(menu_key):
+        raise KeyError(menu_key)
     return db.list_menu_image_history(menu_key)
 
 
 def restore(menu_key: str, version_id: int) -> Optional[Dict[str, Any]]:
     menu_key = _key(menu_key)
+    if not _known(menu_key):
+        raise KeyError(menu_key)
     return db.restore_menu_image(menu_key, version_id)
 
 
 def current_url(menu_key: str, fallback: Optional[str] = None) -> Optional[str]:
     menu_key = _key(menu_key)
+    if not _known(menu_key):
+        return None
     row = db.get_menu_image_current(menu_key)
     if row:
         return row.get("image_path")

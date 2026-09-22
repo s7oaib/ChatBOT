@@ -30,6 +30,36 @@ class MenuCatalogueError(ValueError):
     """A create/update request failed validation."""
 
 
+class MenuCatalogueInUseError(MenuCatalogueError):
+    """A menu still has active customer-facing routing references."""
+
+    def __init__(self, menu_id: str, references: List[Dict[str, Any]]):
+        self.menu_id = menu_id
+        self.references = references
+        labels = []
+        for reference in references:
+            if reference["type"] == "instagram_route":
+                labels.append(
+                    f"Instagram {reference.get('source_type') or 'content'} route #{reference['routing_id']}"
+                )
+            else:
+                labels.append(f"Instagram Topic '{reference.get('name') or reference['topic_id']}'")
+        super().__init__(
+            f"Cannot permanently delete '{menu_id}' because it is used by: "
+            + ", ".join(labels)
+            + ". Remove or disable those active references first."
+        )
+
+
+_MANAGER_KEYS = {
+    "aamar_mishti": "collections.aamar_mishti",
+    "signature": "collections.signature_collection",
+    "weekly_vegetarian": "weekly.vegetarian",
+    "weekly_non_vegetarian": "weekly.non_vegetarian",
+    "bento": "weekly.bengali_bento",
+}
+
+
 def _slugify(name: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "_", name.strip().lower()).strip("_")
     return slug or "menu"
@@ -56,7 +86,7 @@ def create_menu(name: str, category: str, description: str, active: bool = True)
         raise MenuCatalogueError(f"A menu named '{name}' already exists.")
 
     menu_id = _slugify(name)
-    if db.get_menu_catalogue_entry(menu_id):
+    if db.get_menu_catalogue_entry(menu_id) or db.is_menu_deleted(menu_id):
         # A different name that slugifies to the same id (e.g. punctuation-only
         # difference) — disambiguate rather than silently colliding into the
         # existing menu's image history.
@@ -66,6 +96,32 @@ def create_menu(name: str, category: str, description: str, active: bool = True)
         menu_id = f"{menu_id}_{suffix}"
 
     return db.create_menu_catalogue_entry(menu_id, name, category, description, active=active, is_builtin=False)
+
+
+def permanently_delete_menu(menu_id: str, deleted_by: str = "admin") -> Dict[str, Any]:
+    """Irreversibly remove a catalogue menu and its local assets/history."""
+    # The Menu Manager gallery uses its legacy dotted keys while the Menu
+    # Catalogue uses durable catalogue ids. Accept both at this boundary so
+    # the destructive action cannot silently target the wrong record.
+    menu_id = next(
+        (catalogue_id for catalogue_id, manager_key in _MANAGER_KEYS.items() if manager_key == menu_id),
+        menu_id,
+    )
+    if not db.get_menu_catalogue_entry(menu_id):
+        raise KeyError(menu_id)
+    related_key = _MANAGER_KEYS.get(menu_id)
+    result = db.permanently_delete_menu(
+        menu_id,
+        related_keys=[related_key] if related_key else None,
+        deleted_by=deleted_by,
+    )
+    if not result or not result.get("deleted"):
+        raise MenuCatalogueInUseError(menu_id, (result or {}).get("references", []))
+
+    # SQLite owns the metadata; the image module owns the durable upload path.
+    from camellia import menu_images
+    result["image_files_removed"] = menu_images.remove_persisted_files(result.pop("image_paths", []))
+    return result
 
 
 def update_menu(

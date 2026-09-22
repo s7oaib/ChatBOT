@@ -5346,6 +5346,13 @@ class DeterministicResponder:
 
         # Weekly menu & bento photo card queries
         elif template_id in ["weekly_menu_veg", "weekly_menu_nonveg", "combo_bento"]:
+            deleted_menu_id = {
+                "weekly_menu_veg": "weekly_vegetarian",
+                "weekly_menu_nonveg": "weekly_non_vegetarian",
+                "combo_bento": "bento",
+            }[template_id]
+            if db.is_menu_deleted(deleted_menu_id):
+                return _WEEKLY_MENU_BEING_UPDATED, None
             # Once the printed week has passed, the dishes and prices below are
             # last week's. A customer would order against them, so say the menu
             # is being updated instead of sending anything stale.
