@@ -139,7 +139,7 @@ def test_ad_routing_panel_still_present_alongside_menu_manager(page):
     """Routing remains available, now as a Posts & Reels subview."""
     assert 'id="tab-ad-routing"' in page
     assert 'data-group="instagram_content"' in page[page.index('id="tab-ad-routing"'):]
-    assert "Posts &amp; Reels Routing" in page
+    assert "Posts &amp; Reels Mapping" in page
     assert 'id="igPriorityProducts"' in page
 
 
@@ -255,7 +255,7 @@ def test_instagram_story_menu_choice_offers_inherit_none_and_active_menus(page):
     menu_select = section[section.index('id="igStoryMenuPicker"'):section.index('</select>', section.index('id="igStoryMenuPicker"'))]
     assert '<option value="__inherit__">Inherit topic default</option>' in menu_select
     assert '<option value="__none__">No menu</option>' in menu_select
-    assert "Menu to send" in section
+    assert "Menu / Attachments" in section
     assert "Choose the menu customers should receive when this content starts the conversation." in section
     assert "openMenuModal('igStoryMenuPicker')" in section
 
@@ -295,19 +295,18 @@ def test_instagram_story_refresh_does_not_clear_the_list_before_it_settles(page)
 def test_instagram_stories_exposes_status_filters_and_safe_actions(page):
     section = page[page.index('id="tab-instagram-stories"'):page.index('<!-- MENU tab, panel 3 of 4')]
     render = page[page.index('function renderInstagramStories'):page.index('async function loadInstagramStories')]
-    for label in ("All", "Unmapped", "Mapped", "Disabled", "Deleted", "Map Story", "Edit", "Disable", "Enable", "Restore", "Delete"):
+    for label in ("All", "Unmapped", "Mapped", "Disabled", "Deleted", "Map Story", "Edit Mapping", "Delete Mapping"):
         assert label in section or label in render
     assert 'data-story-filter="ARCHIVED"' not in section
     assert 'data-story-action="archive"' not in render
-    assert 'data-story-action="delete"' in render
+    assert 'data-story-action="delete-mapping"' in render
     assert 'data-story-action="restore-source"' in render
     assert 'Delete this Story from Camellia Admin?' in page
     assert 'This removes the Story from the Admin dashboard and disables its Story routing.' in page
     assert '/admin/instagram-story-sources/${encodeURIComponent(mediaId)}' in page
     assert '/permanent' not in render
-    assert "setInstagramStoryActive" in render
-    assert "archiveInstagramStory" in render
-    assert "restoreInstagramStory" in render
+    assert "removeInstagramStoryMapping" in render
+    assert 'id="igStoryActive"' in section
 
 
 def test_instagram_story_delete_is_local_and_history_is_explicit(page):
@@ -432,7 +431,7 @@ def test_instagram_routing_has_a_simple_client_first_default_view(page):
     assert ">Identify<" not in section
     assert "id=\"igTopicPicker\"" in section and "+ Add Topic" in section
     assert "Save Mapping" in section
-    assert "Menu to send" in section
+    assert "Menu / Attachments" in section
     assert "Choose the menu customers should receive when this content starts the conversation." in section
     assert "openMenuModal('igMenuPicker')" in section
     assert "Preview Reply" in section
@@ -477,8 +476,8 @@ def test_topic_and_menu_edit_actions_are_clear_and_metadata_only(page):
 
 def test_instagram_routing_keeps_client_friendly_cards_and_existing_actions(page):
     section = page[page.index('function renderInstagramMediaCard'):page.index('// Shared-post pairing')]
-    assert "View Details" in section
-    for action in ("Edit", "Disable", "Archive", "Status:", "Menu:", "Priority:"):
+    assert "Edit Mapping" in section
+    for action in ("Edit Mapping", "Auto reply: On", "Delete Mapping", "Status:", "Menu:"):
         assert action in section
     assert "/admin/instagram-routes/${id}/active" in page
     assert "/admin/instagram-routes/${id}" in page

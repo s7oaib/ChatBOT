@@ -754,6 +754,7 @@ class Database:
                 ad_id TEXT,
                 campaign_id TEXT,
                 routing_topic TEXT NOT NULL DEFAULT '',
+                source_description TEXT NOT NULL DEFAULT '',
                 knowledge_scope TEXT NOT NULL DEFAULT '[]',
                 escalation_policy TEXT NOT NULL DEFAULT 'human_if_unsupported',
                 priority_products TEXT NOT NULL DEFAULT '[]',
@@ -1013,6 +1014,7 @@ class Database:
             cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_topics_normalized_name ON instagram_topics(name COLLATE NOCASE)")
 
             self._ensure_column(cursor, "instagram_source_routes", "topic_id", "TEXT")
+            self._ensure_column(cursor, "instagram_source_routes", "source_description", "TEXT NOT NULL DEFAULT ''")
             # The menu shown for this route. Defaults from the selected
             # Topic's default_menu_id at save time (see validate_route_payload)
             # but is its own column so a route can override it independently —
@@ -1418,7 +1420,7 @@ class Database:
         values = (
             route["source_type"], route.get("canonical_url"), route.get("shortcode"),
             route.get("media_id"), route.get("ad_id"), route.get("campaign_id"),
-            route.get("routing_topic", ""), json.dumps(route.get("knowledge_scope", [])),
+            route.get("routing_topic", ""), route.get("source_description", ""), json.dumps(route.get("knowledge_scope", [])),
             route.get("escalation_policy", "human_if_unsupported"),
             json.dumps(route.get("priority_products", [])), int(bool(route.get("active", True))),
             route.get("topic_id"), route.get("menu_id"), menu_mode,
@@ -1440,16 +1442,16 @@ class Database:
                 cursor = conn.execute(
                     """INSERT INTO instagram_source_routes
                     (source_type, canonical_url, shortcode, media_id, ad_id, campaign_id,
-                     routing_topic, knowledge_scope, escalation_policy, priority_products,
+                     routing_topic, source_description, knowledge_scope, escalation_policy, priority_products,
                     active, topic_id, menu_id, menu_mode, preview_url, media_type, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     values[:-1] + (now, now),
                 )
                 routing_id = int(cursor.lastrowid)
             else:
                 cursor = conn.execute(
                     """UPDATE instagram_source_routes SET source_type=?, canonical_url=?, shortcode=?,
-                    media_id=?, ad_id=?, campaign_id=?, routing_topic=?, knowledge_scope=?,
+                    media_id=?, ad_id=?, campaign_id=?, routing_topic=?, source_description=?, knowledge_scope=?,
                     escalation_policy=?, priority_products=?, active=?, topic_id=?, menu_id=?, menu_mode=?,
                     preview_url=?, media_type=?, updated_at=?, archived_at=NULL
                     WHERE routing_id=?""",
@@ -1852,7 +1854,7 @@ class Database:
                 item = dict(row)
                 route = conn.execute(
                     """
-                    SELECT routing_id, topic_id, routing_topic, active, archived_at
+                    SELECT routing_id, topic_id, routing_topic, source_description, menu_id, menu_mode, active, archived_at
                     FROM instagram_source_routes
                     WHERE source_type = 'story' AND media_id = ?
                     ORDER BY updated_at DESC, routing_id DESC LIMIT 1
@@ -1875,6 +1877,10 @@ class Database:
                 item["routing_id"] = route["routing_id"] if route else None
                 item["topic_id"] = route["topic_id"] if route else None
                 item["routing_topic"] = route["routing_topic"] if route else None
+                item["source_description"] = route["source_description"] if route else ""
+                item["menu_id"] = route["menu_id"] if route else None
+                item["menu_mode"] = route["menu_mode"] if route else "INHERIT"
+                item["active"] = bool(route["active"]) if route else False
                 # Admin-only ordinal convenience label — never a routing
                 # identity. story_media_id above remains what any reply/
                 # webhook or mapping actually matches against.
@@ -2558,6 +2564,8 @@ class Database:
         values.append(topic_id)
         with self.get_connection() as conn:
             cursor = conn.execute(f"UPDATE instagram_topics SET {', '.join(fields)} WHERE topic_id = ?", values)
+            if cursor.rowcount and name is not None:
+                conn.execute("UPDATE instagram_source_routes SET routing_topic=?, updated_at=? WHERE topic_id=?", (name, datetime.utcnow().isoformat(), topic_id))
             conn.commit()
         return self.get_instagram_topic(topic_id) if cursor.rowcount else None
 
@@ -2571,10 +2579,13 @@ class Database:
     def delete_instagram_topic(self, topic_id: str, replacement_topic_id: Optional[str] = None) -> bool:
         with self.get_connection() as conn:
             if replacement_topic_id:
-                conn.execute("UPDATE instagram_source_routes SET topic_id=? WHERE topic_id=?", (replacement_topic_id, topic_id))
+                replacement = conn.execute("SELECT name FROM instagram_topics WHERE topic_id=?", (replacement_topic_id,)).fetchone()
+                if not replacement:
+                    return False
+                conn.execute("UPDATE instagram_source_routes SET topic_id=?, routing_topic=? WHERE topic_id=?", (replacement_topic_id, replacement["name"], topic_id))
                 conn.execute("UPDATE instagram_media SET topic_id=? WHERE topic_id=?", (replacement_topic_id, topic_id))
             else:
-                conn.execute("UPDATE instagram_source_routes SET topic_id=NULL WHERE topic_id=?", (topic_id,))
+                conn.execute("UPDATE instagram_source_routes SET topic_id=NULL, routing_topic='' WHERE topic_id=?", (topic_id,))
                 conn.execute("UPDATE instagram_media SET topic_id=NULL WHERE topic_id=?", (topic_id,))
             cursor = conn.execute("DELETE FROM instagram_topics WHERE topic_id=?", (topic_id,))
             conn.commit()

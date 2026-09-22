@@ -17,6 +17,7 @@ SENSITIVE_BUSINESS_FACT = "SENSITIVE_BUSINESS_FACT"
 SYSTEM_CONVERSATION = "SYSTEM_CONVERSATION"
 GROUNDED_DERIVED = "GROUNDED_DERIVED"
 HUMAN_HANDOFF = "HUMAN_HANDOFF"
+SOURCE_DESCRIPTION = "SOURCE_DESCRIPTION"
 
 _HANDOFF_TEMPLATES = frozenset({
     None,
@@ -61,7 +62,7 @@ def classify_lane(
     if not was_matched and facts.get("last_route_source") == EXACT_APPROVED:
         return HUMAN_HANDOFF
     if was_matched and facts.get("last_route_source") in {
-        SYSTEM_CONVERSATION, EXACT_APPROVED, GROUNDED_DERIVED,
+        SYSTEM_CONVERSATION, EXACT_APPROVED, GROUNDED_DERIVED, SOURCE_DESCRIPTION,
     }:
         return facts["last_route_source"]
     if (

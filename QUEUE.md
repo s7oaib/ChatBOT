@@ -179,6 +179,23 @@ Risk: High
 - Reconcile 19 legacy Story/Admin tests that expect source-route, guard-template, or dynamic weekly-menu answers now blocked by the earlier client-approved-only Instagram policy; preserve the approved-knowledge boundary during that update.
 - Admin auth/CSRF, webhook/privacy, migration/restart, full repository suite, live staging Instagram acceptance, and production validation.
 
+### Q-006 — Simple Instagram Source Context Mapping
+
+Status: IMPLEMENTED / VALIDATION_PENDING
+Risk: Medium/High
+
+#### Implemented
+- Unified client-facing Topic, source-specific Description, optional Menu/Attachment, and Auto Reply controls for Posts, Reels, and Stories; technical route modes remain internal.
+- Additive durable source-description column on exact-ID route records; existing rows retain blank descriptions and compatibility fields.
+- Source-reference questions use only the saved Description; explicit business questions and later topic switches retain Q-005 approved-answer precedence.
+- Delete Mapping removes only chatbot context, retaining Instagram inventory, Topics, and menu assets.
+
+#### Deferred validation
+- Full UI visual/browser sweep and large gallery performance.
+- All source-context ambiguity combinations, Story historical compatibility, and Q-005 legacy-test reconciliation.
+- A widened legacy Story routing run surfaced 52 old-assumption failures across four Story/source-referential modules; reconcile their expectations against the Q-005 approved-only policy before release. One separate Admin runtime test still expects the removed archived-list request.
+- Admin auth/CSRF, webhook/privacy, exhaustive migration/restart, full repository suite, live staging Instagram acceptance, and production validation.
+
 ---
 
 # Final release gate

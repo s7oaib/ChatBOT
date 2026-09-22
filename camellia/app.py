@@ -765,6 +765,14 @@ def _process_instagram_event(
                 facts["source_priority_cursor"] = 0
                 facts["active_product_context"] = None
         elif isinstance(facts.get("source_route"), dict):
+            stored_route_id = facts["source_route"].get("routing_id")
+            stored_route = db.get_instagram_source_route(int(stored_route_id)) if stored_route_id else None
+            if stored_route_id and (not stored_route or not stored_route.get("active") or stored_route.get("archived_at")):
+                facts["source_route"] = None
+                facts["source_context_superseded"] = True
+                stored_route = None
+            elif stored_route:
+                facts["source_route"] = decode_route(stored_route)
             if source_media_present:
                 # An unmapped source must not borrow a previous route. Its
                 # written question still goes through canonical intent
@@ -865,6 +873,7 @@ def _process_instagram_event(
         informational_templates = {
             "system_conversation",
             "grounded_derived",
+            "source_description",
             "opening_hours",
             "subscription_details",
             "sondesh_dispatch_time",
@@ -3113,6 +3122,64 @@ async def update_instagram_media(item_id: int, request: Request, x_admin_key: Op
     if not updated: raise HTTPException(status_code=404, detail="Instagram media not found.")
     updated["needs_review"] = bool(updated["needs_review"])
     return {"status": "success", "item": updated}
+
+
+@app.put("/admin/instagram-media/{item_id}/mapping")
+async def save_instagram_media_mapping(item_id: int, request: Request, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    """Client-facing mapping save; technical route modes stay internal."""
+    require_admin(x_admin_key, x_admin_pin)
+    item = db.get_instagram_media(item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Instagram media not found.")
+    body = await request.json()
+    topic_id = str(body.get("topic_id") or "").strip()
+    if not topic_id:
+        raise HTTPException(status_code=400, detail="Choose a Topic.")
+    existing = db.get_instagram_source_route(int(item["custom_route_id"])) if item.get("custom_route_id") else None
+    if existing and existing.get("media_id") != item["instagram_media_id"]:
+        existing = None
+    source_type = "reel" if item["media_type"] == "VIDEO" else "post"
+    if existing is None:
+        existing = next((route for route in db.list_instagram_source_routes()
+                         if route.get("media_id") == item["instagram_media_id"] and route.get("source_type") == source_type), None)
+    route_body = {
+        "source_type": source_type, "url": item.get("permalink") or "",
+        "media_id": item["instagram_media_id"], "shortcode": item.get("shortcode"),
+        "topic_id": topic_id, "source_description": body.get("source_description") or "",
+        "menu_id": body.get("menu_id"), "menu_mode": body.get("menu_mode") or "NONE",
+        "preview_url": item.get("thumbnail_url") or item.get("media_url"),
+        "media_type": item["media_type"], "active": body.get("auto_reply_enabled", True),
+        "escalation_policy": (existing or {}).get("escalation_policy") or "human_if_unsupported",
+        "priority_products": json.loads(existing["priority_products"]) if existing else [],
+        "knowledge_scope": json.loads(existing["knowledge_scope"]) if existing else [],
+    }
+    try:
+        route = validate_route_payload(route_body)
+        saved = db.save_instagram_source_route(route, int(existing["routing_id"]) if existing else None)
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    updated = db.update_instagram_media_route(
+        item_id, route_mode="CUSTOM" if route["active"] else "DISABLED",
+        topic_id=topic_id, custom_route_id=int(saved["routing_id"]), needs_review=False,
+    )
+    return {"status": "success", "item": updated, "route": decode_route(saved)}
+
+
+@app.delete("/admin/instagram-media/{item_id}/mapping")
+def delete_instagram_media_mapping(item_id: int, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    item = db.get_instagram_media(item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Instagram media not found.")
+    route = db.get_instagram_source_route(int(item["custom_route_id"])) if item.get("custom_route_id") else None
+    if route is None:
+        route = next((candidate for candidate in db.list_instagram_source_routes()
+                      if candidate.get("media_id") == item["instagram_media_id"]
+                      and candidate.get("source_type") == ("reel" if item["media_type"] == "VIDEO" else "post")), None)
+    if route and route.get("media_id") == item["instagram_media_id"]:
+        db.archive_instagram_source_route(int(route["routing_id"]))
+    db.update_instagram_media_route(item_id, route_mode="DEFAULT", topic_id=None, custom_route_id=None, needs_review=False)
+    return {"status": "success", "mapping_removed": True, "instagram_media_id": item["instagram_media_id"]}
 
 
 @app.get("/admin/instagram-story-sources")
@@ -6792,9 +6859,9 @@ def get_admin_dashboard():
         </div>
 
         <div id="tab-ad-routing" class="panel-card" data-group="instagram_content" style="display: none;">
-            <div class="admin-breadcrumb"><button type="button" onclick="setInstagramContentSubview('gallery')">← Back to Posts &amp; Reels</button><span>/</span><b>Routing</b></div>
+            <div class="admin-breadcrumb"><button type="button" onclick="setInstagramContentSubview('gallery')">← Back to Posts &amp; Reels</button><span>/</span><b>Mapping</b></div>
             <div class="panel-header">
-                <h2>📣 Posts &amp; Reels Routing</h2>
+                <h2>📣 Posts &amp; Reels Mapping</h2>
                 <p>Connect an Instagram post or reel to a Topic using the exact Meta ID derived from its canonical link. Story routing remains in Instagram Stories.</p>
             </div>
             <div class="ad-routing-form">
@@ -6818,25 +6885,30 @@ def get_admin_dashboard():
                     <select class="field-control" id="igTopicPicker" onchange="onIgTopicChange()" style="flex:1; min-width:220px;"><option value="">Select Topic</option></select>
                     <button class="btn-secondary" type="button" onclick="openTopicModal('', 'igTopicPicker')">+ Add Topic</button>
                     <button class="btn-secondary" id="igEditTopicButton" type="button" onclick="openTopicEditor()" disabled>Edit Topic</button>
+                    <button class="btn-danger" type="button" onclick="deleteTopicFromPicker('igTopicPicker')">Delete Topic</button>
                 </div>
                 <small id="igTopicEmptyHelp" class="ig-media-muted" style="display:none; margin-top:6px;">No active Topics are configured yet. Use + Add Topic to create one before saving Instagram routing.</small>
             </div>
 
+            <div style="margin-top:14px;"><label class="field-label" for="igSourceDescription">Description</label><textarea class="field-control" id="igSourceDescription" rows="3" placeholder="What is this post or reel about?"></textarea></div>
+
             <div style="margin-top:14px;">
-                <label class="field-label" for="igMenuPicker">Menu to send</label>
+                <label class="field-label" for="igMenuPicker">Menu / Attachments</label>
                 <div style="display:flex; gap:8px; flex-wrap:wrap;">
                     <select class="field-control" id="igMenuPicker" onchange="onInstagramMenuChoiceChange()" style="flex:1; min-width:220px;"><option value="__inherit__">Inherit topic default</option><option value="__none__">No menu</option></select>
                     <button class="btn-secondary" type="button" onclick="openMenuModal('igMenuPicker')">+ Add Menu</button>
+                    <button class="btn-secondary" type="button" onclick="openMenuEditModal(encodeURIComponent(document.getElementById('igMenuPicker').value))">Edit</button>
+                    <button class="btn-secondary" type="button" onclick="document.getElementById('igMenuPicker').value='__none__'">Remove</button>
                 </div>
                 <small class="ig-media-muted" style="display:block; margin-top:6px;">Choose the menu customers should receive when this content starts the conversation.</small>
                 <small id="igMenuWarning" style="display:none; margin-top:6px; color:var(--danger); font-weight:700;"></small>
             </div>
 
             <label style="display:flex; align-items:center; gap:8px; margin-top:12px; font-size:0.84rem; font-weight:700;">
-                <input type="checkbox" id="igActive" checked> Active
+                <input type="checkbox" id="igActive" checked> Auto reply from this source
             </label>
 
-            <details id="igAdvancedSettings" style="margin-top:12px;"><summary style="cursor:pointer;"><b>Advanced settings</b></summary>
+            <details id="igAdvancedSettings" style="display:none;"><summary><b>Internal compatibility settings</b></summary>
                 <div id="igTopicPreview" style="display:none; margin-top:12px; background:#FCFBF9; border:1px solid var(--border); border-radius:10px; padding:14px; font-size:0.85rem;">
                     <div style="font-size:0.76rem; color:var(--text-muted); margin-bottom:6px;">Topic preview</div>
                     <h3 id="igTopicPreviewName" style="margin:0; font-size:1rem; color:var(--primary);"></h3>
@@ -6874,7 +6946,7 @@ def get_admin_dashboard():
                 <button class="tab-btn active" type="button" id="igRouteTabActiveBtn" onclick="switchIgRouteTab('active')" style="border-radius:8px 8px 0 0;">Active</button>
             </div>
             <div class="ig-media-toolbar" aria-label="Connected Instagram media filters">
-                <input class="field-control ig-media-search" id="igMediaSearch" type="search" placeholder="Search permalink, shortcode, Topic, description, or routing ID" oninput="filterInstagramMedia()">
+                <input class="field-control ig-media-search" id="igMediaSearch" type="search" placeholder="Search Posts and Reels by link or Topic" oninput="filterInstagramMedia()">
                 <button class="ig-media-filter active" type="button" data-media-filter="all" onclick="setInstagramMediaFilter('all')">All</button>
                 <button class="ig-media-filter" type="button" data-media-filter="post" onclick="setInstagramMediaFilter('post')">Posts</button>
                 <button class="ig-media-filter" type="button" data-media-filter="reel" onclick="setInstagramMediaFilter('reel')">Reels</button>
@@ -6920,8 +6992,9 @@ def get_admin_dashboard():
                     </div>
                     <span id="igStoryEditingLabel" class="ig-media-muted"></span>
                 </div>
+                <div id="igStoryMappingPreview" class="ig-media-preview" style="max-width:240px;margin:12px 0;"></div>
                 <div class="ig-story-form-grid">
-                    <div style="grid-column:1/-1;">
+                    <div style="grid-column:1/-1;display:none;">
                         <label class="field-label" for="igStoryMediaId">Story media ID</label>
                         <input class="field-control ig-story-readonly" id="igStoryMediaId" readonly aria-readonly="true" autocomplete="off">
                     </div>
@@ -6931,23 +7004,27 @@ def get_admin_dashboard():
                             <select class="field-control" id="igStoryTopicPicker" style="flex:1; min-width:180px;"><option value="">Select Topic</option></select>
                             <button class="btn-secondary" type="button" onclick="openTopicModal('', 'igStoryTopicPicker')">+ Add Topic</button>
                             <button class="btn-secondary" id="igStoryEditTopicButton" type="button" onclick="openStoryTopicEditor()" disabled>Edit Topic</button>
+                            <button class="btn-danger" type="button" onclick="deleteTopicFromPicker('igStoryTopicPicker')">Delete Topic</button>
                         </div>
                         <small id="igStoryTopicEmptyHelp" class="ig-media-muted" style="display:none; margin-top:6px;">No active Topics are configured yet. Create a Topic above, then choose it here.</small>
                     </div>
+                    <div style="grid-column:1/-1;"><label class="field-label" for="igStorySourceDescription">Description</label><textarea class="field-control" id="igStorySourceDescription" rows="3" placeholder="What is this story about?"></textarea></div>
                     <div style="grid-column:1/-1;">
-                        <label class="field-label" for="igStoryMenuPicker">Menu to send</label>
+                        <label class="field-label" for="igStoryMenuPicker">Menu / Attachments</label>
                         <div style="display:flex; gap:8px; align-items:flex-start; flex-wrap:wrap;">
                             <select class="field-control" id="igStoryMenuPicker" style="flex:1; min-width:220px;"><option value="__inherit__">Inherit topic default</option><option value="__none__">No menu</option></select>
                             <button class="btn-secondary" type="button" onclick="openMenuModal('igStoryMenuPicker')">+ Add Menu</button>
+                            <button class="btn-secondary" type="button" onclick="openMenuEditModal(encodeURIComponent(document.getElementById('igStoryMenuPicker').value))">Edit</button>
+                            <button class="btn-secondary" type="button" onclick="document.getElementById('igStoryMenuPicker').value='__none__'">Remove</button>
                         </div>
                         <small class="ig-media-muted" style="display:block; margin-top:6px;">Choose the menu customers should receive when this content starts the conversation.</small>
                         <small id="igStoryMenuWarning" style="display:none; margin-top:6px; color:var(--danger); font-weight:700;"></small>
                     </div>
                 </div>
                 <label style="display:flex; align-items:center; gap:8px; margin-top:12px; font-size:0.84rem; font-weight:700;">
-                    <input type="checkbox" id="igStoryActive" checked> Active
+                    <input type="checkbox" id="igStoryActive" checked> Auto reply from this source
                 </label>
-                <details id="igStoryAdvancedSettings" style="margin-top:12px;"><summary style="cursor:pointer;"><b>Advanced settings</b></summary>
+                <details id="igStoryAdvancedSettings" style="display:none;"><summary><b>Internal compatibility settings</b></summary>
                     <div class="ig-story-form-grid" style="margin-top:10px;">
                         <div><label class="field-label" for="igStoryEscalationPolicy">Escalation policy</label><select class="field-control" id="igStoryEscalationPolicy"><option value="human_if_unsupported">Human if unsupported</option><option value="canonical">Normal canonical rules</option><option value="always_human">Always offer human help</option></select></div>
                         <div><label class="field-label" for="igStoryKnowledgeScope">Knowledge scope</label><select class="field-control" id="igStoryKnowledgeScope" multiple title="Optional canonical knowledge scope" size="3"></select></div>
@@ -6962,6 +7039,7 @@ def get_admin_dashboard():
                     <div style="display:flex; gap:8px; flex-wrap:wrap;">
                         <button class="btn-primary" id="igStorySaveButton" type="button">Save Mapping</button>
                         <button class="btn-secondary" id="igStoryCancelButton" type="button">Cancel</button>
+                        <button class="btn-danger" id="igStoryDeleteMappingButton" type="button" onclick="removeInstagramStoryMapping()" style="display:none;">Delete Mapping</button>
                     </div>
                 </div>
             </div>
@@ -8245,7 +8323,7 @@ THIS WEEK'S BENGAL SPECIALS
         }
 
         function instagramContentStatus(route) {
-            if (route.gallery_media) return route.route_mode || 'DEFAULT';
+            if (route.gallery_media) return route.mapping_route || route.topic_id ? 'Mapped' : 'Not mapped';
             if (route.archived_at) return 'ARCHIVED';
             if (!route.routing_topic && !route.topic_id) return 'UNMAPPED';
             return route.active === false ? 'ARCHIVED' : 'ACTIVE';
@@ -8273,7 +8351,7 @@ THIS WEEK'S BENGAL SPECIALS
         function renderInstagramContentCard(route) {
             const status = instagramContentStatus(route); const label = route.gallery_media ? (route.media_type === 'VIDEO' ? 'REEL' : route.media_type === 'CAROUSEL_ALBUM' ? 'CAROUSEL' : 'POST') : (route.source_type === 'reel' ? 'REEL' : 'POST'); const image = route.preview_url || route.admin_preview_url;
             const preview = image ? `<img class="ig-media-thumb" src="${escapeHtml(image)}" alt="${label} preview" onerror="this.style.display='none';this.nextElementSibling.style.display='flex';"><div class="ig-media-placeholder" style="display:none;"><span class="ig-media-placeholder-icon">◎</span><span>${label}</span></div>` : `<div class="ig-media-placeholder"><span class="ig-media-placeholder-icon">◎</span><span>${label}</span></div>`;
-            return `<article class="ig-media-card" tabindex="0" data-content-route-id="${escapeHtml(String(route.routing_id || ''))}"><div class="ig-media-preview">${preview}<span class="ig-media-badge">${label}</span></div><div class="ig-media-main"><div class="ig-media-title"><b class="ig-media-topic">${escapeHtml(route.routing_topic || 'Unmapped content')}</b><span class="ig-media-status ${status === 'ARCHIVED' || status === 'UNMAPPED' ? 'disabled' : ''}">${status}</span></div><div class="ig-media-summary">Meta ID: ${escapeHtml(route.media_id || 'Not connected')}</div><div class="ig-media-facts"><span><b>Route:</b> ${escapeHtml(route.menu_id || route.routing_topic || '—')}</span><span><b>Published:</b> ${escapeHtml(route.published_at || route.created_at || '—')}</span></div></div><div class="ig-media-actions"><button class="btn-secondary" type="button" data-content-action="details">View details</button></div></article>`;
+            return `<article class="ig-media-card" tabindex="0" data-content-route-id="${escapeHtml(String(route.routing_id || ''))}"><div class="ig-media-preview">${preview}<span class="ig-media-badge">${label}</span></div><div class="ig-media-main"><div class="ig-media-title"><b class="ig-media-topic">${escapeHtml(route.routing_topic ? 'Mapped to: ' + route.routing_topic : 'Not mapped')}</b></div><div class="ig-media-summary">${escapeHtml(route.source_description || 'No description added.')}</div><div class="ig-media-facts"><span><b>Auto reply:</b> ${(route.mapping_route?.active || (!route.mapping_route && route.topic_id && route.route_mode !== 'DISABLED')) ? 'Active' : 'Off'}</span><span><b>Published:</b> ${escapeHtml(route.published_at || route.created_at || '—')}</span></div></div><div class="ig-media-actions"><button class="btn-secondary" type="button" data-content-action="details">${route.mapping_route || route.topic_id ? 'Edit Mapping' : label === 'REEL' ? 'Map Reel' : 'Map Post'}</button></div></article>`;
         }
 
         function renderInstagramContentGallery() {
@@ -8289,7 +8367,7 @@ THIS WEEK'S BENGAL SPECIALS
             });
             if (!filtered.length) { list.innerHTML = '<span class="ig-media-muted">No Instagram media matches this filter.</span>'; return; }
             if (igContentView === 'table') {
-                list.className = ''; list.innerHTML = `<table class="instagram-table"><thead><tr><th>Type</th><th>Exact Meta ID</th><th>Topic / intent</th><th>Route</th><th>Status</th><th></th></tr></thead><tbody>${filtered.map(route => `<tr><td>${route.source_type === 'reel' ? 'Reel' : 'Post'}</td><td><code>${escapeHtml(route.media_id || 'Not connected')}</code></td><td>${escapeHtml(route.routing_topic || 'Unmapped')}</td><td>${escapeHtml(route.menu_id || '—')}</td><td>${instagramContentStatus(route)}</td><td><button class="btn-secondary" type="button" data-content-table-id="${escapeHtml(String(route.routing_id || ''))}" style="padding:6px 9px;font-size:.72rem;">Details</button></td></tr>`).join('')}</tbody></table>`;
+                list.className = ''; list.innerHTML = `<table class="instagram-table"><thead><tr><th>Type</th><th>Topic</th><th>Attachment</th><th>Auto reply</th><th></th></tr></thead><tbody>${filtered.map(route => `<tr><td>${route.source_type === 'reel' ? 'Reel' : 'Post'}</td><td>${escapeHtml(route.routing_topic || 'Not mapped')}</td><td>${escapeHtml((igMenus.find(menu => menu.menu_id === route.menu_id) || {}).name || 'None')}</td><td>${route.mapping_route?.active ? 'Active' : 'Off'}</td><td><button class="btn-secondary" type="button" data-content-table-id="${escapeHtml(String(route.routing_id || ''))}" style="padding:6px 9px;font-size:.72rem;">${route.mapping_route ? 'Edit Mapping' : 'Map'}</button></td></tr>`).join('')}</tbody></table>`;
                 list.querySelectorAll('[data-content-table-id]').forEach(button => button.addEventListener('click', () => openContentDetails('content', igContentRoutes.find(route => String(route.routing_id) === button.dataset.contentTableId))));
                 return;
             }
@@ -8301,11 +8379,12 @@ THIS WEEK'S BENGAL SPECIALS
             if (!adminAuthenticated) return;
             const list = document.getElementById('igContentGallery'); if (!list) return;
             try {
+                if (!igTopics.length) await loadTopicsAndMenus();
                 const responses = await Promise.all([fetch('/admin/instagram-media?page_size=100', { headers: getAuthHeaders() }), fetch('/admin/instagram-routes', { headers: getAuthHeaders() })]);
                 const payloads = await Promise.all(responses.map(response => response.json().catch(() => ({})))); const response = responses[0]; const payload = payloads[0];
                 if (!response.ok) throw new Error(payload.detail || 'Could not load Instagram media.');
                 window.igGalleryCustomRoutes = payloads[1].routes || [];
-                igContentRoutes = (payload.items || []).map(item => ({ ...item, gallery_media: true, routing_id: item.id, media_id: item.instagram_media_id, preview_url: item.thumbnail_url || item.media_url, canonical_url: item.permalink, source_type: item.media_type === 'VIDEO' ? 'reel' : 'post', routing_topic: item.topic_id || '', menu_id: item.custom_route_id || '' })); window.igContentRoutes = igContentRoutes; renderInstagramContentGallery();
+                igContentRoutes = (payload.items || []).map(item => { const mapping = (window.igGalleryCustomRoutes || []).find(route => route.media_id === item.instagram_media_id && !route.archived_at); const topicId = (mapping || {}).topic_id || item.topic_id; const topic = igTopics.find(t => t.topic_id === topicId); return { ...item, gallery_media: true, routing_id: item.id, media_id: item.instagram_media_id, preview_url: item.thumbnail_url || item.media_url, canonical_url: item.permalink, source_type: item.media_type === 'VIDEO' ? 'reel' : 'post', routing_topic: topic?.name || mapping?.routing_topic || '', source_description: mapping?.source_description || '', menu_id: mapping?.menu_id || null, mapping_route: mapping || null }; }); window.igContentRoutes = igContentRoutes; renderInstagramContentGallery();
             } catch (error) { list.innerHTML = `<span style="color:var(--danger);">${escapeHtml(error.message || 'Could not load Instagram content.')}</span>`; }
         }
 
@@ -8324,12 +8403,14 @@ THIS WEEK'S BENGAL SPECIALS
             if (item.gallery_media) {
                 const drawer = document.getElementById('contentDetailsDrawer'); const backdrop = document.getElementById('contentDetailsBackdrop');
                 const typeLabel = item.media_type === 'VIDEO' ? 'Instagram Reel' : item.media_type === 'CAROUSEL_ALBUM' ? 'Instagram Carousel' : 'Instagram Post';
-                document.getElementById('contentDetailsType').innerText = typeLabel; document.getElementById('contentDetailsTitle').innerText = item.route_mode || 'DEFAULT';
+                document.getElementById('contentDetailsType').innerText = typeLabel; document.getElementById('contentDetailsTitle').innerText = `What is this ${item.source_type} about?`;
                 const image = item.preview_url; document.getElementById('contentDetailsPreview').innerHTML = image ? `<img src="${escapeHtml(image)}" alt="${escapeHtml(typeLabel)} preview">` : '<div style="font-size:3rem;color:#8b97a8;">◎</div>';
                 document.getElementById('contentDetailsFacts').innerHTML = [['Published', item.published_at || 'Not supplied'], ['Instagram permalink', item.permalink || 'Not supplied'], ['Exact Meta Media ID', item.instagram_media_id], ['Caption', 'Instagram caption — context only'], ['Caption text', item.caption || 'Not supplied']].map(([label, value]) => `<div class="drawer-fact"><span class="drawer-fact-label">${escapeHtml(label)}</span><span class="drawer-fact-value">${escapeHtml(value)}</span></div>`).join('');
-                const topicOptions = ['<option value="">Normal defaults</option>', ...(window.igTopics || []).filter(t => t.active).map(t => `<option value="${escapeHtml(t.topic_id)}" ${t.topic_id === item.topic_id ? 'selected' : ''}>${escapeHtml(t.name)}</option>`)].join('');
-                const routeOptions = ['<option value="">Choose existing route</option>', ...(window.igGalleryCustomRoutes || []).map(r => `<option value="${Number(r.routing_id)}" ${Number(r.routing_id) === Number(item.custom_route_id) ? 'selected' : ''}>${escapeHtml(r.routing_topic || `Route #${r.routing_id}`)}</option>`)].join('');
-                document.getElementById('contentDetailsActions').innerHTML = `<label class="field-label">Route mode <select class="field-control" id="igMediaRouteMode"><option ${item.route_mode === 'DEFAULT' ? 'selected' : ''}>DEFAULT</option><option ${item.route_mode === 'CUSTOM' ? 'selected' : ''}>CUSTOM</option><option ${item.route_mode === 'DISABLED' ? 'selected' : ''}>DISABLED</option></select></label><label class="field-label">Topic <select class="field-control" id="igMediaTopic">${topicOptions}</select></label><label class="field-label">Custom route <select class="field-control" id="igMediaCustomRoute">${routeOptions}</select></label><label style="display:block;font-size:.82rem;"><input type="checkbox" id="igMediaReview" ${item.needs_review ? 'checked' : ''}> Needs review</label><button class="btn-secondary" type="button" onclick="saveInstagramMediaRoute(${Number(item.id)})">Save</button>${item.permalink ? `<a class="btn-secondary" target="_blank" rel="noopener" href="${escapeHtml(item.permalink)}">Open on Instagram</a>` : ''}`;
+                const selectedTopic = item.mapping_route?.topic_id || item.topic_id;
+                const topicOptions = ['<option value="">Select Topic</option>', ...igTopics.filter(t => t.active || t.topic_id === selectedTopic).map(t => `<option value="${escapeHtml(t.topic_id)}" ${t.topic_id === selectedTopic ? 'selected' : ''}>${escapeHtml(t.name)}</option>`)].join('');
+                const selectedMenu = item.mapping_route?.menu_mode === 'NONE' ? '__none__' : item.menu_id || '__none__';
+                const menuOptions = `<option value="__none__">No attachment</option>${igMenus.map(menu => `<option value="${escapeHtml(menu.menu_id)}" ${menu.menu_id === selectedMenu ? 'selected' : ''}>${escapeHtml(menu.name)}</option>`).join('')}`;
+                document.getElementById('contentDetailsActions').innerHTML = `<label class="field-label">Topic</label><div style="display:flex;gap:6px;flex-wrap:wrap;"><select class="field-control" id="igMediaTopic" style="flex:1;">${topicOptions}</select><button class="btn-secondary" type="button" onclick="openTopicModal('', 'igMediaTopic')">+ Add Topic</button><button class="btn-secondary" type="button" onclick="openTopicModal(document.getElementById('igMediaTopic').value, 'igMediaTopic')">Edit</button><button class="btn-danger" type="button" onclick="deleteTopicFromPicker('igMediaTopic')">Delete Topic</button></div><label class="field-label" for="igMediaDescription">Description</label><textarea class="field-control" id="igMediaDescription" rows="4" placeholder="Describe what this ${item.source_type} is about.">${escapeHtml(item.source_description || '')}</textarea><label class="field-label">Menu / Attachments</label><div style="display:flex;gap:6px;flex-wrap:wrap;"><select class="field-control" id="igMediaMenu" style="flex:1;">${menuOptions}</select><button class="btn-secondary" type="button" onclick="openMenuModal('igMediaMenu')">+ Add Menu / Image</button><button class="btn-secondary" type="button" onclick="openMenuEditModal(encodeURIComponent(document.getElementById('igMediaMenu').value))">Edit</button><button class="btn-secondary" type="button" onclick="document.getElementById('igMediaMenu').value='__none__'">Remove</button></div><label style="display:block;margin:12px 0;"><input type="checkbox" id="igMediaAutoReply" ${item.mapping_route?.active || (!item.mapping_route && item.route_mode !== 'DISABLED') ? 'checked' : ''}> Auto reply from this source</label><button class="btn-primary" type="button" onclick="saveInstagramMediaRoute(${Number(item.id)})">Save Mapping</button>${item.permalink ? `<a class="btn-secondary" target="_blank" rel="noopener" href="${escapeHtml(item.permalink)}">Open on Instagram</a>` : ''}${item.mapping_route || item.topic_id ? `<button class="btn-danger" type="button" onclick="deleteInstagramMediaMapping(${Number(item.id)})">Delete Mapping</button>` : ''}`;
                 drawer.classList.add('open'); backdrop.classList.add('open'); drawer.setAttribute('aria-hidden', 'false'); backdrop.setAttribute('aria-hidden', 'false'); return;
             }
             const isStory = kind === 'story'; const route = isStory ? item : item; const drawer = document.getElementById('contentDetailsDrawer'); const backdrop = document.getElementById('contentDetailsBackdrop');
@@ -8349,9 +8430,17 @@ THIS WEEK'S BENGAL SPECIALS
         }
 
         async function saveInstagramMediaRoute(id) {
-            const payload = { route_mode: document.getElementById('igMediaRouteMode').value, topic_id: document.getElementById('igMediaTopic').value || null, custom_route_id: document.getElementById('igMediaCustomRoute').value || null, needs_review: document.getElementById('igMediaReview').checked };
-            const response = await fetch(`/admin/instagram-media/${id}`, { method: 'PATCH', headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-            if (!response.ok) { const data = await response.json().catch(() => ({})); alert(data.detail || 'Could not save media routing.'); return; }
+            const menu = document.getElementById('igMediaMenu').value;
+            const payload = { topic_id: document.getElementById('igMediaTopic').value, source_description: document.getElementById('igMediaDescription').value.trim(), menu_id: menu === '__none__' ? null : menu, menu_mode: menu === '__none__' ? 'NONE' : 'SELECTED', auto_reply_enabled: document.getElementById('igMediaAutoReply').checked };
+            const response = await fetch(`/admin/instagram-media/${id}/mapping`, { method: 'PUT', headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+            if (!response.ok) { const data = await response.json().catch(() => ({})); alert(data.detail || 'Could not save mapping.'); return; }
+            closeContentDetails(); await loadInstagramContentGallery();
+        }
+
+        async function deleteInstagramMediaMapping(id) {
+            if (!confirm('Remove this chatbot mapping? The Instagram content itself will not be deleted.')) return;
+            const response = await fetch(`/admin/instagram-media/${id}/mapping`, { method: 'DELETE', headers: getAuthHeaders() });
+            if (!response.ok) { alert('Could not remove mapping.'); return; }
             closeContentDetails(); await loadInstagramContentGallery();
         }
 
@@ -8748,6 +8837,10 @@ THIS WEEK'S BENGAL SPECIALS
                 const topicOptions = '<option value="">Select Topic</option>' + activeTopics.map(t =>
                     `<option value="${escapeHtml(t.topic_id)}">${escapeHtml(t.name)}</option>`).join('');
                 document.getElementById('igTopicPicker').innerHTML = topicOptions;
+                const mediaTopic = document.getElementById('igMediaTopic');
+                if (mediaTopic) { const previous = mediaTopic.value; mediaTopic.innerHTML = topicOptions; mediaTopic.value = previous; }
+                const mediaMenu = document.getElementById('igMediaMenu');
+                if (mediaMenu) { const previous = mediaMenu.value; mediaMenu.innerHTML = '<option value="__none__">No attachment</option>' + igMenus.map(m => `<option value="${escapeHtml(m.menu_id)}">${escapeHtml(m.name)}</option>`).join(''); mediaMenu.value = previous; }
                 const emptyHelp = document.getElementById('igTopicEmptyHelp');
                 if (emptyHelp) emptyHelp.style.display = activeTopics.length ? 'none' : 'block';
 
@@ -8840,6 +8933,7 @@ THIS WEEK'S BENGAL SPECIALS
             igResponseOrder = 'description_first';
             refreshMenuChoicePicker('igMenuPicker', '', '__inherit__');
             document.getElementById('igActive').checked = true;
+            document.getElementById('igSourceDescription').value = '';
             document.getElementById('igTopicDescription').value = '';
             document.getElementById('igEscalationPolicy').value='human_if_unsupported';
             Array.from(document.getElementById('igKnowledgeScope').options).forEach(option => option.selected=false);
@@ -8892,6 +8986,7 @@ THIS WEEK'S BENGAL SPECIALS
             document.getElementById('igCampaignId').value=route.campaign_id||'';
             document.getElementById('igEscalationPolicy').value=route.escalation_policy||'human_if_unsupported';
             document.getElementById('igActive').checked=route.active !== false;
+            document.getElementById('igSourceDescription').value=route.source_description||'';
             Array.from(document.getElementById('igKnowledgeScope').options).forEach(option=>option.selected=(route.knowledge_scope||[]).includes(option.value));
             renderIgPriorityProducts(); onIgTopicChange(true);
             setMenuChoiceFromRoute('igMenuPicker', 'igMenuWarning', route);
@@ -8906,7 +9001,7 @@ THIS WEEK'S BENGAL SPECIALS
             if (updateMenuChoiceWarning('igMenuPicker', 'igMenuWarning')) { result.style.display='block'; result.className='result-box error'; result.innerText='Choose an active menu or No menu before saving.'; return; }
             const menuChoice=menuChoiceParts(document.getElementById('igMenuPicker').value);
             const sourceType=document.getElementById('igSourceType').value;
-            const payload={routing_id:igEditingId,source_type:sourceType,url:sourceType==='story'?'':document.getElementById('igRouteUrl').value.trim(),topic_id:document.getElementById('igTopicPicker').value,menu_id:menuChoice.menu_id,menu_mode:menuChoice.menu_mode,media_id:document.getElementById('igMediaId').value.trim(),ad_id:document.getElementById('igAdId').value.trim(),campaign_id:document.getElementById('igCampaignId').value.trim(),preview_url:igMediaMetadata.preview_url,media_type:igMediaMetadata.media_type,escalation_policy:document.getElementById('igEscalationPolicy').value,priority_products:igPriority,knowledge_scope:Array.from(document.getElementById('igKnowledgeScope').selectedOptions).map(o=>o.value),active:document.getElementById('igActive').checked};
+            const payload={routing_id:igEditingId,source_type:sourceType,url:sourceType==='story'?'':document.getElementById('igRouteUrl').value.trim(),topic_id:document.getElementById('igTopicPicker').value,source_description:document.getElementById('igSourceDescription').value.trim(),menu_id:menuChoice.menu_id,menu_mode:menuChoice.menu_mode,media_id:document.getElementById('igMediaId').value.trim(),ad_id:document.getElementById('igAdId').value.trim(),campaign_id:document.getElementById('igCampaignId').value.trim(),preview_url:igMediaMetadata.preview_url,media_type:igMediaMetadata.media_type,escalation_policy:document.getElementById('igEscalationPolicy').value,priority_products:igPriority,knowledge_scope:Array.from(document.getElementById('igKnowledgeScope').selectedOptions).map(o=>o.value),active:document.getElementById('igActive').checked};
             const resp=await fetch('/admin/instagram-routes',{method:'POST',headers:{...getAuthHeaders(),'Content-Type':'application/json'},body:JSON.stringify(payload)});
             const data=await resp.json().catch(()=>({})); result.style.display='block';
             if(!resp.ok){result.className='result-box error';result.innerText=data.detail||'Could not save route.';return;}
@@ -9012,6 +9107,12 @@ THIS WEEK'S BENGAL SPECIALS
             const id = document.getElementById('igStoryTopicPicker').value;
             if (id) openTopicModal(id, 'igStoryTopicPicker');
         }
+        async function deleteTopicFromPicker(pickerId) {
+            const id = document.getElementById(pickerId)?.value;
+            if (!id) return;
+            openTopicModal(id, pickerId);
+            await deleteCurrentTopic();
+        }
         function closeTopicModal() { document.getElementById('topicModal').style.display = 'none'; }
 
         async function submitTopic() {
@@ -9052,7 +9153,7 @@ THIS WEEK'S BENGAL SPECIALS
             const usage = await fetch(`/admin/instagram-topics/${encodeURIComponent(id)}/usage`, { headers: getAuthHeaders() }).then(r => r.json());
             const total = Object.values(usage.references || {}).reduce((a, b) => a + Number(b || 0), 0);
             let replacement_topic_id = null, clear_associations = false;
-            if (total) { const options = igTopics.filter(t => t.topic_id !== id).map(t => `${t.topic_id}: ${t.name}`).join('\n'); const chosen = prompt(`This Topic is used by ${total} mapping(s). Enter a replacement Topic ID, or type CLEAR to remove the Topic association:\n${options}`); if (chosen === null) return; if (chosen.trim().toUpperCase() === 'CLEAR') clear_associations = true; else replacement_topic_id = chosen.trim(); }
+            if (total) { const options = igTopics.filter(t => t.topic_id !== id).map(t => t.name).join('\n'); const chosen = prompt(`This Topic is used by ${total} mapping(s). Enter a replacement Topic name, or type CLEAR to remove the Topic association:\n${options}`); if (chosen === null) return; if (chosen.trim().toUpperCase() === 'CLEAR') clear_associations = true; else replacement_topic_id = (igTopics.find(t => t.name.toLowerCase() === chosen.trim().toLowerCase()) || {}).topic_id || ''; if (!clear_associations && !replacement_topic_id) return alert('Choose an existing Topic name.'); }
             if (!confirm('Delete this Topic? This cannot be undone.')) return;
             const resp = await fetch(`/admin/instagram-topics/${encodeURIComponent(id)}`, { method: 'DELETE', headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ replacement_topic_id, clear_associations }) }); const data = await resp.json();
             if (!resp.ok) return alert(data.detail?.message || data.detail || 'Could not delete Topic.'); closeTopicModal(); await loadTopicsAndMenus();
@@ -9465,13 +9566,13 @@ THIS WEEK'S BENGAL SPECIALS
             const pairingNote = route.source_type === 'post' && route.media_id && route.pairing_status === 'bound' ? '<span class="ig-media-muted">Connected via Post Pairing</span>' : '';
             const detailsImage = (route.preview_url || route.admin_preview_url) ? instagramPreview(route, true) : '<span class="ig-media-muted">Preview unavailable; route remains active.</span>';
             const previewSource = route.preview_url ? 'Meta-provided preview' : route.admin_preview_url ? 'Admin preview fallback' : 'Placeholder';
-            const details = `<details class="ig-media-details"><summary style="cursor:pointer;">View Details</summary>${detailsImage}<div>Full permalink: ${escapeHtml(route.canonical_url || '—')}<br>Media ID: ${escapeHtml(route.media_id || '—')}<br>Media type: ${escapeHtml(route.media_type || '—')}<br>Shortcode: ${escapeHtml(route.shortcode || '—')}<br>Preview source: ${escapeHtml(previewSource)}<br>Topic: ${escapeHtml(route.routing_topic || 'Instagram content')}<br>Description: ${escapeHtml(description || '—')}<br>Menu mode: ${escapeHtml(route.menu_mode || 'INHERIT')}<br>Selected menu: ${escapeHtml(route.menu_id || '—')}<br>Routing ID: ${escapeHtml(String(route.routing_id || '—'))}<br>Updated: ${escapeHtml(route.updated_at || route.created_at || '—')}<br>Priority: ${escapeHtml(priority)}</div></details>`;
+            const details = `<details class="ig-media-details"><summary style="cursor:pointer;">Details</summary>${detailsImage}<div>Topic: ${escapeHtml(route.routing_topic || 'Not mapped')}<br>Description: ${escapeHtml(route.source_description || 'No description added.')}<br>Updated: ${escapeHtml(route.updated_at || route.created_at || '—')}</div></details>`;
             let actions = '';
             if (route.archived_at) {
                 actions = `<button class="btn-secondary" type="button" onclick="restoreInstagramRoute(${route.routing_id})">Restore</button> <button class="btn-danger" type="button" onclick="openIgRemoveModal(${route.routing_id})">Delete</button>`;
             } else if (route.routing_id) {
                 const connect = route.source_type === 'post' ? `<button class="btn-secondary" type="button" onclick="pairInstagramPost(${route.routing_id})">${route.media_id ? 'Reconnect Post' : 'Connect Post'}</button>` : '';
-                actions = `<button class="btn-secondary" type="button" onclick="editInstagramRoute(${route.routing_id})">Edit</button><button class="btn-secondary" type="button" onclick="setInstagramRouteActive(${route.routing_id},${!route.active})">${route.active ? 'Disable' : 'Enable'}</button><button class="btn-danger" type="button" onclick="openIgRemoveModal(${route.routing_id})">Delete</button>${connect}`;
+                actions = `<button class="btn-secondary" type="button" onclick="editInstagramRoute(${route.routing_id})">Edit Mapping</button><button class="btn-secondary" type="button" onclick="setInstagramRouteActive(${route.routing_id},${!route.active})">${route.active ? 'Auto reply: On' : 'Auto reply: Off'}</button><button class="btn-danger" type="button" onclick="openIgRemoveModal(${route.routing_id})">Delete Mapping</button>${connect}`;
             } else {
                 actions = `<button class="btn-danger" type="button" onclick="removeAdRoute('${escapeHtml(route.ad_id || '')}')">Remove</button>`;
             }
@@ -9590,18 +9691,20 @@ THIS WEEK'S BENGAL SPECIALS
         function openInstagramStoryMapping(mediaId) {
             const source = igStorySources.find(item => String(item.story_media_id || '') === String(mediaId || '')) || { story_media_id: mediaId || '' };
             const status = String(source.mapping_status || source.status || 'UNMAPPED').toUpperCase();
-            if (status === 'ARCHIVED') return;
-            const routeId = source.routing_id ? Number(source.routing_id) : null;
+            const routeId = status !== 'ARCHIVED' && source.routing_id ? Number(source.routing_id) : null;
             igStoryEditingRoutingId = routeId;
             igStoryPriority = [...(source.priority_products || [])];
             document.getElementById('igStoryMediaId').value = source.story_media_id || '';
+            document.getElementById('igStoryMappingPreview').innerHTML = '<span>Instagram Story preview unavailable</span>';
             document.getElementById('igStoryTopicPicker').value = source.topic_id || '';
+            document.getElementById('igStorySourceDescription').value = source.source_description || '';
             refreshMenuChoicePicker('igStoryMenuPicker', source.topic_id || '', menuChoiceForRoute(source));
             setMenuChoiceFromRoute('igStoryMenuPicker', 'igStoryMenuWarning', source);
             document.getElementById('igStoryEscalationPolicy').value = source.escalation_policy || 'human_if_unsupported';
             document.getElementById('igStoryActive').checked = source.active !== false && status !== 'DISABLED';
             Array.from(document.getElementById('igStoryKnowledgeScope').options).forEach(option => option.selected = (source.knowledge_scope || []).includes(option.value));
-            document.getElementById('igStoryEditingLabel').innerText = routeId ? `Editing routing #${routeId}` : 'New mapping';
+            document.getElementById('igStoryEditingLabel').innerText = routeId ? 'Edit Mapping' : 'New mapping';
+            document.getElementById('igStoryDeleteMappingButton').style.display = routeId ? '' : 'none';
             document.getElementById('igStorySaveButton').innerText = routeId ? 'Save Changes' : 'Save Mapping';
             document.getElementById('igStoryAdvancedSettings').open = false;
             const editTopicButton = document.getElementById('igStoryEditTopicButton');
@@ -9615,6 +9718,8 @@ THIS WEEK'S BENGAL SPECIALS
         function cancelInstagramStoryMapping() {
             igStoryEditingRoutingId = null;
             igStoryPriority = [];
+            document.getElementById('igStorySourceDescription').value = '';
+            document.getElementById('igStoryDeleteMappingButton').style.display = 'none';
             refreshMenuChoicePicker('igStoryMenuPicker', '', '__inherit__');
             document.getElementById('igStoryAdvancedSettings').open = false;
             document.getElementById('igStorySaveButton').innerText = 'Save Mapping';
@@ -9664,6 +9769,7 @@ THIS WEEK'S BENGAL SPECIALS
                 routing_id: igStoryEditingRoutingId,
                 source_type: 'story', url: '', media_id: mediaId, ad_id: '', campaign_id: '',
                 preview_url: null, media_type: 'story', topic_id: topicId,
+                source_description: document.getElementById('igStorySourceDescription').value.trim(),
                 menu_id: menuChoice.menu_id, menu_mode: menuChoice.menu_mode,
                 escalation_policy: document.getElementById('igStoryEscalationPolicy').value,
                 priority_products: igStoryPriority,
@@ -9700,6 +9806,15 @@ THIS WEEK'S BENGAL SPECIALS
                 const data = await response.json().catch(() => ({}));
                 if (!response.ok) throw new Error(data.detail || 'Could not archive Story mapping.');
                 await loadInstagramStories();
+            } catch (err) { showInstagramStoryResult('error', err.message || String(err)); }
+        }
+
+        async function removeInstagramStoryMapping(routingId = igStoryEditingRoutingId) {
+            if (!routingId || !confirm('Remove this chatbot mapping? The Instagram Story itself will not be deleted.')) return;
+            try {
+                const response = await fetch(`/admin/instagram-routes/${routingId}`, { method: 'DELETE', headers: getAuthHeaders() });
+                if (!response.ok) throw new Error('Could not remove Story mapping.');
+                cancelInstagramStoryMapping(); await loadInstagramStories();
             } catch (err) { showInstagramStoryResult('error', err.message || String(err)); }
         }
 
@@ -9761,24 +9876,26 @@ THIS WEEK'S BENGAL SPECIALS
             const sources = [...igStorySources].filter(storyMatches).sort((left, right) => storyTimestamp(right) - storyTimestamp(left));
             if (!sources.length) { list.innerHTML = '<p style="color:var(--text-muted);font-size:0.84rem;">No captured Stories match this filter.</p>'; return; }
             list.innerHTML = sources.map(source => {
-                const status = storyIsAdminDeleted(source)
+                const rawStatus = storyIsAdminDeleted(source)
                     ? 'DELETED'
                     : String(source.mapping_status || source.status || 'UNMAPPED').toUpperCase();
+                const status = rawStatus === 'ARCHIVED' ? 'UNMAPPED' : rawStatus;
                 const lifecycle = String(source.story_status || 'ACTIVE').toUpperCase();
                 const routeId = source.routing_id ? Number(source.routing_id) : null;
                 let actions = '';
                 if (status === 'DELETED') actions = `<button class="btn-secondary" type="button" data-story-action="restore-source" data-story-media-id="${escapeHtml(source.story_media_id || '')}">Restore</button>`;
-                else if (status === 'UNMAPPED') actions = `<button class="btn-secondary" type="button" data-story-action="map" data-story-media-id="${escapeHtml(source.story_media_id || '')}">Map Story</button><button class="btn-danger" type="button" data-story-action="delete" data-story-media-id="${escapeHtml(source.story_media_id || '')}">Delete</button>`;
-                else if (status === 'MAPPED') actions = `<button class="btn-secondary" type="button" data-story-action="edit" data-story-media-id="${escapeHtml(source.story_media_id || '')}">Edit</button><button class="btn-secondary" type="button" data-story-action="disable" data-routing-id="${routeId}">Disable</button><button class="btn-danger" type="button" data-story-action="delete" data-story-media-id="${escapeHtml(source.story_media_id || '')}">Delete</button>`;
-                else if (status === 'DISABLED') actions = `<button class="btn-secondary" type="button" data-story-action="edit" data-story-media-id="${escapeHtml(source.story_media_id || '')}">Edit</button><button class="btn-secondary" type="button" data-story-action="enable" data-routing-id="${routeId}">Enable</button><button class="btn-danger" type="button" data-story-action="delete" data-story-media-id="${escapeHtml(source.story_media_id || '')}">Delete</button>`;
-                else actions = `<button class="btn-secondary" type="button" data-story-action="restore" data-routing-id="${routeId}">Restore</button><button class="btn-danger" type="button" data-story-action="delete" data-story-media-id="${escapeHtml(source.story_media_id || '')}">Delete</button>`;
+                else if (status === 'UNMAPPED') actions = `<button class="btn-secondary" type="button" data-story-action="map" data-story-media-id="${escapeHtml(source.story_media_id || '')}">Map Story</button>`;
+                else if (status === 'MAPPED' || status === 'DISABLED') actions = `<button class="btn-secondary" type="button" data-story-action="edit" data-story-media-id="${escapeHtml(source.story_media_id || '')}">Edit Mapping</button><button class="btn-danger" type="button" data-story-action="delete-mapping" data-routing-id="${routeId}">Delete Mapping</button>`;
+                else actions = '';
                 const topic = source.routing_topic || 'Unmapped Story';
                 const isNewUnmapped = source.source === 'META_STORY_SYNC' && status === 'UNMAPPED';
                 // Sequence is an admin convenience label only — routing and
                 // mapping always use the exact story_media_id shown below.
                 const sequenceDisplay = source.story_sequence_display || 'Story — sequence unavailable';
-                const details = `<details class="ig-media-details"><summary style="cursor:pointer;">View details</summary><div>Meta Story ID: ${escapeHtml(source.story_media_id || '—')}<br>Routing ID: ${escapeHtml(String(routeId || '—'))}<br>Preview metadata: <span class="ig-story-preview-meta">${escapeHtml(storyPreviewMetadata(source.temporary_url))}</span><br>Media type: ${escapeHtml(source.media_type || 'Not supplied')}<br>Published: ${escapeHtml(source.published_at || 'Not supplied')}<br>Meta Story status: ${escapeHtml(lifecycle)}<br>Inventory source: ${escapeHtml(source.source || 'WEBHOOK_STORY_REPLY')}<br>First seen: ${escapeHtml(source.first_seen || '—')}<br>Last seen: ${escapeHtml(source.last_seen || '—')}</div></details>`;
-                return `<article class="ig-media-card ig-story-card" tabindex="0" data-story-media-id="${escapeHtml(source.story_media_id || '')}"><div class="ig-media-preview"><div class="ig-media-placeholder"><span class="ig-media-placeholder-icon">📖</span><span>STORY</span></div><span class="ig-media-badge">STORY</span></div><div class="ig-media-main"><div class="ig-media-title"><b class="ig-media-topic">${escapeHtml(topic)}</b><span class="ig-media-status ${storyStatusClass(status)}">${escapeHtml(status)}</span>${isNewUnmapped ? '<span class="ig-media-status">NEW / UNMAPPED</span>' : ''}</div><div class="ig-media-summary">${escapeHtml(sequenceDisplay)}</div><div class="ig-media-facts"><span><b>Exact ID:</b> ${escapeHtml(source.story_media_id || '—')}</span><span><b>Last seen:</b> ${escapeHtml(source.last_seen || '—')}</span><span><b>Meta status:</b> ${escapeHtml(lifecycle)}</span></div></div><div class="ig-media-actions">${actions}</div>${details}</article>`;
+                const details = `<details class="ig-media-details"><summary style="cursor:pointer;">Details</summary><div>Meta Story ID: ${escapeHtml(source.story_media_id || '—')}<br>Preview source: ${escapeHtml(storyPreviewMetadata(source.temporary_url))}<br>Media type: ${escapeHtml(source.media_type || 'Not supplied')}<br>Published: ${escapeHtml(source.published_at || 'Not supplied')}<br>Last seen: ${escapeHtml(source.last_seen || '—')}</div></details>`;
+                const mappingLabel = status === 'UNMAPPED' ? 'Not mapped' : `Mapped to: ${topic}`;
+                const autoLabel = status === 'MAPPED' ? 'Auto reply: Active' : 'Auto reply: Off';
+                return `<article class="ig-media-card ig-story-card" tabindex="0" data-story-media-id="${escapeHtml(source.story_media_id || '')}"><div class="ig-media-preview"><div class="ig-media-placeholder"><span class="ig-media-placeholder-icon">📖</span><span>STORY</span></div><span class="ig-media-badge">STORY</span></div><div class="ig-media-main"><div class="ig-media-title"><b class="ig-media-topic">${escapeHtml(mappingLabel)}</b></div><div class="ig-media-summary">${escapeHtml(source.source_description || sequenceDisplay)}</div><div class="ig-media-facts"><span>${autoLabel}</span><span><b>Last seen:</b> ${escapeHtml(source.last_seen || '—')}</span></div></div><div class="ig-media-actions">${actions}</div>${details}</article>`;
             }).join('');
             list.querySelectorAll('[data-story-action]').forEach(button => button.addEventListener('click', () => {
                 const action = button.dataset.storyAction;
@@ -9790,6 +9907,7 @@ THIS WEEK'S BENGAL SPECIALS
                 else if (action === 'restore') restoreInstagramStory(routingId);
                 else if (action === 'delete') deleteInstagramStory(button.dataset.storyMediaId || '');
                 else if (action === 'restore-source') restoreInstagramStorySource(button.dataset.storyMediaId || '', button);
+                else if (action === 'delete-mapping') removeInstagramStoryMapping(routingId);
             }));
             list.querySelectorAll('[data-story-media-id]').forEach(card => card.addEventListener('click', event => {
                 if (event.target.closest('button,a,summary')) return;

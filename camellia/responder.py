@@ -2576,6 +2576,30 @@ class DeterministicResponder:
                 session_memory.add_turn(user_id, channel, user_message, conversation_reply)
                 return conversation_reply, True, "system_conversation", None
 
+            source = facts.get("source_route") if isinstance(facts.get("source_route"), dict) else {}
+            source_description = str(source.get("source_description") or "").strip()
+            source_reference = bool(re.fullmatch(
+                r"\s*(?:what(?:'s| is| are)?|tell me|can you explain|explain)\s+"
+                r"(?:(?:me\s+)?(?:more\s+)?about\s+)?(?:this|that|the)\s*"
+                r"(?:(?:post|reel|story|video|photo)\s*)?(?:about)?\s*[?.!]*",
+                user_message, re.I,
+            ) or re.fullmatch(r"\s*what are you showing here[?.!]*\s*", user_message, re.I))
+            if source.get("active", True) and source_description and source_reference and (
+                not facts.get("source_context_superseded") or re.search(r"\b(?:post|reel|story|video|photo)\b", user_message, re.I)
+            ) and not re.search(
+                r"\b(?:sondesh|bento|subscription|price|cost|delivery|menu)\b", user_message, re.I,
+            ):
+                facts.update({
+                    "last_route_source": "SOURCE_DESCRIPTION",
+                    "last_knowledge_ids": [f"source_route:{source.get('routing_id')}"],
+                    "last_grounding": "explicit_admin_source_description",
+                    "last_actions": [BusinessAction.SEND_RESPONSE.value],
+                    "knowledge_sufficient": True,
+                    "source_context_used": True,
+                })
+                session_memory.add_turn(user_id, channel, user_message, source_description)
+                return source_description, True, "source_description", None
+
         # Asset requests are a deterministic intent class, so resolve them
         # before the broad client-approved-QA matcher can replay a canonical
         # topic answer.  An unresolved first-turn Story/Post/Reel request is
@@ -2623,7 +2647,26 @@ class DeterministicResponder:
             and not HOME_TABLE_RE.search(source_topic_text)
             and not explicit_client_subject
         )
-        client_qa_candidate = client_qa.match(user_message, facts)
+        price_followup = bool(re.fullmatch(r"\s*(?:price|cost|rate|how much)\s*[?.!]*\s*", user_message, re.I))
+        context_topic = str(facts.get("last_topic") or "").casefold()
+        source_topic = str(source_route.get("routing_topic") or "").casefold() if source_route_active else ""
+        contextual_price_topic = (
+            "sondesh" if context_topic.startswith("sondesh") else
+            "subscription" if context_topic == "subscription" else
+            "bento" if context_topic == "bento" else
+            "subscription" if "subscription" in source_topic else
+            "sondesh" if "sondesh" in source_topic else
+            "bento" if "bento" in source_topic else ""
+        ) if price_followup else ""
+        client_qa_candidate = client_qa.match(
+            f"{contextual_price_topic} price" if contextual_price_topic else user_message, facts,
+        )
+        if contextual_price_topic and context_topic:
+            facts["source_context_superseded"] = True
+            source_context_blocks_client_qa = False
+        elif contextual_price_topic and source_route_active:
+            source_context_blocks_client_qa = False
+            facts["source_context_used"] = True
         client_qa_flow_candidate = bool(
             client_qa_candidate
             and client_qa_candidate.entry.qa_id in {"alacarte_prebook", "order_prebook"}
@@ -2700,6 +2743,16 @@ class DeterministicResponder:
                     asset_missing.append(asset_key)
                 else:
                     asset_urls.extend(values)
+            if (
+                source_route_active and source_route
+                and str(source_route.get("menu_mode") or "").upper() == "SELECTED"
+                and source_route.get("menu_id")
+                and entry.context in str(source_route.get("routing_topic") or "").casefold()
+                and re.search(r"\b(?:price|rate|chart|menu)\b", user_message, re.I)
+            ):
+                mapped_image = current_menu_image(str(source_route["menu_id"]))
+                if mapped_image and mapped_image not in asset_urls:
+                    asset_urls.append(mapped_image)
             facts.update({
                 "last_route_source": "EXACT_APPROVED",
                 "last_intents": [entry.qa_id],
@@ -2734,6 +2787,8 @@ class DeterministicResponder:
             client_topic = TOPIC_MAP.get(_CLIENT_QA_TEMPLATE_IDS.get(entry.qa_id, ""))
             if client_topic:
                 facts["last_topic"] = client_topic
+                if explicit_client_subject:
+                    facts["source_context_superseded"] = True
             if entry.qa_id in {"bento_details_client", "bento_price_client"}:
                 facts["active_product_context"] = "bento"
             if entry.context == "home_table" and (
@@ -5611,7 +5666,7 @@ class DeterministicResponder:
             and facts_after_route.get("last_grounding") == "exact_approved"
         )
         if client_exact_route or facts_after_route.get("last_route_source") in {
-            "SYSTEM_CONVERSATION", "GROUNDED_DERIVED"
+            "SYSTEM_CONVERSATION", "GROUNDED_DERIVED", "SOURCE_DESCRIPTION"
         }:
             # The client-QA registry is itself the authoritative, versioned
             # source copy.  Replacing it with the older template quarantine

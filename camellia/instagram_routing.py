@@ -431,6 +431,9 @@ def validate_route_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     routing_topic = (
         topic["name"] if topic else str(payload.get("routing_topic") or "").strip()
     )
+    source_description = str(payload.get("source_description") or "").strip()
+    if len(source_description) > 2000:
+        raise ValueError("Description must be 2,000 characters or fewer.")
 
     preview_url = str(payload.get("preview_url") or "").strip() or None
     if preview_url and (len(preview_url) > 2000 or not preview_url.lower().startswith(("http://", "https://"))):
@@ -448,7 +451,7 @@ def validate_route_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     clean = {
         "source_type": source_type,
         "canonical_url": normalized.get("canonical_url"),
-        "shortcode": normalized.get("shortcode"),
+        "shortcode": normalized.get("shortcode") or (str(payload.get("shortcode") or "").strip() or None if media_id else None),
         "media_id": media_id,
         "ad_id": str(payload.get("ad_id") or "").strip() or None,
         "campaign_id": str(payload.get("campaign_id") or "").strip() or None,
@@ -458,6 +461,7 @@ def validate_route_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         "preview_url": str(payload.get("preview_url") or "").strip() or None,
         "media_type": str(payload.get("media_type") or "").strip() or None,
         "routing_topic": routing_topic,
+        "source_description": source_description,
         "knowledge_scope": scope,
         "escalation_policy": escalation,
         "priority_products": priority,
