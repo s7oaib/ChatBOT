@@ -145,6 +145,23 @@ Risk: Medium
 - Full client-Q&A completeness/byte comparison and guard-routing regression.
 - Admin auth/CSRF, migration/restart, webhook/privacy, gallery scale, full suite, and final production validation.
 
+### Q-004 — Client-approved-only Answers and Handoff Identity
+
+Status: IMPLEMENTED / VALIDATION_PENDING
+Risk: High
+
+#### Implemented
+- Enforced the attached client Q&A registry as the only Instagram customer-answer source.
+- Registry misses cannot reach legacy templates, learned answers, RAG, or Groq customer output.
+- Unsupported questions create/reuse an Instagram handoff with the exact approved manager notice and no automatic WhatsApp link.
+- Preserved exact sender ID and verified username together; Admin identity priority is username, sender ID, then generic label.
+- Added Admin handoff search across username, CAM reference, and sender ID.
+
+#### Deferred validation
+- Full approved-answer byte comparison and semantic-match boundary corpus.
+- Full conversation/source-routing, order, CAM, privacy, auth/CSRF, webhook, migration/restart, and repository regressions.
+- Staging Meta username-resolution acceptance without sending live messages.
+
 ---
 
 # Final release gate

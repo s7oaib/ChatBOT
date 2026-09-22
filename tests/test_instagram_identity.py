@@ -38,9 +38,9 @@ def _create_cam(identity):
             user_id, "Do you offer wedding gift wrapping?", "ad-identity",
             customer_identity=identity,
         )
-    match = re.search(r"CAM-\d{5,6}", send_reply.call_args.args[1])
-    assert match and escalated.call_count == 1
-    return user_id, match.group(0)
+    rows = [row for row in db.get_handoffs(limit=200) if row["source_user_id"] == user_id]
+    assert len(rows) == 1 and escalated.call_count == 1
+    return user_id, rows[0]["handoff_ref"]
 
 
 def test_username_available_is_stored_and_authenticated_admin_can_display_it():
@@ -61,11 +61,10 @@ def test_username_available_is_stored_and_authenticated_admin_can_display_it():
     item = next(entry for entry in response.json()["handoffs"] if entry["handoff_ref"] == handoff_ref)
     assert item["customer_display_name"] == "@bengalifoodie"
     assert item["customer_username"] == "bengalifoodie"
-    assert "customer_external_id" not in item
-    assert sender_id not in str(item)
+    assert item["customer_external_id"] == sender_id
 
 
-def test_username_unavailable_degrades_to_safe_anonymous_customer_label():
+def test_username_unavailable_falls_back_to_exact_sender_id():
     sender_id = _sender_id()
     _user_id, handoff_ref = _create_cam({
         "customer_external_id": sender_id,
@@ -74,9 +73,8 @@ def test_username_unavailable_degrades_to_safe_anonymous_customer_label():
     with patch.object(app_module, "require_admin", lambda *args, **kwargs: None):
         response = TestClient(app_module.app).get("/admin/handoffs?limit=200")
     item = next(entry for entry in response.json()["handoffs"] if entry["handoff_ref"] == handoff_ref)
-    assert "customer_external_id" not in item
-    assert item["customer_display_name"] == "Instagram customer"
-    assert sender_id not in str(item)
+    assert item["customer_external_id"] == sender_id
+    assert item["customer_display_name"] == sender_id
 
 
 def test_identity_lookup_returns_username_without_exposing_provider_payload(monkeypatch):

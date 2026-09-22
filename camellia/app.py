@@ -685,7 +685,6 @@ def _process_instagram_event(
     frees the loop and lets several customers be handled at once.
     """
     try:
-        identity_was_supplied = customer_identity is not None
         identity = customer_identity or (
             resolve_instagram_identity(sender_id).as_record()
             if resolve_identity else
@@ -902,8 +901,13 @@ def _process_instagram_event(
             bool(needs_escalation),
         )
         if needs_escalation:
-            contact_mode = handoff_contact_mode(
-                customer_message, template_id=template_id,
+            # A registry miss stays on Instagram even when the wording looks
+            # purchase-shaped (for example, a 200-box wedding enquiry). Only
+            # an approved order workflow may offer the WhatsApp continuation.
+            contact_mode = (
+                "support_callback"
+                if not was_matched and template_id is None
+                else handoff_contact_mode(customer_message, template_id=template_id)
             )
             reason = (
                 "Order Confirmation & Intake Request"
@@ -957,11 +961,6 @@ def _process_instagram_event(
                 response_text = customer_facing_notice(
                     finalized_order=template_id == "order_next_steps"
                 )
-                if contact_mode == "support_callback" and identity_was_supplied:
-                    response_text = (
-                        f"{response_text}\n\nPlease quote reference {handoff['handoff_ref']} "
-                        "when you follow up with our team."
-                    )
             link_message = (
                 customer_facing_link_message(handoff["handoff_ref"], order_summary)
                 if contact_mode == "whatsapp_order" else None
@@ -1706,7 +1705,7 @@ def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks
                         background_args = (sender_id, "", ad_id, entry_point)
                     background_tasks.add_task(
                         background_fn, *background_args,
-                        **({"resolve_identity": True} if background_fn is _process_instagram_event else {}),
+                        **({"resolve_identity": True, "instagram_username": entry_point.customer_username} if background_fn is _process_instagram_event else {}),
                     )
                     results.append({
                         "sender_id": sender_id,
@@ -1751,7 +1750,7 @@ def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks
                 background_tasks.add_task(
                     _process_instagram_event, sender_id, message_text, ad_id, entry_point,
                     shared_reel, shared_post_id, shared_source_type,
-                    None, None, True,
+                    entry_point.customer_username, None, True,
                 )
                 results.append({
                     "sender_id": sender_id,
@@ -1763,7 +1762,7 @@ def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks
                 continue
             background_tasks.add_task(
                 _process_instagram_event, sender_id, message_text, ad_id, entry_point,
-                None, None, None, None, None, True,
+                None, None, None, entry_point.customer_username, None, True,
             )
             results.append({
                 "sender_id": sender_id,
@@ -3628,11 +3627,11 @@ def get_escalations_list(limit: int = 50, status: Optional[str] = None, x_admin_
 
 
 def _safe_admin_handoff_label(handoff: Dict[str, Any]) -> str:
-    """Choose an operator-friendly label without ever falling back to Meta ID."""
+    """Choose username, then the exact Meta sender ID, then a generic label."""
     source_user_id = str(handoff.get("source_user_id") or "")
     candidate = normalize_instagram_username(handoff.get("instagram_username"))
     if candidate and candidate != source_user_id:
-        return candidate
+        return f"@{candidate}"
     candidate = normalize_instagram_username(handoff.get("customer_username"))
     if candidate and candidate != source_user_id:
         return f"@{candidate}"
@@ -3646,7 +3645,10 @@ def _safe_admin_handoff_label(handoff: Dict[str, Any]) -> str:
         candidate = normalize_instagram_username(known.get(key))
         if candidate and candidate != source_user_id:
             return candidate
-    return "Instagram customer"
+    external_id = str(
+        handoff.get("customer_external_id") or handoff.get("source_user_id") or ""
+    ).strip()
+    return external_id or "Instagram customer"
 
 
 @app.get("/admin/handoffs")
@@ -3680,10 +3682,15 @@ def get_admin_handoffs(
         if requested_status is None and row_status not in visible_statuses:
             continue
         handoff_ref = str(row.get("handoff_ref") or "")
+        resolved_username = (
+            normalize_instagram_username(row.get("customer_username"))
+            or normalize_instagram_username(row.get("instagram_username"))
+        )
         handoffs.append({
             "handoff_ref": handoff_ref,
             "customer_display_name": _safe_admin_handoff_label(row),
-            "customer_username": row.get("customer_username"),
+            "customer_username": resolved_username,
+            "customer_external_id": row.get("customer_external_id") or row.get("source_user_id"),
             "source_channel": row.get("source_channel"),
             "reason": row.get("reason") or "Human support requested",
             "summary": row.get("summary") or "",
@@ -6715,6 +6722,7 @@ def get_admin_dashboard():
 
         <div id="tab-handoffs" class="panel-card" data-group="handoffs" style="display:none;">
             <div class="admin-page-heading"><div><h2>Handoffs</h2><p>Owner notifications for conversations waiting on a human. Opening an item marks only the notification as seen; CAM lifecycle remains unchanged.</p></div><button class="btn-secondary" type="button" onclick="loadHandoffs()">↻ Refresh</button></div>
+            <input class="field-control" id="handoffSearch" type="search" placeholder="Search username, CAM reference, or sender ID" oninput="renderHandoffs()" style="margin-bottom:12px;">
             <div id="handoffPageSummary" class="result-box" role="status"></div>
             <div id="handoffList" class="handoff-list"><span class="ig-media-muted">Loading handoffs…</span></div>
         </div>
@@ -8133,15 +8141,19 @@ THIS WEEK'S BENGAL SPECIALS
         }
 
         function handoffCustomerIdentity(item) {
-            const value = String(item?.customer_display_name || '').trim();
-            if (!value || value === 'Instagram customer') return 'Instagram customer';
-            return `@${value.replace(/^@+/, '')}`;
+            const username = String(item?.customer_username || '').trim().replace(/^@+/, '');
+            if (username) return `@${username}`;
+            const externalId = String(item?.customer_external_id || '').trim();
+            if (externalId) return externalId;
+            return 'Instagram customer';
         }
 
         function renderHandoffs() {
             const list = document.getElementById('handoffList');
             const popover = document.getElementById('handoffPopoverList');
-            if (list) list.innerHTML = adminHandoffs.length ? adminHandoffs.map(item => renderHandoffCard(item)).join('') : '<span class="ig-media-muted">No active handoffs waiting for a human.</span>';
+            const query = String(document.getElementById('handoffSearch')?.value || '').trim().toLowerCase();
+            const visible = query ? adminHandoffs.filter(item => [item.customer_username, item.customer_external_id, item.handoff_ref].filter(Boolean).join(' ').toLowerCase().includes(query)) : adminHandoffs;
+            if (list) list.innerHTML = visible.length ? visible.map(item => renderHandoffCard(item)).join('') : '<span class="ig-media-muted">No active handoffs match this search.</span>';
             if (popover) popover.innerHTML = adminHandoffs.length ? adminHandoffs.slice(0, 4).map(item => renderHandoffCard(item, true)).join('') : '<span class="ig-media-muted">No new handoffs.</span>';
             document.querySelectorAll('[data-handoff-ref]').forEach(card => {
                 card.addEventListener('click', () => openHandoffDetails(card.dataset.handoffRef));
@@ -8210,7 +8222,7 @@ THIS WEEK'S BENGAL SPECIALS
             document.getElementById('contentDetailsType').innerText = 'Customer handoff';
             document.getElementById('contentDetailsTitle').innerText = `Customer: ${handoffCustomerIdentity(item)}`;
             document.getElementById('contentDetailsPreview').innerHTML = '<div style="font-size:3rem;color:#8b97a8;">↗</div>';
-            document.getElementById('contentDetailsFacts').innerHTML = [['Customer', handoffCustomerIdentity(item)], ['CAM reference', item.handoff_ref], ['Status', status], ['Reason', item.reason], ['Summary', item.summary || '—'], ['Created', formatAdminTimestamp(item.created_at)], ['Updated', formatAdminTimestamp(item.updated_at || item.created_at)]].map(([label, value]) => `<div class="drawer-fact"><span class="drawer-fact-label">${escapeHtml(label)}</span><span class="drawer-fact-value">${escapeHtml(value)}</span></div>`).join('');
+            document.getElementById('contentDetailsFacts').innerHTML = [['Customer', handoffCustomerIdentity(item)], ['CAM reference', item.handoff_ref], ['Instagram sender ID', item.customer_external_id || 'Unavailable'], ['Status', status], ['Reason', item.reason], ['Summary', item.summary || '—'], ['Created', formatAdminTimestamp(item.created_at)], ['Updated', formatAdminTimestamp(item.updated_at || item.created_at)]].map(([label, value]) => `<div class="drawer-fact"><span class="drawer-fact-label">${escapeHtml(label)}</span><span class="drawer-fact-value">${escapeHtml(value)}</span></div>`).join('');
             const resumeAction = status === 'WAITING_FOR_HUMAN' || status === 'CREATED'
                 ? `<button class="btn-secondary" type="button" onclick="resumeAdminHandoff('${escapeHtml(item.handoff_ref)}')">Resume CAM</button>`
                 : '<span class="ig-media-muted">Read-only history — this CAM is already resumed.</span>';

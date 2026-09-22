@@ -364,7 +364,10 @@ def customer_facing_notice(*, order_receipt: bool = False, finalized_order: bool
         )
     if order_receipt:
         return "Continue on WhatsApp to send this order draft to our team."
-    return "Of course. I’ve shared your message with our team and someone will get back to you shortly."
+    return (
+        "Thanks for your question. Our Manager of Kitchens will connect with "
+        "you here shortly and help you with this."
+    )
 
 
 def customer_facing_link_message(

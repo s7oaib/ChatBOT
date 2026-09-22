@@ -1130,10 +1130,10 @@ class DeterministicResponder:
         return None
 
     def _generic_fallback(self) -> str:
-        """Safe first message; the Instagram caller appends the CAM link separately."""
+        """Exact client-approved response for knowledge outside the registry."""
         return (
-            "Our team can assist you personally on WhatsApp. "
-            "Please continue your enquiry using the link below."
+            "Thanks for your question. Our Manager of Kitchens will connect "
+            "with you here shortly and help you with this."
         )
 
     def classify_unmatched_intent(self, text: str) -> str:
@@ -2756,6 +2756,33 @@ class DeterministicResponder:
                 template_id or f"client_approved_{entry.qa_id}",
                 asset_urls or None,
             )
+
+        # Customer-answer policy: Instagram may serve only the authoritative
+        # client registry above. Legacy templates, learned knowledge, RAG and
+        # generative providers remain available for internal classification,
+        # safety and review workflows, but they cannot produce customer copy.
+        if channel == "instagram":
+            fallback = self._generic_fallback()
+            facts.update({
+                "last_route_source": "client_approved_qa_miss",
+                "last_knowledge_ids": [],
+                "last_actions": [BusinessAction.ESCALATE_TO_TEAM.value],
+                "knowledge_sufficient": False,
+                "last_grounding": "client_registry_miss",
+                "last_llm_called": False,
+                "last_fallback_used": True,
+            })
+            try:
+                db.record_knowledge_gap(
+                    user_message=user_message,
+                    intents=facts.get("last_intents") or ["unknown"],
+                    entities=facts.get("last_entities") or {},
+                    reason="client_approved_registry_miss",
+                )
+            except Exception as exc:
+                log.warning("Could not record client-registry knowledge gap: %s", exc)
+            session_memory.add_turn(user_id, channel, user_message, fallback)
+            return fallback, False, None, None
 
         # A decline closes only this active add-on flow. It is session-scoped,
         # so a later conversation can offer the add-on again.

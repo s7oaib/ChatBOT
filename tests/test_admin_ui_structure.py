@@ -295,8 +295,10 @@ def test_instagram_story_refresh_does_not_clear_the_list_before_it_settles(page)
 def test_instagram_stories_exposes_status_filters_and_safe_actions(page):
     section = page[page.index('id="tab-instagram-stories"'):page.index('<!-- MENU tab, panel 3 of 4')]
     render = page[page.index('function renderInstagramStories'):page.index('async function loadInstagramStories')]
-    for label in ("All", "Unmapped", "Mapped", "Disabled", "Archived", "Deleted", "Map Story", "Edit", "Disable", "Enable", "Archive", "Restore", "Delete"):
+    for label in ("All", "Unmapped", "Mapped", "Disabled", "Deleted", "Map Story", "Edit", "Disable", "Enable", "Restore", "Delete"):
         assert label in section or label in render
+    assert 'data-story-filter="ARCHIVED"' not in section
+    assert 'data-story-action="archive"' not in render
     assert 'data-story-action="delete"' in render
     assert 'data-story-action="restore-source"' in render
     assert 'Delete this Story from Camellia Admin?' in page
@@ -341,7 +343,7 @@ def test_instagram_stories_refreshes_from_source_and_mapping_endpoints(page):
     section = page[page.index('async function loadInstagramStories'):page.index('function renderInstagramMediaRegistry')]
     assert "igStoryRefreshButton" in page
     assert "instagram-story-sources" in section
-    assert "instagram-routes?include_archived=true" in section
+    assert "instagram-routes?include_archived=true" not in section
     assert "populateInstagramStoryPickers" in section
     assert "renderInstagramStories()" in section
 
@@ -626,7 +628,7 @@ def test_admin_redesign_has_dashboard_gallery_and_drawer(page):
     assert 'id="igContentGallery"' in page
     assert 'data-content-filter="post"' in page
     assert 'data-content-filter="reel"' in page
-    assert 'id="igContentTableView"' in page
+    assert 'id="igContentTableView"' not in page
     assert 'id="contentDetailsDrawer"' in page
     assert 'Open full details' in page
     assert "function openContentDetails" in page
@@ -673,12 +675,11 @@ def test_second_pass_layout_and_drilldown_navigation_are_explicit(page):
     assert "No published menu is currently serving customers" in page
 
 
-def test_posts_reels_owns_routing_as_a_first_class_subview(page):
+def test_posts_reels_is_a_single_gallery_without_routing_subview(page):
     section = page[page.index('id="tab-instagram-content"'):page.index('id="tab-handoffs"')]
-    assert "data-content-subview=\"gallery\"" in section
-    assert "data-content-subview=\"routing\"" in section
-    assert "data-content-subview=\"list\"" in section
-    assert "setInstagramContentSubview('routing')" in page
+    assert "data-content-subview=\"gallery\"" not in section
+    assert "data-content-subview=\"routing\"" not in section
+    assert "data-content-subview=\"list\"" not in section
     assert "Exact Meta ID" in page
     assert "Instagram Content Routing" not in page[page.index('<aside class="admin-sidebar"'):page.index('</aside>')]
 

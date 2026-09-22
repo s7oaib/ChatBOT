@@ -37,7 +37,7 @@ def test_handoff_fallback_opens_waiting_and_resumed_cam_records(monkeypatch):
     waiting = client.get("/admin/handoffs?include_resumed=true", headers=ADMIN_HEADERS)
     assert waiting.status_code == 200
     item = next(row for row in waiting.json()["handoffs"] if row["handoff_ref"] == handoff["handoff_ref"])
-    assert item["customer_display_name"] == "Instagram customer"
+    assert item["customer_display_name"] == user_id
     assert item["status"] == "WAITING_FOR_HUMAN"
 
     resumed = client.post(f"/admin/handoffs/{handoff['handoff_ref']}/resume", headers=ADMIN_HEADERS)
@@ -65,20 +65,20 @@ def test_handoff_username_is_reused_for_waiting_and_resumed_identity(monkeypatch
     waiting = client.get("/admin/handoffs?include_resumed=true", headers=ADMIN_HEADERS)
     assert waiting.status_code == 200
     item = next(row for row in waiting.json()["handoffs"] if row["handoff_ref"] == handoff["handoff_ref"])
-    assert item["customer_display_name"] == "camellia_customer"
+    assert item["customer_display_name"] == "@camellia_customer"
     assert item["status"] == "WAITING_FOR_HUMAN"
     assert "source_user_id" not in item
-    assert user_id not in json.dumps(item)
+    assert item["customer_external_id"] == user_id
 
     resumed = client.post(f"/admin/handoffs/{handoff['handoff_ref']}/resume", headers=ADMIN_HEADERS)
     assert resumed.status_code == 200
     history = client.get("/admin/handoffs?include_resumed=true", headers=ADMIN_HEADERS)
     item = next(row for row in history.json()["handoffs"] if row["handoff_ref"] == handoff["handoff_ref"])
-    assert item["customer_display_name"] == "camellia_customer"
+    assert item["customer_display_name"] == "@camellia_customer"
     assert item["status"] == "RESUMED"
 
 
-def test_handoff_raw_meta_id_never_becomes_customer_identity(monkeypatch):
+def test_handoff_raw_meta_id_is_the_verified_fallback_identity(monkeypatch):
     monkeypatch.setattr(config, "ADMIN_API_KEY", "test_admin_second_pass_key")
     user_id = "178900009876543"
     session_memory.clear_session(user_id, "instagram")
@@ -93,5 +93,5 @@ def test_handoff_raw_meta_id_never_becomes_customer_identity(monkeypatch):
     response = client.get("/admin/handoffs?include_resumed=true", headers=ADMIN_HEADERS)
     assert response.status_code == 200
     item = next(row for row in response.json()["handoffs"] if row["handoff_ref"] == handoff["handoff_ref"])
-    assert item["customer_display_name"] == "Instagram customer"
-    assert user_id not in json.dumps(item)
+    assert item["customer_display_name"] == user_id
+    assert item["customer_external_id"] == user_id
