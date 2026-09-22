@@ -90,6 +90,7 @@ class SessionMemoryManager:
                 "last_bot_question": None,
                 "last_answer_id": None,
                 "last_assets_sent": [],
+                "last_asset_ids": [],
                 "active_asset": None,
                 "updated_at": current_time,
                 "last_escalation_status": None,
@@ -156,7 +157,7 @@ class SessionMemoryManager:
             "last_nlu_confidence", "last_nlu_reason",
             "active_topic", "active_entity", "active_intent",
             "pending_clarification", "clarification_options", "clarification_intent", "presented_options",
-            "last_bot_question", "last_answer_id", "last_assets_sent", "active_asset",
+            "last_bot_question", "last_answer_id", "last_assets_sent", "last_asset_ids", "active_asset",
             "cart", "order_draft",
         }
         for key in transient:
@@ -384,6 +385,13 @@ class SessionMemoryManager:
         if len(turns) > self.max_history_turns * 2:
             session["turns"] = turns[-(self.max_history_turns * 2):]
         session["last_updated"] = time.time()
+        self._persist(user_id, channel)
+
+    def touch(self, user_id: str, channel: str) -> None:
+        """Persist routing metadata changed after the turn was recorded."""
+        session = self.get_session(user_id, channel)
+        session["last_updated"] = time.time()
+        session["facts"]["updated_at"] = session["last_updated"]
         self._persist(user_id, channel)
 
     def get_context_summary(self, user_id: str, channel: str) -> str:

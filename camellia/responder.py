@@ -966,6 +966,80 @@ TOPIC_PRICE_HINT = {
     "sondesh_general": "sondesh price",
 }
 
+# Stable asset identifiers keep routing metadata independent from URLs and
+# approved copy. The renderer below still obtains every URL from the existing
+# protected template/image paths; this table only defines ownership and the
+# short acknowledgement for an asset-only follow-up.
+ASSET_ROUTE_SPECS = {
+    "SUBSCRIPTION_RATE_CHART": {
+        "topic": "subscription",
+        "entity": "SUBSCRIPTION",
+        "template_id": "subscription_details",
+        "route_id": "asset_request_subscription_chart",
+        "ack": "Here is the subscription price chart again.",
+    },
+    "AAMAR_MISHTI_MENU": {
+        "topic": "aamar_mishti",
+        "entity": "SONDESH",
+        "template_id": "aamar_mishti_collection",
+        "route_id": "asset_request_aamar_mishti_menu",
+        "ack": "Sure — sharing the Aamar Mishti menu below.",
+    },
+    "SIGNATURE_SONDESH_MENU": {
+        "topic": "signature",
+        "entity": "SONDESH",
+        "template_id": "signature_collection",
+        "route_id": "asset_request_signature_sondesh_menu",
+        "ack": "Sure — sharing the Signature Sondesh menu below.",
+    },
+    "WEEKLY_MENU": {
+        "topic": "savoury",
+        "entity": "BENGALI_MEAL",
+        "template_id": "savoury_food_intro",
+        "route_id": "asset_request_weekly_menu",
+        "ack": "Sure — sharing the current weekly menu below.",
+    },
+    "BENTO_IMAGES": {
+        "topic": "bento",
+        "entity": "BENGALI_MEAL",
+        "template_id": "bento_details",
+        "route_id": "asset_request_bento_images",
+        "ack": "Sure — sharing the Bengali Bento menu image below.",
+    },
+    # Kept explicit so an operator can see why a Home Table request is
+    # clarified: the current approved data marks its menu media as blocked and
+    # there is no approved customer-facing image to send.
+    "HOME_TABLE_MENU": {
+        "topic": "bengali_home_table",
+        "entity": "BENGALI_MEAL",
+        "template_id": "bengali_home_table_details",
+        "route_id": "asset_request_home_table_menu",
+        "ack": "I don't have an approved Home Table menu image to send yet. Which details would you like to know?",
+    },
+}
+
+
+def _source_topic_to_active_topic(label: Any) -> Optional[str]:
+    """Normalize an admin/source label into the routing topic vocabulary."""
+    text = " ".join(str(label or "").lower().split())
+    if not text:
+        return None
+    if re.search(r"subscription|everyday\s+meal|meal\s+plan|tiffin", text):
+        return "subscription"
+    if re.search(r"home\s+table|kolkata\s+home", text):
+        return "bengali_home_table"
+    if re.search(r"bento", text):
+        return "bento"
+    if re.search(r"aamar\s+mishti|aamar", text):
+        return "aamar_mishti"
+    if re.search(r"signature", text):
+        return "signature"
+    if re.search(r"sondesh|sandesh|mishti|sweet", text):
+        return "sondesh_general"
+    if re.search(r"meal|savoury|savory|weekly|lunch|dinner", text):
+        return "savoury"
+    return None
+
 
 
 @dataclass
@@ -1112,6 +1186,24 @@ class DeterministicResponder:
             return str(item.get("url") or item.get("image_url") or item.get("path") or "")
         return str(item or "")
 
+    @staticmethod
+    def _asset_id_for_route(template_id: Optional[str], images: Any) -> Optional[str]:
+        """Return a stable asset id only when the reply has one clear asset."""
+        for asset_id, spec in ASSET_ROUTE_SPECS.items():
+            if template_id == spec["route_id"]:
+                return asset_id
+        if template_id == "subscription_details":
+            return "SUBSCRIPTION_RATE_CHART" if images else None
+        if template_id in {"aamar_mishti_collection", "nolen_gur_aamar"}:
+            return "AAMAR_MISHTI_MENU" if images else None
+        if template_id in {"signature_collection", "mahua_signature_special"}:
+            return "SIGNATURE_SONDESH_MENU" if images else None
+        if template_id in {"weekly_menu_veg", "weekly_menu_nonveg", "savoury_food_intro"}:
+            return "WEEKLY_MENU" if images else None
+        if template_id == "bento_details":
+            return "BENTO_IMAGES" if images else None
+        return None
+
     def _remember_conversation_state(
         self, user_id: str, channel: str, message: str,
         response: str, template_id: Optional[str], images: Any,
@@ -1121,19 +1213,29 @@ class DeterministicResponder:
         facts["last_bot_question"] = response if (response or "").rstrip().endswith("?") else None
         facts["last_answer_id"] = template_id
         facts["last_assets_sent"] = [self._asset_key(item) for item in (images or []) if self._asset_key(item)] if isinstance(images, list) else ([self._asset_key(images)] if images else [])
-        facts["active_asset"] = facts["last_assets_sent"][0] if len(facts["last_assets_sent"]) == 1 else None
+        asset_id = self._asset_id_for_route(template_id, images)
+        facts["last_asset_ids"] = [asset_id] if asset_id else []
+        facts["active_asset"] = asset_id
         facts.update(pending_for_response(template_id, response or "", images))
         if facts.get("pending_clarification") == "delivery_area":
             facts["awaiting_area_confirmation"] = True
-        topic = TOPIC_MAP.get(template_id or "")
+        asset_spec = ASSET_ROUTE_SPECS.get(asset_id or "")
+        topic = asset_spec.get("topic") if asset_spec else TOPIC_MAP.get(template_id or "")
         if topic:
             facts["active_topic"] = topic
+            if asset_spec:
+                facts["active_entity"] = asset_spec.get("entity")
         elif template_id and template_id.startswith("source_"):
             facts["active_topic"] = facts.get("last_topic")
-        if facts.get("last_topic"):
+        if facts.get("last_topic") and not asset_spec:
             facts["active_topic"] = facts["last_topic"]
-        facts["active_intent"] = template_id
+        is_asset_route = bool(
+            template_id == "asset_request_clarify"
+            or str(template_id or "").startswith("asset_request")
+        )
+        facts["active_intent"] = "ASSET_REQUEST" if is_asset_route else template_id
         facts["updated_at"] = time.time()
+        session_memory.touch(user_id, channel)
 
     def _contextual_resolution(
         self, message: str, user_id: str, channel: str,
@@ -1143,6 +1245,30 @@ class DeterministicResponder:
         This is intentionally a bridge into existing approved templates.  It
         does not produce an answer and it does not rewrite canonical content.
         """
+        lowered_message = str(message or "").lower()
+        if (
+            _UNSUPPORTED_CUSTOMIZATION_RE.search(lowered_message)
+            or _HIGH_RISK_UNSUPPORTED_RE.search(lowered_message)
+            or (
+                semantic_fallback._ESCALATION_INTENT_RE.search(lowered_message)
+                and not semantic_fallback._IDENTITY_QUESTION_RE.search(lowered_message)
+            )
+            or (
+                re.search(
+                    r"\b(?:allerg\w*|allergen\w*|nuts?|peanuts?|cashews?|pistachios?|"
+                    r"gluten|dairy|cross[- ]contamination)\b",
+                    lowered_message,
+                    re.IGNORECASE,
+                )
+                and re.search(
+                    r"\b(?:without|no|remove|replace|substitute|change|customi[sz]e)\b",
+                    lowered_message,
+                    re.IGNORECASE,
+                )
+            )
+        ):
+            # Policy and safety handling always outrank a media request.
+            return None
         facts = session_memory.get_facts(user_id, channel)
         resolution = resolve_conversation_context(message, facts)
         current_entity = explicit_entity(message)
@@ -1263,34 +1389,85 @@ class DeterministicResponder:
                 return self._resolve_response("delivery time", user_id, channel)
 
         if resolution.kind == "asset_request":
-            topic = str(resolution.entity or facts.get("active_topic") or facts.get("last_topic") or "").lower()
-            if resolution.asset == "chart" and topic == "subscription":
-                template = self._template_by_id("subscription_details") or {}
-                text = "Here is the subscription price chart again."
-                _ignored, images = self._format_dynamic_response(
-                    "subscription_details", template.get("response") or "",
-                    user_id=user_id, channel=channel, user_message=message,
-                )
-                return text, True, "asset_request_subscription_chart", images
-            if resolution.asset in {"menu", "active"} and topic in {"savoury", "bento"}:
-                template_id = "know_more"
-                template = self._template_by_id(template_id) or {}
-                _ignored, images = self._format_dynamic_response(
-                    template_id, template.get("response") or "",
-                    user_id=user_id, channel=channel, user_message=message,
-                )
-                return "Here is the menu again.", True, "asset_request_menu", images
-            if resolution.asset == "active" and facts.get("last_answer_id"):
-                template_id = str(facts["last_answer_id"])
-                template = self._template_by_id(template_id) or {}
-                if template.get("response"):
-                    _ignored, images = self._format_dynamic_response(
-                        template_id, template["response"], user_id=user_id,
-                        channel=channel, user_message=message,
-                    )
-                    if images:
-                        return "Here it is again.", True, "asset_request", images
-            return None
+            asset_id = str(resolution.asset or "")
+            spec = ASSET_ROUTE_SPECS.get(asset_id)
+            if not spec:
+                return None
+            template_id = str(spec["template_id"])
+            template = self._template_by_id(template_id) or {}
+            _ignored, images = self._format_dynamic_response(
+                template_id, template.get("response") or "",
+                user_id=user_id, channel=channel, user_message=message,
+            )
+            # Home Table media is explicitly blocked in the current approved
+            # data. Never manufacture a URL or send a text-only "asset".
+            if not images:
+                if asset_id == "HOME_TABLE_MENU":
+                    facts["pending_clarification"] = None
+                    facts["last_intents"] = ["ASSET_REQUEST"]
+                    return spec["ack"], True, spec["route_id"], None
+                return None
+            facts.update({
+                "active_topic": spec["topic"],
+                "last_topic": spec["topic"],
+                "active_entity": spec["entity"],
+                "active_asset": asset_id,
+                "active_intent": "ASSET_REQUEST",
+                "pending_clarification": None,
+                "clarification_options": [],
+                "presented_options": [],
+                "last_route_source": "deterministic_asset_request",
+                "last_intents": ["ASSET_REQUEST"],
+                "last_actions": [BusinessAction.SEND_RESPONSE.value, BusinessAction.SEND_PRODUCT_IMAGE.value],
+                "knowledge_sufficient": True,
+                "last_grounding": "deterministic_approved_asset",
+                "last_llm_called": False,
+            })
+            return spec["ack"], True, spec["route_id"], images
+
+        if resolution.kind == "asset_ambiguous":
+            # A context-free generic menu opener is an established overview
+            # question, not a request to guess one of several menu assets.
+            # Keep the legacy ``know_more`` route; only unresolved chart,
+            # photo, or resend references enter asset clarification here.
+            if (
+                not facts.get("active_topic")
+                and not facts.get("last_topic")
+                and re.search(r"\bmenu\b", str(message or ""), re.I)
+                and not re.search(r"\b(?:again|resend|re-?send|it|that)\b", str(message or ""), re.I)
+            ):
+                return None
+            # On the very first turn of a mapped Story/Post/Reel flow, the
+            # source route is the only available owner. Let that route answer
+            # the opening request and establish active state; later generic
+            # asset requests are handled by this deterministic layer.
+            if (
+                not facts.get("active_topic")
+                and not facts.get("last_topic")
+                and not facts.get("last_answer_id")
+                and isinstance(facts.get("source_route"), dict)
+                and not facts.get("source_context_superseded")
+            ):
+                return None
+            facts.update({
+                "pending_clarification": "asset_request",
+                "clarification_intent": "ASSET_REQUEST",
+                "clarification_options": [],
+                "presented_options": [],
+                "active_intent": "ASSET_REQUEST",
+                "last_intents": ["ASSET_REQUEST"],
+                "last_actions": [BusinessAction.SEND_RESPONSE.value],
+                "knowledge_sufficient": True,
+                "last_grounding": "deterministic_asset_clarification",
+                "last_llm_called": False,
+            })
+            return (
+                "Which approved asset would you like me to send — the subscription price chart, "
+                "Aamar Mishti menu, Signature Sondesh menu, weekly menu, or Bengali Bento image?",
+                True,
+                "asset_request_clarify",
+                None,
+            )
 
         if resolution.kind == "clarification_selection":
             selected = resolution.entity
@@ -1516,7 +1693,7 @@ class DeterministicResponder:
         "price_clarify_product", "context_meal_price_followup", "name_introduction",
         "recall_name", "bot_identity", "bot_capabilities", "explicit_escalation",
         "groq_structured_event_escalation", "ad_gate_blocked", "product_recommendation",
-        "alacarte_sondesh_addon",
+        "alacarte_sondesh_addon", "asset_request_clarify",
     })
 
     def _record_answer_sufficiency(
@@ -2381,6 +2558,17 @@ class DeterministicResponder:
         facts["source_context_used"] = False
         facts["source_referential_intent"] = None
 
+        # Asset requests are a deterministic intent class, so resolve them
+        # before the broad client-approved-QA matcher can replay a canonical
+        # topic answer.  An unresolved first-turn Story/Post/Reel request is
+        # allowed to fall through so its source route can establish context.
+        if config.CONVERSATION_IMPROVEMENTS_ENABLED:
+            early_context = resolve_conversation_context(user_message, facts)
+            if early_context.kind in {"asset_request", "asset_ambiguous"}:
+                contextual = self._contextual_resolution(user_message, user_id, channel)
+                if contextual is not None:
+                    return contextual
+
         # Client-approved QA is the hard deterministic fast path.  The
         # matcher may understand a paraphrase, but the response itself is
         # loaded from the source block and never sent through Groq, RAG,
@@ -3049,9 +3237,18 @@ class DeterministicResponder:
         # A pack-size follow-up is still about the source product even after
         # the first Story/Reel/Post answer established ``last_topic``.
         source_size_followup = bool(re.search(r"\b(?:250|500|1000|1)\s*(?:g|kg)\b", lowered_text))
+        source_asset_opening = bool(
+            source_context_available
+            and re.search(
+                r"\b(?:share|send|show|see|get|give|forward)\b.*\b(?:menu|chart|image|photo|card|rate|rates)\b",
+                lowered_text,
+                re.IGNORECASE,
+            )
+        )
         vague_opening = bool(
             source_intent
             or source_size_followup
+            or source_asset_opening
             or (legacy_vague_opening and not conversational_opener)
         )
         source_topic = (
@@ -3083,6 +3280,7 @@ class DeterministicResponder:
         # product falls through to the generic topic overview and never
         # reaches the campaign's exact pricing template.
         source_topic_name = str((source_route or {}).get("routing_topic") or "")
+        source_active_topic = _source_topic_to_active_topic(source_topic_name)
         if (
             channel == "instagram"
             and source_context_available
@@ -3142,6 +3340,37 @@ class DeterministicResponder:
                 session_memory.add_turn(user_id, channel, user_message, response_text)
                 return response_text, True, f"source_{source_product}_{template_id}", images
 
+        # A source explicitly labelled as the Everyday Meal Subscription is a
+        # product route, even when it has no legacy priority-product row. Use
+        # the existing protected subscription response and chart so the next
+        # asset request has an unambiguous active owner.
+        if (
+            channel == "instagram"
+            and source_context_available
+            and source_route
+            and source_active_topic == "subscription"
+            and vague_opening
+            and not explicit_product
+            and can_use_source
+            and menu_attached
+        ):
+            template = self._template_by_id("subscription_details") or {}
+            response_text, images = self._format_dynamic_response(
+                "subscription_details", template.get("response") or self._generic_fallback(),
+                user_id=user_id, channel=channel, user_message=user_message,
+            )
+            facts.update({
+                "source_context_used": True,
+                "last_topic": "subscription",
+                "active_topic": "subscription",
+                "active_entity": "SUBSCRIPTION",
+                "subscription_context": True,
+                "awaiting_subscription_booking": True,
+                "active_product_context": None,
+            })
+            session_memory.add_turn(user_id, channel, user_message, response_text)
+            return response_text, True, "subscription_details", images
+
         # A topic-only route may frame a vague opening, but the body still
         # comes from the approved overview template. The admin label is not
         # allowed to supply a price, promise, availability, or other fact.
@@ -3182,6 +3411,9 @@ class DeterministicResponder:
                 if source_product:
                     facts["last_topic"] = TOPIC_MAP.get(route_template_id(source_product) or "", source_product)
                     facts["active_product_context"] = source_product
+                elif source_active_topic:
+                    facts["last_topic"] = source_active_topic
+                    facts["active_topic"] = source_active_topic
                 session_memory.add_turn(user_id, channel, user_message, response_text)
                 return response_text, True, "source_topic_know_more", images
 

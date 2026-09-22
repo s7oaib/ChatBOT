@@ -17,9 +17,12 @@ _FILLER = {
     "send", "share", "show", "give", "can", "you", "could", "again", "same",
 }
 
-_ASSET_WORDS = re.compile(
-    r"\b(chart|rate\s*card|image|photo|flyer|card|asset)\b|"
-    r"\b(resend|re-?send|send|share|forward)\b.*\b(it|that|again|chart|menu|image|card)\b",
+_ASSET_NOUNS = r"chart|rate\s*card|rates?|image|photo|flyer|card|asset|menu"
+_ASSET_REQUEST_RE = re.compile(
+    rf"\b(?:send|share|show|see|get|give|forward|attach|provide)\b.*\b(?:{_ASSET_NOUNS})\b|"
+    rf"\b(?:can|could)\s+i\s+(?:see|get|have)\b.*\b(?:{_ASSET_NOUNS})\b|"
+    rf"\b(?:where\s+is|where(?:'s|\s+are))\b.*\b(?:{_ASSET_NOUNS})\b|"
+    r"\b(?:resend|re-?send)\b|\b(?:send|share|forward)\s+(?:it|that|again)\b",
     re.I,
 )
 _CHART_WORDS = re.compile(r"\b(chart|rate\s*card|price\s*chart|pricing\s*chart)\b", re.I)
@@ -38,6 +41,72 @@ _FOLLOWUP = re.compile(
     re.I,
 )
 _CORRECTION = re.compile(r"\b(?:not|no,?\s+i\s+meant|actually|i\s+meant)\b", re.I)
+
+ASSET_IDS = frozenset({
+    "SUBSCRIPTION_RATE_CHART",
+    "AAMAR_MISHTI_MENU",
+    "SIGNATURE_SONDESH_MENU",
+    "WEEKLY_MENU",
+    "BENTO_IMAGES",
+    "HOME_TABLE_MENU",
+})
+
+
+def _asset_request_shape(value: str) -> bool:
+    """Recognise an explicit request for a media asset, not a topic FAQ."""
+    return bool(_ASSET_REQUEST_RE.search(value))
+
+
+def _explicit_asset(value: str, state: Dict[str, Any]) -> Optional[str]:
+    """Map an explicit asset/product name to a stable asset identifier."""
+    if re.search(r"\b(?:aamar\s+mishti|aamar|collection\s*1|option\s*1)\b", value, re.I):
+        return "AAMAR_MISHTI_MENU"
+    if re.search(r"\b(?:signature|collection\s*2|option\s*2)\b", value, re.I):
+        # ``Option 2 menu`` is a collection request only inside a Sondesh
+        # conversation.  Subscription option 2 is a plan, not a media asset.
+        topic = str(state.get("active_topic") or state.get("last_topic") or "").lower()
+        if "sondesh" in topic or "signature" in topic or "aamar" in topic:
+            return "SIGNATURE_SONDESH_MENU"
+        if re.search(r"\b(?:signature|collection\s*2)\b", value, re.I):
+            return "SIGNATURE_SONDESH_MENU"
+    if re.search(r"\b(?:home\s+table|bengali\s+home|kolkata\s+home)\b", value, re.I):
+        return "HOME_TABLE_MENU"
+    if re.search(r"\b(?:bento|bento\s+images?)\b", value, re.I):
+        return "BENTO_IMAGES"
+    if re.search(r"\b(?:weekly|current|today(?:'s)?|this\s+week)\b", value, re.I) and _MENU_WORDS.search(value):
+        # Generic menu openers such as "today's menu" and "share weekly
+        # menu" retain their established overview/client-QA routes. They
+        # become an asset request when the weekly topic is already active;
+        # explicit named assets and resend requests are handled below.
+        topic = str(state.get("active_topic") or state.get("last_topic") or "").lower()
+        if topic in {"savoury", "weekly_menu"}:
+            return "WEEKLY_MENU"
+    if _CHART_WORDS.search(value) or (
+        re.search(r"\brates?\b", value, re.I)
+        and str(state.get("active_topic") or state.get("last_topic") or "").lower() == "subscription"
+    ):
+        if _SUBSCRIPTION.search(value) or str(state.get("active_topic") or state.get("last_topic") or "").lower() == "subscription":
+            return "SUBSCRIPTION_RATE_CHART"
+
+    topic = str(state.get("active_topic") or state.get("last_topic") or "").lower()
+    if _MENU_WORDS.search(value):
+        if topic in {"aamar_mishti", "aamar", "aamar mishti"}:
+            return "AAMAR_MISHTI_MENU"
+        if topic in {"signature", "signature_sondesh"}:
+            return "SIGNATURE_SONDESH_MENU"
+        if topic in {"savoury", "weekly_menu"}:
+            return "WEEKLY_MENU"
+        if topic in {"bento", "bengali_bento"}:
+            return "BENTO_IMAGES"
+        if topic in {"bengali_home_table", "home_table"}:
+            return "HOME_TABLE_MENU"
+
+    # A pronoun-only resend must use the one unambiguous asset just sent. A
+    # multi-card answer deliberately leaves active_asset empty and clarifies.
+    active_asset = str(state.get("active_asset") or "")
+    if active_asset in ASSET_IDS:
+        return active_asset
+    return None
 
 
 @dataclass
@@ -119,7 +188,7 @@ def resolve(text: str, state: Dict[str, Any]) -> ContextResolution:
     if current:
         if pending == "product_price" and current in {"SONDESH", "BENGALI_MEAL"}:
             return ContextResolution("clarification_selection", current, confidence=1.0, options=options)
-        if pending == "asset_request" and current in {"SONDESH", "BENGALI_MEAL", "SUBSCRIPTION"}:
+        if pending == "asset_request" and current in {"SONDESH", "BENGALI_MEAL", "SUBSCRIPTION"} and not _asset_request_shape(value):
             return ContextResolution("topic_switch", current, confidence=1.0)
         if _CORRECTION.search(value) and current:
             return ContextResolution("correction", current, corrected_text=value, confidence=1.0)
@@ -128,17 +197,17 @@ def resolve(text: str, state: Dict[str, Any]) -> ContextResolution:
     if pending and selected:
         return ContextResolution("clarification_selection", selected, confidence=1.0, options=options)
 
-    # Asset requests are first-class.  The active topic is used only when the
-    # requested asset has one clearly relevant owner.
+    # Asset requests are first-class. Resolve a current explicit
+    # asset/product first, then use active state only when the current message
+    # omits the owner. This runs before follow-ups, source context, and FAQ
+    # replay.
     menu_selection = re.search(r"\b(?:veg|vegetarian|niramish|non\s*veg|chicken|mangsho|fish|mutton)\b", value)
-    if _ASSET_WORDS.search(value) and not (menu_selection and _MENU_WORDS.search(value)):
-        asset = "chart" if _CHART_WORDS.search(value) else "menu" if _MENU_WORDS.search(value) else "active"
-        if _MENU_WORDS.search(value) and re.search(r"\bnot\b[^.?!]*\bchart\b", value):
-            asset = "menu"
-        topic = state.get("active_topic") or state.get("last_topic")
-        if topic or state.get("last_answer_id") or state.get("active_asset"):
-            return ContextResolution("asset_request", str(topic or ""), asset=asset, confidence=0.95)
-        return ContextResolution("asset_ambiguous", asset=asset, confidence=0.0)
+    if _asset_request_shape(value) and not (menu_selection and _MENU_WORDS.search(value)):
+        asset = _explicit_asset(value, state)
+        topic = str(state.get("active_topic") or state.get("last_topic") or "")
+        if asset:
+            return ContextResolution("asset_request", topic, asset=asset, confidence=1.0)
+        return ContextResolution("asset_ambiguous", topic, asset="", confidence=0.0)
 
     # Short follow-ups are eligible only with a recent topic and are never
     # borrowed from an old source route when the message names a new subject.
@@ -171,6 +240,8 @@ def pending_for_response(template_id: Optional[str], response: str, images: Any)
         pending, options = "delivery_area", []
     elif template_id == "subscription_details":
         pending, options = "subscription_booking", ["SUBSCRIPTION"]
+    elif template_id == "asset_request_clarify":
+        pending, options = "asset_request", []
     elif template_id == "sondesh_price_detailed" and re.search(r"collection|option\s*[12]", text):
         pending, options = "sondesh_collection", ["AAMAR_MISHTI", "SIGNATURE"]
     elif template_id in {"know_more", "product_overview"} and any(x in text for x in ("sondesh", "meals")):
