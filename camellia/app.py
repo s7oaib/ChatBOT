@@ -659,6 +659,57 @@ def verify_instagram_webhook(
     log.warning("Instagram webhook verification failed (mode=%s).", hub_mode)
     return Response(content="Forbidden", media_type="text/plain", status_code=403)
 
+def _cached_instagram_identity(
+    sender_id: str, supplied: Optional[Dict[str, Any]] = None, *,
+    lookup: bool = False, force: bool = False,
+) -> Dict[str, Any]:
+    """Enrich by exact IGSID; a failed lookup never removes cached identity."""
+    external_id = str(sender_id)
+    cached = db.get_instagram_customer_identity(external_id) or {}
+    supplied = supplied or {}
+    username = normalize_instagram_username(supplied.get("customer_username"))
+    display_name = str(supplied.get("customer_display_name") or "").strip() or None
+    profile_pic = str(supplied.get("customer_profile_pic") or "").strip() or None
+    if profile_pic and (not profile_pic.startswith("https://") or "access_token" in profile_pic.lower()):
+        profile_pic = None
+    now = datetime.utcnow()
+    last_lookup = cached.get("last_lookup_at")
+    try:
+        age_hours = (now - datetime.fromisoformat(last_lookup)).total_seconds() / 3600 if last_lookup else None
+    except (TypeError, ValueError):
+        age_hours = None
+    # Meta is queried at most once per interval on ordinary inbound messages.
+    # A new handoff gets one immediate final retry when still unresolved.
+    interval = 24 if cached.get("customer_username") else 6
+    should_lookup = lookup and not username and (force or age_hours is None or age_hours >= interval)
+    lookup_at = None
+    if should_lookup:
+        lookup_at = now.isoformat()
+        try:
+            resolved = resolve_instagram_identity(external_id)
+            username = normalize_instagram_username(resolved.username)
+            if isinstance(resolved.display_name, str):
+                display_name = resolved.display_name.strip() or display_name
+            if isinstance(resolved.profile_pic, str) and resolved.profile_pic.startswith("https://") and "access_token" not in resolved.profile_pic.lower():
+                profile_pic = resolved.profile_pic
+        except Exception:
+            # Provider outages must not interrupt a customer reply or CAM.
+            username = None
+    if username or display_name or profile_pic or lookup_at or not cached:
+        cached = db.save_instagram_customer_identity(
+            external_id, username=username, display_name=display_name,
+            profile_pic=profile_pic, lookup_at=lookup_at or (now.isoformat() if username else None),
+        )
+    return {
+        "customer_external_id": external_id,
+        "customer_username": cached.get("customer_username"),
+        "customer_display_name": cached.get("customer_display_name"),
+        "customer_profile_pic": cached.get("customer_profile_pic"),
+        "identity_resolved_at": cached.get("identity_resolved_at"),
+        "identity_status": cached.get("identity_status") or "UNRESOLVED",
+    }
+
+
 def _process_instagram_event(
     sender_id: str,
     message_text: str,
@@ -685,12 +736,10 @@ def _process_instagram_event(
     frees the loop and lets several customers be handled at once.
     """
     try:
-        identity = customer_identity or (
-            resolve_instagram_identity(sender_id).as_record()
-            if resolve_identity else
-            {"customer_external_id": sender_id, "customer_username": None}
-        )
-        identity["customer_external_id"] = identity.get("customer_external_id") or sender_id
+        supplied_identity = dict(customer_identity or {})
+        if not supplied_identity.get("customer_username") and instagram_username:
+            supplied_identity["customer_username"] = instagram_username
+        identity = _cached_instagram_identity(sender_id, supplied_identity, lookup=resolve_identity)
         facts = session_memory.get_facts(sender_id, "instagram")
         active_handoff = db.get_active_handoff("instagram", sender_id)
         if active_handoff:
@@ -931,6 +980,8 @@ def _process_instagram_event(
             is_order_handoff = template_id in (
                 "order_draft_receipt", "order_next_steps", "client_approved_order_ready_handoff",
             )
+            if not identity.get("customer_username") and resolve_identity:
+                identity = _cached_instagram_identity(sender_id, identity, lookup=True, force=True)
             handoff = get_or_create_handoff(
                 user_id=sender_id, channel="instagram", reason=reason,
                 user_message=customer_message, facts=facts,
@@ -3712,28 +3763,15 @@ def get_escalations_list(limit: int = 50, status: Optional[str] = None, x_admin_
 
 
 def _safe_admin_handoff_label(handoff: Dict[str, Any]) -> str:
-    """Choose username, then the exact Meta sender ID, then a generic label."""
+    """Present a verified Instagram identity, never an IGSID as a name."""
     source_user_id = str(handoff.get("source_user_id") or "")
-    candidate = normalize_instagram_username(handoff.get("instagram_username"))
+    candidate = normalize_instagram_username(handoff.get("customer_username")) or normalize_instagram_username(handoff.get("instagram_username"))
     if candidate and candidate != source_user_id:
         return f"@{candidate}"
-    candidate = normalize_instagram_username(handoff.get("customer_username"))
-    if candidate and candidate != source_user_id:
-        return f"@{candidate}"
-    try:
-        known = json.loads(handoff.get("known_entities") or "{}")
-    except (TypeError, ValueError):
-        known = {}
-    if not isinstance(known, dict):
-        known = {}
-    for key in ("instagram_username", "username", "display_name", "customer_name"):
-        candidate = normalize_instagram_username(known.get(key))
-        if candidate and candidate != source_user_id:
-            return candidate
-    external_id = str(
-        handoff.get("customer_external_id") or handoff.get("source_user_id") or ""
-    ).strip()
-    return external_id or "Instagram customer"
+    display_name = str(handoff.get("customer_name") or "").strip()
+    if display_name and display_name != source_user_id:
+        return display_name
+    return "Instagram customer" if handoff.get("source_channel") == "instagram" else (source_user_id or "Customer")
 
 
 @app.get("/admin/handoffs")
@@ -3746,9 +3784,8 @@ def get_admin_handoffs(
 ):
     """Return safe, durable handoff notifications for the Admin shell.
 
-    The raw Instagram sender identifier is intentionally omitted. CAM status
-    remains read-only here; lifecycle changes continue through the existing
-    resume endpoint.
+    CAM status remains read-only here; lifecycle changes continue through the
+    existing resume endpoint.
     """
     require_admin(x_admin_key, x_admin_pin)
     requested_status = str(status or "").strip().upper() or None
@@ -3757,6 +3794,15 @@ def get_admin_handoffs(
     seen_refs = db.get_admin_handoff_seen_refs(refs)
     handoffs = []
     for row in rows:
+        if row.get("source_channel") == "instagram":
+            external_id = str(row.get("customer_external_id") or row.get("source_user_id") or "")
+            cached = db.get_instagram_customer_identity(external_id) or {}
+            row = {**row,
+                   "customer_username": cached.get("customer_username") or row.get("customer_username"),
+                   "customer_name": cached.get("customer_display_name"),
+                   "customer_profile_pic": cached.get("customer_profile_pic"),
+                   "identity_status": cached.get("identity_status") or ("RESOLVED" if row.get("customer_username") or normalize_instagram_username(row.get("instagram_username")) else "UNRESOLVED"),
+                   "identity_resolved_at": cached.get("identity_resolved_at")}
         row_status = str(row.get("status") or "CREATED").upper()
         # CREATED is included because the accepted flow promotes it to
         # WAITING_FOR_HUMAN after notification delivery; neither state should
@@ -3776,6 +3822,9 @@ def get_admin_handoffs(
             "customer_display_name": _safe_admin_handoff_label(row),
             "customer_username": resolved_username,
             "customer_external_id": row.get("customer_external_id") or row.get("source_user_id"),
+            "customer_profile_pic": row.get("customer_profile_pic"),
+            "identity_status": row.get("identity_status"),
+            "identity_resolved_at": row.get("identity_resolved_at"),
             "source_channel": row.get("source_channel"),
             "reason": row.get("reason") or "Human support requested",
             "summary": row.get("summary") or "",
@@ -6832,7 +6881,7 @@ def get_admin_dashboard():
 
         <div id="tab-handoffs" class="panel-card" data-group="handoffs" style="display:none;">
             <div class="admin-page-heading"><div><h2>Handoffs</h2><p>Owner notifications for conversations waiting on a human. Opening an item marks only the notification as seen; CAM lifecycle remains unchanged.</p></div><button class="btn-secondary" type="button" onclick="loadHandoffs()">↻ Refresh</button></div>
-            <input class="field-control" id="handoffSearch" type="search" placeholder="Search username, CAM reference, or sender ID" oninput="renderHandoffs()" style="margin-bottom:12px;">
+            <input class="field-control" id="handoffSearch" type="search" placeholder="Search username, CAM reference, or Instagram ID" oninput="renderHandoffs()" style="margin-bottom:12px;">
             <div id="handoffPageSummary" class="result-box" role="status"></div>
             <div id="handoffList" class="handoff-list"><span class="ig-media-muted">Loading handoffs…</span></div>
         </div>
@@ -8219,7 +8268,7 @@ THIS WEEK'S BENGAL SPECIALS
             const statusClass = status === 'RESUMED' ? '' : ' waiting';
             const customer = handoffCustomerIdentity(item);
             return `<article class="handoff-card${unseenClass}" tabindex="0" data-handoff-ref="${escapeHtml(item.handoff_ref || '')}">
-                <div class="handoff-card-top"><div><div class="handoff-name">Customer: ${escapeHtml(customer)}</div><div class="handoff-ref">${escapeHtml(item.handoff_ref || 'CAM')}</div></div><span class="ig-media-status${statusClass}">${escapeHtml(status)}</span></div>
+                <div class="handoff-card-top"><div><div class="handoff-name">${escapeHtml(customer)}</div><div class="handoff-ref">Instagram ID: ${escapeHtml(item.customer_external_id || 'Unavailable')}</div><div class="handoff-ref">${escapeHtml(item.handoff_ref || 'CAM')}</div></div><span class="ig-media-status${statusClass}">${escapeHtml(status)}</span></div>
                 <div class="handoff-summary">${escapeHtml(item.reason || 'Human support requested')}${item.summary && !compact ? `\n${escapeHtml(item.summary)}` : ''}</div>
                 <div class="handoff-meta">${escapeHtml(formatAdminTimestamp(item.created_at))}${item.unresolved_topic ? ` · ${escapeHtml(item.unresolved_topic)}` : ''}</div>
                 <button class="btn-secondary" type="button" data-handoff-open="${escapeHtml(item.handoff_ref || '')}" style="justify-self:start;padding:7px 10px;font-size:.74rem;">Open handoff</button>
@@ -8229,16 +8278,20 @@ THIS WEEK'S BENGAL SPECIALS
         function handoffCustomerIdentity(item) {
             const username = String(item?.customer_username || '').trim().replace(/^@+/, '');
             if (username) return `@${username}`;
-            const externalId = String(item?.customer_external_id || '').trim();
-            if (externalId) return externalId;
-            return 'Instagram customer';
+            return item?.customer_display_name || 'Instagram customer';
+        }
+
+        function handoffMatchesSearch(item, query) {
+            const needle = String(query || '').trim().toLowerCase().replace(/^@+/, '');
+            return !needle || [item.customer_username, item.customer_external_id, item.handoff_ref]
+                .filter(Boolean).join(' ').toLowerCase().includes(needle);
         }
 
         function renderHandoffs() {
             const list = document.getElementById('handoffList');
             const popover = document.getElementById('handoffPopoverList');
             const query = String(document.getElementById('handoffSearch')?.value || '').trim().toLowerCase();
-            const visible = query ? adminHandoffs.filter(item => [item.customer_username, item.customer_external_id, item.handoff_ref].filter(Boolean).join(' ').toLowerCase().includes(query)) : adminHandoffs;
+            const visible = adminHandoffs.filter(item => handoffMatchesSearch(item, query));
             if (list) list.innerHTML = visible.length ? visible.map(item => renderHandoffCard(item)).join('') : '<span class="ig-media-muted">No active handoffs match this search.</span>';
             if (popover) popover.innerHTML = adminHandoffs.length ? adminHandoffs.slice(0, 4).map(item => renderHandoffCard(item, true)).join('') : '<span class="ig-media-muted">No new handoffs.</span>';
             document.querySelectorAll('[data-handoff-ref]').forEach(card => {
@@ -8306,13 +8359,17 @@ THIS WEEK'S BENGAL SPECIALS
             const drawer = document.getElementById('contentDetailsDrawer'); const backdrop = document.getElementById('contentDetailsBackdrop');
             const status = String(item.status || 'WAITING_FOR_HUMAN').toUpperCase();
             document.getElementById('contentDetailsType').innerText = 'Customer handoff';
-            document.getElementById('contentDetailsTitle').innerText = `Customer: ${handoffCustomerIdentity(item)}`;
-            document.getElementById('contentDetailsPreview').innerHTML = '<div style="font-size:3rem;color:#8b97a8;">↗</div>';
-            document.getElementById('contentDetailsFacts').innerHTML = [['Customer', handoffCustomerIdentity(item)], ['CAM reference', item.handoff_ref], ['Instagram sender ID', item.customer_external_id || 'Unavailable'], ['Status', status], ['Reason', item.reason], ['Summary', item.summary || '—'], ['Created', formatAdminTimestamp(item.created_at)], ['Updated', formatAdminTimestamp(item.updated_at || item.created_at)]].map(([label, value]) => `<div class="drawer-fact"><span class="drawer-fact-label">${escapeHtml(label)}</span><span class="drawer-fact-value">${escapeHtml(value)}</span></div>`).join('');
+            document.getElementById('contentDetailsTitle').innerText = handoffCustomerIdentity(item);
+            const avatar = String(item.customer_profile_pic || '');
+            document.getElementById('contentDetailsPreview').innerHTML = avatar.startsWith('https:' + '/' + '/') ? `<img src="${escapeHtml(avatar)}" alt="Instagram customer profile" style="width:64px;height:64px;border-radius:50%;object-fit:cover;">` : '<div style="font-size:3rem;color:#8b97a8;">↗</div>';
+            document.getElementById('contentDetailsFacts').innerHTML = [['Customer', handoffCustomerIdentity(item)], ...(!item.customer_username ? [['Identity', 'Username unavailable from Meta']] : []), ['Instagram ID', item.customer_external_id || 'Unavailable'], ['CAM reference', item.handoff_ref], ['Status', status], ['Reason', item.reason], ['Summary', item.summary || '—'], ['Created', formatAdminTimestamp(item.created_at)], ['Updated', formatAdminTimestamp(item.updated_at || item.created_at)]].map(([label, value]) => `<div class="drawer-fact"><span class="drawer-fact-label">${escapeHtml(label)}</span><span class="drawer-fact-value">${escapeHtml(value)}</span></div>`).join('');
             const resumeAction = status === 'WAITING_FOR_HUMAN' || status === 'CREATED'
                 ? `<button class="btn-secondary" type="button" onclick="resumeAdminHandoff('${escapeHtml(item.handoff_ref)}')">Resume CAM</button>`
                 : '<span class="ig-media-muted">Read-only history — this CAM is already resumed.</span>';
-            document.getElementById('contentDetailsActions').innerHTML = `${resumeAction}<button class="btn-secondary" type="button" onclick="switchTab('tab-handoffs', null); closeContentDetails();">Open Handoffs</button>`;
+            const username = String(item.customer_username || '');
+            const profileUrl = 'https:' + '/' + '/' + 'www.instagram.com/' + encodeURIComponent(username) + '/';
+            const profileAction = /^[A-Za-z0-9._-]+$/.test(username) ? `<a class="btn-secondary" href="${escapeHtml(profileUrl)}" target="_blank" rel="noopener noreferrer">Open Instagram Profile</a>` : '';
+            document.getElementById('contentDetailsActions').innerHTML = `${resumeAction}${profileAction}<button class="btn-secondary" type="button" onclick="switchTab('tab-handoffs', null); closeContentDetails();">Open Handoffs</button>`;
             drawer.classList.add('open'); backdrop.classList.add('open'); drawer.setAttribute('aria-hidden', 'false'); backdrop.setAttribute('aria-hidden', 'false'); document.getElementById('contentDetailsClose').focus();
         }
 

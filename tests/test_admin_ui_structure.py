@@ -646,7 +646,8 @@ def test_handoff_notifications_are_global_and_persistent(page):
 
 
 def test_handoff_identity_and_current_menu_actions_are_wired(page):
-    assert "Customer: ${escapeHtml(customer)}" in page
+    assert "${escapeHtml(customer)}" in page
+    assert "Instagram ID: ${escapeHtml(item.customer_external_id" in page
     assert "function handoffCustomerIdentity" in page
     assert "function showGroup(group, selectedTabId = null)" in page
     assert "panel.id === selectedTabId" in page

@@ -16,11 +16,15 @@ log = get_logger("camellia.instagram_identity")
 class InstagramIdentity:
     external_id: str
     username: Optional[str] = None
+    display_name: Optional[str] = None
+    profile_pic: Optional[str] = None
 
     def as_record(self) -> dict:
         return {
             "customer_external_id": self.external_id,
             "customer_username": self.username,
+            "customer_display_name": self.display_name,
+            "customer_profile_pic": self.profile_pic,
         }
 
 
@@ -32,6 +36,8 @@ def resolve_instagram_identity(sender_id: str) -> InstagramIdentity:
 
     token = str(config.INSTAGRAM_ACCESS_TOKEN or "").strip()
     username = None
+    display_name = None
+    profile_pic = None
     if token:
         host = "graph.instagram.com" if token.startswith("IGAA") else "graph.facebook.com"
         url = f"https://{host}/{config.INSTAGRAM_API_VERSION}/{quote(external_id, safe='')}"
@@ -46,9 +52,13 @@ def resolve_instagram_identity(sender_id: str) -> InstagramIdentity:
             if isinstance(candidate, str):
                 candidate = candidate.strip().lstrip("@")
                 username = candidate or None
+            if isinstance(payload, dict):
+                display_name = str(payload.get("name") or "").strip() or None
+                picture = str(payload.get("profile_pic") or "").strip()
+                profile_pic = picture if picture.startswith("https://") and "access_token" not in picture.lower() else None
         except Exception:
             # Do not log the raw ID, username, token, provider response, or
             # exception. The sender ID remains a complete operational identity.
             log.info("Instagram username lookup unavailable; retaining sender identity.")
 
-    return InstagramIdentity(external_id=external_id, username=username)
+    return InstagramIdentity(external_id=external_id, username=username, display_name=display_name, profile_pic=profile_pic)

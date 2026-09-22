@@ -683,6 +683,19 @@ class Database:
             self._ensure_column(cursor, "cross_channel_handoffs", "customer_username", "TEXT")
             self._ensure_column(cursor, "cross_channel_handoffs", "customer_external_id", "TEXT")
 
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS instagram_customer_identities (
+                customer_external_id TEXT PRIMARY KEY,
+                customer_username TEXT,
+                customer_display_name TEXT,
+                customer_profile_pic TEXT,
+                identity_resolved_at TEXT,
+                identity_status TEXT NOT NULL DEFAULT 'UNRESOLVED',
+                last_lookup_at TEXT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+
             # Admin notification state is deliberately separate from the
             # handoff lifecycle. Reading a notification must never mutate a
             # CAM, and marking it seen must never change WAITING_FOR_HUMAN.
@@ -3508,6 +3521,46 @@ class Database:
                 (customer_username, customer_external_id, handoff_ref),
             )
             conn.commit()
+
+    def get_instagram_customer_identity(self, external_id: str) -> Optional[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM instagram_customer_identities WHERE customer_external_id = ?",
+                (external_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def save_instagram_customer_identity(
+        self, external_id: str, *, username: Optional[str] = None,
+        display_name: Optional[str] = None, profile_pic: Optional[str] = None,
+        lookup_at: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Cache Meta identity without erasing a previously resolved value."""
+        resolved_at = lookup_at if (username or display_name) else None
+        status = "RESOLVED" if username else "UNRESOLVED"
+        with self.get_connection() as conn:
+            conn.execute(
+                """INSERT INTO instagram_customer_identities
+                   (customer_external_id, customer_username, customer_display_name,
+                    customer_profile_pic, identity_resolved_at, identity_status, last_lookup_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(customer_external_id) DO UPDATE SET
+                    customer_username=COALESCE(excluded.customer_username, customer_username),
+                    customer_display_name=COALESCE(excluded.customer_display_name, customer_display_name),
+                    customer_profile_pic=COALESCE(excluded.customer_profile_pic, customer_profile_pic),
+                    identity_resolved_at=COALESCE(excluded.identity_resolved_at, identity_resolved_at),
+                    identity_status=CASE WHEN excluded.identity_status='RESOLVED' OR customer_username IS NOT NULL
+                        THEN 'RESOLVED' ELSE 'UNRESOLVED' END,
+                    last_lookup_at=COALESCE(excluded.last_lookup_at, last_lookup_at),
+                    updated_at=CURRENT_TIMESTAMP""",
+                (external_id, username, display_name, profile_pic, resolved_at, status, lookup_at),
+            )
+            row = conn.execute(
+                "SELECT * FROM instagram_customer_identities WHERE customer_external_id = ?",
+                (external_id,),
+            ).fetchone()
+            conn.commit()
+            return dict(row)
 
     def get_handoff_by_ref(self, handoff_ref: str) -> Optional[Dict[str, Any]]:
         """Looks up a handoff by its customer-facing reference."""
