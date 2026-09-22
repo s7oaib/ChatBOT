@@ -26,7 +26,7 @@ def _respond(uid, message):
     return responder.match_and_respond(message, user_id=uid, channel="instagram")
 
 
-def test_how_to_order_starts_request_draft_with_the_exact_customer_instruction(monkeypatch):
+def test_generic_how_to_order_uses_the_approved_process_answer(monkeypatch):
     monkeypatch.setattr(config, "BYPASS_AD_GATE", True)
     uid = "order-intake-start-" + uuid.uuid4().hex[:8]
     session_memory.clear_session(uid, "instagram")
@@ -34,12 +34,11 @@ def test_how_to_order_starts_request_draft_with_the_exact_customer_instruction(m
     response, matched, template_id, _images = _respond(uid, "how do i order")
 
     assert matched is True
-    assert template_id == "order_intake_draft"
-    assert response == instruction_message()
-    assert "Need 2 boxes Sondesh for Friday dinner in Gurgaon" in response
-    assert "Sondesh Classic 250g to Gurgaon" in response
+    assert template_id == "alacarte_prebooking_steps"
+    from camellia.client_qa import REGISTRY_BY_ID
+    assert response == REGISTRY_BY_ID["order_prebook"].answer
     facts = session_memory.get_facts(uid, "instagram")
-    assert facts["order_intake_draft"]["status"] == ORDER_DRAFT_INCOMPLETE
+    assert facts.get("order_intake_draft") is None
     assert not [row for row in db.get_handoffs(limit=300) if row["source_user_id"] == uid]
 
 
@@ -242,9 +241,11 @@ def test_instagram_order_start_sends_one_reply_and_creates_no_human_handoff(monk
         app_module._process_instagram_event(uid, "how do i order", "ad-order-intake")
 
     assert send.call_count == 1
-    assert send.call_args.args[1] == instruction_message()
+    from camellia.client_qa import REGISTRY_BY_ID
+    assert send.call_args.args[1] == REGISTRY_BY_ID["order_prebook"].answer
     escalate.assert_not_called()
     assert not [row for row in db.get_handoffs(limit=300) if row["source_user_id"] == uid]
+    assert session_memory.get_facts(uid, "instagram").get("order_intake_draft") is None
 
 
 def test_complete_intake_is_a_click_to_chat_not_an_automatic_handoff(monkeypatch):
@@ -304,9 +305,12 @@ def test_how_to_order_overrides_mapped_source_without_sending_source_description
 
     response, matched, template_id, _images = _respond(uid, "how do i order")
 
-    assert matched is True and template_id == "order_intake_draft"
-    assert response == instruction_message()
+    from camellia.client_qa import REGISTRY_BY_ID
+    assert matched is True and template_id == "alacarte_prebooking_steps"
+    assert response == REGISTRY_BY_ID["order_prebook"].answer
     assert "Source description" not in response
+    assert facts["source_context_superseded"] is False
+    assert facts.get("order_intake_draft") is None
 
 
 def test_price_payment_finalized_order_and_unsupported_questions_keep_separate_routes(monkeypatch):
@@ -339,7 +343,7 @@ def test_price_payment_finalized_order_and_unsupported_questions_keep_separate_r
     assert "available" not in _availability.lower() or not matched_availability
     assert discount_template != "order_intake_draft"
     assert active_price_match is True and active_price_template == "sondesh_price_detailed"
-    assert session_memory.get_facts(active_price_id, "instagram")["order_intake_draft"]["status"] == ORDER_DRAFT_INCOMPLETE
+    assert session_memory.get_facts(active_price_id, "instagram")["order_intake_draft"] is None
     assert active_payment_match is True and active_payment_template == "GUARD_payment_method"
-    assert session_memory.get_facts(active_payment_id, "instagram")["order_intake_draft"]["status"] == ORDER_DRAFT_INCOMPLETE
+    assert session_memory.get_facts(active_payment_id, "instagram")["order_intake_draft"] is None
 

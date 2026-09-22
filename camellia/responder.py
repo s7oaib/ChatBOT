@@ -2596,19 +2596,62 @@ class DeterministicResponder:
                 isinstance(existing_order_intake, dict)
                 and existing_order_intake.get("status")
             )
+            approved_qa_candidate = client_qa.match(user_message, facts)
+            explicit_product_question = bool(
+                order_intake._PRODUCT_RE.search(user_message)
+                and re.search(r"\b(?:know|more|tell|details|about|what|why|price|cost|pay|payment|deliver\w*)\b", lowered_text)
+                and not order_intake.is_order_process_question(user_message)
+            )
+            explicit_order_details = bool(
+                not explicit_product_question
+                and order_intake._PRODUCT_RE.search(user_message)
+                and order_intake.is_order_request(
+                    user_message, facts.get("active_product_context"),
+                )
+            )
+            approved_intent_precedes_draft = bool(
+                (approved_qa_candidate or explicit_product_question)
+                and not explicit_order_details
+            )
+            source_referential_order = bool(
+                isinstance(facts.get("source_route"), dict)
+                and facts["source_route"].get("active", True)
+                and source_referential_intent(user_message)
+            )
             finalized_order = bool(
                 ORDER_READY_RE.fullmatch(lowered_text)
                 and not order_intake.is_order_process_question(user_message)
             )
+            if finalized_order:
+                # A confirmed/ready order is an explicit next-steps intent.
+                # Resolve it before the fail-closed approved-Q&A miss path,
+                # while the generic "I want to order" process question stays
+                # eligible for its client-approved prebooking answer.
+                order_template = self._template_by_id("order_next_steps") or {}
+                order_response = order_template.get("response") or self._generic_fallback()
+                facts.update({
+                    "order_intake_draft": None,
+                    "last_route_source": "FINALIZED_ORDER_NEXT_STEPS",
+                    "last_topic": "order",
+                    "last_knowledge_ids": ["template:order_next_steps"],
+                    "last_actions": [BusinessAction.SEND_RESPONSE.value],
+                    "knowledge_sufficient": True,
+                    "last_grounding": "approved_order_next_steps",
+                    "last_llm_called": False,
+                    "last_fallback_used": False,
+                })
+                session_memory.add_turn(user_id, channel, user_message, order_response)
+                return order_response, False, "order_next_steps", None
             if (
                 not finalized_order
+                and not approved_intent_precedes_draft
+                and not source_referential_order
                 and not order_intake.is_price_or_payment(user_message)
                 and not order_intake.is_unsupported_question(user_message)
                 and not semantic_fallback._ESCALATION_INTENT_RE.search(lowered_text)
             ):
                 starts_order_intake = (
-                    order_intake.is_order_process_question(user_message)
-                    or order_intake.is_order_request(
+                    order_intake.is_order_request(
                         user_message, facts.get("active_product_context"),
                     )
                 )
@@ -2665,6 +2708,31 @@ class DeterministicResponder:
                     )
                     session_memory.add_turn(user_id, channel, user_message, safe_turn_response)
                     return response_text, True, "order_intake_draft", None
+
+            # A referential order question belongs to the exact mapped source,
+            # not to an empty generic draft. Resolve only the source's saved
+            # priority product and keep the source route available for follow-up.
+            source_route = facts.get("source_route") if isinstance(facts.get("source_route"), dict) else None
+            if source_referential_order and source_route and not facts.get("source_context_superseded"):
+                source_product = next((
+                    product for product in source_route.get("priority_products", [])
+                    if route_template_id(product)
+                ), None)
+                source_template_id = route_template_id(source_product) if source_product else None
+                source_template = self._template_by_id(source_template_id) if source_template_id else None
+                if source_template and source_template.get("response") and not source_template.get("escalate"):
+                    source_response, source_images = self._format_dynamic_response(
+                        source_template_id, source_template["response"],
+                        user_id=user_id, channel=channel, user_message=user_message,
+                    )
+                    facts.update({
+                        "last_route_source": "MAPPED_SOURCE_ORDER_FOLLOWUP",
+                        "source_context_used": True,
+                        "last_topic": TOPIC_MAP.get(source_template_id, source_product),
+                        "active_product_context": source_product,
+                    })
+                    session_memory.add_turn(user_id, channel, user_message, source_response)
+                    return source_response, True, f"source_{source_product}_{source_template_id}", source_images
 
             source = facts.get("source_route") if isinstance(facts.get("source_route"), dict) else {}
             source_description = str(source.get("source_description") or "").strip()
@@ -2733,7 +2801,6 @@ class DeterministicResponder:
             lowered_text,
             re.I,
         ))
-        explicit_client_subject = explicit_client_subject or order_process_question
         source_topic_text = " ".join(
             str(source_route.get(key) or "")
             for key in ("routing_topic", "topic_name", "name")
@@ -2746,6 +2813,7 @@ class DeterministicResponder:
             source_route_active
             and not HOME_TABLE_RE.search(source_topic_text)
             and not explicit_client_subject
+            and not order_process_question
         )
         price_followup = bool(re.fullmatch(r"\s*(?:price|cost|rate|how much)\s*[?.!]*\s*", user_message, re.I))
         details_followup = bool(re.fullmatch(r"\s*(?:tell me more|more details|tell me about it)\s*[?.!]*\s*", user_message, re.I))
@@ -3380,10 +3448,16 @@ class DeterministicResponder:
                 re.IGNORECASE,
             )
         )
+        source_order_followup = bool(
+            isinstance(facts.get("source_route"), dict)
+            and facts["source_route"].get("active", True)
+            and source_referential_intent(user_message) == "order"
+            and not explicit_product
+        )
         explicit_current_intent = bool(
             explicit_product
             or explicit_sensitive_subject
-            or PURCHASE_ASSISTANCE_RE.search(lowered_text)
+            or (PURCHASE_ASSISTANCE_RE.search(lowered_text) and not source_order_followup)
             or (
                 semantic_fallback._ESCALATION_INTENT_RE.search(lowered_text)
                 and not semantic_fallback._IDENTITY_QUESTION_RE.search(lowered_text)
