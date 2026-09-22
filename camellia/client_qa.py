@@ -319,13 +319,30 @@ def match(message: str, facts: Optional[Dict[str, Any]] = None) -> Optional[Appr
 
     if re.search(r"\b(?:how\s+to\s+pay|how\s+do\s+i\s+pay|payment\s+(?:method|options?))\b", text, re.I):
         return result("home_table_payment" if home else "general_payment_client")
+    if re.search(
+        r"\b(?:how\s+(?:do\s+i|can\s+i|to)\s+(?:place\s+)?(?:an?\s+)?order|"
+        r"how\s+can\s+i\s+place\s+(?:an?\s+)?order|"
+        r"i\s+(?:want|would\s+like)\s+to\s+(?:place\s+)?(?:an?\s+)?order|"
+        r"what\s+are\s+the\s+next\s+steps\s+to\s+(?:order|place\s+(?:an?\s+)?order)|"
+        r"how\s+(?:do\s+i|can\s+i)\s+(?:pre\s*[- ]?book|pre\s*[- ]?order))\b",
+        text,
+        re.I,
+    ):
+        return result("order_prebook")
     if re.search(r"\b(?:pre\s*[- ]?book|pre\s*[- ]?order|how\s+to\s+order\s+(?:from|an?)\s+menu|order\s+ala\s*[- ]?carte)\b", text, re.I):
         return result(
             "order_prebook"
             if state.get("order_flow_context") or re.search(r"\bto\s+place\s+an\s+order\b", text, re.I)
             else "alacarte_prebook"
         )
-    if re.search(r"\b(?:ready\s+to\s+(?:place|order)|placed\s+(?:my|the)\s+order|confirm\s+(?:my|the)\s+order|finali[sz]e\s+(?:it|my\s+order))\b", text, re.I):
+    if re.search(
+        r"\b(?:ready\s+to\s+(?:place|order)|placed\s+(?:my|the)\s+order|"
+        r"confirm\s+(?:my|the)\s+order|finali[sz]e\s+(?:it|my\s+order)|"
+        r"(?:i\s*(?:'ve|have)\s+)?finali[sz]ed\s+(?:my\s+)?order|"
+        r"order\s+is\s+final|i\s*(?:'ve|have)\s+selected\s+everything)\b",
+        text,
+        re.I,
+    ):
         return result("order_ready_handoff")
     if re.search(r"\b(?:how\s+do\s+i\s+pay|payment)\b", text, re.I):
         return result("general_payment_client")

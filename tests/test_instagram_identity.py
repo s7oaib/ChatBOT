@@ -5,6 +5,7 @@ import re
 import uuid
 from unittest.mock import patch
 
+import pytest
 from fastapi.testclient import TestClient
 
 from camellia import app as app_module
@@ -108,15 +109,113 @@ def test_identity_lookup_returns_username_without_exposing_provider_payload(monk
             return False
 
         def get(self, _url, params=None):
-            assert params["fields"] == "username"
+            assert params["fields"] == "name,username,profile_pic"
             return FakeResponse()
 
     monkeypatch.setattr(config, "INSTAGRAM_ACCESS_TOKEN", "test-token")
+    monkeypatch.setattr(config, "INSTAGRAM_AUTH_MODE", "instagram_login")
     monkeypatch.setattr("camellia.instagram_identity.httpx.Client", FakeClient)
     sender_id = _sender_id()
     identity = resolve_instagram_identity(sender_id)
     assert identity.external_id == sender_id
     assert identity.username == "lookup_name"
+
+
+@pytest.mark.parametrize(
+    ("auth_mode", "expected_host"),
+    [("instagram_login", "graph.instagram.com"), ("legacy_page", "graph.facebook.com")],
+)
+def test_identity_lookup_host_comes_from_configured_auth_mode(monkeypatch, auth_mode, expected_host):
+    class FakeResponse:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"username": "meta_name", "name": "Customer", "profile_pic": "https://example.com/p.jpg"}
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def get(self, url, params=None):
+            assert expected_host in url
+            assert params["fields"] == "name,username,profile_pic"
+            return FakeResponse()
+
+    monkeypatch.setattr(config, "INSTAGRAM_AUTH_MODE", auth_mode)
+    monkeypatch.setattr(config, "INSTAGRAM_ACCESS_TOKEN", "opaque-token")
+    monkeypatch.setattr("camellia.instagram_identity.httpx.Client", FakeClient)
+    identity = resolve_instagram_identity(_sender_id())
+    assert identity.username == "meta_name"
+    assert identity.display_name == "Customer"
+    assert identity.profile_pic == "https://example.com/p.jpg"
+
+
+def test_non_200_identity_lookup_logs_only_safe_failure_metadata(monkeypatch, caplog):
+    class FakeResponse:
+        status_code = 400
+
+        @staticmethod
+        def json():
+            return {"error": {"code": 100, "message": "Unknown field in private provider message"}}
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def get(self, _url, params=None):
+            assert params["fields"] == "name,username,profile_pic"
+            return FakeResponse()
+
+    token = "secret-access-token"
+    sender_id = _sender_id()
+    monkeypatch.setattr(config, "INSTAGRAM_AUTH_MODE", "instagram_login")
+    monkeypatch.setattr(config, "INSTAGRAM_ACCESS_TOKEN", token)
+    monkeypatch.setattr("camellia.instagram_identity.httpx.Client", FakeClient)
+    with caplog.at_level(logging.INFO, logger="camellia.instagram_identity"):
+        identity = resolve_instagram_identity(sender_id)
+    assert identity.external_id == sender_id
+    assert identity.username is None
+    assert "INSTAGRAM_IDENTITY_LOOKUP status=failed http_status=400 category=unsupported_field auth_mode=instagram_login" in caplog.text
+    assert token not in caplog.text
+    assert sender_id not in caplog.text
+    assert "Unknown field in private provider message" not in caplog.text
+
+
+def test_unexpected_identity_lookup_exception_is_nonblocking_and_redacted(monkeypatch, caplog):
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def get(self, *_args, **_kwargs):
+            raise RuntimeError("private error includes secret-access-token")
+
+    monkeypatch.setattr(config, "INSTAGRAM_AUTH_MODE", "legacy_page")
+    monkeypatch.setattr(config, "INSTAGRAM_ACCESS_TOKEN", "secret-access-token")
+    monkeypatch.setattr("camellia.instagram_identity.httpx.Client", FakeClient)
+    with caplog.at_level(logging.INFO, logger="camellia.instagram_identity"):
+        identity = resolve_instagram_identity(_sender_id())
+    assert identity.username is None
+    assert "category=provider_unavailable" in caplog.text
+    assert "secret-access-token" not in caplog.text
 
 
 def test_identity_and_username_are_not_emitted_into_ordinary_logs(caplog):

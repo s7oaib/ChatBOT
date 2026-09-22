@@ -444,6 +444,8 @@ ORDER_READY_RE = re.compile(
     r"let'?s\s+confirm|finali[sz]e\s+it|book\s+this|can\s+we\s+lock\s+this\s+in|"
     r"go\s+ahead\s+and\s+book\s+it|order\s+now|i\s+wnt\s+2\s+ordr\s+pls|i\s+want\s+two\s+boxes|"
     r"yes\s+place\s+my\s+order|final\s+selection|confirm\s+my\s+order|"
+    r"(?:i\s*(?:'ve|have)\s+)?finali[sz]ed\s+(?:my\s+)?order|order\s+is\s+final|"
+    r"i\s*(?:'ve|have)\s+selected\s+everything|"
     r"place\s+the\s+order)\s*[?.!]*$",
     re.IGNORECASE,
 )
@@ -2646,6 +2648,16 @@ class DeterministicResponder:
             lowered_text,
             re.I,
         ))
+        order_process_question = bool(re.search(
+            r"\b(?:how\s+(?:do\s+i|can\s+i|to)\s+(?:place\s+)?(?:an?\s+)?order|"
+            r"how\s+can\s+i\s+place\s+(?:an?\s+)?order|"
+            r"i\s+(?:want|would\s+like)\s+to\s+(?:place\s+)?(?:an?\s+)?order|"
+            r"what\s+are\s+the\s+next\s+steps\s+to\s+(?:order|place\s+(?:an?\s+)?order)|"
+            r"how\s+(?:do\s+i|can\s+i)\s+(?:pre\s*[- ]?book|pre\s*[- ]?order))\b",
+            lowered_text,
+            re.I,
+        ))
+        explicit_client_subject = explicit_client_subject or order_process_question
         source_topic_text = " ".join(
             str(source_route.get(key) or "")
             for key in ("routing_topic", "topic_name", "name")

@@ -84,6 +84,52 @@ def test_instagram_prebook_question_beats_stale_subscription_context(monkeypatch
     assert response == REGISTRY_BY_ID["alacarte_prebook"].answer
 
 
+@pytest.mark.parametrize("message", [
+    "how do i order",
+    "how can i order",
+    "how to order",
+    "how do I place an order",
+    "I want to place an order",
+    "I want to order",
+    "what are the next steps to order",
+    "how do I pre book",
+    "how can I pre-book",
+])
+def test_order_process_paraphrases_use_exact_approved_ordering_answer(monkeypatch, message):
+    from camellia.client_qa import REGISTRY_BY_ID
+
+    monkeypatch.setattr("camellia.config.config.BYPASS_AD_GATE", True)
+    user_id = "client-qa-order-process-" + str(abs(hash(message)))
+    session_memory.clear_session(user_id, "instagram")
+    facts = session_memory.get_facts(user_id, "instagram")
+    facts["source_route"] = {"routing_id": 7, "source_type": "story", "active": True, "routing_topic": "Sondesh"}
+
+    response, matched, template_id, _images = responder.match_and_respond(
+        message, user_id=user_id, channel="instagram",
+    )
+
+    assert matched is True
+    assert template_id == "alacarte_prebooking_steps"
+    assert response == REGISTRY_BY_ID["order_prebook"].answer
+
+
+@pytest.mark.parametrize(
+    ("message", "expected_template"),
+    [
+        ("How do I pay", "GUARD_payment_method"),
+        ("I've finalized my order", "order_next_steps"),
+    ],
+)
+def test_payment_and_finalized_order_remain_distinct_from_order_process(monkeypatch, message, expected_template):
+    monkeypatch.setattr("camellia.config.config.BYPASS_AD_GATE", True)
+    user_id = "client-qa-distinct-order-intent-" + str(abs(hash(message)))
+    session_memory.clear_session(user_id, "instagram")
+    _response, _matched, template_id, _images = responder.match_and_respond(
+        message, user_id=user_id, channel="instagram",
+    )
+    assert template_id == expected_template
+
+
 def test_instagram_bengali_bento_details_beats_stale_story_context(monkeypatch):
     monkeypatch.setattr("camellia.config.config.BYPASS_AD_GATE", True)
     user_id = "client-qa-bento-stale-story"
