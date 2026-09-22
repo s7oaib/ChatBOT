@@ -2625,7 +2625,10 @@ class DeterministicResponder:
                 and source_referential_intent(user_message)
             )
             finalized_order = bool(
-                ORDER_READY_RE.fullmatch(lowered_text)
+                (
+                    ORDER_READY_RE.fullmatch(lowered_text)
+                    or PURCHASE_ASSISTANCE_RE.search(lowered_text)
+                )
                 and not order_intake.is_order_process_question(user_message)
             )
             if finalized_order:
