@@ -88,7 +88,7 @@ Risk: Low | Medium | High
 ### Q-001 — Instagram Media Gallery V2
 
 Status: IMPLEMENTED / VALIDATION_PENDING
-Commit: pending staging push
+Commit: `b972ba03802866a513e87e8ccabd35bc7ed6c7f5`
 Branch: `codex/staging-fast-dev-20260922`
 Risk: Medium
 
