@@ -114,7 +114,9 @@ function pendingFetchCount() {
 }
 global.fetch = (url, opts) => {
     const method = ((opts && opts.method) || 'GET').toUpperCase();
-    fetchLog.push({ url: String(url), method, body: opts && opts.body ? JSON.parse(opts.body) : null });
+    const rawBody = opts && opts.body;
+    const parsedBody = typeof rawBody === 'string' ? JSON.parse(rawBody) : rawBody || null;
+    fetchLog.push({ url: String(url), method, body: parsedBody });
     const idx = fetchHandlers.findIndex(h => String(url).includes(h.urlPart) && h.method === method);
     if (idx === -1) {
         return Promise.resolve({ ok: false, status: 404, json: async () => ({ detail: 'unhandled fetch: ' + method + ' ' + url }) });
@@ -159,8 +161,9 @@ def _run_node(scenario_js: str) -> dict:
 
 def _seed_common_pickers():
     return textwrap.dedent("""
-        igTopics = [{ topic_id: 't1', name: 'Topic One', priority_products: [], default_menu_id: null }];
-        igMenus = [{ menu_id: 'm1', name: 'Menu One' }, { menu_id: 'm2', name: 'Menu Two' }];
+        igTopics = [{ topic_id: 't1', name: 'Topic One', priority_products: [], default_menu_id: 'm1' }];
+        igAllMenus = [{ menu_id: 'm1', name: 'Menu One', active: 1 }, { menu_id: 'm2', name: 'Menu Two', active: 1 }];
+        igMenus = [...igAllMenus];
         adminAuthenticated = true;
     """)
 
@@ -170,12 +173,11 @@ def _seed_common_pickers():
 # =====================================================================
 
 class TestStoryMenuModeSubmission:
-    def _save_scenario(self, media_id, topic_id, menu_mode, menu_id_value):
+    def _save_scenario(self, media_id, topic_id, menu_choice):
         return _seed_common_pickers() + textwrap.dedent(f"""
             document.getElementById('igStoryMediaId').value = {json.dumps(media_id)};
             document.getElementById('igStoryTopicPicker').value = {json.dumps(topic_id)};
-            document.getElementById('igStoryMenuMode').value = {json.dumps(menu_mode)};
-            document.getElementById('igStoryMenuPicker').value = {json.dumps(menu_id_value)};
+            document.getElementById('igStoryMenuPicker').value = {json.dumps(menu_choice)};
             queueFetch('/admin/instagram-routes', 'POST', () => okResponse({{ status: 'success', routing_id: 55 }}));
             // saveInstagramStoryMapping() calls loadInstagramStories() on success;
             // let those three GETs resolve harmlessly so the promise settles.
@@ -194,25 +196,25 @@ class TestStoryMenuModeSubmission:
         """)
 
     def test_inherit_submits_menu_mode_inherit(self):
-        result = _run_node(self._save_scenario("story-1", "t1", "INHERIT", ""))
+        result = _run_node(self._save_scenario("story-1", "t1", "__inherit__"))
         assert result["postCalled"] is True
         assert result["body"]["menu_mode"] == "INHERIT"
         assert result["body"]["menu_id"] is None
 
     def test_none_submits_menu_mode_none(self):
-        result = _run_node(self._save_scenario("story-1", "t1", "NONE", ""))
+        result = _run_node(self._save_scenario("story-1", "t1", "__none__"))
         assert result["postCalled"] is True
         assert result["body"]["menu_mode"] == "NONE"
         assert result["body"]["menu_id"] is None
 
     def test_selected_submits_menu_mode_selected_with_menu_id(self):
-        result = _run_node(self._save_scenario("story-1", "t1", "SELECTED", "m2"))
+        result = _run_node(self._save_scenario("story-1", "t1", "m2"))
         assert result["postCalled"] is True
         assert result["body"]["menu_mode"] == "SELECTED"
         assert result["body"]["menu_id"] == "m2"
 
-    def test_selected_without_a_menu_cannot_be_submitted(self):
-        result = _run_node(self._save_scenario("story-1", "t1", "SELECTED", ""))
+    def test_unavailable_selected_menu_cannot_be_submitted(self):
+        result = _run_node(self._save_scenario("story-1", "t1", "archived-menu"))
         assert result["postCalled"] is False
         assert "menu" in result["resultText"].lower()
 
@@ -228,38 +230,195 @@ class TestStoryMenuModeEditPreservation:
             }}];
             openInstagramStoryMapping('story-1');
             console.log('RESULT::' + JSON.stringify({{
-                menuMode: document.getElementById('igStoryMenuMode').value,
-                menuId: document.getElementById('igStoryMenuPicker').value,
-                pickerWrapDisplay: document.getElementById('igStoryMenuPickerWrap').style.display,
+                menuChoice: document.getElementById('igStoryMenuPicker').value,
+                active: document.getElementById('igStoryActive').checked,
+                saveLabel: document.getElementById('igStorySaveButton').innerText,
             }}));
         """)
 
     def test_editing_an_inherit_route_preserves_inherit(self):
         result = _run_node(self._edit_scenario("INHERIT", None))
-        assert result["menuMode"] == "INHERIT"
-        assert result["pickerWrapDisplay"] != "block"
+        assert result["menuChoice"] == "__inherit__"
+        assert result["saveLabel"] == "Save Changes"
 
     def test_editing_a_none_route_preserves_none(self):
         result = _run_node(self._edit_scenario("NONE", None))
-        assert result["menuMode"] == "NONE"
-        assert result["pickerWrapDisplay"] != "block"
+        assert result["menuChoice"] == "__none__"
 
     def test_editing_a_selected_route_preserves_selected_menu(self):
         result = _run_node(self._edit_scenario("SELECTED", "m2"))
-        assert result["menuMode"] == "SELECTED"
-        assert result["menuId"] == "m2"
-        assert result["pickerWrapDisplay"] == "block"
+        assert result["menuChoice"] == "m2"
 
-    def test_menu_mode_select_offers_inherit_as_a_real_option(self):
+    def test_menu_choice_select_offers_inherit_as_a_real_option(self):
         """Requirement 1: INHERIT is selectable -- proven by successfully
         assigning it and reading it back, not just by string presence."""
         result = _run_node(_seed_common_pickers() + textwrap.dedent("""
-            document.getElementById('igStoryMenuMode').value = 'INHERIT';
+            document.getElementById('igStoryMenuPicker').value = '__inherit__';
             console.log('RESULT::' + JSON.stringify({
-                value: document.getElementById('igStoryMenuMode').value,
+                value: document.getElementById('igStoryMenuPicker').value,
             }));
         """))
-        assert result["value"] == "INHERIT"
+        assert result["value"] == "__inherit__"
+
+
+class TestSimpleMappingEditPreservation:
+    def test_changing_only_active_preserves_every_advanced_value(self):
+        result = _run_node(_seed_common_pickers() + textwrap.dedent("""
+            const scope = document.getElementById('igStoryKnowledgeScope');
+            scope.options = [{ value: 'services', selected: false }, { value: 'products', selected: false }];
+            igStorySources = [{
+                story_media_id: 'story-advanced', routing_id: 202, mapping_status: 'MAPPED',
+                topic_id: 't1', menu_mode: 'SELECTED', menu_id: 'm2', active: true,
+                escalation_policy: 'always_human', priority_products: ['jolbhora'],
+                knowledge_scope: ['services'],
+            }];
+            igProducts = [{ id: 'jolbhora', label: 'Jolbhora' }];
+            openInstagramStoryMapping('story-advanced');
+            scope.selectedOptions = scope.options.filter(option => option.selected);
+            document.getElementById('igStoryActive').checked = false;
+            queueFetch('/admin/instagram-routes', 'POST', () => okResponse({ status: 'success', routing_id: 202 }));
+            queueFetch('/admin/instagram-story-sources', 'GET', () => okResponse({ story_sources: [] }));
+            queueFetch('/admin/instagram-routes?include_archived=true', 'GET', () => okResponse({ routes: [] }));
+            queueFetch('/admin/instagram-routes', 'GET', () => okResponse({ routes: [] }));
+            saveInstagramStoryMapping().then(() => {
+                const call = fetchLog.find(c => c.url.includes('/admin/instagram-routes') && c.method === 'POST');
+                console.log('RESULT::' + JSON.stringify({ body: call.body }));
+            });
+        """))
+        assert result["body"]["topic_id"] == "t1"
+        assert result["body"]["menu_mode"] == "SELECTED"
+        assert result["body"]["menu_id"] == "m2"
+        assert result["body"]["active"] is False
+        assert result["body"]["escalation_policy"] == "always_human"
+        assert result["body"]["priority_products"] == ["jolbhora"]
+        assert result["body"]["knowledge_scope"] == ["services"]
+
+    def test_selecting_topic_keeps_inherit_selected_and_shows_default(self):
+        result = _run_node(_seed_common_pickers() + textwrap.dedent("""
+            populateInstagramStoryPickers();
+            document.getElementById('igStoryTopicPicker').value = 't1';
+            document.getElementById('igStoryMenuPicker').value = '__inherit__';
+            onInstagramStoryTopicChange();
+            console.log('RESULT::' + JSON.stringify({
+                value: document.getElementById('igStoryMenuPicker').value,
+                options: document.getElementById('igStoryMenuPicker').innerHTML,
+            }));
+        """))
+        assert result["value"] == "__inherit__"
+        assert "Inherit topic default — Menu One" in result["options"]
+
+    def test_post_reel_edit_prefills_and_preserves_advanced_values(self):
+        result = _run_node(_seed_common_pickers() + textwrap.dedent("""
+            igProducts = [{ id: 'jolbhora', label: 'Jolbhora' }];
+            const scope = document.getElementById('igKnowledgeScope');
+            scope.options = [{ value: 'services', selected: false }];
+            window.igRoutes = [{
+                routing_id: 303, source_type: 'reel', canonical_url: 'https://www.instagram.com/reel/Exact303/',
+                topic_id: 't1', menu_mode: 'SELECTED', menu_id: 'm2', active: true,
+                media_id: 'meta-303', ad_id: '', campaign_id: '', preview_url: null, media_type: 'REELS',
+                escalation_policy: 'canonical', priority_products: ['jolbhora'], knowledge_scope: ['services'],
+            }];
+            editInstagramRoute(303);
+            const prefill = {
+                topic: document.getElementById('igTopicPicker').value,
+                menu: document.getElementById('igMenuPicker').value,
+                media: document.getElementById('igMediaId').value,
+                active: document.getElementById('igActive').checked,
+                saveLabel: document.getElementById('igSaveButton').innerText,
+            };
+            scope.selectedOptions = scope.options.filter(option => option.selected);
+            document.getElementById('igActive').checked = false;
+            queueFetch('/admin/instagram-routes', 'POST', () => okResponse({ route: window.igRoutes[0] }));
+            queueFetch('/admin/instagram-routes', 'GET', () => okResponse({ routes: [], product_catalogue: [], knowledge_scopes: [] }));
+            saveInstagramRoute().then(() => {
+                const call = fetchLog.find(c => c.method === 'POST');
+                console.log('RESULT::' + JSON.stringify({
+                    prefill,
+                    body: call.body,
+                }));
+            });
+        """))
+        assert result["prefill"] == {
+            "topic": "t1", "menu": "m2", "media": "meta-303",
+            "active": True, "saveLabel": "Save Changes",
+        }
+        assert result["body"]["source_type"] == "reel"
+        assert result["body"]["topic_id"] == "t1"
+        assert result["body"]["menu_mode"] == "SELECTED"
+        assert result["body"]["active"] is False
+        assert result["body"]["escalation_policy"] == "canonical"
+        assert result["body"]["priority_products"] == ["jolbhora"]
+        assert result["body"]["knowledge_scope"] == ["services"]
+
+
+class TestInlineCreateAndEdit:
+    def test_new_menu_refreshes_and_selects_calling_story_field(self):
+        result = _run_node(_seed_common_pickers() + textwrap.dedent("""
+            mmLoadMenuList = async () => {};
+            openMenuModal('igStoryMenuPicker');
+            document.getElementById('menuName').value = 'New Event Menu';
+            document.getElementById('menuDescription').value = 'Event menu description';
+            document.getElementById('menuImageFile').files = [new Blob(['image'], { type: 'image/png' })];
+            queueFetch('/admin/menu-catalogue', 'POST', () => okResponse({ menu: { menu_id: 'new_event_menu', name: 'New Event Menu', active: 1 } }));
+            queueFetch('/admin/instagram-topics', 'GET', () => okResponse({ topics: igTopics }));
+            queueFetch('/admin/menu-catalogue', 'GET', () => okResponse({ menus: igAllMenus.concat([{ menu_id: 'new_event_menu', name: 'New Event Menu', active: 1 }]), categories: ['Other'] }));
+            submitMenu().then(() => console.log('RESULT::' + JSON.stringify({
+                selected: document.getElementById('igStoryMenuPicker').value,
+                modalClosed: document.getElementById('menuModal').style.display === 'none',
+                postCalls: fetchLog.filter(c => c.method === 'POST').length,
+            })));
+        """))
+        assert result == {"selected": "new_event_menu", "modalClosed": True, "postCalls": 1}
+
+    def test_menu_metadata_edit_uses_patch_without_image_replacement(self):
+        result = _run_node(_seed_common_pickers() + textwrap.dedent("""
+            mmLoadMenuList = async () => {};
+            openMenuEditModal('m2');
+            document.getElementById('menuName').value = 'Renamed Menu';
+            document.getElementById('menuDescription').value = 'Updated description';
+            document.getElementById('menuActive').checked = false;
+            queueFetch('/admin/menu-catalogue/m2', 'PATCH', () => okResponse({ menu: { menu_id: 'm2' } }));
+            queueFetch('/admin/instagram-topics', 'GET', () => okResponse({ topics: igTopics }));
+            queueFetch('/admin/menu-catalogue', 'GET', () => okResponse({ menus: igAllMenus, categories: ['Other'] }));
+            submitMenu().then(() => {
+                const call = fetchLog.find(c => c.method === 'PATCH');
+                console.log('RESULT::' + JSON.stringify({ body: call.body, urls: fetchLog.map(c => c.url) }));
+            });
+        """))
+        assert result["body"]["name"] == "Renamed Menu"
+        assert result["body"]["description"] == "Updated description"
+        assert result["body"]["active"] is False
+        assert not any("/image/" in url for url in result["urls"])
+
+    def test_topic_edit_prefills_and_updates_existing_topic(self):
+        result = _run_node(_seed_common_pickers() + textwrap.dedent("""
+            igTopics[0].description = 'Original description';
+            igTopics[0].active = true;
+            igTopics[0].response_order = 'description_first';
+            igTopics[0].knowledge_scope = [];
+            openTopicModal('t1', 'igStoryTopicPicker');
+            const prefilled = {
+                name: document.getElementById('topicName').value,
+                description: document.getElementById('topicDescription').value,
+                defaultMenu: document.getElementById('topicDefaultMenu').value,
+            };
+            document.getElementById('topicDescription').value = 'Changed description';
+            queueFetch('/admin/instagram-topics/t1', 'PATCH', () => okResponse({ topic: { ...igTopics[0], description: 'Changed description' } }));
+            queueFetch('/admin/instagram-topics', 'GET', () => okResponse({ topics: igTopics }));
+            queueFetch('/admin/menu-catalogue', 'GET', () => okResponse({ menus: igAllMenus, categories: ['Other'] }));
+            submitTopic().then(() => {
+                const call = fetchLog.find(c => c.method === 'PATCH');
+                console.log('RESULT::' + JSON.stringify({ prefilled, body: call.body }));
+            });
+        """))
+        assert result["prefilled"] == {
+            "name": "Topic One",
+            "description": "Original description",
+            "defaultMenu": "m1",
+        }
+        assert result["body"]["name"] == "Topic One"
+        assert result["body"]["description"] == "Changed description"
+        assert result["body"]["default_menu_id"] == "m1"
 
 
 # =====================================================================

@@ -238,38 +238,35 @@ def test_instagram_stories_map_flow_uses_a_read_only_captured_id(page):
     section = page[page.index('id="tab-instagram-stories"'):page.index('<!-- MENU tab, panel 3 of 4')]
     assert 'id="igStoryMapForm"' in section
     assert 'id="igStoryMediaId"' in section and 'readonly' in section
-    for field in ("igStoryTopicPicker", "igStoryPriorityPicker", "igStoryKnowledgeScope", "igStoryMenuMode", "igStoryMenuPicker", "igStoryEscalationPolicy", "igStoryActive"):
+    for field in ("igStoryTopicPicker", "igStoryPriorityPicker", "igStoryKnowledgeScope", "igStoryMenuPicker", "igStoryEscalationPolicy", "igStoryActive"):
         assert f'id="{field}"' in section
+    assert 'id="igStoryAdvancedSettings"' in section
+    assert '<details id="igStoryAdvancedSettings" open' not in section
     assert "media_id: mediaId" in page
     assert 'onclick="editInstagramRoute(' not in section
 
 
-def test_instagram_story_menu_mode_offers_inherit_none_and_selected(page):
+def test_instagram_story_menu_choice_offers_inherit_none_and_active_menus(page):
     """
-    Defect 1 (P1): the picker's empty option used to be labelled "Inherit
-    Topic Menu" but always submitted menu_mode='NONE' -- INHERIT was
-    unreachable. A dedicated menu-mode select now carries all three states
-    explicitly; tests/test_instagram_story_runtime.py proves the actual
-    submit/edit-reload behavior by executing the real JS.
+    The client-facing selector represents all three persisted states without
+    exposing the internal menu-mode terminology.
     """
     section = page[page.index('id="tab-instagram-stories"'):page.index('<!-- MENU tab, panel 3 of 4')]
-    mode_select = section[section.index('id="igStoryMenuMode"'):section.index('</select>', section.index('id="igStoryMenuMode"'))]
-    assert '<option value="INHERIT">Inherit Topic Menu</option>' in mode_select
-    assert '<option value="NONE">No Menu</option>' in mode_select
-    assert '<option value="SELECTED">Select Menu</option>' in mode_select
-    assert 'id="igStoryMenuPickerWrap"' in section
-
-    script = page[page.index('function onInstagramStoryMenuModeChange'):page.index('function renderInstagramStoryPriorityProducts')]
-    assert "igStoryMenuMode" in script
+    menu_select = section[section.index('id="igStoryMenuPicker"'):section.index('</select>', section.index('id="igStoryMenuPicker"'))]
+    assert '<option value="__inherit__">Inherit topic default</option>' in menu_select
+    assert '<option value="__none__">No menu</option>' in menu_select
+    assert "Menu to send" in section
+    assert "Choose the menu customers should receive when this content starts the conversation." in section
+    assert "openMenuModal('igStoryMenuPicker')" in section
 
     save = page[page.index('async function saveInstagramStoryMapping'):page.index('async function setInstagramStoryActive')]
-    assert "menu_mode: menuMode" in save
-    assert "menuMode === 'SELECTED' ? menuId : null" in save
-    assert "menuMode === 'SELECTED' && !menuId" in save, "SELECTED without a chosen menu must be blocked before submit"
+    assert "menu_mode: menuChoice.menu_mode" in save
+    assert "menu_id: menuChoice.menu_id" in save
+    assert "updateMenuChoiceWarning" in save
 
     edit = page[page.index('function openInstagramStoryMapping'):page.index('function cancelInstagramStoryMapping')]
-    assert "source.menu_mode" in edit
-    assert "onInstagramStoryMenuModeChange()" in edit
+    assert "menuChoiceForRoute(source)" in edit
+    assert "setMenuChoiceFromRoute" in edit
 
 
 def test_instagram_story_refresh_does_not_clear_the_list_before_it_settles(page):
@@ -298,7 +295,7 @@ def test_instagram_story_refresh_does_not_clear_the_list_before_it_settles(page)
 def test_instagram_stories_exposes_status_filters_and_safe_actions(page):
     section = page[page.index('id="tab-instagram-stories"'):page.index('<!-- MENU tab, panel 3 of 4')]
     render = page[page.index('function renderInstagramStories'):page.index('async function loadInstagramStories')]
-    for label in ("All", "Unmapped", "Mapped", "Disabled", "Archived", "Deleted", "Map Story", "Edit Mapping", "Disable", "Enable", "Archive", "Restore", "Delete"):
+    for label in ("All", "Unmapped", "Mapped", "Disabled", "Archived", "Deleted", "Map Story", "Edit", "Disable", "Enable", "Archive", "Restore", "Delete"):
         assert label in section or label in render
     assert 'data-story-action="delete"' in render
     assert 'data-story-action="restore-source"' in render
@@ -432,10 +429,12 @@ def test_instagram_routing_has_a_simple_client_first_default_view(page):
     assert "Instagram Post / Reel Link" not in section
     assert ">Identify<" not in section
     assert "id=\"igTopicPicker\"" in section and "+ Add Topic" in section
-    assert "Save Routing" in section
+    assert "Save Mapping" in section
+    assert "Menu to send" in section
+    assert "Choose the menu customers should receive when this content starts the conversation." in section
+    assert "openMenuModal('igMenuPicker')" in section
     assert "Preview Reply" in section
     assert "Preview Customer Response" not in section
-    assert '<details id="igCustomize"' in section and '<details id="igCustomize" open' not in section
     assert '<details id="igAdvancedSettings"' in section and '<details id="igAdvancedSettings" open' not in section
     assert "Advanced settings are normally filled automatically" in section
 
@@ -445,13 +444,33 @@ def test_topic_selectors_explain_empty_catalogues_and_refresh_together(page):
     assert 'id="igTopicEmptyHelp"' in page
     assert "No active Topics are configured yet." in page
     assert 'id="igStoryTopicEmptyHelp"' in page
-    assert 'onclick="openTopicModal()">+ Add Topic</button>' in page
+    assert "openTopicModal('', 'igTopicPicker')" in page
+    assert "openTopicModal('', 'igStoryTopicPicker')" in page
     load_topics = page[page.index("async function loadTopicsAndMenus"):page.index("function onIgTopicChange")]
     assert "activeTopics = igTopics.filter" in load_topics
     assert "populateInstagramStoryPickers();" in load_topics
     story_pickers = page[page.index("function populateInstagramStoryPickers"):page.index("function onInstagramStoryTopicChange")]
     assert "activeTopics = igTopics.filter" in story_pickers
     assert "igStoryTopicEmptyHelp" in story_pickers
+
+
+def test_topic_and_menu_edit_actions_are_clear_and_metadata_only(page):
+    story_section = page[page.index('id="tab-instagram-stories"'):page.index('<!-- MENU tab, panel 3 of 4')]
+    assert 'id="igStoryEditTopicButton"' in story_section
+    assert '>Edit Topic</button>' in story_section
+    assert 'id="igEditTopicButton"' in page
+    assert 'id="topicModalTitle">+ Add Topic</h3>' in page
+    assert "openMenuModal('topicDefaultMenu')" in page
+
+    catalogue = page[page.index('id="tab-menu-manager"'):page.index('<!-- CUSTOMERS tab')]
+    assert "openMenuEditModal" in page
+    assert 'id="menuModalTitle"' in page
+    assert 'id="menuModalEditingId"' in page
+    assert 'id="menuMetadataHelp"' in page
+    assert "Replace → Preview → Save &amp; Publish" in page
+    assert "method: 'PATCH'" in page
+    assert "body: JSON.stringify({ name, category:" in page
+    assert "Menu Catalogue" in catalogue
 
 
 def test_instagram_routing_keeps_client_friendly_cards_and_existing_actions(page):

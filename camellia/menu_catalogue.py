@@ -137,6 +137,10 @@ def update_menu(
         existing = db.find_menu_catalogue_entry_by_name(name)
         if existing and existing["menu_id"] != menu_id:
             raise MenuCatalogueError(f"A menu named '{name}' already exists.")
+    if description is not None:
+        description = description.strip()
+        if not description:
+            raise MenuCatalogueError("Customer description is required.")
     if category is not None and category not in CATEGORIES:
         category = "Other"
     updated = db.update_menu_catalogue_entry(

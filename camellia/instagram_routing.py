@@ -384,8 +384,11 @@ def validate_route_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         menu_id = topic.get("default_menu_id") or None
     if menu_mode == "SELECTED" and not menu_id:
         raise ValueError("A selected menu is required when menu_mode is SELECTED.")
-    if menu_id and not db.get_menu_catalogue_entry(menu_id):
+    selected_menu = db.get_menu_catalogue_entry(menu_id) if menu_id else None
+    if menu_id and not selected_menu:
         raise ValueError("Unknown menu.")
+    if selected_menu and not bool(selected_menu.get("active")):
+        raise ValueError("That menu is inactive. Choose an active menu or No menu.")
 
     priority = payload.get("priority_products", [])
     if priority is None:
@@ -628,8 +631,11 @@ def create_topic(
     if unknown_scope:
         raise InstagramTopicError(f"Unknown knowledge scope: {unknown_scope[0]}")
 
-    if default_menu_id and not db.get_menu_catalogue_entry(default_menu_id):
+    default_menu = db.get_menu_catalogue_entry(default_menu_id) if default_menu_id else None
+    if default_menu_id and not default_menu:
         raise InstagramTopicError("Unknown default menu.")
+    if default_menu and not bool(default_menu.get("active")):
+        raise InstagramTopicError("The default menu must be active.")
 
     topic_id = _slugify_topic(name)
     if db.get_instagram_topic(topic_id):
@@ -657,8 +663,12 @@ def update_topic(topic_id: str, **fields: Any) -> Dict[str, Any]:
         if existing and existing["topic_id"] != topic_id:
             raise InstagramTopicError(f"A topic named '{name}' already exists.")
         fields["name"] = name
-    if fields.get("default_menu_id") and not db.get_menu_catalogue_entry(fields["default_menu_id"]):
+    default_menu_id = fields.get("default_menu_id")
+    default_menu = db.get_menu_catalogue_entry(default_menu_id) if default_menu_id else None
+    if default_menu_id and not default_menu:
         raise InstagramTopicError("Unknown default menu.")
+    if default_menu and not bool(default_menu.get("active")):
+        raise InstagramTopicError("The default menu must be active.")
     if "response_order" in fields:
         response_order = str(fields["response_order"] or "description_first").strip().lower()
         if response_order not in RESPONSE_ORDERS:

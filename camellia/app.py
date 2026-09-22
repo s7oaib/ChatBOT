@@ -6635,52 +6635,57 @@ def get_admin_dashboard():
                 <label class="field-label" for="igTopicPicker">Topic</label>
                 <div style="display:flex; gap:8px; flex-wrap:wrap;">
                     <select class="field-control" id="igTopicPicker" onchange="onIgTopicChange()" style="flex:1; min-width:220px;"><option value="">Select Topic</option></select>
-                    <button class="btn-secondary" type="button" onclick="openTopicModal()">+ Add Topic</button>
+                    <button class="btn-secondary" type="button" onclick="openTopicModal('', 'igTopicPicker')">+ Add Topic</button>
                     <button class="btn-secondary" id="igEditTopicButton" type="button" onclick="openTopicEditor()" disabled>Edit Topic</button>
                 </div>
                 <small id="igTopicEmptyHelp" class="ig-media-muted" style="display:none; margin-top:6px;">No active Topics are configured yet. Use + Add Topic to create one before saving Instagram routing.</small>
             </div>
 
-            <div id="igTopicPreview" style="display:none; margin-top:14px; background:#FCFBF9; border:1px solid var(--border); border-radius:10px; padding:14px; font-size:0.85rem;">
-                <div style="font-size:0.76rem; color:var(--text-muted); margin-bottom:6px;">Topic preview</div>
-                <h3 id="igTopicPreviewName" style="margin:0; font-size:1rem; color:var(--primary);"></h3>
-                <div style="margin-top:8px;"><b>Menu:</b> <span id="igTopicPreviewMenu">—</span></div>
-                <div style="margin-top:4px;"><b>Priority:</b> <span id="igTopicPreviewPriority">—</span></div>
-                <div style="margin-top:4px; white-space:pre-wrap;"><b>Description:</b> <span id="igTopicPreviewDescription">—</span></div>
-                <div style="margin-top:10px;"><b>Reply Order:</b> <span id="igTopicPreviewOrder">Description First</span></div>
-                <button class="btn-secondary" type="button" onclick="swapIgResponseOrder()" style="margin-top:8px;">⇅ Swap Order</button>
-                <button class="btn-secondary" type="button" onclick="previewInstagramRoute()" style="margin-top:10px;">Preview Reply</button>
-                <div id="igPreviewBox" style="display:none; margin-top:10px; background:#fff; border:1px solid var(--border); border-radius:8px; padding:10px; font-size:0.84rem;"></div>
+            <div style="margin-top:14px;">
+                <label class="field-label" for="igMenuPicker">Menu to send</label>
+                <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                    <select class="field-control" id="igMenuPicker" onchange="onInstagramMenuChoiceChange()" style="flex:1; min-width:220px;"><option value="__inherit__">Inherit topic default</option><option value="__none__">No menu</option></select>
+                    <button class="btn-secondary" type="button" onclick="openMenuModal('igMenuPicker')">+ Add Menu</button>
+                </div>
+                <small class="ig-media-muted" style="display:block; margin-top:6px;">Choose the menu customers should receive when this content starts the conversation.</small>
+                <small id="igMenuWarning" style="display:none; margin-top:6px; color:var(--danger); font-weight:700;"></small>
             </div>
 
-            <details id="igCustomize" style="margin-top:12px;"><summary style="cursor:pointer;"><b>Customize</b></summary>
+            <label style="display:flex; align-items:center; gap:8px; margin-top:12px; font-size:0.84rem; font-weight:700;">
+                <input type="checkbox" id="igActive" checked> Active
+            </label>
+
+            <details id="igAdvancedSettings" style="margin-top:12px;"><summary style="cursor:pointer;"><b>Advanced settings</b></summary>
+                <div id="igTopicPreview" style="display:none; margin-top:12px; background:#FCFBF9; border:1px solid var(--border); border-radius:10px; padding:14px; font-size:0.85rem;">
+                    <div style="font-size:0.76rem; color:var(--text-muted); margin-bottom:6px;">Topic preview</div>
+                    <h3 id="igTopicPreviewName" style="margin:0; font-size:1rem; color:var(--primary);"></h3>
+                    <div style="margin-top:8px;"><b>Menu:</b> <span id="igTopicPreviewMenu">—</span></div>
+                    <div style="margin-top:4px;"><b>Priority:</b> <span id="igTopicPreviewPriority">—</span></div>
+                    <div style="margin-top:4px; white-space:pre-wrap;"><b>Description:</b> <span id="igTopicPreviewDescription">—</span></div>
+                    <div style="margin-top:10px;"><b>Reply Order:</b> <span id="igTopicPreviewOrder">Description First</span></div>
+                    <button class="btn-secondary" type="button" onclick="swapIgResponseOrder()" style="margin-top:8px;">⇅ Swap Order</button>
+                    <button class="btn-secondary" type="button" onclick="previewInstagramRoute()" style="margin-top:10px;">Preview Reply</button>
+                    <div id="igPreviewBox" style="display:none; margin-top:10px; background:#fff; border:1px solid var(--border); border-radius:8px; padding:10px; font-size:0.84rem;"></div>
+                </div>
                 <div style="margin-top:10px;">
-                    <label class="field-label" for="igMenuPicker">Menu to Show</label>
-                    <div style="display:flex; gap:8px;">
-                        <select class="field-control" id="igMenuPicker"><option value="">Select Menu</option></select>
-                        <button class="btn-secondary" type="button" onclick="openMenuModal()">+ Add Menu</button>
-                    </div>
-                    <label class="field-label" for="igTopicDescription" style="margin-top:10px;">Topic Description</label>
+                    <label class="field-label" for="igTopicDescription">Topic Description</label>
                     <textarea class="field-control" id="igTopicDescription" rows="2" placeholder="Select a Topic to see its description"></textarea>
                     <label class="field-label" style="margin-top:10px;">Priority Products</label>
                     <div style="display:flex; gap:8px;"><select class="field-control" id="igProductPicker"></select><button class="btn-secondary" type="button" onclick="addIgPriorityProduct()">+ Add Product</button></div>
                     <div id="igPriorityProducts" class="ad-route-list" style="margin-top:8px;"></div>
                 </div>
-            </details>
-
-            <details id="igAdvancedSettings" style="margin-top:12px;"><summary style="cursor:pointer;"><b>Advanced Settings</b></summary>
                 <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:10px; margin-top:10px;">
-                    <input class="field-control" id="igMediaId" placeholder="Verified Media ID">
-                    <input class="field-control" id="igAdId" placeholder="Meta Ad ID">
-                    <input class="field-control" id="igCampaignId" placeholder="Campaign ID (reference only)">
-                    <select class="field-control" id="igEscalationPolicy"><option value="human_if_unsupported">Human if unsupported</option><option value="canonical">Normal canonical rules</option><option value="always_human">Always offer human help</option></select>
-                    <select class="field-control" id="igKnowledgeScope" multiple title="Optional canonical knowledge scope"></select>
+                    <div><label class="field-label" for="igMediaId">Verified Media ID</label><input class="field-control ig-story-readonly" id="igMediaId" readonly aria-readonly="true"></div>
+                    <div><label class="field-label" for="igAdId">Meta Ad ID</label><input class="field-control" id="igAdId"></div>
+                    <div><label class="field-label" for="igCampaignId">Campaign ID</label><input class="field-control" id="igCampaignId"></div>
+                    <div><label class="field-label" for="igEscalationPolicy">Escalation policy</label><select class="field-control" id="igEscalationPolicy"><option value="human_if_unsupported">Human if unsupported</option><option value="canonical">Normal canonical rules</option><option value="always_human">Always offer human help</option></select></div>
+                    <div><label class="field-label" for="igKnowledgeScope">Knowledge scope</label><select class="field-control" id="igKnowledgeScope" multiple title="Optional canonical knowledge scope"></select></div>
                 </div>
                 <p style="font-size:0.76rem;color:var(--text-muted);">Advanced settings are normally filled automatically. Only change these when instructed.</p>
             </details>
 
             <div class="action-bar">
-                <button class="btn-primary" id="igSaveButton" type="button" onclick="saveInstagramRoute()">Save Routing</button>
+                <button class="btn-primary" id="igSaveButton" type="button" onclick="saveInstagramRoute()">Save Mapping</button>
                 <button class="btn-secondary" type="button" onclick="resetInstagramRouteForm()">Cancel</button>
             </div>
             <div id="adRouteResult" class="result-box"></div>
@@ -6741,49 +6746,42 @@ def get_admin_dashboard():
                         <label class="field-label" for="igStoryMediaId">Story media ID</label>
                         <input class="field-control ig-story-readonly" id="igStoryMediaId" readonly aria-readonly="true" autocomplete="off">
                     </div>
-                    <div>
+                    <div style="grid-column:1/-1;">
                         <label class="field-label" for="igStoryTopicPicker">Topic</label>
                         <div style="display:flex; gap:8px; align-items:flex-start; flex-wrap:wrap;">
                             <select class="field-control" id="igStoryTopicPicker" style="flex:1; min-width:180px;"><option value="">Select Topic</option></select>
-                            <button class="btn-secondary" type="button" onclick="openTopicModal()">+ Add Topic</button>
+                            <button class="btn-secondary" type="button" onclick="openTopicModal('', 'igStoryTopicPicker')">+ Add Topic</button>
+                            <button class="btn-secondary" id="igStoryEditTopicButton" type="button" onclick="openStoryTopicEditor()" disabled>Edit Topic</button>
                         </div>
                         <small id="igStoryTopicEmptyHelp" class="ig-media-muted" style="display:none; margin-top:6px;">No active Topics are configured yet. Create a Topic above, then choose it here.</small>
                     </div>
-                    <div>
-                        <label class="field-label" for="igStoryMenuMode">Menu behavior</label>
-                        <select class="field-control" id="igStoryMenuMode">
-                            <option value="INHERIT">Inherit Topic Menu</option>
-                            <option value="NONE">No Menu</option>
-                            <option value="SELECTED">Select Menu</option>
-                        </select>
-                    </div>
-                    <div id="igStoryMenuPickerWrap" style="display:none;">
-                        <label class="field-label" for="igStoryMenuPicker">Menu</label>
-                        <select class="field-control" id="igStoryMenuPicker"><option value="">Select a menu…</option></select>
-                    </div>
-                    <div>
-                        <label class="field-label" for="igStoryEscalationPolicy">Escalation policy</label>
-                        <select class="field-control" id="igStoryEscalationPolicy"><option value="human_if_unsupported">Human if unsupported</option><option value="canonical">Normal canonical rules</option><option value="always_human">Always offer human help</option></select>
-                    </div>
-                    <div>
-                        <label class="field-label" for="igStoryKnowledgeScope">Knowledge scope</label>
-                        <select class="field-control" id="igStoryKnowledgeScope" multiple title="Optional canonical knowledge scope" size="3"></select>
-                    </div>
                     <div style="grid-column:1/-1;">
-                        <label class="field-label" for="igStoryPriorityPicker">Priority products</label>
-                        <div style="display:flex; gap:8px; flex-wrap:wrap;">
-                            <select class="field-control" id="igStoryPriorityPicker" style="flex:1; min-width:220px;"><option value="">Choose an approved product…</option></select>
-                            <button class="btn-secondary" id="igStoryAddPriorityButton" type="button">+ Add Product</button>
+                        <label class="field-label" for="igStoryMenuPicker">Menu to send</label>
+                        <div style="display:flex; gap:8px; align-items:flex-start; flex-wrap:wrap;">
+                            <select class="field-control" id="igStoryMenuPicker" style="flex:1; min-width:220px;"><option value="__inherit__">Inherit topic default</option><option value="__none__">No menu</option></select>
+                            <button class="btn-secondary" type="button" onclick="openMenuModal('igStoryMenuPicker')">+ Add Menu</button>
                         </div>
-                        <div id="igStoryPriorityProducts" class="ad-route-list" style="margin-top:8px;"></div>
+                        <small class="ig-media-muted" style="display:block; margin-top:6px;">Choose the menu customers should receive when this content starts the conversation.</small>
+                        <small id="igStoryMenuWarning" style="display:none; margin-top:6px; color:var(--danger); font-weight:700;"></small>
                     </div>
                 </div>
                 <label style="display:flex; align-items:center; gap:8px; margin-top:12px; font-size:0.84rem; font-weight:700;">
                     <input type="checkbox" id="igStoryActive" checked> Active
                 </label>
+                <details id="igStoryAdvancedSettings" style="margin-top:12px;"><summary style="cursor:pointer;"><b>Advanced settings</b></summary>
+                    <div class="ig-story-form-grid" style="margin-top:10px;">
+                        <div><label class="field-label" for="igStoryEscalationPolicy">Escalation policy</label><select class="field-control" id="igStoryEscalationPolicy"><option value="human_if_unsupported">Human if unsupported</option><option value="canonical">Normal canonical rules</option><option value="always_human">Always offer human help</option></select></div>
+                        <div><label class="field-label" for="igStoryKnowledgeScope">Knowledge scope</label><select class="field-control" id="igStoryKnowledgeScope" multiple title="Optional canonical knowledge scope" size="3"></select></div>
+                        <div style="grid-column:1/-1;">
+                            <label class="field-label" for="igStoryPriorityPicker">Priority products</label>
+                            <div style="display:flex; gap:8px; flex-wrap:wrap;"><select class="field-control" id="igStoryPriorityPicker" style="flex:1; min-width:220px;"><option value="">Choose an approved product…</option></select><button class="btn-secondary" id="igStoryAddPriorityButton" type="button">+ Add Product</button></div>
+                            <div id="igStoryPriorityProducts" class="ad-route-list" style="margin-top:8px;"></div>
+                        </div>
+                    </div>
+                </details>
                 <div class="action-bar">
                     <div style="display:flex; gap:8px; flex-wrap:wrap;">
-                        <button class="btn-primary" id="igStorySaveButton" type="button">Save Story Mapping</button>
+                        <button class="btn-primary" id="igStorySaveButton" type="button">Save Mapping</button>
                         <button class="btn-secondary" id="igStoryCancelButton" type="button">Cancel</button>
                     </div>
                 </div>
@@ -7511,8 +7509,12 @@ THIS WEEK'S BENGAL SPECIALS
             <input class="field-control" id="topicName" placeholder="e.g. Wedding / Event Sondesh" style="margin-bottom:10px;">
             <label class="field-label">Description *</label>
             <textarea class="field-control" id="topicDescription" rows="3" placeholder="Shown to customers who ask a vague question after sharing this content." style="margin-bottom:10px;"></textarea>
-            <label class="field-label">Default Menu *</label>
-            <select class="field-control" id="topicDefaultMenu" style="margin-bottom:10px;"><option value="">Select Menu</option></select>
+            <label class="field-label">Default Menu</label>
+            <div style="display:flex; gap:8px; align-items:flex-start; margin-bottom:10px;">
+                <select class="field-control" id="topicDefaultMenu" style="flex:1;"><option value="">No default menu</option></select>
+                <button class="btn-secondary" type="button" onclick="openMenuModal('topicDefaultMenu')">+ Add Menu</button>
+            </div>
+            <small id="topicDefaultMenuWarning" style="display:none; margin:-4px 0 10px; color:var(--danger); font-weight:700;"></small>
             <label class="field-label">Reply Order</label>
             <select class="field-control" id="topicResponseOrder" style="margin-bottom:10px;"><option value="description_first">Description First</option><option value="menu_first">Menu First</option></select>
             <label style="display:flex; align-items:center; gap:6px; font-size:0.85rem; margin-bottom:10px;"><input type="checkbox" id="topicActive" checked> Active</label>
@@ -7536,21 +7538,22 @@ THIS WEEK'S BENGAL SPECIALS
     <div id="menuModal" style="display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 9999; justify-content: center; align-items: center; padding: 20px;">
         <div style="background: white; border-radius: 16px; width: 100%; max-width: 480px; padding: 24px; box-shadow: 0 10px 30px rgba(0,0,0,0.2); max-height: 90vh; overflow-y: auto;">
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px;">
-                <h3 style="margin: 0; color: var(--primary);">+ Add New Menu</h3>
+                <h3 style="margin: 0; color: var(--primary);" id="menuModalTitle">+ Add New Menu</h3>
                 <button onclick="closeMenuModal()" style="background: none; border: none; font-size: 1.4rem; cursor: pointer;">&times;</button>
             </div>
+            <input type="hidden" id="menuModalEditingId">
             <label class="field-label">Menu Name *</label>
             <input class="field-control" id="menuName" placeholder="e.g. Meal Subscription" style="margin-bottom:10px;">
             <label class="field-label">Menu Type / Category</label>
             <select class="field-control" id="menuCategory" style="margin-bottom:10px;"></select>
             <label class="field-label">Customer Description *</label>
             <textarea class="field-control" id="menuDescription" rows="3" placeholder="e.g. Weekly Bengali home-style meal subscription with rotating menus." style="margin-bottom:10px;"></textarea>
-            <label class="field-label">Menu Image *</label>
-            <input type="file" id="menuImageFile" accept="image/jpeg,image/png,image/webp" style="margin-bottom:10px;">
+            <div id="menuImageField"><label class="field-label">Menu Image *</label><input type="file" id="menuImageFile" accept="image/jpeg,image/png,image/webp" style="margin-bottom:10px;"></div>
+            <p id="menuMetadataHelp" class="ig-media-muted" style="display:none; margin:0 0 10px;">This changes menu details only. Use Replace → Preview → Save &amp; Publish to change the image.</p>
             <label style="display:flex; align-items:center; gap:6px; font-size:0.85rem; margin-bottom:10px;"><input type="checkbox" id="menuActive" checked> Active</label>
             <div style="display: flex; gap: 8px; justify-content: flex-end;">
                 <button class="btn-secondary" onclick="closeMenuModal()">Cancel</button>
-                <button class="btn-primary" onclick="submitMenu()">Create Menu</button>
+                <button class="btn-primary" id="menuModalSubmitButton" onclick="submitMenu()">Create Menu</button>
             </div>
             <div id="menuModalResult" class="result-box"></div>
         </div>
@@ -7684,7 +7687,7 @@ THIS WEEK'S BENGAL SPECIALS
                 button.addEventListener('click', () => setInstagramStoryFilter(button.dataset.storyFilter || 'all'));
             });
             document.getElementById('igStoryTopicPicker')?.addEventListener('change', onInstagramStoryTopicChange);
-            document.getElementById('igStoryMenuMode')?.addEventListener('change', onInstagramStoryMenuModeChange);
+            document.getElementById('igStoryMenuPicker')?.addEventListener('change', () => updateMenuChoiceWarning('igStoryMenuPicker', 'igStoryMenuWarning'));
             document.getElementById('igStoryAddPriorityButton')?.addEventListener('click', addInstagramStoryPriorityProduct);
             document.getElementById('igStorySaveButton')?.addEventListener('click', saveInstagramStoryMapping);
             document.getElementById('igStoryCancelButton')?.addEventListener('click', cancelInstagramStoryMapping);
@@ -8107,8 +8110,8 @@ THIS WEEK'S BENGAL SPECIALS
             const auditSummary = [item.source || 'Existing Admin record', item.first_seen ? `first seen ${item.first_seen}` : '', item.updated_at ? `updated ${item.updated_at}` : ''].filter(Boolean).join(' · ');
             document.getElementById('contentDetailsFacts').innerHTML = [['Exact Meta ID', id], ['Content type', typeLabel], ['Status', status], ['Route health', routeHealth], ['Topic / intent', item.routing_topic || 'Unmapped'], ['Route destination', item.menu_id || item.canonical_url || 'Not mapped'], ['Published', item.published_at || item.created_at || 'Not supplied'], ['Expiry / last seen', item.expires_at || item.last_seen || 'Not supplied'], ['Routing history / audit', auditSummary || 'No additional history supplied']].map(([label, value]) => `<div class="drawer-fact"><span class="drawer-fact-label">${escapeHtml(label)}</span><span class="drawer-fact-value">${escapeHtml(value)}</span></div>`).join('');
             const actions = [];
-            if (isStory) { if (item.story_media_id && !storyIsAdminDeleted(item)) actions.push(`<button class="btn-secondary" type="button" onclick="closeContentDetails(); openInstagramStoryMapping('${escapeHtml(item.story_media_id)}')">Edit route</button>`); if (item.routing_id && status === 'MAPPED') actions.push(`<button class="btn-danger" type="button" onclick="archiveInstagramStory(${Number(item.routing_id)}); closeContentDetails();">Archive</button>`); }
-            else if (item.routing_id) { actions.push(`<button class="btn-secondary" type="button" onclick="openAdminRoute(igContentRoutes.find(route => Number(route.routing_id) === ${Number(item.routing_id)}))">Edit route</button>`); if (item.archived_at) actions.push(`<button class="btn-secondary" type="button" onclick="restoreInstagramRoute(${Number(item.routing_id)}); closeContentDetails();">Unarchive</button>`); else actions.push(`<button class="btn-danger" type="button" onclick="archiveInstagramRoute(${Number(item.routing_id)}); closeContentDetails();">Archive</button>`); }
+            if (isStory) { if (item.story_media_id && !storyIsAdminDeleted(item)) actions.push(`<button class="btn-secondary" type="button" onclick="closeContentDetails(); openInstagramStoryMapping('${escapeHtml(item.story_media_id)}')">Edit</button>`); if (item.routing_id && status === 'MAPPED') actions.push(`<button class="btn-danger" type="button" onclick="archiveInstagramStory(${Number(item.routing_id)}); closeContentDetails();">Archive</button>`); }
+            else if (item.routing_id) { actions.push(`<button class="btn-secondary" type="button" onclick="openAdminRoute(igContentRoutes.find(route => Number(route.routing_id) === ${Number(item.routing_id)}))">Edit</button>`); if (item.archived_at) actions.push(`<button class="btn-secondary" type="button" onclick="restoreInstagramRoute(${Number(item.routing_id)}); closeContentDetails();">Unarchive</button>`); else actions.push(`<button class="btn-danger" type="button" onclick="archiveInstagramRoute(${Number(item.routing_id)}); closeContentDetails();">Archive</button>`); }
             actions.push(`<button class="btn-secondary" type="button" onclick="switchTab('tab-image', null); closeContentDetails();">Open full details</button>`);
             document.getElementById('contentDetailsActions').innerHTML = actions.join(''); drawer.classList.add('open'); backdrop.classList.add('open'); drawer.setAttribute('aria-hidden', 'false'); backdrop.setAttribute('aria-hidden', 'false'); document.getElementById('contentDetailsClose').focus();
         }
@@ -8196,7 +8199,7 @@ THIS WEEK'S BENGAL SPECIALS
                     const key = encodeURIComponent(m.menu_key);
                     const draftNotice = m.draft ? `<span style="color:var(--primary);font-weight:700;"> · Draft ready · pending publish</span>` : '';
                     const publishAction = m.draft ? `<button class="btn-primary" onclick="mmPublishImage('${key}')">Save &amp; Publish</button>` : '';
-                    return `<article class="visual-menu-card"><h3>${escapeHtml(m.title)}${m.category ? ` <span style="font-weight:400;font-size:0.75rem;color:var(--text-muted);">· ${escapeHtml(m.category)}</span>` : ''}</h3>${image}<div class="visual-menu-meta"><b>${escapeHtml(m.status || 'Active')}</b>${m.published_at ? ` · ${escapeHtml(m.published_at)}` : ''}${draftNotice}</div><div class="visual-menu-actions"><button class="btn-primary" onclick="mmReplaceImage('${key}')">Replace</button>${publishAction}<button class="btn-secondary" onclick="mmPreviewImage('${key}')">Preview</button><button class="btn-secondary" onclick="mmHistoryImage('${key}')">History</button><button class="btn-danger" onclick="mmArchiveImage('${key}')">Archive</button><button class="btn-danger" onclick="mmDeleteMenu('${key}', ${escapeHtml(JSON.stringify(m.title))})">Delete Permanently</button></div><div id="mm-image-history-${key}" style="padding:0 14px 12px"></div></article>`;
+                    return `<article class="visual-menu-card"><h3>${escapeHtml(m.title)}${m.category ? ` <span style="font-weight:400;font-size:0.75rem;color:var(--text-muted);">· ${escapeHtml(m.category)}</span>` : ''}</h3>${image}<div class="visual-menu-meta"><b>${m.active === false ? 'Inactive' : escapeHtml(m.status || 'Active')}</b>${m.published_at ? ` · ${escapeHtml(m.published_at)}` : ''}${draftNotice}</div><div class="visual-menu-actions"><button class="btn-secondary" onclick="openMenuEditModal('${key}')">Edit</button><button class="btn-primary" onclick="mmReplaceImage('${key}')">Replace</button>${publishAction}<button class="btn-secondary" onclick="mmPreviewImage('${key}')">Preview</button><button class="btn-secondary" onclick="mmHistoryImage('${key}')">History</button><button class="btn-danger" onclick="mmArchiveImage('${key}')">Archive</button><button class="btn-danger" onclick="mmDeleteMenu('${key}', ${escapeHtml(JSON.stringify(m.title))})">Delete Permanently</button></div><div id="mm-image-history-${key}" style="padding:0 14px 12px"></div></article>`;
                 }).join('');
             } catch (err) {
                 grid.innerHTML = `<p style="color: var(--danger);">${escapeHtml(err.message || err)}</p>`;
@@ -8414,6 +8417,7 @@ THIS WEEK'S BENGAL SPECIALS
         let igPriority = [];
         let igEditingId = null;
         let igTopics = [];
+        let igAllMenus = [];
         let igMenus = [];
         let igResponseOrder = 'description_first';
         let igMediaMetadata = { preview_url: null, media_type: null };
@@ -8421,6 +8425,68 @@ THIS WEEK'S BENGAL SPECIALS
         // Topic and Menu dropdowns are populated purely from the backend —
         // no hardcoded list — so a Topic or Menu created just now is
         // immediately selectable everywhere it belongs, no restart needed.
+        function menuChoiceParts(value) {
+            if (value === '__inherit__') return { menu_mode: 'INHERIT', menu_id: null };
+            if (value === '__none__') return { menu_mode: 'NONE', menu_id: null };
+            return { menu_mode: 'SELECTED', menu_id: value || null };
+        }
+
+        function menuChoiceForRoute(route) {
+            const mode = String((route || {}).menu_mode || 'INHERIT').toUpperCase();
+            if (mode === 'NONE') return '__none__';
+            if (mode === 'SELECTED') return (route || {}).menu_id || '';
+            return '__inherit__';
+        }
+
+        function inheritedMenuText(topicId) {
+            const topic = igTopics.find(item => item.topic_id === topicId);
+            const menu = topic && topic.default_menu_id ? igMenus.find(item => item.menu_id === topic.default_menu_id) : null;
+            return menu ? `Inherit topic default — ${menu.name}` : 'Inherit topic default — No menu';
+        }
+
+        function refreshMenuChoicePicker(pickerId, topicId, preferredValue = null) {
+            const picker = document.getElementById(pickerId);
+            if (!picker) return;
+            const current = preferredValue === null ? picker.value : preferredValue;
+            picker.innerHTML = `<option value="__inherit__">${escapeHtml(inheritedMenuText(topicId))}</option><option value="__none__">No menu</option>`
+                + igMenus.map(menu => `<option value="${escapeHtml(menu.menu_id)}">${escapeHtml(menu.name)}</option>`).join('');
+            picker.value = current || '__inherit__';
+            if (picker.value !== (current || '__inherit__')) picker.value = '__inherit__';
+        }
+
+        function setMenuChoiceFromRoute(pickerId, warningId, route) {
+            const picker = document.getElementById(pickerId);
+            if (!picker) return;
+            const choice = menuChoiceForRoute(route);
+            const missingSelectedMenu = choice && !choice.startsWith('__') && !igMenus.some(menu => menu.menu_id === choice);
+            if (missingSelectedMenu) {
+                const unavailable = (igAllMenus.find(menu => menu.menu_id === choice) || {}).name || route.menu_id || 'Unavailable menu';
+                picker.innerHTML += `<option value="${escapeHtml(choice)}" disabled>${escapeHtml(unavailable)} — unavailable</option>`;
+            }
+            picker.value = choice;
+            updateMenuChoiceWarning(pickerId, warningId, missingSelectedMenu ? choice : '');
+        }
+
+        function updateMenuChoiceWarning(pickerId, warningId, forcedMissingId = '') {
+            const picker = document.getElementById(pickerId);
+            const warning = document.getElementById(warningId);
+            if (!picker || !warning) return false;
+            const value = forcedMissingId || picker.value;
+            const selectedMissing = value && !value.startsWith('__') && !igMenus.some(menu => menu.menu_id === value);
+            const topicPickerId = pickerId === 'igStoryMenuPicker' ? 'igStoryTopicPicker' : 'igTopicPicker';
+            const topic = igTopics.find(item => item.topic_id === (document.getElementById(topicPickerId)?.value || ''));
+            const inheritedMissing = value === '__inherit__' && topic && topic.default_menu_id && !igMenus.some(menu => menu.menu_id === topic.default_menu_id);
+            const invalid = Boolean(selectedMissing || inheritedMissing);
+            warning.style.display = invalid ? 'block' : 'none';
+            warning.innerText = invalid ? 'The previously linked menu is unavailable. Choose an active menu or No menu before saving.' : '';
+            return invalid;
+        }
+
+        function onInstagramMenuChoiceChange() {
+            updateMenuChoiceWarning('igMenuPicker', 'igMenuWarning');
+            renderIgTopicPreview();
+        }
+
         async function loadTopicsAndMenus() {
             try {
                 const [topicsResp, menusResp] = await Promise.all([
@@ -8430,7 +8496,8 @@ THIS WEEK'S BENGAL SPECIALS
                 const topicsData = await topicsResp.json();
                 const menusData = await menusResp.json();
                 igTopics = topicsData.topics || [];
-                igMenus = (menusData.menus || []).filter(m => m.active);
+                igAllMenus = menusData.menus || [];
+                igMenus = igAllMenus.filter(m => m.active);
                 window.igMenuCategories = menusData.categories || [];
 
                 const activeTopics = igTopics.filter(t => t.active !== false);
@@ -8440,9 +8507,9 @@ THIS WEEK'S BENGAL SPECIALS
                 const emptyHelp = document.getElementById('igTopicEmptyHelp');
                 if (emptyHelp) emptyHelp.style.display = activeTopics.length ? 'none' : 'block';
 
-                const menuOptions = '<option value="">No menu — description only</option>' + igMenus.map(m =>
+                refreshMenuChoicePicker('igMenuPicker', document.getElementById('igTopicPicker').value);
+                const menuOptions = '<option value="">No default menu</option>' + igMenus.map(m =>
                     `<option value="${escapeHtml(m.menu_id)}">${escapeHtml(m.name)}</option>`).join('');
-                document.getElementById('igMenuPicker').innerHTML = menuOptions;
                 const topicDefaultMenuEl = document.getElementById('topicDefaultMenu');
                 if (topicDefaultMenuEl) topicDefaultMenuEl.innerHTML = menuOptions;
                 populateInstagramStoryPickers();
@@ -8456,10 +8523,13 @@ THIS WEEK'S BENGAL SPECIALS
             const editTopicButton = document.getElementById('igEditTopicButton');
             if (editTopicButton) editTopicButton.disabled = !topic;
             document.getElementById('igTopicDescription').value = topic ? (topic.description || '') : '';
+            const currentMenuChoice = document.getElementById('igMenuPicker').value || '__inherit__';
+            refreshMenuChoicePicker('igMenuPicker', topicId, currentMenuChoice);
+            updateMenuChoiceWarning('igMenuPicker', 'igMenuWarning');
             // A new Topic owns the normal defaults. Edit mode passes true so
             // an existing route override is preserved until the client changes
             // it in Customize.
-            if (topic && !preservePriority) {
+            if (topic && !preservePriority && !igEditingId) {
                 igPriority = [...topic.priority_products];
                 renderIgPriorityProducts();
             }
@@ -8470,14 +8540,16 @@ THIS WEEK'S BENGAL SPECIALS
             const box = document.getElementById('igTopicPreview');
             const topic = igTopics.find(t => t.topic_id === document.getElementById('igTopicPicker').value);
             if (!box || !topic) { if (box) box.style.display = 'none'; return; }
-            const menuId = document.getElementById('igMenuPicker').value;
-            const menu = igMenus.find(item => item.menu_id === menuId);
+            const menuChoice = document.getElementById('igMenuPicker').value;
+            const choice = menuChoiceParts(menuChoice);
+            const inheritedId = topic ? topic.default_menu_id : null;
+            const menu = igMenus.find(item => item.menu_id === (choice.menu_mode === 'INHERIT' ? inheritedId : choice.menu_id));
             const labels = igPriority.map(id => {
                 const product = igProducts.find(item => item.id === id);
                 return product ? product.label : id;
             });
             document.getElementById('igTopicPreviewName').innerText = topic.name || '';
-            document.getElementById('igTopicPreviewMenu').innerText = menu ? menu.name : 'No menu selected';
+            document.getElementById('igTopicPreviewMenu').innerText = choice.menu_mode === 'NONE' ? 'No menu' : (menu ? menu.name : 'No menu selected');
             document.getElementById('igTopicPreviewPriority').innerText = labels.length ? labels.join(' → ') : 'Normal conversation routing';
             document.getElementById('igTopicPreviewDescription').innerText = document.getElementById('igTopicDescription').value || '—';
             document.getElementById('igTopicPreviewOrder').innerText = igResponseOrder === 'menu_first' ? 'Menu First' : 'Description First';
@@ -8522,17 +8594,17 @@ THIS WEEK'S BENGAL SPECIALS
             onInstagramSourceTypeChange();
             document.getElementById('igTopicPicker').value = '';
             igResponseOrder = 'description_first';
-            document.getElementById('igMenuPicker').value = '';
+            refreshMenuChoicePicker('igMenuPicker', '', '__inherit__');
+            document.getElementById('igActive').checked = true;
             document.getElementById('igTopicDescription').value = '';
             document.getElementById('igEscalationPolicy').value='human_if_unsupported';
             Array.from(document.getElementById('igKnowledgeScope').options).forEach(option => option.selected=false);
             document.getElementById('igRouteIdentity').innerHTML='';
             document.getElementById('igPreviewBox').style.display = 'none';
             document.getElementById('igTopicPreview').style.display = 'none';
-            document.getElementById('igCustomize').open = false;
             document.getElementById('igAdvancedSettings').open = false;
             const saveButton = document.getElementById('igSaveButton');
-            if (saveButton) saveButton.innerText = 'Save Routing';
+            if (saveButton) saveButton.innerText = 'Save Mapping';
             const status = document.getElementById('igPostConnectionStatus');
             if (status) status.style.display = 'none';
             renderIgPriorityProducts();
@@ -8566,7 +8638,8 @@ THIS WEEK'S BENGAL SPECIALS
             onInstagramSourceTypeChange();
             document.getElementById('igRouteUrl').value=route.canonical_url||'';
             document.getElementById('igTopicPicker').value=route.topic_id||'';
-            document.getElementById('igMenuPicker').value=route.menu_id||'';
+            refreshMenuChoicePicker('igMenuPicker', route.topic_id || '', menuChoiceForRoute(route));
+            setMenuChoiceFromRoute('igMenuPicker', 'igMenuWarning', route);
             igMediaMetadata = { preview_url: route.preview_url || null, media_type: route.media_type || null };
             const topic = igTopics.find(t => t.topic_id === route.topic_id);
             document.getElementById('igTopicDescription').value = topic ? (topic.description || '') : '';
@@ -8574,8 +8647,11 @@ THIS WEEK'S BENGAL SPECIALS
             document.getElementById('igAdId').value=route.ad_id||'';
             document.getElementById('igCampaignId').value=route.campaign_id||'';
             document.getElementById('igEscalationPolicy').value=route.escalation_policy||'human_if_unsupported';
+            document.getElementById('igActive').checked=route.active !== false;
             Array.from(document.getElementById('igKnowledgeScope').options).forEach(option=>option.selected=(route.knowledge_scope||[]).includes(option.value));
             renderIgPriorityProducts(); onIgTopicChange(true);
+            setMenuChoiceFromRoute('igMenuPicker', 'igMenuWarning', route);
+            document.getElementById('igAdvancedSettings').open = false;
             const saveButton = document.getElementById('igSaveButton');
             if (saveButton) saveButton.innerText = 'Save Changes';
             document.getElementById('igRouteUrl').scrollIntoView({behavior:'smooth'});
@@ -8583,9 +8659,10 @@ THIS WEEK'S BENGAL SPECIALS
 
         async function saveInstagramRoute() {
             const result=document.getElementById('adRouteResult');
-            const selectedMenuId=document.getElementById('igMenuPicker').value;
+            if (updateMenuChoiceWarning('igMenuPicker', 'igMenuWarning')) { result.style.display='block'; result.className='result-box error'; result.innerText='Choose an active menu or No menu before saving.'; return; }
+            const menuChoice=menuChoiceParts(document.getElementById('igMenuPicker').value);
             const sourceType=document.getElementById('igSourceType').value;
-            const payload={routing_id:igEditingId,source_type:sourceType,url:sourceType==='story'?'':document.getElementById('igRouteUrl').value.trim(),topic_id:document.getElementById('igTopicPicker').value,menu_id:selectedMenuId,menu_mode:selectedMenuId?'SELECTED':'NONE',media_id:document.getElementById('igMediaId').value.trim(),ad_id:document.getElementById('igAdId').value.trim(),campaign_id:document.getElementById('igCampaignId').value.trim(),preview_url:igMediaMetadata.preview_url,media_type:igMediaMetadata.media_type,escalation_policy:document.getElementById('igEscalationPolicy').value,priority_products:igPriority,knowledge_scope:Array.from(document.getElementById('igKnowledgeScope').selectedOptions).map(o=>o.value),active:true};
+            const payload={routing_id:igEditingId,source_type:sourceType,url:sourceType==='story'?'':document.getElementById('igRouteUrl').value.trim(),topic_id:document.getElementById('igTopicPicker').value,menu_id:menuChoice.menu_id,menu_mode:menuChoice.menu_mode,media_id:document.getElementById('igMediaId').value.trim(),ad_id:document.getElementById('igAdId').value.trim(),campaign_id:document.getElementById('igCampaignId').value.trim(),preview_url:igMediaMetadata.preview_url,media_type:igMediaMetadata.media_type,escalation_policy:document.getElementById('igEscalationPolicy').value,priority_products:igPriority,knowledge_scope:Array.from(document.getElementById('igKnowledgeScope').selectedOptions).map(o=>o.value),active:document.getElementById('igActive').checked};
             const resp=await fetch('/admin/instagram-routes',{method:'POST',headers:{...getAuthHeaders(),'Content-Type':'application/json'},body:JSON.stringify(payload)});
             const data=await resp.json().catch(()=>({})); result.style.display='block';
             if(!resp.ok){result.className='result-box error';result.innerText=data.detail||'Could not save route.';return;}
@@ -8606,9 +8683,10 @@ THIS WEEK'S BENGAL SPECIALS
             if (!topicId) { alert('Select a Topic first to preview its response.'); return; }
             box.style.display = 'block';
             box.innerHTML = 'Loading preview…';
-            const menuId = document.getElementById('igMenuPicker').value;
+            const menuChoice = menuChoiceParts(document.getElementById('igMenuPicker').value);
+            const menuId = menuChoice.menu_id || '';
             const product = igPriority[0] || '';
-            const params = new URLSearchParams({ topic_id: topicId, menu_id: menuId, menu_mode: menuId ? 'SELECTED' : 'NONE', product, response_order: igResponseOrder });
+            const params = new URLSearchParams({ topic_id: topicId, menu_id: menuId, menu_mode: menuChoice.menu_mode, product, response_order: igResponseOrder });
             try {
                 const resp = await fetch(`/admin/instagram-routes/preview?${params}`, { headers: getAuthHeaders() });
                 const data = await resp.json();
@@ -8631,6 +8709,7 @@ THIS WEEK'S BENGAL SPECIALS
         // and it is immediately selectable on this and every future route —
         // no hardcoded list, no restart.
         let topicPriority = [];
+        let topicModalSelectTarget = 'igTopicPicker';
         function renderTopicPriorityProducts() {
             const box = document.getElementById('topicPriorityProducts');
             if (!box) return;
@@ -8647,8 +8726,9 @@ THIS WEEK'S BENGAL SPECIALS
             topicPriority.push(id); renderTopicPriorityProducts();
         }
 
-        function openTopicModal(editingId = '') {
+        function openTopicModal(editingId = '', selectTarget = '') {
             const topic = editingId ? igTopics.find(item => item.topic_id === editingId) : null;
+            topicModalSelectTarget = selectTarget || topicModalSelectTarget || 'igTopicPicker';
             document.getElementById('topicModalTitle').innerText = topic ? 'Edit Topic' : '+ Add Topic';
             document.getElementById('topicModalEditingId').value = topic ? topic.topic_id : '';
             document.getElementById('topicName').value = '';
@@ -8659,11 +8739,20 @@ THIS WEEK'S BENGAL SPECIALS
             topicPriority = []; renderTopicPriorityProducts();
             Array.from(document.getElementById('topicKnowledgeScope').options).forEach(o => o.selected = false);
             document.getElementById('topicModalResult').style.display = 'none';
+            const menuWarning = document.getElementById('topicDefaultMenuWarning');
+            menuWarning.style.display = 'none'; menuWarning.innerText = '';
             document.getElementById('topicModal').style.display = 'flex';
             if (topic) {
                 document.getElementById('topicName').value = topic.name || '';
                 document.getElementById('topicDescription').value = topic.description || '';
-                document.getElementById('topicDefaultMenu').value = topic.default_menu_id || '';
+                const defaultMenu = topic.default_menu_id || '';
+                if (defaultMenu && !igMenus.some(menu => menu.menu_id === defaultMenu)) {
+                    const unavailable = (igAllMenus.find(menu => menu.menu_id === defaultMenu) || {}).name || defaultMenu;
+                    document.getElementById('topicDefaultMenu').innerHTML += `<option value="${escapeHtml(defaultMenu)}" disabled>${escapeHtml(unavailable)} — unavailable</option>`;
+                    menuWarning.style.display = 'block';
+                    menuWarning.innerText = 'The previous default menu is unavailable. Choose an active menu or No default menu before saving.';
+                }
+                document.getElementById('topicDefaultMenu').value = defaultMenu;
                 document.getElementById('topicActive').checked = topic.active !== false;
                 topicPriority = [...(topic.priority_products || [])];
                 renderTopicPriorityProducts();
@@ -8672,7 +8761,11 @@ THIS WEEK'S BENGAL SPECIALS
         }
         function openTopicEditor() {
             const id = document.getElementById('igTopicPicker').value;
-            if (id) openTopicModal(id);
+            if (id) openTopicModal(id, 'igTopicPicker');
+        }
+        function openStoryTopicEditor() {
+            const id = document.getElementById('igStoryTopicPicker').value;
+            if (id) openTopicModal(id, 'igStoryTopicPicker');
         }
         function closeTopicModal() { document.getElementById('topicModal').style.display = 'none'; }
 
@@ -8699,8 +8792,10 @@ THIS WEEK'S BENGAL SPECIALS
                 await loadTopicsAndMenus();
                 // The saved topic is selected immediately, and its defaults
                 // (including reply order) fill in like any normal selection.
-                document.getElementById('igTopicPicker').value = data.topic.topic_id;
-                onIgTopicChange();
+                const target = document.getElementById(topicModalSelectTarget) || document.getElementById('igTopicPicker');
+                target.value = data.topic.topic_id;
+                if (target.id === 'igStoryTopicPicker') onInstagramStoryTopicChange();
+                else onIgTopicChange();
             } catch (err) {
                 result.style.display = 'block';
                 result.className = 'result-box error';
@@ -8711,13 +8806,39 @@ THIS WEEK'S BENGAL SPECIALS
         // + Add New Menu modal. Shared by Instagram Content Routing and the
         // Visual Menu Manager — a menu created from either place appears in
         // both, plus the Topic form's Default Menu dropdown, immediately.
-        function openMenuModal() {
+        let menuModalSelectTarget = '';
+        function openMenuModal(selectTarget = '') {
+            menuModalSelectTarget = selectTarget || '';
+            document.getElementById('menuModalEditingId').value = '';
+            document.getElementById('menuModalTitle').innerText = '+ Add New Menu';
             document.getElementById('menuName').value = '';
             document.getElementById('menuDescription').value = '';
             document.getElementById('menuImageFile').value = '';
             document.getElementById('menuActive').checked = true;
+            document.getElementById('menuImageField').style.display = 'block';
+            document.getElementById('menuMetadataHelp').style.display = 'none';
+            document.getElementById('menuModalSubmitButton').innerText = 'Create Menu';
             const categories = window.igMenuCategories || ['Sondesh','Weekly Vegetarian','Weekly Non-Vegetarian','Bento / Meal','Subscription','Event','Other'];
             document.getElementById('menuCategory').innerHTML = categories.map(c => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join('');
+            document.getElementById('menuModalResult').style.display = 'none';
+            document.getElementById('menuModal').style.display = 'flex';
+        }
+        function openMenuEditModal(menuId) {
+            const menu = igAllMenus.find(item => item.menu_id === decodeURIComponent(menuId || ''));
+            if (!menu) return;
+            menuModalSelectTarget = '';
+            document.getElementById('menuModalEditingId').value = menu.menu_id;
+            document.getElementById('menuModalTitle').innerText = 'Edit Menu';
+            document.getElementById('menuName').value = menu.name || '';
+            document.getElementById('menuDescription').value = menu.description || '';
+            document.getElementById('menuImageFile').value = '';
+            document.getElementById('menuActive').checked = Boolean(menu.active);
+            const categories = window.igMenuCategories || ['Sondesh','Weekly Vegetarian','Weekly Non-Vegetarian','Bento / Meal','Subscription','Event','Other'];
+            document.getElementById('menuCategory').innerHTML = categories.map(c => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join('');
+            document.getElementById('menuCategory').value = menu.category || 'Other';
+            document.getElementById('menuImageField').style.display = 'none';
+            document.getElementById('menuMetadataHelp').style.display = 'block';
+            document.getElementById('menuModalSubmitButton').innerText = 'Save Changes';
             document.getElementById('menuModalResult').style.display = 'none';
             document.getElementById('menuModal').style.display = 'flex';
         }
@@ -8727,10 +8848,28 @@ THIS WEEK'S BENGAL SPECIALS
             const result = document.getElementById('menuModalResult');
             const name = document.getElementById('menuName').value.trim();
             const description = document.getElementById('menuDescription').value.trim();
-            const file = document.getElementById('menuImageFile').files[0];
+            const editingId = document.getElementById('menuModalEditingId').value;
+            const imageInput = document.getElementById('menuImageFile');
+            const file = imageInput && imageInput.files ? imageInput.files[0] : null;
             if (!name) { result.style.display='block'; result.className='result-box error'; result.innerText='Menu name is required.'; return; }
             if (!description) { result.style.display='block'; result.className='result-box error'; result.innerText='Customer description is required.'; return; }
-            if (!file) { result.style.display='block'; result.className='result-box error'; result.innerText='A menu image is required.'; return; }
+            if (!editingId && !file) { result.style.display='block'; result.className='result-box error'; result.innerText='A menu image is required.'; return; }
+            if (editingId) {
+                try {
+                    const resp = await fetch(`/admin/menu-catalogue/${encodeURIComponent(editingId)}`, {
+                        method: 'PATCH', headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ name, category: document.getElementById('menuCategory').value, description, active: document.getElementById('menuActive').checked }),
+                    });
+                    const data = await resp.json();
+                    if (!resp.ok) throw new Error(data.detail || 'Could not update menu.');
+                    closeMenuModal();
+                    await loadTopicsAndMenus();
+                    if (typeof mmLoadMenuList === 'function') await mmLoadMenuList();
+                } catch (err) {
+                    result.style.display = 'block'; result.className = 'result-box error'; result.innerText = err.message || String(err);
+                }
+                return;
+            }
             const form = new FormData();
             form.append('name', name);
             form.append('category', document.getElementById('menuCategory').value);
@@ -8743,7 +8882,12 @@ THIS WEEK'S BENGAL SPECIALS
                 if (!resp.ok) throw new Error(data.detail || 'Could not create menu.');
                 closeMenuModal();
                 await loadTopicsAndMenus();
-                document.getElementById('igMenuPicker').value = data.menu.menu_id;
+                const target = menuModalSelectTarget ? document.getElementById(menuModalSelectTarget) : null;
+                if (target) {
+                    target.value = data.menu.menu_id;
+                    if (target.id === 'igMenuPicker') onInstagramMenuChoiceChange();
+                    if (target.id === 'igStoryMenuPicker') updateMenuChoiceWarning('igStoryMenuPicker', 'igStoryMenuWarning');
+                }
                 if (typeof mmLoadMenuList === 'function') mmLoadMenuList();
             } catch (err) {
                 result.style.display = 'block';
@@ -9059,7 +9203,7 @@ THIS WEEK'S BENGAL SPECIALS
             if (topics) topics.innerHTML = '<option value="">Select Topic</option>' + activeTopics.map(topic => `<option value="${escapeHtml(topic.topic_id)}">${escapeHtml(topic.name)}</option>`).join('');
             const emptyHelp = document.getElementById('igStoryTopicEmptyHelp');
             if (emptyHelp) emptyHelp.style.display = activeTopics.length ? 'none' : 'block';
-            if (menus) menus.innerHTML = '<option value="">Select a menu…</option>' + igMenus.map(menu => `<option value="${escapeHtml(menu.menu_id)}">${escapeHtml(menu.name)}</option>`).join('');
+            if (menus) refreshMenuChoicePicker('igStoryMenuPicker', topics ? topics.value : '', menus.value || '__inherit__');
             if (products) products.innerHTML = '<option value="">Choose an approved product…</option>' + igProducts.map(product => `<option value="${escapeHtml(product.id)}">${escapeHtml(product.label)}</option>`).join('');
             if (scopes) scopes.innerHTML = igStoryKnowledgeScopes.map(scope => `<option value="${escapeHtml(scope)}">${escapeHtml(scope)}</option>`).join('');
         }
@@ -9067,22 +9211,13 @@ THIS WEEK'S BENGAL SPECIALS
         function onInstagramStoryTopicChange() {
             const topicId = document.getElementById('igStoryTopicPicker')?.value || '';
             const topic = igTopics.find(item => item.topic_id === topicId);
+            const editTopicButton = document.getElementById('igStoryEditTopicButton');
+            if (editTopicButton) editTopicButton.disabled = !topic;
+            const currentChoice = document.getElementById('igStoryMenuPicker')?.value || '__inherit__';
+            refreshMenuChoicePicker('igStoryMenuPicker', topicId, currentChoice);
+            updateMenuChoiceWarning('igStoryMenuPicker', 'igStoryMenuWarning');
             if (!igStoryEditingRoutingId && topic) igStoryPriority = [...(topic.priority_products || [])];
             renderInstagramStoryPriorityProducts();
-        }
-
-        // Three explicit, persisted menu states -- INHERIT / NONE / SELECTED
-        // -- rather than inferring one from whether a menu happens to be
-        // picked. An empty picker used to be indistinguishable from "no
-        // menu"; it is now only ever read when the mode is SELECTED.
-        function onInstagramStoryMenuModeChange() {
-            const mode = document.getElementById('igStoryMenuMode')?.value || 'INHERIT';
-            const wrap = document.getElementById('igStoryMenuPickerWrap');
-            if (wrap) wrap.style.display = mode === 'SELECTED' ? 'block' : 'none';
-            if (mode !== 'SELECTED') {
-                const picker = document.getElementById('igStoryMenuPicker');
-                if (picker) picker.value = '';
-            }
         }
 
         function renderInstagramStoryPriorityProducts() {
@@ -9115,18 +9250,16 @@ THIS WEEK'S BENGAL SPECIALS
             igStoryPriority = [...(source.priority_products || [])];
             document.getElementById('igStoryMediaId').value = source.story_media_id || '';
             document.getElementById('igStoryTopicPicker').value = source.topic_id || '';
-            // Load the persisted menu_mode as-is -- never inferred from
-            // whether menu_id happens to be set, and never silently
-            // coerced into a different mode (INHERIT stays INHERIT even
-            // though menu_id is empty for it, same as for NONE).
-            const persistedMenuMode = String(source.menu_mode || 'INHERIT').toUpperCase();
-            document.getElementById('igStoryMenuMode').value = ['INHERIT', 'NONE', 'SELECTED'].includes(persistedMenuMode) ? persistedMenuMode : 'INHERIT';
-            document.getElementById('igStoryMenuPicker').value = persistedMenuMode === 'SELECTED' ? (source.menu_id || '') : '';
-            onInstagramStoryMenuModeChange();
+            refreshMenuChoicePicker('igStoryMenuPicker', source.topic_id || '', menuChoiceForRoute(source));
+            setMenuChoiceFromRoute('igStoryMenuPicker', 'igStoryMenuWarning', source);
             document.getElementById('igStoryEscalationPolicy').value = source.escalation_policy || 'human_if_unsupported';
             document.getElementById('igStoryActive').checked = source.active !== false && status !== 'DISABLED';
             Array.from(document.getElementById('igStoryKnowledgeScope').options).forEach(option => option.selected = (source.knowledge_scope || []).includes(option.value));
             document.getElementById('igStoryEditingLabel').innerText = routeId ? `Editing routing #${routeId}` : 'New mapping';
+            document.getElementById('igStorySaveButton').innerText = routeId ? 'Save Changes' : 'Save Mapping';
+            document.getElementById('igStoryAdvancedSettings').open = false;
+            const editTopicButton = document.getElementById('igStoryEditTopicButton');
+            if (editTopicButton) editTopicButton.disabled = !source.topic_id;
             renderInstagramStoryPriorityProducts();
             const form = document.getElementById('igStoryMapForm');
             form.style.display = 'block';
@@ -9136,9 +9269,9 @@ THIS WEEK'S BENGAL SPECIALS
         function cancelInstagramStoryMapping() {
             igStoryEditingRoutingId = null;
             igStoryPriority = [];
-            const menuMode = document.getElementById('igStoryMenuMode');
-            if (menuMode) menuMode.value = 'INHERIT';
-            onInstagramStoryMenuModeChange();
+            refreshMenuChoicePicker('igStoryMenuPicker', '', '__inherit__');
+            document.getElementById('igStoryAdvancedSettings').open = false;
+            document.getElementById('igStorySaveButton').innerText = 'Save Mapping';
             const form = document.getElementById('igStoryMapForm');
             if (form) form.style.display = 'none';
         }
@@ -9179,14 +9312,13 @@ THIS WEEK'S BENGAL SPECIALS
             const topicId = document.getElementById('igStoryTopicPicker')?.value || '';
             if (!mediaId) return showInstagramStoryResult('error', 'Choose a captured Story before mapping it.');
             if (!topicId) return showInstagramStoryResult('error', 'Select a Topic before saving the Story mapping.');
-            const menuMode = document.getElementById('igStoryMenuMode')?.value || 'INHERIT';
-            const menuId = document.getElementById('igStoryMenuPicker').value;
-            if (menuMode === 'SELECTED' && !menuId) return showInstagramStoryResult('error', 'Choose a menu, or switch Menu behavior to Inherit Topic Menu / No Menu.');
+            if (updateMenuChoiceWarning('igStoryMenuPicker', 'igStoryMenuWarning')) return showInstagramStoryResult('error', 'Choose an active menu or No menu before saving.');
+            const menuChoice = menuChoiceParts(document.getElementById('igStoryMenuPicker').value);
             const payload = {
                 routing_id: igStoryEditingRoutingId,
                 source_type: 'story', url: '', media_id: mediaId, ad_id: '', campaign_id: '',
                 preview_url: null, media_type: 'story', topic_id: topicId,
-                menu_id: menuMode === 'SELECTED' ? menuId : null, menu_mode: menuMode,
+                menu_id: menuChoice.menu_id, menu_mode: menuChoice.menu_mode,
                 escalation_policy: document.getElementById('igStoryEscalationPolicy').value,
                 priority_products: igStoryPriority,
                 knowledge_scope: Array.from(document.getElementById('igStoryKnowledgeScope').selectedOptions).map(option => option.value),
@@ -9291,8 +9423,8 @@ THIS WEEK'S BENGAL SPECIALS
                 let actions = '';
                 if (status === 'DELETED') actions = `<button class="btn-secondary" type="button" data-story-action="restore-source" data-story-media-id="${escapeHtml(source.story_media_id || '')}">Restore</button>`;
                 else if (status === 'UNMAPPED') actions = `<button class="btn-secondary" type="button" data-story-action="map" data-story-media-id="${escapeHtml(source.story_media_id || '')}">Map Story</button><button class="btn-danger" type="button" data-story-action="delete" data-story-media-id="${escapeHtml(source.story_media_id || '')}">Delete</button>`;
-                else if (status === 'MAPPED') actions = `<button class="btn-secondary" type="button" data-story-action="edit" data-story-media-id="${escapeHtml(source.story_media_id || '')}">Edit Mapping</button><button class="btn-secondary" type="button" data-story-action="disable" data-routing-id="${routeId}">Disable</button><button class="btn-danger" type="button" data-story-action="archive" data-routing-id="${routeId}">Archive</button><button class="btn-danger" type="button" data-story-action="delete" data-story-media-id="${escapeHtml(source.story_media_id || '')}">Delete</button>`;
-                else if (status === 'DISABLED') actions = `<button class="btn-secondary" type="button" data-story-action="edit" data-story-media-id="${escapeHtml(source.story_media_id || '')}">Edit Mapping</button><button class="btn-secondary" type="button" data-story-action="enable" data-routing-id="${routeId}">Enable</button><button class="btn-danger" type="button" data-story-action="archive" data-routing-id="${routeId}">Archive</button><button class="btn-danger" type="button" data-story-action="delete" data-story-media-id="${escapeHtml(source.story_media_id || '')}">Delete</button>`;
+                else if (status === 'MAPPED') actions = `<button class="btn-secondary" type="button" data-story-action="edit" data-story-media-id="${escapeHtml(source.story_media_id || '')}">Edit</button><button class="btn-secondary" type="button" data-story-action="disable" data-routing-id="${routeId}">Disable</button><button class="btn-danger" type="button" data-story-action="archive" data-routing-id="${routeId}">Archive</button><button class="btn-danger" type="button" data-story-action="delete" data-story-media-id="${escapeHtml(source.story_media_id || '')}">Delete</button>`;
+                else if (status === 'DISABLED') actions = `<button class="btn-secondary" type="button" data-story-action="edit" data-story-media-id="${escapeHtml(source.story_media_id || '')}">Edit</button><button class="btn-secondary" type="button" data-story-action="enable" data-routing-id="${routeId}">Enable</button><button class="btn-danger" type="button" data-story-action="archive" data-routing-id="${routeId}">Archive</button><button class="btn-danger" type="button" data-story-action="delete" data-story-media-id="${escapeHtml(source.story_media_id || '')}">Delete</button>`;
                 else actions = `<button class="btn-secondary" type="button" data-story-action="restore" data-routing-id="${routeId}">Restore</button><button class="btn-danger" type="button" data-story-action="delete" data-story-media-id="${escapeHtml(source.story_media_id || '')}">Delete</button>`;
                 const topic = source.routing_topic || 'Unmapped Story';
                 const isNewUnmapped = source.source === 'META_STORY_SYNC' && status === 'UNMAPPED';
