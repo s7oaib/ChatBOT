@@ -6,6 +6,7 @@ only the small amount of metadata needed to make one version current.
 import os
 import time
 import uuid
+from datetime import datetime, timezone
 from io import BytesIO
 from typing import Any, Dict, Optional
 
@@ -29,6 +30,11 @@ CANONICAL_ALIASES = {
     "weekly.non_vegetarian": "weekly_non_vegetarian",
     "weekly.bengali_bento": "bento",
 }
+# A weekly menu card is one customer-facing asset even though the catalogue
+# keeps vegetarian and non-vegetarian records separately.  Resolve the live
+# card from their durable lifecycle rows rather than from a filename, list
+# position, or the day-of-week built-in rotation.
+WEEKLY_MENU_KEYS = ("weekly_vegetarian", "weekly_non_vegetarian")
 ALLOWED_TYPES = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}
 PREVIEW_MAX_EDGE = 640
 PREVIEW_MAX_BYTES = 2 * 1024 * 1024
@@ -102,6 +108,61 @@ def _fallback(menu_key: str) -> Optional[str]:
     return flyer.get("url") if flyer else "/images/From%20Friday.jpeg"
 
 
+def _published_sort_key(row: Dict[str, Any]) -> tuple:
+    """Order current rows by authoritative publication time, then row id.
+
+    SQLite timestamps written by this module are UTC-naive ISO strings.  The
+    parser also accepts an explicit offset so old or hand-migrated rows do not
+    fall back to lexical ordering accidentally.
+    """
+    raw = str(row.get("published_at") or "").strip()
+    parsed = None
+    if raw:
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            else:
+                parsed = parsed.astimezone(timezone.utc)
+        except ValueError:
+            parsed = None
+    return (
+        parsed or datetime.min.replace(tzinfo=timezone.utc),
+        int(row.get("id") or 0),
+        int(row.get("version") or 0),
+    )
+
+
+def current_weekly() -> Optional[Dict[str, Any]]:
+    """Return the newest currently published weekly menu image row.
+
+    Draft and archived rows are excluded by ``get_menu_image_current``.  A
+    fresh database read on every call keeps publish/restore visible to the
+    responder immediately and after a process restart.
+    """
+    rows = [
+        row
+        for key in WEEKLY_MENU_KEYS
+        if (row := db.get_menu_image_current(key)) is not None
+    ]
+    return max(rows, key=_published_sort_key) if rows else None
+
+
+def has_weekly_archive() -> bool:
+    """Whether any managed weekly image has history but no current row."""
+    return any(db.has_menu_image_archive(key) for key in WEEKLY_MENU_KEYS)
+
+
+def current_weekly_url(fallback: Optional[str] = None) -> Optional[str]:
+    """Resolve the customer-facing weekly image from the shared lifecycle."""
+    row = current_weekly()
+    if row:
+        return row.get("image_path")
+    if has_weekly_archive():
+        return None
+    return fallback
+
+
 def list_menus() -> list[Dict[str, Any]]:
     result = []
     for entry in db.list_menu_catalogue():
@@ -117,6 +178,7 @@ def list_menus() -> list[Dict[str, Any]]:
             "active": bool(entry["active"]),
             "image_url": (current or {}).get("image_path") or (None if archived else _fallback(key)),
             "status": "Archived" if current is None and archived else ("Active" if current else "Active (built-in)"),
+            "draft_status": "Draft ready" if draft else None,
             "version": (current or {}).get("version"),
             "published_at": (current or {}).get("published_at"),
             "draft": draft,
@@ -135,6 +197,7 @@ def card(menu_key: str) -> Dict[str, Any]:
     status = "Archived" if current is None and archived else ("Published" if current else "Built-in")
     return {
         "menu_key": menu_key, "image_url": image_url, "image_status": status,
+        "draft_status": "Draft ready" if draft else None,
         "image_version": (current or {}).get("version"),
         "published_at": (current or {}).get("published_at"), "image_draft": draft,
     }

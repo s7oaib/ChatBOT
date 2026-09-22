@@ -25,7 +25,12 @@ from camellia.trigger_index import trigger_index
 from camellia import weekly_flyer
 from camellia import menu_dates
 from camellia import client_qa
-from camellia.menu_images import current_url as current_menu_image
+from camellia.menu_images import (
+    current_url as current_menu_image,
+    current_weekly,
+    current_weekly_url,
+    has_weekly_archive,
+)
 from camellia import semantic_fallback
 from camellia.understanding import BusinessAction, Intent, understanding_engine
 from camellia.conversation_resolver import (
@@ -2663,7 +2668,7 @@ class DeterministicResponder:
                 ],
                 "aamar_menu": ["/images/AAMAR%20MISHTI.jpeg"],
                 "signature_menu": ["/images/Signature%20Sondesh.jpeg"],
-                "weekly_menu": [current_menu_image("weekly_vegetarian", "/images/From%20Friday.jpeg")],
+                "weekly_menu": [current_weekly_url("/images/From%20Friday.jpeg")],
             }
             for asset_key in client_match.asset_keys:
                 values = [value for value in asset_map.get(asset_key, []) if value]
@@ -5078,10 +5083,10 @@ class DeterministicResponder:
         # A deliberately published Menu Manager image wins immediately and is
         # read from durable metadata on every request; no process restart is
         # needed. An explicitly archived image returns no card.
-        managed = db.get_menu_image_current("weekly_vegetarian")
+        managed = current_weekly()
         if managed:
             return managed["image_path"], None
-        if db.has_menu_image_archive("weekly_vegetarian"):
+        if has_weekly_archive():
             return None, None
 
         uploaded = weekly_flyer.get()

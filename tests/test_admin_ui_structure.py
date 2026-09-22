@@ -127,6 +127,9 @@ def test_menu_manager_can_edit_preview_publish_and_restore(page):
     assert "mmPublish()" in page
     assert "mmRestoreVersion(" in page
     assert "mmReplaceImage(" in page
+    assert "Save &amp; Publish" in page
+    assert "Draft ready" in page
+    assert "mmPublishImage(" in page
     assert "mmArchiveImage(" in page
     assert "mmHistoryImage(" in page
 

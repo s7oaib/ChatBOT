@@ -88,3 +88,53 @@ def test_weekly_vegetarian_publish_overrides_the_flyer_rotation(image_store, mon
     image_url, caption = bot._current_weekly_image(today_weekday=0)
     assert image_url == published["image_path"]
     assert caption is None
+
+
+def test_weekly_resolver_chooses_newest_current_published_record(image_store, monkeypatch):
+    """Bento/weekly delivery follows lifecycle time, not catalogue order."""
+    menu_images.save_draft("weekly_vegetarian", _png("red"), "image/png", "tester")
+    old = menu_images.publish("weekly_vegetarian")
+    menu_images.save_draft("weekly_non_vegetarian", _png("blue"), "image/png", "tester")
+    newer = menu_images.publish("weekly_non_vegetarian")
+
+    assert menu_images.current_weekly()["image_path"] == newer["image_path"]
+    assert menu_images.current_weekly_url("/images/From%20Friday.jpeg") == newer["image_path"]
+    assert old["image_path"] != newer["image_path"]
+
+    restarted = Database(image_store.db_path)
+    monkeypatch.setattr(menu_images, "db", restarted)
+    assert menu_images.current_weekly()["image_path"] == newer["image_path"]
+
+
+def test_weekly_draft_and_archive_never_replace_customer_asset(image_store):
+    """Only a current row can be sent; drafts and archived rows are excluded."""
+    menu_images.save_draft("weekly_vegetarian", _png("red"), "image/png", "tester")
+    current = menu_images.publish("weekly_vegetarian")
+    menu_images.save_draft("weekly_non_vegetarian", _png("blue"), "image/png", "tester")
+    assert menu_images.current_weekly_url() == current["image_path"]
+
+    menu_images.archive("weekly_vegetarian")
+    assert menu_images.current_weekly() is None
+    assert menu_images.current_weekly_url("/images/From%20Friday.jpeg") is None
+
+
+def test_bento_formatter_preserves_approved_text_and_uses_latest_weekly_image(image_store):
+    from camellia import client_qa
+    from camellia import responder as responder_module
+
+    menu_images.save_draft("weekly_vegetarian", _png("red"), "image/png", "tester")
+    menu_images.publish("weekly_vegetarian")
+    menu_images.save_draft("weekly_non_vegetarian", _png("blue"), "image/png", "tester")
+    newer = menu_images.publish("weekly_non_vegetarian")
+
+    approved = client_qa.REGISTRY_BY_ID["bento_details_client"].answer
+    bot = responder_module.DeterministicResponder.__new__(responder_module.DeterministicResponder)
+    rendered, images = bot._format_dynamic_response(
+        "bento_details", approved, user_id="bento-test", channel="instagram",
+        user_message="tell me about BENGALI BENTO",
+    )
+
+    assert rendered == approved
+    image_items = images if isinstance(images, list) else [images]
+    urls = [item.get("url") if isinstance(item, dict) else item for item in image_items]
+    assert newer["image_path"] in urls
