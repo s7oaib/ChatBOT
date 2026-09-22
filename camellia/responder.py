@@ -25,6 +25,7 @@ from camellia.trigger_index import trigger_index
 from camellia import weekly_flyer
 from camellia import menu_dates
 from camellia import client_qa
+from camellia import grounded_answers
 from camellia.menu_images import (
     current_url as current_menu_image,
     current_weekly,
@@ -1698,7 +1699,7 @@ class DeterministicResponder:
         "price_clarify_product", "context_meal_price_followup", "name_introduction",
         "recall_name", "bot_identity", "bot_capabilities", "explicit_escalation",
         "groq_structured_event_escalation", "ad_gate_blocked", "product_recommendation",
-        "alacarte_sondesh_addon", "asset_request_clarify",
+        "alacarte_sondesh_addon", "asset_request_clarify", "system_conversation",
     })
 
     def _record_answer_sufficiency(
@@ -2563,6 +2564,18 @@ class DeterministicResponder:
         facts["source_context_used"] = False
         facts["source_referential_intent"] = None
 
+        if channel == "instagram":
+            conversation_reply = grounded_answers.system_reply(user_message)
+            if conversation_reply is not None:
+                facts.update({
+                    "last_route_source": "SYSTEM_CONVERSATION",
+                    "last_grounding": "system_conversation",
+                    "last_actions": [BusinessAction.SEND_RESPONSE.value],
+                    "knowledge_sufficient": True,
+                })
+                session_memory.add_turn(user_id, channel, user_message, conversation_reply)
+                return conversation_reply, True, "system_conversation", None
+
         # Asset requests are a deterministic intent class, so resolve them
         # before the broad client-approved-QA matcher can replay a canonical
         # topic answer.  An unresolved first-turn Story/Post/Reel request is
@@ -2638,6 +2651,17 @@ class DeterministicResponder:
             )
             or source_context_blocks_client_qa
             or BULK_CONTEXT_RE.search(lowered_text)
+            or BULK_QTY_RE.search(lowered_text)
+            or re.search(r"\b(?:discount|offer|cater|wedding|guests|no\s+onion|gluten[- ]free)\b", lowered_text)
+            or (
+                re.search(r"\bbento\b", lowered_text)
+                and re.search(r"\b(?:available|availability|stock|vegan|allerg\w*|gluten|deliver\w*|ship\w*|discount|offer|customi[sz]\w*)\b", lowered_text)
+            )
+            or grounded_answers._operation(
+                user_message,
+                grounded_answers._names(user_message),
+                bool(re.search(r"\bbento\b", user_message, re.I) or facts.get("active_product_context") == "bento" or len(grounded_answers._names(user_message)) == 2),
+            )
             or (
                 facts.get("active_product_context")
                 and not explicit_client_subject
@@ -2677,7 +2701,7 @@ class DeterministicResponder:
                 else:
                     asset_urls.extend(values)
             facts.update({
-                "last_route_source": "client_approved_qa",
+                "last_route_source": "EXACT_APPROVED",
                 "last_intents": [entry.qa_id],
                 "last_entities": {"client_qa_id": entry.qa_id},
                 "last_knowledge_ids": [f"client_qa:{entry.qa_id}"],
@@ -2741,14 +2765,6 @@ class DeterministicResponder:
                 return handoff, False, "client_approved_asset_missing", None
             template_id = _CLIENT_QA_TEMPLATE_IDS.get(entry.qa_id)
             response_text = entry.answer
-            if template_id in ALACARTE_SONDESH_ADDON_TEMPLATES:
-                response_text, asset_urls = self._apply_crosssell_nudges(
-                    template_id,
-                    response_text,
-                    asset_urls or None,
-                    facts,
-                    user_message,
-                )
             session_memory.add_turn(user_id, channel, user_message, response_text)
             return (
                 response_text,
@@ -2762,9 +2778,24 @@ class DeterministicResponder:
         # generative providers remain available for internal classification,
         # safety and review workflows, but they cannot produce customer copy.
         if channel == "instagram":
+            derived = grounded_answers.derive(user_message, facts)
+            if derived is not None:
+                facts.update({
+                    "last_route_source": "GROUNDED_DERIVED",
+                    "last_knowledge_ids": [f"client_qa:{source_id}" for source_id in derived["source_ids"]],
+                    "last_actions": [BusinessAction.SEND_RESPONSE.value],
+                    "knowledge_sufficient": True,
+                    "last_grounding": derived["grounding"],
+                    "last_nlu_confidence": derived["confidence"],
+                    "last_llm_called": derived["model_called"],
+                    "grounding_latency_ms": derived["latency_ms"],
+                    "last_fallback_used": False,
+                })
+                session_memory.add_turn(user_id, channel, user_message, derived["answer"])
+                return derived["answer"], True, "grounded_derived", None
             fallback = self._generic_fallback()
             facts.update({
-                "last_route_source": "client_approved_qa_miss",
+                "last_route_source": "HUMAN_HANDOFF",
                 "last_knowledge_ids": [],
                 "last_actions": [BusinessAction.ESCALATE_TO_TEAM.value],
                 "knowledge_sufficient": False,
@@ -5579,7 +5610,9 @@ class DeterministicResponder:
             facts_after_route.get("client_qa_id")
             and facts_after_route.get("last_grounding") == "exact_approved"
         )
-        if client_exact_route:
+        if client_exact_route or facts_after_route.get("last_route_source") in {
+            "SYSTEM_CONVERSATION", "GROUNDED_DERIVED"
+        }:
             # The client-QA registry is itself the authoritative, versioned
             # source copy.  Replacing it with the older template quarantine
             # would reintroduce precisely the manual/live mismatch this path

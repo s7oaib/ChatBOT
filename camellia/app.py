@@ -863,6 +863,8 @@ def _process_instagram_event(
         # flag or a future route adapter reports an escalation-shaped result.
         # Order completion remains deliberately outside this allowlist.
         informational_templates = {
+            "system_conversation",
+            "grounded_derived",
             "opening_hours",
             "subscription_details",
             "sondesh_dispatch_time",

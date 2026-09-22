@@ -162,6 +162,23 @@ Risk: High
 - Full conversation/source-routing, order, CAM, privacy, auth/CSRF, webhook, migration/restart, and repository regressions.
 - Staging Meta username-resolution acceptance without sending live messages.
 
+### Q-005 — Grounded Derived Answer Layer
+
+Status: IMPLEMENTED / VALIDATION_PENDING
+Risk: High
+
+#### Implemented
+- Four Instagram customer-response lanes: system conversation, exact client-approved Q&A, guarded Bento derivation/approved Sondesh gluten wording, and human handoff.
+- Derived prices and arithmetic are read from the authoritative client registry; model drafts are structured and may pass only when identical to the Python-verified answer with approved provenance.
+- Unsupported questions remain human-only; optional assisted candidates stay internal and pending approval.
+
+#### Deferred validation
+- Full approved-answer byte audit and larger paraphrase corpus.
+- Adversarial grounding and prompt-injection tests, multi-turn ambiguity, numerical/high-risk fact regression.
+- Complete candidate workflow and Groq outage/rate-limit regression.
+- Reconcile 19 legacy Story/Admin tests that expect source-route, guard-template, or dynamic weekly-menu answers now blocked by the earlier client-approved-only Instagram policy; preserve the approved-knowledge boundary during that update.
+- Admin auth/CSRF, webhook/privacy, migration/restart, full repository suite, live staging Instagram acceptance, and production validation.
+
 ---
 
 # Final release gate
