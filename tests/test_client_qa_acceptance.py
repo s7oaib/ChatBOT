@@ -95,22 +95,21 @@ def test_instagram_prebook_question_beats_stale_subscription_context(monkeypatch
     "how do I pre book",
     "how can I pre-book",
 ])
-def test_order_process_paraphrases_use_exact_approved_ordering_answer(monkeypatch, message):
-    from camellia.client_qa import REGISTRY_BY_ID
+def test_order_process_phrases_start_the_customer_order_draft(monkeypatch, message):
+    from camellia.order_intake import ORDER_DRAFT_INCOMPLETE, instruction_message
 
     monkeypatch.setattr("camellia.config.config.BYPASS_AD_GATE", True)
     user_id = "client-qa-order-process-" + str(abs(hash(message)))
     session_memory.clear_session(user_id, "instagram")
-    facts = session_memory.get_facts(user_id, "instagram")
-    facts["source_route"] = {"routing_id": 7, "source_type": "story", "active": True, "routing_topic": "Sondesh"}
 
     response, matched, template_id, _images = responder.match_and_respond(
         message, user_id=user_id, channel="instagram",
     )
 
     assert matched is True
-    assert template_id == "alacarte_prebooking_steps"
-    assert response == REGISTRY_BY_ID["order_prebook"].answer
+    assert template_id == "order_intake_draft"
+    assert response == instruction_message()
+    assert session_memory.get_facts(user_id, "instagram")["order_intake_draft"]["status"] == ORDER_DRAFT_INCOMPLETE
 
 
 @pytest.mark.parametrize(

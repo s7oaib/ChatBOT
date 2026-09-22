@@ -2610,7 +2610,13 @@ class DeterministicResponder:
                 )
             )
             approved_intent_precedes_draft = bool(
-                (approved_qa_candidate or explicit_product_question)
+                (
+                    explicit_product_question
+                    or (
+                        approved_qa_candidate
+                        and approved_qa_candidate.entry.qa_id not in {"alacarte_prebook", "order_prebook"}
+                    )
+                )
                 and not explicit_order_details
             )
             source_referential_order = bool(
@@ -2651,7 +2657,8 @@ class DeterministicResponder:
                 and not semantic_fallback._ESCALATION_INTENT_RE.search(lowered_text)
             ):
                 starts_order_intake = (
-                    order_intake.is_order_request(
+                    order_intake.is_order_process_question(user_message)
+                    or order_intake.is_order_request(
                         user_message, facts.get("active_product_context"),
                     )
                 )
