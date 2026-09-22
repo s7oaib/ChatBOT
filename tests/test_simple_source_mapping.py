@@ -107,6 +107,37 @@ def test_greeting_does_not_use_source_description():
     assert matched and "How can I help" in answer and facts["decision_lane"] == "SYSTEM_CONVERSATION"
 
 
+@pytest.mark.parametrize("topic,question,approved_id", [
+    ("Sondesh", "tell me more", "sondesh_details_client"),
+    ("Sondesh", "price?", "sondesh_price_client"),
+    ("Sondesh", "how much?", "sondesh_price_client"),
+    ("Subscription", "tell me more", "subscription_details_client"),
+    ("Subscription", "price?", "subscription_price"),
+    ("Bengali Bento", "tell me more", "bento_details_client"),
+    ("Bengali Bento", "price?", "bento_price_client"),
+])
+def test_short_followup_uses_source_topic_approved_answer(topic, question, approved_id):
+    user_id = f"short-{topic}-{question}"
+    session_memory.clear_session(user_id, "instagram")
+    facts = session_memory.get_facts(user_id, "instagram")
+    facts["source_route"] = {**_source("post", "exact-post"), "routing_id": 51,
+                             "routing_topic": topic, "source_description": "Mapped source description."}
+    answer, matched, _template, _images = responder.match_and_respond(
+        question, user_id=user_id, channel="instagram"
+    )
+    assert matched and answer == client_qa.REGISTRY_BY_ID[approved_id].answer
+    assert facts["decision_lane"] == "EXACT_APPROVED"
+
+
+def test_bento_source_explicit_sondesh_switch_then_price():
+    user_id = "bento-switch-sondesh"
+    session_memory.clear_session(user_id, "instagram")
+    facts = session_memory.get_facts(user_id, "instagram")
+    facts["source_route"] = {**_source("post", "exact-post"), "routing_id": 52, "routing_topic": "Bengali Bento"}
+    assert responder.match_and_respond("Tell me about Sondesh", user_id=user_id, channel="instagram")[0] == client_qa.REGISTRY_BY_ID["sondesh_details_client"].answer
+    assert responder.match_and_respond("price?", user_id=user_id, channel="instagram")[0] == client_qa.REGISTRY_BY_ID["sondesh_price_client"].answer
+
+
 def test_description_and_attachment_survive_reopen_and_exact_id(mapping_db):
     database, path = mapping_db
     menu = database.list_menu_catalogue()[0]

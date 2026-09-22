@@ -93,6 +93,22 @@ def test_source_only_event_waits_for_customer_intent(monkeypatch):
     assert facts["source_route"]["media_id"] == "exact-meta-post"
 
 
+def test_unmapped_source_only_event_does_not_reply_or_handoff(monkeypatch):
+    user_id = "unmapped-source-only-no-handoff"
+    session_memory.clear_session(user_id, "instagram")
+    monkeypatch.setattr(config, "BYPASS_AD_GATE", True)
+    with patch.object(app_module, "route_for_inbound", return_value=(None, None)), patch.object(
+        app_module, "_establish_shared_post_context", return_value=False
+    ), patch.object(app_module, "send_instagram_reply") as send, patch.object(
+        app_module.escalator, "handle_escalation"
+    ) as escalate, patch.object(app_module, "create_suggestion") as suggestion:
+        app_module._process_instagram_event(user_id, "", None, shared_post_id="unmapped-meta-post")
+    send.assert_not_called()
+    escalate.assert_not_called()
+    suggestion.assert_not_called()
+    assert app_module.db.get_active_handoff("instagram", user_id) is None
+
+
 def test_explicit_sondesh_after_subscription_source_description_never_replays_it():
     user_id = "source-then-explicit-sondesh"
     session_memory.clear_session(user_id, "instagram")

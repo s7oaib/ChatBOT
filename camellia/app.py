@@ -815,21 +815,10 @@ def _process_instagram_event(
             "source_media_present": source_media_present,
             "customer_text_accompanied_media": customer_text_accompanied_media,
         })
-        if source_media_present and not source_route and not str(message_text or "").strip():
-            # An unconfigured/unsupported share remains a genuinely unreadable
-            # attachment. This branch is never reached for an identified route.
-            _reply_to_unreadable_attachment(
-                sender_id,
-                source_type=trace["source_type"], media_id=trace["media_id"],
-                shortcode=trace["shortcode"],
-                source_match_method=trace["source_match_method"],
-                source_media_present=True,
-            )
-            return
-        if source_media_present and source_route and not str(message_text or "").strip():
-            # A source-only webhook establishes context but carries no customer
-            # question. Wait for the actual message: the next turn may name a
-            # different product, which must outrank this mapped source.
+        if source_media_present and not str(message_text or "").strip():
+            # A media-only webhook is context, not a customer question. Exact
+            # mapped state was saved above; unmapped media remains unmapped.
+            # Neither case may trigger a reply, QA fallback, or handoff.
             return
         customer_message = str(message_text or "").strip() or "[shared media]"
         response_input = str(message_text or "").strip() or "Tell me more"

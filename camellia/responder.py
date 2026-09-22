@@ -2648,6 +2648,7 @@ class DeterministicResponder:
             and not explicit_client_subject
         )
         price_followup = bool(re.fullmatch(r"\s*(?:price|cost|rate|how much)\s*[?.!]*\s*", user_message, re.I))
+        details_followup = bool(re.fullmatch(r"\s*(?:tell me more|more details|tell me about it)\s*[?.!]*\s*", user_message, re.I))
         context_topic = str(facts.get("last_topic") or "").casefold()
         source_topic = str(source_route.get("routing_topic") or "").casefold() if source_route_active else ""
         contextual_price_topic = (
@@ -2658,13 +2659,23 @@ class DeterministicResponder:
             "sondesh" if "sondesh" in source_topic else
             "bento" if "bento" in source_topic else ""
         ) if price_followup else ""
+        contextual_details_topic = (
+            "sondesh" if context_topic.startswith("sondesh") else
+            "subscription" if context_topic == "subscription" else
+            "bento" if context_topic == "bento" else
+            "subscription" if "subscription" in source_topic else
+            "sondesh" if "sondesh" in source_topic else
+            "bento" if "bento" in source_topic else ""
+        ) if details_followup else ""
+        contextual_topic = contextual_price_topic or contextual_details_topic
         client_qa_candidate = client_qa.match(
-            f"{contextual_price_topic} price" if contextual_price_topic else user_message, facts,
+            (f"{contextual_price_topic} price" if contextual_price_topic else
+             f"tell me about {contextual_details_topic}" if contextual_details_topic else user_message), facts,
         )
-        if contextual_price_topic and context_topic:
+        if contextual_topic and context_topic:
             facts["source_context_superseded"] = True
             source_context_blocks_client_qa = False
-        elif contextual_price_topic and source_route_active:
+        elif contextual_topic and source_route_active:
             source_context_blocks_client_qa = False
             facts["source_context_used"] = True
         client_qa_flow_candidate = bool(
