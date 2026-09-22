@@ -2724,6 +2724,7 @@ class DeterministicResponder:
             entry = client_match.entry
             asset_urls: List[str] = []
             asset_missing: List[str] = []
+            ordered_response_blocks: List[Dict[str, Any]] = []
             asset_map = {
                 "sondesh_addon_images": [
                     "/images/sondesh_addon_01.jpeg",
@@ -2737,12 +2738,7 @@ class DeterministicResponder:
                 "signature_menu": ["/images/Signature%20Sondesh.jpeg"],
                 "weekly_menu": [current_weekly_url("/images/From%20Friday.jpeg")],
             }
-            for asset_key in client_match.asset_keys:
-                values = [value for value in asset_map.get(asset_key, []) if value]
-                if not values:
-                    asset_missing.append(asset_key)
-                else:
-                    asset_urls.extend(values)
+            mapped_image = None
             if (
                 source_route_active and source_route
                 and str(source_route.get("menu_mode") or "").upper() == "SELECTED"
@@ -2751,8 +2747,26 @@ class DeterministicResponder:
                 and re.search(r"\b(?:price|rate|chart|menu)\b", user_message, re.I)
             ):
                 mapped_image = current_menu_image(str(source_route["menu_id"]))
-                if mapped_image and mapped_image not in asset_urls:
-                    asset_urls.append(mapped_image)
+            for block in entry.blocks:
+                if block.kind == "TEXT":
+                    ordered_response_blocks.append({"kind": "TEXT", "text": block.value})
+                    continue
+                values = [value for value in asset_map.get(block.value, []) if value]
+                if mapped_image and block.value in {"subscription_rate_chart", "weekly_menu"}:
+                    values = [mapped_image]
+                if not values:
+                    asset_missing.append(block.value)
+                else:
+                    ordered_response_blocks.append({"kind": block.kind, "asset_key": block.value, "urls": values})
+                    asset_urls.extend(values)
+            for asset_key in client_match.asset_keys:
+                if asset_key not in {block.value for block in entry.blocks if block.kind != "TEXT"}:
+                    values = [value for value in asset_map.get(asset_key, []) if value]
+                    if not values:
+                        asset_missing.append(asset_key)
+                    else:
+                        ordered_response_blocks.append({"kind": "ASSET", "asset_key": asset_key, "urls": values})
+                        asset_urls.extend(values)
             facts.update({
                 "last_route_source": "EXACT_APPROVED",
                 "last_intents": [entry.qa_id],
@@ -2768,6 +2782,7 @@ class DeterministicResponder:
                 "client_qa_asset_status": "ASSET-MISSING" if asset_missing else "available",
                 "client_qa_missing_assets": asset_missing,
                 "client_qa_handoff_exact": entry.qa_id == "order_ready_handoff",
+                "ordered_response_blocks": ordered_response_blocks,
             })
             if entry.qa_id == "sondesh_details_client":
                 # An explicit canonical Sondesh FAQ is a fresh subject. It

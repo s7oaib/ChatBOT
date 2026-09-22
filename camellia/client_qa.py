@@ -25,6 +25,13 @@ class ApprovedQA:
     answer: str
     context: str = "general"
     asset_keys: Tuple[str, ...] = ()
+    blocks: Tuple["ResponseBlock", ...] = ()
+
+
+@dataclass(frozen=True)
+class ResponseBlock:
+    kind: str
+    value: str
 
 
 @dataclass(frozen=True)
@@ -66,7 +73,6 @@ _STOP_MARKERS = (
     "After custoner has finalized order:",
     "When customer is asking questions that are not in this list",
     "24 HOURS AFTER SENDING ABOVE, SEND THIS",
-    "SHARE WEEKLY MENU",
 )
 _PLACEHOLDER_ASSETS = {
     "INSERT CURRENT MENU HERE": "weekly_menu",
@@ -75,6 +81,7 @@ _PLACEHOLDER_ASSETS = {
     "INSERT AAMAR MENU HERE": "aamar_menu",
     "INSERT SIGNATURE MENU HERE": "signature_menu",
     "INSERT LATEST WEEKLY LUNCH/ DINNER MENU HERE": "weekly_menu",
+    "SHARE WEEKLY MENU": "weekly_menu",
 }
 
 
@@ -109,6 +116,42 @@ def _clean_answer(raw_lines: Sequence[str]) -> Tuple[str, Tuple[str, ...]]:
     # normalized, but sentence order and wording are not changed.
     answer = re.sub(r"\n[ \t]*\n(?:[ \t]*\n)+", "\n\n", answer)
     return answer, tuple(dict.fromkeys(assets))
+
+
+def _ordered_blocks(raw_lines: Sequence[str], qa_id: str) -> Tuple[ResponseBlock, ...]:
+    """Keep approved wording and place each asset at its approved response slot."""
+    lines = list(raw_lines)
+    if qa_id in {"sondesh_details_client", "sondesh_price_client"}:
+        # The latest client delivery instruction explicitly places Signature's
+        # card before the Porter sentence. Keep that sentence verbatim.
+        signature = next((i for i, line in enumerate(lines) if line.strip() == "INSERT SIGNATURE MENU HERE"), None)
+        if signature is not None:
+            porter = next((i for i, line in enumerate(lines[:signature]) if line.strip() == "Porter charges are on actuals."), None)
+            if porter is not None:
+                sentence = lines.pop(porter)
+                signature -= 1
+                lines.insert(signature + 1, sentence)
+    blocks: List[ResponseBlock] = []
+    pending: List[str] = []
+
+    def flush() -> None:
+        if pending:
+            text = re.sub(r"\n[ \t]*\n(?:[ \t]*\n)+", "\n\n", "\n".join(pending).strip())
+            if text:
+                blocks.append(ResponseBlock("TEXT", text))
+            pending.clear()
+
+    for line in lines:
+        marker = line.strip()
+        asset = _PLACEHOLDER_ASSETS.get(marker)
+        if asset:
+            flush()
+            kind = "IMAGE_GROUP" if asset == "sondesh_addon_images" else "MENU" if "menu" in asset else "ASSET"
+            blocks.append(ResponseBlock(kind, asset))
+        elif marker != "ADD LINK TO WHATSAPP":
+            pending.append(line.rstrip())
+    flush()
+    return tuple(blocks)
 
 
 def parse_source(source_text: Optional[str] = None) -> Tuple[ApprovedQA, ...]:
@@ -154,7 +197,7 @@ def parse_source(source_text: Optional[str] = None) -> Tuple[ApprovedQA, ...]:
             r"sharing our full menu for the week below", answer, re.I,
         ):
             assets = tuple(dict.fromkeys((*assets, "weekly_menu")))
-        entries.append(ApprovedQA(qa_id, question, answer, context, assets))
+        entries.append(ApprovedQA(qa_id, question, answer, context, assets, _ordered_blocks(raw_answer, qa_id)))
     return tuple(entries)
 
 

@@ -826,6 +826,11 @@ def _process_instagram_event(
                 source_media_present=True,
             )
             return
+        if source_media_present and source_route and not str(message_text or "").strip():
+            # A source-only webhook establishes context but carries no customer
+            # question. Wait for the actual message: the next turn may name a
+            # different product, which must outrank this mapped source.
+            return
         customer_message = str(message_text or "").strip() or "[shared media]"
         response_input = str(message_text or "").strip() or "Tell me more"
         log.info(
@@ -1002,10 +1007,14 @@ def _process_instagram_event(
             template_id, **trace,
         )
 
-        send_instagram_reply(
-            sender_id, response_text, image_url=image_url,
-            inbound_message_id=conversation_id, response_type="reply",
-        )
+        ordered_blocks = facts.get("ordered_response_blocks") if facts.get("last_route_source") == "EXACT_APPROVED" else None
+        if ordered_blocks and not needs_escalation:
+            send_instagram_response_blocks(sender_id, ordered_blocks, inbound_message_id=conversation_id)
+        else:
+            send_instagram_reply(
+                sender_id, response_text, image_url=image_url,
+                inbound_message_id=conversation_id, response_type="reply",
+            )
         if needs_escalation and link_message:
             send_instagram_reply(
                 sender_id, link_message,
@@ -1935,6 +1944,24 @@ def _public_url(path: str) -> str:
         return path
     base = config.PUBLIC_BASE_URL.rstrip("/")
     return base + path if base else path
+
+
+def send_instagram_response_blocks(recipient_id: str, blocks: list, *, inbound_message_id: Optional[int] = None) -> None:
+    """Deliver one approved answer in its client-authored text/asset order."""
+    for index, block in enumerate(blocks):
+        if block.get("kind") == "TEXT":
+            result = send_instagram_reply(
+                recipient_id, block.get("text", ""),
+                inbound_message_id=inbound_message_id, response_type="reply",
+            )
+        else:
+            result = send_instagram_reply(
+                recipient_id, "", image_url=block.get("urls") or [],
+                inbound_message_id=inbound_message_id, response_type="reply",
+            )
+        if isinstance(result, dict) and result.get("status") == "failed":
+            log.warning("Instagram approved response stopped after failed block %s (%s).", index + 1, block.get("kind"))
+            break
 
 
 def send_instagram_reply(
