@@ -155,6 +155,24 @@ def test_description_and_attachment_survive_reopen_and_exact_id(mapping_db):
     assert route["media_id"] == "exact-story-123" and method == "story_media_id"
 
 
+@pytest.mark.parametrize("source_type", ["story", "post", "reel"])
+def test_new_story_post_and_reel_mappings_default_to_context_on(mapping_db, source_type):
+    database, _path = mapping_db
+    payload = _source(source_type, f"exact-{source_type}-default-on")
+    payload.pop("active")
+    saved = database.save_instagram_source_route(validate_route_payload(payload))
+    assert decode_route(saved)["active"] is True
+
+
+@pytest.mark.parametrize("source_type", ["story", "post", "reel"])
+def test_explicit_context_off_is_preserved_for_legacy_mapping(mapping_db, source_type):
+    database, _path = mapping_db
+    payload = _source(source_type, f"exact-{source_type}-legacy-off")
+    payload["active"] = False
+    saved = database.save_instagram_source_route(validate_route_payload(payload))
+    assert decode_route(saved)["active"] is False
+
+
 def test_old_route_table_gains_blank_description_without_losing_row(tmp_path):
     path = tmp_path / "older-routes.db"
     with sqlite3.connect(path) as conn:
@@ -239,3 +257,7 @@ def test_client_mapping_ui_hides_route_mode():
     assert "igMediaReview" not in html
     assert "igStorySourceDescription" in html
     assert "igMediaDescription" in html
+    assert html.count("<b>Use as chatbot context</b>") == 3
+    assert "Auto reply from this source" not in html
+    assert "This does not send a message automatically." in html
+    assert "<b>Chatbot context:</b>" in html
