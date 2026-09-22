@@ -2,6 +2,12 @@
 
 This file is the single source of truth for deferred engineering work during fast development.
 
+## Staging target
+
+- Git branch: `codex/staging-fast-dev-20260922`
+- Railway service: `ChatBOT-Staging`
+- Production promotion is forbidden until the queue is processed and the user explicitly approves it.
+
 ## Operating mode
 
 **Default mode: FAST IMPLEMENTATION + STAGING PREVIEW**
