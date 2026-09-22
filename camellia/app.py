@@ -811,6 +811,7 @@ def _process_instagram_event(
                 # Post/Reel/Story from answering "price?".
                 facts["last_topic"] = None
                 facts["source_context_superseded"] = False
+                facts["unmapped_shared_attachment"] = False
                 facts["source_priority_cursor"] = 0
                 facts["active_product_context"] = None
         elif isinstance(facts.get("source_route"), dict):
@@ -842,6 +843,10 @@ def _process_instagram_event(
                 # the share rather than to the vaguer "it was already here".
                 source_match_method = facts.get("source_match_method") or "session"
         facts["source_context_used"] = False
+        if source_media_present and not source_route:
+            _mark_unmapped_shared_attachment(sender_id)
+        elif source_route:
+            facts["unmapped_shared_attachment"] = False
         source_trace_type = (source_route or {}).get("source_type") or (
             "story" if entry.source == "story_reply" else shared_source_type
         )
@@ -1164,6 +1169,7 @@ def _apply_source_context(sender_id: str, route: Dict[str, Any], match_method: s
     facts["source_route"] = route
     facts["source_match_method"] = match_method
     facts["source_context_superseded"] = False
+    facts["unmapped_shared_attachment"] = False
     # Sharing a post is itself a change of subject: the customer has just put
     # a specific thing in front of us, newer and more specific than whatever
     # was last discussed. Without clearing that stale topic, source routing
@@ -1201,10 +1207,7 @@ def _establish_shared_reel_context(sender_id: str, identity: Dict[str, str]) -> 
             ad_id=None, media_id=None, shortcode=identity.get("shortcode"),
         )
         if not route:
-            log.info(
-                "Shared reel %s from %s is not configured for routing; no source context set.",
-                identity.get("shortcode"), sender_id,
-            )
+            log.info("Shared reel had no exact configured route; no source context set.")
             return False
         _apply_source_context(sender_id, route, match_method)
         log.info(
@@ -1251,10 +1254,7 @@ def _establish_shared_post_context(sender_id: str, post_media_id: str) -> bool:
 
         pairing = db.get_active_post_pairing()
         if not pairing:
-            log.info(
-                "Shared post %s from %s is not configured and no pairing is open; no source context set.",
-                post_media_id, sender_id,
-            )
+            log.info("Shared post had no exact configured route and no pairing is open; no source context set.")
             return False
 
         bound = db.bind_post_pairing(pairing["id"], post_media_id)
@@ -1310,6 +1310,7 @@ def _handle_shared_attachment(
                 _establish_shared_post_context(sender_id, post_media_id)
                 route = session_memory.get_facts(sender_id, "instagram").get("source_route")
             if not route:
+                _mark_unmapped_shared_attachment(sender_id)
                 _reply_to_unreadable_attachment(
                     sender_id,
                     source_type="reel" if reel_identity else "post",
@@ -1340,7 +1341,23 @@ def _handle_shared_attachment(
                 source_media_present=True,
             )
         return
+    _mark_unmapped_shared_attachment(sender_id)
     _reply_to_unreadable_attachment(sender_id)
+
+
+def _mark_unmapped_shared_attachment(sender_id: str) -> None:
+    """Drop stale source/topic state after a share with no exact identity."""
+    facts = session_memory.get_facts(sender_id, "instagram")
+    facts.update({
+        "source_route": None,
+        "source_match_method": "shared_media_unmapped",
+        "source_context_superseded": True,
+        "source_context_used": False,
+        "source_priority_cursor": 0,
+        "last_topic": None,
+        "active_product_context": None,
+        "unmapped_shared_attachment": True,
+    })
 
 
 def _story_reply_payload(messaging_event: dict) -> Optional[Dict[str, Any]]:
@@ -1472,86 +1489,16 @@ def get_dropped_webhook_events(
     return {"count": len(_DROPPED_WEBHOOK_EVENTS), "events": list(reversed(_DROPPED_WEBHOOK_EVENTS))}
 
 
-# Sharing a reel into a DM arrives as an attachment with no message text, so
-# it never reaches the source-routing path. Whether Meta puts anything usable
-# (a permalink, a media id) inside that attachment is not documented by any
-# payload this repo has ever captured, and the code has only ever checked
-# `message.attachments` for truthiness — so nothing here assumes a field name.
-# This records the structure Meta actually sends, so the question can be
-# answered from evidence before any matcher is written.
-#
-# Structure, not content: values are kept only where they identify a shared
-# object (ids, types, URLs with the query string removed), everything else is
-# reported as its type. Deliberately in memory and bounded — a diagnostic
-# answering one question, not a second copy of customer data.
+# Bounded structural-only evidence for resolving Meta's exact attachment
+# identity field. Values and customer content are never retained.
 _ATTACHMENT_DEBUG_EVENTS: List[Dict[str, Any]] = []
 _ATTACHMENT_DEBUG_LIMIT = 10
-_ATTACHMENT_DEBUG_MAX_DEPTH = 6
-_ATTACHMENT_DEBUG_MAX_STR = 300
-
-# Meta signs its CDN URLs with short-lived credentials in the query string
-# (and a shared link can carry click-tracking tokens), so a URL is recorded
-# as scheme://host/path only. A key that looks like a credential is never
-# recorded at all, whatever Meta decides to call it.
-_SECRET_KEY_HINTS = (
-    "token", "secret", "signature", "auth", "cookie", "password",
-    "credential", "session", "bearer", "apikey", "api_key",
-)
-
-
-def _sanitize_debug_url(value: str) -> str:
-    """scheme://host/path — the shape that identifies a shared object, with
-    signed query parameters dropped."""
-    try:
-        parsed = urlsplit(value)
-    except ValueError:
-        return "<unparseable-url>"
-    if not parsed.scheme or not parsed.hostname:
-        return "<not-a-url>"
-    cleaned = f"{parsed.scheme}://{parsed.hostname}{parsed.path}"
-    if parsed.query:
-        cleaned += "?<query-removed>"
-    return cleaned[:_ATTACHMENT_DEBUG_MAX_STR]
-
-
-def _sanitize_debug_value(key: str, value: Any, depth: int = 0) -> Any:
-    """
-    Reports what Meta sent without copying anything sensitive out of it.
-
-    Field names are never assumed — whatever keys arrive are the keys
-    reported. Only the values that could identify a shared post/reel survive
-    in readable form; everything else degrades to its type.
-    """
-    if any(hint in key.lower() for hint in _SECRET_KEY_HINTS):
-        return "<redacted-by-key-name>"
-    if depth >= _ATTACHMENT_DEBUG_MAX_DEPTH:
-        return "<max-depth>"
-
-    if isinstance(value, dict):
-        return {
-            str(k): _sanitize_debug_value(str(k), v, depth + 1)
-            for k, v in list(value.items())[:40]
-        }
-    if isinstance(value, list):
-        return [_sanitize_debug_value(key, item, depth + 1) for item in value[:10]]
-    if isinstance(value, bool) or value is None:
-        return value
-    if isinstance(value, (int, float)):
-        return value
-    if isinstance(value, str):
-        if value.startswith(("http://", "https://")):
-            return _sanitize_debug_url(value)
-        if len(value) > _ATTACHMENT_DEBUG_MAX_STR:
-            return f"<str len={len(value)}>"
-        return value
-    return f"<{type(value).__name__}>"
-
-
 def _record_attachment_debug_event(messaging_event: dict, sender_id: Optional[str]) -> None:
     """
-    Captures the sanitized shape of one attachment-only Instagram message.
+    Captures only structural metadata for an unresolved Instagram attachment.
 
-    Changes nothing about how the message is answered — this only observes.
+    No sender, ID values, URLs, captions, message text, or payload values are
+    retained or logged. This only observes the provider's field names.
     Never allowed to raise: a diagnostic that can break the webhook is worse
     than the missing evidence it was added to collect.
     """
@@ -1559,28 +1506,76 @@ def _record_attachment_debug_event(messaging_event: dict, sender_id: Optional[st
         message = messaging_event.get("message") or {}
         attachments = message.get("attachments")
         attachment_list = attachments if isinstance(attachments, list) else []
+        safe_key = lambda value: re.sub(r"[^A-Za-z0-9_.-]", "?", str(value))[:80]
+        attachment_types = []
+        attachment_keys = []
+        payload_keys = []
+        exact_id_fields = set()
+        permalink_present = False
 
-        _ATTACHMENT_DEBUG_EVENTS.append({
-            "at": datetime.utcnow().isoformat(timespec="seconds"),
-            "had_sender": bool(sender_id),
-            "event_keys": sorted(str(k) for k in messaging_event.keys()),
-            "message_keys": sorted(str(k) for k in message.keys()),
+        def inspect(value: Any, path: str, depth: int = 0) -> None:
+            nonlocal permalink_present
+            if depth >= 8:
+                return
+            if isinstance(value, dict):
+                for raw_key, child in list(value.items())[:40]:
+                    key = safe_key(raw_key)
+                    field_path = f"{path}.{key}" if path else key
+                    if re.search(r"(?:^|[_.-])(?:id|mediaid|media_id|sourceid|source_id|postid|post_id|reelid|reel_id|storyid|story_id)$", key, re.I):
+                        if isinstance(child, (int, float)) and not isinstance(child, bool):
+                            exact_id_fields.add(field_path)
+                        elif isinstance(child, str) and re.fullmatch(r"\d{5,}", child.strip()):
+                            exact_id_fields.add(field_path)
+                    if isinstance(child, str) and re.match(
+                        r"^https?://(?:www\.)?instagram\.com/(?:p|reel|stories)/[^/?#]+(?:/[^/?#]+)?/?(?:[?#].*)?$",
+                        child.strip(), re.I,
+                    ):
+                        permalink_present = True
+                    inspect(child, field_path, depth + 1)
+            elif isinstance(value, list):
+                for child in value[:10]:
+                    inspect(child, path + "[]", depth + 1)
+
+        for index, item in enumerate(attachment_list):
+            if isinstance(item, dict):
+                raw_type = item.get("type")
+                attachment_types.append(safe_key(raw_type) if raw_type is not None else "unknown")
+                attachment_keys.append(sorted(safe_key(key) for key in item.keys()))
+                payload = item.get("payload")
+                if isinstance(payload, dict):
+                    payload_keys.extend(safe_key(key) for key in payload.keys())
+                inspect(item, f"attachments[{index}]")
+            else:
+                attachment_types.append("unknown")
+                attachment_keys.append([])
+        postback = messaging_event.get("postback")
+        referral = message.get("referral") or messaging_event.get("referral") or (
+            postback.get("referral") if isinstance(postback, dict) else None
+        ) or {}
+        referral_keys = sorted(safe_key(key) for key in referral.keys()) if isinstance(referral, dict) else []
+        event = {
             "attachment_count": len(attachment_list),
-            # Every key each attachment actually carries, so a field this
-            # code has never heard of still shows up.
-            "attachment_keys": [
-                sorted(str(k) for k in item.keys()) if isinstance(item, dict) else f"<{type(item).__name__}>"
-                for item in attachment_list
-            ],
-            "attachments": _sanitize_debug_value("attachments", attachment_list),
-            # A reply/share wrapper, if Meta sends one, lives beside the
-            # attachments rather than inside them.
-            "reply_to": _sanitize_debug_value("reply_to", message.get("reply_to")),
-            "referral": _sanitize_debug_value("referral", messaging_event.get("referral")),
-        })
+            "attachment_types": attachment_types,
+            "attachment_keys": attachment_keys,
+            "payload_keys": sorted(set(payload_keys)),
+            "referral_keys": referral_keys,
+            "exact_id_fields": sorted(exact_id_fields),
+            "exact_numeric_id_present": bool(exact_id_fields),
+            "instagram_permalink_present": permalink_present,
+        }
+        _ATTACHMENT_DEBUG_EVENTS.append(event)
         del _ATTACHMENT_DEBUG_EVENTS[:-_ATTACHMENT_DEBUG_LIMIT]
+        log.info(
+            "INSTAGRAM_SOURCE_SHAPE attachment_type=%s attachment_keys=%s payload_keys=%s "
+            "referral_keys=%s exact_id_fields=%s exact_numeric_id_present=%s "
+            "instagram_permalink_present=%s",
+            json.dumps(attachment_types), json.dumps(attachment_keys),
+            json.dumps(event["payload_keys"]), json.dumps(referral_keys),
+            json.dumps(event["exact_id_fields"]), event["exact_numeric_id_present"],
+            permalink_present,
+        )
     except Exception:
-        log.exception("Attachment diagnostic capture failed; the message itself is unaffected.")
+        log.warning("Attachment shape diagnostic failed; the message itself is unaffected.")
 
 
 @app.get("/admin/debug/instagram-attachments")
@@ -1740,12 +1735,13 @@ def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks
                 # event that actually mattered.
                 reason = _classify_unanswered_event(messaging_event)
 
-                # Observation only, before either branch below: a reel shared
-                # into a DM lands here, and what Meta puts inside that
-                # attachment is the open question blocking shared-reel
-                # routing. Recording it changes nothing about the reply.
+                # Observation only, before either branch below: unresolved
+                # attachments need real field evidence before any exact source
+                # matcher can be extended.
                 if reason == "attachment_only":
                     _record_attachment_debug_event(messaging_event, sender_id)
+                    if not shared_reel and not shared_post_id and not entry_point.media_id:
+                        _mark_unmapped_shared_attachment(sender_id)
 
                 # Parsed here because it is pure string work, but resolved and
                 # stored in the background task below — the webhook must keep

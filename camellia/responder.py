@@ -2564,6 +2564,18 @@ class DeterministicResponder:
         facts["source_context_used"] = False
         facts["source_referential_intent"] = None
 
+        if channel == "instagram" and facts.pop("unmapped_shared_attachment", False):
+            if re.fullmatch(r"\s*(?:tell me more|more details|tell me about it)\s*[?.!]*\s*", user_message, re.I):
+                clarification = "Of course — what would you like to know more about?"
+                facts.update({
+                    "last_route_source": "UNMAPPED_SHARED_ATTACHMENT_CLARIFICATION",
+                    "last_grounding": "source_identity_unavailable",
+                    "last_actions": [BusinessAction.SEND_RESPONSE.value],
+                    "knowledge_sufficient": True,
+                })
+                session_memory.add_turn(user_id, channel, user_message, clarification)
+                return clarification, True, "clarify_request", None
+
         if channel == "instagram":
             conversation_reply = grounded_answers.system_reply(user_message)
             if conversation_reply is not None:
