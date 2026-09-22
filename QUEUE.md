@@ -130,6 +130,21 @@ Risk: Medium
 - Topic deletion/reference integrity, gallery and Story mapping regressions.
 - Archived-data compatibility, migration/restart durability, Admin auth/CSRF/security, privacy/logging, webhook, 5,000-media performance, full suite, and final production validation.
 
+### Q-003 — Archive-free Admin and Client Q&A Library
+
+Status: IMPLEMENTED / VALIDATION_PENDING
+Risk: Medium
+
+#### Implemented
+- Removed normal archive filters/actions and archived route loading from Admin mapping and Story flows.
+- Made the Admin template library read-only and client-approved-only, backed by the parsed authoritative client Q&A registry.
+- Kept legacy `qa_templates.json` guards as runtime-only safety mechanisms.
+
+#### Deferred validation
+- Full visual sweep for hidden compatibility controls and archive-data behavior.
+- Full client-Q&A completeness/byte comparison and guard-routing regression.
+- Admin auth/CSRF, migration/restart, webhook/privacy, gallery scale, full suite, and final production validation.
+
 ---
 
 # Final release gate

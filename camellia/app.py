@@ -5214,20 +5214,20 @@ async def resolve_escalation(
 
 @app.get("/admin/templates")
 def get_templates(x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
-    """Returns active Q&A templates from qa_templates.json."""
+    """Returns only the client's canonical approved Q&A for the Admin UI."""
     require_admin(x_admin_key, x_admin_pin)
-    try:
-        with open(config.QA_TEMPLATES_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return {"status": "success", "templates": data.get("templates", []), "matching_rules": data.get("matching_rules", {})}
-    except Exception as e:
-        log.error("Failed to read qa_templates.json: %s", e)
-        raise HTTPException(status_code=500, detail=str(e))
+    from camellia import client_qa
+    return {"status": "success", "templates": [
+        {"id": entry.qa_id, "triggers": [entry.question], "response": entry.answer,
+         "source_ref": "client-approved Q&A", "asset_keys": list(entry.asset_keys)}
+        for entry in client_qa.REGISTRY
+    ], "matching_rules": {}}
 
 @app.post("/admin/templates")
 async def update_templates(request: Request, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
     """Updates Q&A templates in qa_templates.json and hot-reloads the responder."""
     require_admin(x_admin_key, x_admin_pin)
+    raise HTTPException(status_code=403, detail="Client-approved Q&A is sourced from the approved client registry and is read-only here.")
     try:
         body = await request.json()
     except Exception:
@@ -6862,7 +6862,6 @@ def get_admin_dashboard():
             <div id="adRouteResult" class="result-box"></div>
             <div style="display:flex; gap:8px; margin-top:16px; border-bottom:1px solid var(--border);">
                 <button class="tab-btn active" type="button" id="igRouteTabActiveBtn" onclick="switchIgRouteTab('active')" style="border-radius:8px 8px 0 0;">Active</button>
-                <button class="tab-btn" type="button" id="igRouteTabArchivedBtn" onclick="switchIgRouteTab('archived')" style="border-radius:8px 8px 0 0;">Archived</button>
             </div>
             <div class="ig-media-toolbar" aria-label="Connected Instagram media filters">
                 <input class="field-control ig-media-search" id="igMediaSearch" type="search" placeholder="Search permalink, shortcode, Topic, description, or routing ID" oninput="filterInstagramMedia()">
@@ -6897,7 +6896,6 @@ def get_admin_dashboard():
                 <button class="ig-media-filter ig-story-filter" type="button" data-story-filter="UNMAPPED">Unmapped</button>
                 <button class="ig-media-filter ig-story-filter" type="button" data-story-filter="MAPPED">Mapped</button>
                 <button class="ig-media-filter ig-story-filter" type="button" data-story-filter="DISABLED">Disabled</button>
-                <button class="ig-media-filter ig-story-filter" type="button" data-story-filter="ARCHIVED">Archived</button>
                 <button class="ig-media-filter ig-story-filter" type="button" data-story-filter="ACTIVE">Active</button>
                 <button class="ig-media-filter ig-story-filter" type="button" data-story-filter="EXPIRED">Expired</button>
                 <button class="ig-media-filter ig-story-filter" type="button" data-story-filter="REMOVED">Removed</button>
@@ -7387,7 +7385,6 @@ THIS WEEK'S BENGAL SPECIALS
             <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:10px;">
                 <button class="tab-btn active" type="button" id="cqaStatusBtn-ACTIVE" onclick="setCustomQaStatusFilter('ACTIVE')">Active</button>
                 <button class="tab-btn" type="button" id="cqaStatusBtn-DISABLED" onclick="setCustomQaStatusFilter('DISABLED')">Disabled</button>
-                <button class="tab-btn" type="button" id="cqaStatusBtn-ARCHIVED" onclick="setCustomQaStatusFilter('ARCHIVED')">Archived</button>
                 <button class="tab-btn" type="button" id="cqaStatusBtn-ALL" onclick="setCustomQaStatusFilter('ALL')">All</button>
             </div>
             <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:14px;">
@@ -7586,7 +7583,7 @@ THIS WEEK'S BENGAL SPECIALS
                 </div>
                 <div>
                     <label class="field-label">Status</label>
-                    <select class="field-control" id="cqaStatus"><option value="ACTIVE">Active</option><option value="DISABLED">Disabled</option><option value="ARCHIVED">Archived</option></select>
+                    <select class="field-control" id="cqaStatus"><option value="ACTIVE">Active</option><option value="DISABLED">Disabled</option></select>
                 </div>
             </div>
 
@@ -8331,8 +8328,8 @@ THIS WEEK'S BENGAL SPECIALS
             const auditSummary = [item.source || 'Existing Admin record', item.first_seen ? `first seen ${item.first_seen}` : '', item.updated_at ? `updated ${item.updated_at}` : ''].filter(Boolean).join(' · ');
             document.getElementById('contentDetailsFacts').innerHTML = [['Exact Meta ID', id], ['Content type', typeLabel], ['Status', status], ['Route health', routeHealth], ['Topic / intent', item.routing_topic || 'Unmapped'], ['Route destination', item.menu_id || item.canonical_url || 'Not mapped'], ['Published', item.published_at || item.created_at || 'Not supplied'], ['Expiry / last seen', item.expires_at || item.last_seen || 'Not supplied'], ['Routing history / audit', auditSummary || 'No additional history supplied']].map(([label, value]) => `<div class="drawer-fact"><span class="drawer-fact-label">${escapeHtml(label)}</span><span class="drawer-fact-value">${escapeHtml(value)}</span></div>`).join('');
             const actions = [];
-            if (isStory) { if (item.story_media_id && !storyIsAdminDeleted(item)) actions.push(`<button class="btn-secondary" type="button" onclick="closeContentDetails(); openInstagramStoryMapping('${escapeHtml(item.story_media_id)}')">Edit</button>`); if (item.routing_id && status === 'MAPPED') actions.push(`<button class="btn-danger" type="button" onclick="archiveInstagramStory(${Number(item.routing_id)}); closeContentDetails();">Archive</button>`); }
-            else if (item.routing_id) { actions.push(`<button class="btn-secondary" type="button" onclick="openAdminRoute(igContentRoutes.find(route => Number(route.routing_id) === ${Number(item.routing_id)}))">Edit</button>`); if (item.archived_at) actions.push(`<button class="btn-secondary" type="button" onclick="restoreInstagramRoute(${Number(item.routing_id)}); closeContentDetails();">Unarchive</button>`); else actions.push(`<button class="btn-danger" type="button" onclick="archiveInstagramRoute(${Number(item.routing_id)}); closeContentDetails();">Archive</button>`); }
+            if (isStory) { if (item.story_media_id && !storyIsAdminDeleted(item)) actions.push(`<button class="btn-secondary" type="button" onclick="closeContentDetails(); openInstagramStoryMapping('${escapeHtml(item.story_media_id)}')">Edit</button>`); }
+            else if (item.routing_id) { actions.push(`<button class="btn-secondary" type="button" onclick="openAdminRoute(igContentRoutes.find(route => Number(route.routing_id) === ${Number(item.routing_id)}))">Edit</button>`); }
             actions.push(`<button class="btn-secondary" type="button" onclick="switchTab('tab-image', null); closeContentDetails();">Open full details</button>`);
             document.getElementById('contentDetailsActions').innerHTML = actions.join(''); drawer.classList.add('open'); backdrop.classList.add('open'); drawer.setAttribute('aria-hidden', 'false'); backdrop.setAttribute('aria-hidden', 'false'); document.getElementById('contentDetailsClose').focus();
         }
@@ -8427,7 +8424,7 @@ THIS WEEK'S BENGAL SPECIALS
                     const key = encodeURIComponent(m.menu_key);
                     const draftNotice = m.draft ? `<span style="color:var(--primary);font-weight:700;"> · Draft ready · pending publish</span>` : '';
                     const publishAction = m.draft ? `<button class="btn-primary" onclick="mmPublishImage('${key}')">Save &amp; Publish</button>` : '';
-                    return `<article class="visual-menu-card"><h3>${escapeHtml(m.title)}${m.category ? ` <span style="font-weight:400;font-size:0.75rem;color:var(--text-muted);">· ${escapeHtml(m.category)}</span>` : ''}</h3>${image}<div class="visual-menu-meta"><b>${m.active === false ? 'Inactive' : escapeHtml(m.status || 'Active')}</b>${m.published_at ? ` · ${escapeHtml(m.published_at)}` : ''}${draftNotice}</div><div class="visual-menu-actions"><button class="btn-secondary" onclick="openMenuEditModal('${key}')">Edit</button><button class="btn-primary" onclick="mmReplaceImage('${key}')">Replace</button>${publishAction}<button class="btn-secondary" onclick="mmPreviewImage('${key}')">Preview</button><button class="btn-secondary" onclick="mmHistoryImage('${key}')">History</button><button class="btn-danger" onclick="mmArchiveImage('${key}')">Archive</button><button class="btn-danger" onclick="mmDeleteMenu('${key}', ${escapeHtml(JSON.stringify(m.title))})">Delete Permanently</button></div><div id="mm-image-history-${key}" style="padding:0 14px 12px"></div></article>`;
+                    return `<article class="visual-menu-card"><h3>${escapeHtml(m.title)}${m.category ? ` <span style="font-weight:400;font-size:0.75rem;color:var(--text-muted);">· ${escapeHtml(m.category)}</span>` : ''}</h3>${image}<div class="visual-menu-meta"><b>${m.active === false ? 'Inactive' : escapeHtml(m.status || 'Active')}</b>${m.published_at ? ` · ${escapeHtml(m.published_at)}` : ''}${draftNotice}</div><div class="visual-menu-actions"><button class="btn-secondary" onclick="openMenuEditModal('${key}')">Edit</button><button class="btn-primary" onclick="mmReplaceImage('${key}')">Replace</button>${publishAction}<button class="btn-secondary" onclick="mmPreviewImage('${key}')">Preview</button><button class="btn-secondary" onclick="mmHistoryImage('${key}')">History</button><button class="btn-danger" onclick="mmDeleteMenu('${key}', ${escapeHtml(JSON.stringify(m.title))})">Delete Permanently</button></div><div id="mm-image-history-${key}" style="padding:0 14px 12px"></div></article>`;
                 }).join('');
             } catch (err) {
                 grid.innerHTML = `<p style="color: var(--danger);">${escapeHtml(err.message || err)}</p>`;
@@ -9460,7 +9457,7 @@ THIS WEEK'S BENGAL SPECIALS
                 actions = `<button class="btn-secondary" type="button" onclick="restoreInstagramRoute(${route.routing_id})">Restore</button> <button class="btn-danger" type="button" onclick="openIgRemoveModal(${route.routing_id})">Delete</button>`;
             } else if (route.routing_id) {
                 const connect = route.source_type === 'post' ? `<button class="btn-secondary" type="button" onclick="pairInstagramPost(${route.routing_id})">${route.media_id ? 'Reconnect Post' : 'Connect Post'}</button>` : '';
-                actions = `<button class="btn-secondary" type="button" onclick="editInstagramRoute(${route.routing_id})">Edit</button><button class="btn-secondary" type="button" onclick="setInstagramRouteActive(${route.routing_id},${!route.active})">${route.active ? 'Disable' : 'Enable'}</button><button class="btn-danger" type="button" onclick="archiveInstagramRoute(${route.routing_id})">Archive</button><button class="btn-danger" type="button" onclick="openIgRemoveModal(${route.routing_id})">Delete</button>${connect}`;
+                actions = `<button class="btn-secondary" type="button" onclick="editInstagramRoute(${route.routing_id})">Edit</button><button class="btn-secondary" type="button" onclick="setInstagramRouteActive(${route.routing_id},${!route.active})">${route.active ? 'Disable' : 'Enable'}</button><button class="btn-danger" type="button" onclick="openIgRemoveModal(${route.routing_id})">Delete</button>${connect}`;
             } else {
                 actions = `<button class="btn-danger" type="button" onclick="removeAdRoute('${escapeHtml(route.ad_id || '')}')">Remove</button>`;
             }
@@ -9758,8 +9755,8 @@ THIS WEEK'S BENGAL SPECIALS
                 let actions = '';
                 if (status === 'DELETED') actions = `<button class="btn-secondary" type="button" data-story-action="restore-source" data-story-media-id="${escapeHtml(source.story_media_id || '')}">Restore</button>`;
                 else if (status === 'UNMAPPED') actions = `<button class="btn-secondary" type="button" data-story-action="map" data-story-media-id="${escapeHtml(source.story_media_id || '')}">Map Story</button><button class="btn-danger" type="button" data-story-action="delete" data-story-media-id="${escapeHtml(source.story_media_id || '')}">Delete</button>`;
-                else if (status === 'MAPPED') actions = `<button class="btn-secondary" type="button" data-story-action="edit" data-story-media-id="${escapeHtml(source.story_media_id || '')}">Edit</button><button class="btn-secondary" type="button" data-story-action="disable" data-routing-id="${routeId}">Disable</button><button class="btn-danger" type="button" data-story-action="archive" data-routing-id="${routeId}">Archive</button><button class="btn-danger" type="button" data-story-action="delete" data-story-media-id="${escapeHtml(source.story_media_id || '')}">Delete</button>`;
-                else if (status === 'DISABLED') actions = `<button class="btn-secondary" type="button" data-story-action="edit" data-story-media-id="${escapeHtml(source.story_media_id || '')}">Edit</button><button class="btn-secondary" type="button" data-story-action="enable" data-routing-id="${routeId}">Enable</button><button class="btn-danger" type="button" data-story-action="archive" data-routing-id="${routeId}">Archive</button><button class="btn-danger" type="button" data-story-action="delete" data-story-media-id="${escapeHtml(source.story_media_id || '')}">Delete</button>`;
+                else if (status === 'MAPPED') actions = `<button class="btn-secondary" type="button" data-story-action="edit" data-story-media-id="${escapeHtml(source.story_media_id || '')}">Edit</button><button class="btn-secondary" type="button" data-story-action="disable" data-routing-id="${routeId}">Disable</button><button class="btn-danger" type="button" data-story-action="delete" data-story-media-id="${escapeHtml(source.story_media_id || '')}">Delete</button>`;
+                else if (status === 'DISABLED') actions = `<button class="btn-secondary" type="button" data-story-action="edit" data-story-media-id="${escapeHtml(source.story_media_id || '')}">Edit</button><button class="btn-secondary" type="button" data-story-action="enable" data-routing-id="${routeId}">Enable</button><button class="btn-danger" type="button" data-story-action="delete" data-story-media-id="${escapeHtml(source.story_media_id || '')}">Delete</button>`;
                 else actions = `<button class="btn-secondary" type="button" data-story-action="restore" data-routing-id="${routeId}">Restore</button><button class="btn-danger" type="button" data-story-action="delete" data-story-media-id="${escapeHtml(source.story_media_id || '')}">Delete</button>`;
                 const topic = source.routing_topic || 'Unmapped Story';
                 const isNewUnmapped = source.source === 'META_STORY_SYNC' && status === 'UNMAPPED';
@@ -9826,22 +9823,19 @@ THIS WEEK'S BENGAL SPECIALS
             if (refreshButton) { refreshButton.disabled = true; refreshButton.textContent = '🔄 Refreshing…'; }
 
             try {
-                const [sourcesResponse, activeResponse, archivedResponse] = await Promise.all([
+                const [sourcesResponse, activeResponse] = await Promise.all([
                     fetch('/admin/instagram-story-sources' + (includeDeleted ? '?include_deleted=true' : ''), { headers: getAuthHeaders() }),
                     fetch('/admin/instagram-routes', { headers: getAuthHeaders() }),
-                    fetch('/admin/instagram-routes?include_archived=true', { headers: getAuthHeaders() }),
                 ]);
-                const [sourcesData, activeData, archivedData] = await Promise.all([sourcesResponse.json(), activeResponse.json(), archivedResponse.json()]);
+                const [sourcesData, activeData] = await Promise.all([sourcesResponse.json(), activeResponse.json()]);
                 if (!sourcesResponse.ok) throw new Error(sourcesData.detail || 'Could not load captured Stories.');
                 if (!activeResponse.ok) throw new Error(activeData.detail || 'Could not load Story mappings.');
-                if (!archivedResponse.ok) throw new Error(archivedData.detail || 'Could not load archived Story mappings.');
-
-                const routes = [...(activeData.routes || []), ...(archivedData.routes || [])].filter(route => route.source_type === 'story');
+                const routes = (activeData.routes || []).filter(route => route.source_type === 'story');
                 const routesById = new Map(routes.filter(route => route.routing_id).map(route => [String(route.routing_id), route]));
                 igStorySources = (sourcesData.story_sources || []).map(source => ({ ...(routesById.get(String(source.routing_id)) || {}), ...source }));
                 window.igStorySources = igStorySources;
-                igProducts = activeData.product_catalogue || archivedData.product_catalogue || [];
-                igStoryKnowledgeScopes = activeData.knowledge_scopes || archivedData.knowledge_scopes || [];
+                igProducts = activeData.product_catalogue || [];
+                igStoryKnowledgeScopes = activeData.knowledge_scopes || [];
                 if (!igTopics.length && !igMenus.length) await loadTopicsAndMenus();
                 populateInstagramStoryPickers();
                 renderInstagramStories();
@@ -9904,7 +9898,7 @@ THIS WEEK'S BENGAL SPECIALS
             const list = document.getElementById('adRouteList');
             if (!list || !adminAuthenticated) return;
             try {
-                const query = igRouteTab === 'archived' ? '?include_archived=true' : '';
+            const query = '';
                 const resp = await fetch(`/admin/instagram-routes${query}`, { headers: getAuthHeaders() });
                 const data = await resp.json();
                 if (!resp.ok) throw new Error(data.detail || 'Could not load saved routes.');
@@ -11741,10 +11735,8 @@ Non-Veg:
             const aliasCount = (item.aliases || []).length;
             const priorityBadge = item.priority === 'HIGH' ? '<span class="badge badge-nonveg">High</span>' : '<span class="badge badge-veg">Normal</span>';
             const statusBadge = { ACTIVE: '<span class="badge badge-veg">Active</span>', DISABLED: '<span class="badge badge-nonveg">Disabled</span>', ARCHIVED: '<span class="badge">Archived</span>' }[item.status] || item.status;
-            const lifecycleAction = item.status === 'ARCHIVED'
-                ? `<button class="btn-secondary" style="padding:4px 8px;font-size:0.72rem;" onclick="cqaSetStatus(${item.id},'ACTIVE')">Restore</button>`
-                : `<button class="btn-secondary" style="padding:4px 8px;font-size:0.72rem;" onclick="cqaSetStatus(${item.id},'${item.status === 'ACTIVE' ? 'DISABLED' : 'ACTIVE'}')">${item.status === 'ACTIVE' ? 'Disable' : 'Enable'}</button>
-                   <button class="btn-secondary" style="padding:4px 8px;font-size:0.72rem;" onclick="cqaSetStatus(${item.id},'ARCHIVED')">Archive</button>`;
+            const lifecycleAction = item.status === 'ARCHIVED' ? ''
+                : `<button class="btn-secondary" style="padding:4px 8px;font-size:0.72rem;" onclick="cqaSetStatus(${item.id},'${item.status === 'ACTIVE' ? 'DISABLED' : 'ACTIVE'}')">${item.status === 'ACTIVE' ? 'Disable' : 'Enable'}</button>`;
             return `
             <tr>
                 <td style="max-width:140px;">${escapeHtml(item.topic || '')}</td>
