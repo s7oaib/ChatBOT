@@ -891,7 +891,9 @@ def _process_instagram_event(
 
         # Human-gated assisted resolution: unresolved Instagram messages only.
         # The draft is durable and reviewable; it is never sent from this path.
-        protected_flow = bool(facts.get("cart") or facts.get("order_draft")) or template_id in ("order_draft_receipt", "order_next_steps")
+        protected_flow = bool(
+            facts.get("cart") or facts.get("order_draft") or facts.get("order_intake_draft")
+        ) or template_id in ("order_draft_receipt", "order_next_steps", "order_intake_draft")
         if (config.LLM_ASSISTED_RESOLUTION_ENABLED or config.LLM_AUTO_RESOLVE_SIMULATION_ENABLED) and not was_matched and not protected_flow and not source_route:
             assisted_suggestion = create_suggestion(
                 user_id=sender_id, channel="instagram", customer_message=customer_message,
@@ -929,6 +931,7 @@ def _process_instagram_event(
             "bengali_home_table_pricing",
             "bengali_home_table_payment",
             "GUARD_staff_names_manager_contact",
+            "order_intake_draft",
         }
         client_approved_answer = bool(
             template_id and template_id.startswith("client_approved_")
@@ -1045,6 +1048,10 @@ def _process_instagram_event(
         )
         trace["source_referential_intent"] = facts.get("source_referential_intent")
         logged_response = response_text
+        if template_id == "order_intake_draft":
+            logged_response = re.sub(
+                r"https://wa\.me/[^\s]+", "https://wa.me/[prefilled-order-request]", logged_response,
+            )
         if needs_escalation and link_message:
             logged_response = f"{response_text}\n\n{link_message}"
         conversation_id = db.log_conversation(

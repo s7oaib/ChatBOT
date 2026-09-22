@@ -25,6 +25,7 @@ from camellia.trigger_index import trigger_index
 from camellia import weekly_flyer
 from camellia import menu_dates
 from camellia import client_qa
+from camellia import order_intake
 from camellia import grounded_answers
 from camellia.menu_images import (
     current_url as current_menu_image,
@@ -2589,6 +2590,81 @@ class DeterministicResponder:
                 })
                 session_memory.add_turn(user_id, channel, user_message, conversation_reply)
                 return conversation_reply, True, "system_conversation", None
+
+            existing_order_intake = facts.get("order_intake_draft")
+            has_order_intake = bool(
+                isinstance(existing_order_intake, dict)
+                and existing_order_intake.get("status")
+            )
+            finalized_order = bool(
+                ORDER_READY_RE.fullmatch(lowered_text)
+                and not order_intake.is_order_process_question(user_message)
+            )
+            if (
+                not finalized_order
+                and not order_intake.is_price_or_payment(user_message)
+                and not order_intake.is_unsupported_question(user_message)
+                and not semantic_fallback._ESCALATION_INTENT_RE.search(lowered_text)
+            ):
+                starts_order_intake = (
+                    order_intake.is_order_process_question(user_message)
+                    or order_intake.is_order_request(
+                        user_message, facts.get("active_product_context"),
+                    )
+                )
+                if has_order_intake or starts_order_intake:
+                    is_new_draft = not has_order_intake
+                    draft = existing_order_intake if has_order_intake else order_intake.new_order_draft()
+                    facts["order_intake_draft"] = draft
+                    facts["source_context_superseded"] = True
+                    facts["source_context_used"] = False
+                    if order_intake.is_edit_request(user_message):
+                        draft["status"] = order_intake.ORDER_DRAFT_INCOMPLETE
+                        response_text = (
+                            "What would you like to change? You can update the item, quantity, "
+                            "preferred delivery day or slot, address, receiver phone, or location pin."
+                        )
+                    else:
+                        order_intake.update_order_draft(
+                            draft, user_message,
+                            active_product_context=facts.get("active_product_context"),
+                        )
+                        if draft.get("status") == order_intake.ORDER_DRAFT_READY:
+                            response_text = order_intake.request_summary(draft)
+                            response_text += "\n\n[Edit Order]\nReply with the change you want."
+                            link = order_intake.whatsapp_draft_link(draft)
+                            if link:
+                                response_text += f"\n\n[Continue on WhatsApp]\n{link}"
+                            else:
+                                response_text += "\n\nContinue on WhatsApp is not available right now."
+                        else:
+                            if (
+                                is_new_draft
+                                and order_intake.is_order_process_question(user_message)
+                                and not any(draft.get(field) for field in (
+                                    "item", "quantity", "delivery_area", "delivery_slot",
+                                    "delivery_address", "receiver_phone", "location_pin",
+                                ))
+                            ):
+                                response_text = order_intake.instruction_message()
+                            else:
+                                response_text = order_intake.next_question(draft)
+
+                    facts.update({
+                        "last_route_source": "ORDER_INTAKE_DRAFT",
+                        "last_intents": ["order_request_draft"],
+                        "last_knowledge_ids": [],
+                        "last_actions": [BusinessAction.SEND_RESPONSE.value],
+                        "knowledge_sufficient": True,
+                        "last_grounding": "customer_provided_order_draft",
+                        "last_llm_called": False,
+                        "last_fallback_used": False,
+                    })
+                    safe_turn_response = re.sub(
+                        r"https://wa\.me/[^\s]+", "[Continue on WhatsApp]", response_text,
+                    )
+                    session_memory.add_turn(user_id, channel, user_message, safe_turn_response)
+                    return response_text, True, "order_intake_draft", None
 
             source = facts.get("source_route") if isinstance(facts.get("source_route"), dict) else {}
             source_description = str(source.get("source_description") or "").strip()
