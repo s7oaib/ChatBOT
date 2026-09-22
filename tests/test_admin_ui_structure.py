@@ -298,13 +298,14 @@ def test_instagram_stories_exposes_status_filters_and_safe_actions(page):
         assert label in section or label in render
     assert 'data-story-filter="ARCHIVED"' not in section
     assert 'data-story-action="archive"' not in render
-    assert 'data-story-action="delete-mapping"' in render
+    assert 'data-story-action="delete-mapping"' not in render
     assert 'data-story-action="restore-source"' in render
     assert 'Delete this Story from Camellia Admin?' in page
     assert 'This removes the Story from the Admin dashboard and disables its Story routing.' in page
     assert '/admin/instagram-story-sources/${encodeURIComponent(mediaId)}' in page
     assert '/permanent' not in render
-    assert "removeInstagramStoryMapping" in render
+    drawer = page[page.index('function openContentDetails'):page.index('async function saveInstagramMediaRoute')]
+    assert "removeInstagramStoryMapping" in drawer
     assert 'id="igStoryActive"' in section
 
 
@@ -351,7 +352,9 @@ def test_instagram_story_preview_metadata_never_exposes_temporary_url(page):
     assert "new URL(String(value), window.location.origin)" in section
     assert "parsed.hostname" in section and "parsed.pathname" in section
     story_render = page[page.index('function renderInstagramStories'):page.index('async function loadInstagramStories')]
-    assert "storyPreviewMetadata(source.temporary_url)" in story_render
+    assert "storyPreviewMetadata(source.temporary_url)" not in story_render
+    assert "Meta Story ID:" not in story_render
+    assert "data-story-media-id" in story_render
     assert "temporary_url}" not in story_render
 
 
@@ -477,7 +480,7 @@ def test_topic_and_menu_edit_actions_are_clear_and_metadata_only(page):
 def test_instagram_routing_keeps_client_friendly_cards_and_existing_actions(page):
     section = page[page.index('function renderInstagramMediaCard'):page.index('// Shared-post pairing')]
     assert "Edit Mapping" in section
-    for action in ("Edit Mapping", "Auto reply: On", "Delete Mapping", "Status:", "Menu:"):
+    for action in ("Edit Mapping", "Context: On", "Delete Mapping", "Status:", "Menu:"):
         assert action in section
     assert "/admin/instagram-routes/${id}/active" in page
     assert "/admin/instagram-routes/${id}" in page

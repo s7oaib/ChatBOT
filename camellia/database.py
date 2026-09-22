@@ -1381,8 +1381,14 @@ class Database:
     def list_instagram_media(self, *, page: int = 1, page_size: int = 24, media_type: Optional[str] = None,
                              route_mode: Optional[str] = None, needs_review: Optional[bool] = None,
                              topic_id: Optional[str] = None, search: Optional[str] = None,
-                             sort: str = "newest") -> tuple[List[Dict[str, Any]], int]:
+                             sort: str = "newest", source_type: Optional[str] = None,
+                             mapping_status: Optional[str] = None,
+                             context_active: Optional[bool] = None) -> tuple[List[Dict[str, Any]], int]:
         clauses, params = ["1=1"], []
+        if source_type == "reel":
+            clauses.append("media_type='VIDEO'")
+        elif source_type == "post":
+            clauses.append("media_type!='VIDEO'")
         if media_type:
             clauses.append("media_type=?"); params.append(media_type.upper())
         if route_mode:
@@ -1391,15 +1397,24 @@ class Database:
             clauses.append("needs_review=?"); params.append(int(needs_review))
         if topic_id:
             clauses.append("topic_id=?"); params.append(topic_id)
+        if mapping_status == "mapped":
+            clauses.append("(topic_id IS NOT NULL OR route_mode IN ('CUSTOM','DISABLED') OR EXISTS (SELECT 1 FROM instagram_source_routes r WHERE r.media_id=instagram_media.instagram_media_id AND r.source_type IN ('post','reel') AND r.archived_at IS NULL))")
+        elif mapping_status == "unmapped":
+            clauses.append("(topic_id IS NULL AND route_mode='DEFAULT' AND NOT EXISTS (SELECT 1 FROM instagram_source_routes r WHERE r.media_id=instagram_media.instagram_media_id AND r.source_type IN ('post','reel') AND r.archived_at IS NULL))")
+        if context_active is not None:
+            clauses.append("EXISTS (SELECT 1 FROM instagram_source_routes r WHERE r.media_id=instagram_media.instagram_media_id AND r.source_type IN ('post','reel') AND r.archived_at IS NULL AND r.active=?)")
+            params.append(int(context_active))
         if search:
-            clauses.append("(instagram_media_id LIKE ? OR permalink LIKE ? OR caption LIKE ?)")
-            params.extend([f"%{search[:200]}%"] * 3)
+            pattern = f"%{search[:200]}%"
+            clauses.append("(instagram_media_id LIKE ? OR permalink LIKE ? OR caption LIKE ? OR EXISTS (SELECT 1 FROM instagram_source_routes r WHERE r.media_id=instagram_media.instagram_media_id AND r.source_type IN ('post','reel') AND r.archived_at IS NULL AND (r.routing_topic LIKE ? OR r.source_description LIKE ?)))")
+            params.extend([pattern] * 5)
         where = " AND ".join(clauses)
         direction = "ASC" if sort == "oldest" else "DESC"
+        order_column = "updated_at" if sort == "recently_edited" else "published_at"
         with self.get_connection() as conn:
             total = int(conn.execute(f"SELECT COUNT(*) AS n FROM instagram_media WHERE {where}", params).fetchone()["n"])
             rows = conn.execute(
-                f"SELECT * FROM instagram_media WHERE {where} ORDER BY published_at {direction}, id {direction} LIMIT ? OFFSET ?",
+                f"SELECT * FROM instagram_media WHERE {where} ORDER BY {order_column} {direction}, id {direction} LIMIT ? OFFSET ?",
                 [*params, page_size, (page - 1) * page_size],
             ).fetchall()
         return [dict(row) for row in rows], total
@@ -1551,11 +1566,21 @@ class Database:
             conn.commit()
         return dict(row)
 
-    def list_instagram_source_routes(self, include_archived: bool = False) -> List[Dict[str, Any]]:
-        where = "" if include_archived else "WHERE archived_at IS NULL"
+    def list_instagram_source_routes(self, include_archived: bool = False,
+                                     media_ids: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+        clauses, params = [], []
+        if not include_archived:
+            clauses.append("archived_at IS NULL")
+        if media_ids is not None:
+            if not media_ids:
+                return []
+            clauses.append(f"media_id IN ({','.join('?' for _ in media_ids)})")
+            params.extend(media_ids)
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
         with self.get_connection() as conn:
             rows = conn.execute(
-                f"SELECT * FROM instagram_source_routes {where} ORDER BY updated_at DESC, routing_id DESC"
+                f"SELECT * FROM instagram_source_routes {where} ORDER BY updated_at DESC, routing_id DESC",
+                params,
             ).fetchall()
         return [dict(row) for row in rows]
 
@@ -1850,35 +1875,61 @@ class Database:
             )
             conn.commit()
 
-    def list_instagram_story_sources(self, include_deleted: bool = False) -> List[Dict[str, Any]]:
+    def list_instagram_story_sources(self, include_deleted: bool = False, *, page: int = 1,
+                                     page_size: Optional[int] = None, search: Optional[str] = None,
+                                     mapping_status_filter: Optional[str] = None,
+                                     context_active: Optional[bool] = None,
+                                     sort: str = "newest", with_total: bool = False):
         """Return captured Stories with exact mapping status for admin.
 
         Deleted Stories stay in the database as local tombstones. The normal
         list hides them; History asks explicitly for ``include_deleted``.
         """
+        clauses, params = [], []
+        if not include_deleted:
+            clauses.append("s.admin_deleted=0")
+            if mapping_status_filter is None:
+                clauses.append("UPPER(COALESCE(s.story_status,'ACTIVE')) NOT IN ('EXPIRED','REMOVED')")
+        if search:
+            pattern = f"%{search[:200]}%"
+            clauses.append("(s.story_media_id LIKE ? OR COALESCE(r.routing_topic,'') LIKE ? OR COALESCE(r.source_description,'') LIKE ?)")
+            params.extend([pattern] * 3)
+        if mapping_status_filter == "MAPPED":
+            clauses.append("r.routing_id IS NOT NULL AND r.archived_at IS NULL AND r.active=1")
+        elif mapping_status_filter == "DISABLED":
+            clauses.append("r.routing_id IS NOT NULL AND r.archived_at IS NULL AND r.active=0")
+        elif mapping_status_filter == "UNMAPPED":
+            clauses.append("(r.routing_id IS NULL OR r.archived_at IS NOT NULL)")
+        elif mapping_status_filter in {"ACTIVE", "EXPIRED", "REMOVED"}:
+            clauses.append("UPPER(COALESCE(s.story_status,'ACTIVE'))=?")
+            params.append(mapping_status_filter)
+        elif mapping_status_filter == "DELETED":
+            clauses.append("s.admin_deleted=1")
+        if context_active is not None:
+            clauses.append("COALESCE(r.active,0)=?")
+            params.append(int(context_active))
+        where = " AND ".join(clauses) if clauses else "1=1"
+        sort_column = "r.updated_at" if sort == "recently_edited" else "s.last_seen"
+        direction = "ASC" if sort == "oldest" else "DESC"
         with self.get_connection() as conn:
-            rows = conn.execute(
-                "SELECT * FROM instagram_story_sources "
-                + ("" if include_deleted else "WHERE admin_deleted = 0 ")
-                + "ORDER BY last_seen DESC, story_media_id"
-            ).fetchall()
+            join = "LEFT JOIN instagram_source_routes r ON r.routing_id=(SELECT rr.routing_id FROM instagram_source_routes rr WHERE rr.source_type='story' AND rr.media_id=s.story_media_id ORDER BY rr.updated_at DESC, rr.routing_id DESC LIMIT 1)"
+            total = int(conn.execute(f"SELECT COUNT(*) AS n FROM instagram_story_sources s {join} WHERE {where}", params).fetchone()["n"])
+            sql = f"SELECT s.*, r.routing_id, r.topic_id, r.routing_topic, r.source_description, r.menu_id, r.menu_mode, r.active AS route_active, r.archived_at AS route_archived_at FROM instagram_story_sources s {join} WHERE {where} ORDER BY {sort_column} {direction}, s.story_media_id"
+            if page_size is not None:
+                sql += " LIMIT ? OFFSET ?"
+                params = [*params, page_size, (page - 1) * page_size]
+            rows = conn.execute(sql, params).fetchall()
             output = []
             for row in rows:
                 item = dict(row)
-                route = conn.execute(
-                    """
-                    SELECT routing_id, topic_id, routing_topic, source_description, menu_id, menu_mode, active, archived_at
-                    FROM instagram_source_routes
-                    WHERE source_type = 'story' AND media_id = ?
-                    ORDER BY updated_at DESC, routing_id DESC LIMIT 1
-                    """,
-                    (item["story_media_id"],),
-                ).fetchone()
+                route_active = item.pop("route_active")
+                route_archived_at = item.pop("route_archived_at")
+                route = item.get("routing_id")
                 if item.get("admin_deleted"):
                     mapping_status = "DELETED"
-                elif route and route["archived_at"]:
+                elif route and route_archived_at:
                     mapping_status = "ARCHIVED"
-                elif route and not route["active"]:
+                elif route and not route_active:
                     mapping_status = "DISABLED"
                 elif route:
                     mapping_status = "MAPPED"
@@ -1887,13 +1938,13 @@ class Database:
                 item["media_id"] = item["story_media_id"]
                 item["mapping_status"] = mapping_status
                 item["status"] = mapping_status
-                item["routing_id"] = route["routing_id"] if route else None
-                item["topic_id"] = route["topic_id"] if route else None
-                item["routing_topic"] = route["routing_topic"] if route else None
-                item["source_description"] = route["source_description"] if route else ""
-                item["menu_id"] = route["menu_id"] if route else None
-                item["menu_mode"] = route["menu_mode"] if route else "INHERIT"
-                item["active"] = bool(route["active"]) if route else False
+                item["routing_id"] = route
+                item["topic_id"] = item.get("topic_id") if route else None
+                item["routing_topic"] = item.get("routing_topic") if route else None
+                item["source_description"] = item.get("source_description") or ""
+                item["menu_id"] = item.get("menu_id") if route else None
+                item["menu_mode"] = item.get("menu_mode") if route else "INHERIT"
+                item["active"] = bool(route_active) if route else False
                 # Admin-only ordinal convenience label — never a routing
                 # identity. story_media_id above remains what any reply/
                 # webhook or mapping actually matches against.
@@ -1906,7 +1957,7 @@ class Database:
                 else:
                     item["story_sequence_display"] = "Story — sequence unavailable"
                 output.append(item)
-        return output
+        return (output, total) if with_total else output
 
     def get_instagram_story_source(self, story_media_id: str) -> Optional[Dict[str, Any]]:
         media_id = str(story_media_id or "").strip()

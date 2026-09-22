@@ -260,4 +260,67 @@ def test_client_mapping_ui_hides_route_mode():
     assert html.count("<b>Use as chatbot context</b>") == 3
     assert "Auto reply from this source" not in html
     assert "This does not send a message automatically." in html
-    assert "<b>Chatbot context:</b>" in html
+    assert "Context active" in html
+    assert "-webkit-line-clamp: 2" in html
+    assert "Load more" in html
+    assert "grid-template-columns: repeat(4" in html
+    assert "loading=\"lazy\"" in html
+    card = html[html.index("function renderInstagramContentCard"):html.index("function renderInstagramContentGallery")]
+    assert "Mapped to:" not in card
+    assert "route.routing_topic || 'Unmapped'" in card
+    assert "Context active" in card and "Context off" in card
+    assert 'data-content-filter="post"' in html and 'data-content-filter="reel"' in html
+    assert 'data-content-map-filter="mapped"' in html and 'data-content-map-filter="unmapped"' in html
+    assert "Search Posts, Reels, or Topics" in html
+    story_cards = html[html.index("function renderInstagramStories"):html.index("function setInstagramStoryRefreshStatus")]
+    assert "Meta Story ID:" not in story_cards
+    assert 'data-story-action="delete-mapping"' not in story_cards
+    assert "igStoryFilter === 'DELETED'" in html
+
+
+def test_media_admin_list_paginates_bounds_page_size_and_searches_topics(mapping_db):
+    database, _path = mapping_db
+    client = TestClient(app_module.app)
+    headers = {"x-admin-key": config.ADMIN_API_KEY}
+    topic = client.post("/admin/instagram-topics", headers=headers, json={"name": "Bengali Bento"}).json()["topic"]
+    media_ids = []
+    for index in range(30):
+        media = database.upsert_instagram_media({
+            "instagram_media_id": f"page-media-{index:02d}", "media_type": "IMAGE",
+            "permalink": f"https://www.instagram.com/p/PAGE{index:02d}/", "shortcode": f"PAGE{index:02d}",
+            "published_at": f"2026-09-{(index % 28) + 1:02d}T00:00:00",
+        })
+        media_ids.append(media["id"])
+    route = database.save_instagram_source_route(validate_route_payload({
+        "source_type": "post", "media_id": "page-media-00", "topic_id": topic["topic_id"],
+        "source_description": "Approved Bento details", "active": True,
+    }))
+    database.update_instagram_media_route(media_ids[0], route_mode="CUSTOM", topic_id=topic["topic_id"],
+                                          custom_route_id=route["routing_id"], needs_review=False)
+
+    first = client.get("/admin/instagram-media?page=1&page_size=24&sort=newest", headers=headers)
+    second = client.get("/admin/instagram-media?page=2&page_size=24&sort=newest", headers=headers)
+    assert first.status_code == second.status_code == 200
+    assert len(first.json()["items"]) == 24 and first.json()["has_more"] is True
+    assert len(second.json()["items"]) == 6 and second.json()["has_more"] is False
+    search = client.get("/admin/instagram-media?search=Bengali%20Bento&source_type=post&mapping_status=mapped", headers=headers)
+    assert [item["instagram_media_id"] for item in search.json()["items"]] == ["page-media-00"]
+    mappings = client.get("/admin/instagram-routes?media_ids=page-media-00", headers=headers)
+    assert [item["media_id"] for item in mappings.json()["routes"]] == ["page-media-00"]
+    assert client.get("/admin/instagram-media?page_size=101", headers=headers).status_code == 422
+
+
+def test_story_admin_list_paginates_and_searches_topics(mapping_db):
+    database, _path = mapping_db
+    client = TestClient(app_module.app)
+    headers = {"x-admin-key": config.ADMIN_API_KEY}
+    for index in range(30):
+        database.record_instagram_story_source(f"page-story-{index:02d}", seen_at=f"2026-09-{(index % 28) + 1:02d}T00:00:00")
+    first = client.get("/admin/instagram-story-sources?page=1&page_size=24", headers=headers)
+    second = client.get("/admin/instagram-story-sources?page=2&page_size=24", headers=headers)
+    assert first.status_code == second.status_code == 200
+    assert len(first.json()["story_sources"]) == 24 and first.json()["has_more"] is True
+    assert len(second.json()["story_sources"]) == 6 and second.json()["has_more"] is False
+    assert client.get("/admin/instagram-story-sources?page_size=101", headers=headers).status_code == 422
+    search = client.get("/admin/instagram-story-sources?search=page-story-07", headers=headers)
+    assert [item["story_media_id"] for item in search.json()["story_sources"]] == ["page-story-07"]

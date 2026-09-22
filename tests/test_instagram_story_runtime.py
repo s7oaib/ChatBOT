@@ -740,7 +740,7 @@ class TestStoryDeleteActions:
         assert result["during"]["disabled"] is True
         assert result["during"]["label"] == "Restoring…"
         assert result["restoreRequests"] == 1
-        assert result["fetchCount"] == 4
+        assert result["fetchCount"] == 3
         assert result["buttonReenabled"] is True
         assert result["storyGoneFromDeleted"] is True
         assert result["restoreButtonGone"] is True

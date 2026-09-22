@@ -3088,21 +3088,28 @@ async def identify_instagram_route(
 @app.get("/admin/instagram-routes")
 def list_instagram_routes(
     include_archived: bool = False,
+    media_ids: Optional[str] = None,
     x_admin_key: Optional[str] = Header(None),
     x_admin_pin: Optional[str] = Header(None),
 ):
     require_admin(x_admin_key, x_admin_pin)
+    selected_media_ids = None
+    if media_ids is not None:
+        selected_media_ids = list(dict.fromkeys(value.strip() for value in media_ids.split(",") if value.strip()))
+        if len(selected_media_ids) > 100 or len(media_ids) > 5000:
+            raise HTTPException(status_code=400, detail="Too many media_ids.")
     if include_archived:
         # The Archived tab: only archived rows, never mixed with active ones.
-        routes = [decode_route(row) for row in db.list_instagram_source_routes(include_archived=True) if row.get("archived_at")]
+        routes = [decode_route(row) for row in db.list_instagram_source_routes(include_archived=True, media_ids=selected_media_ids) if row.get("archived_at")]
     else:
-        routes = [decode_route(row) for row in db.list_instagram_source_routes()]
+        routes = [decode_route(row) for row in db.list_instagram_source_routes(media_ids=selected_media_ids)]
     topics = {
         topic["topic_id"]: decode_topic(topic)
         for topic in db.list_instagram_topics()
     }
-    pairings = db.list_latest_post_pairings()
-    previews = db.list_instagram_route_previews()
+    route_ids = {route.get("routing_id") for route in routes}
+    pairings = {key: value for key, value in db.list_latest_post_pairings().items() if key in route_ids}
+    previews = {row["routing_id"]: row for row in db.list_instagram_route_previews() if row["routing_id"] in route_ids}
     for route in routes:
         topic = topics.get(route.get("topic_id")) or {}
         route["topic_description"] = topic.get("description") or ""
@@ -3129,6 +3136,8 @@ def list_instagram_media(
     media_type: Optional[str] = None, route_mode: Optional[str] = None,
     needs_review: Optional[bool] = None, topic_id: Optional[str] = None,
     search: Optional[str] = None, sort: str = "newest",
+    source_type: Optional[str] = None, mapping_status: Optional[str] = None,
+    context_active: Optional[bool] = None,
     x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None),
 ):
     require_admin(x_admin_key, x_admin_pin)
@@ -3136,10 +3145,16 @@ def list_instagram_media(
         raise HTTPException(status_code=400, detail="Unsupported media_type.")
     if route_mode and route_mode.upper() not in {"DEFAULT", "CUSTOM", "DISABLED"}:
         raise HTTPException(status_code=400, detail="Unsupported route_mode.")
-    if sort not in {"newest", "oldest"}:
-        raise HTTPException(status_code=400, detail="sort must be newest or oldest.")
+    if source_type and source_type not in {"post", "reel"}:
+        raise HTTPException(status_code=400, detail="source_type must be post or reel.")
+    if mapping_status and mapping_status not in {"mapped", "unmapped"}:
+        raise HTTPException(status_code=400, detail="mapping_status must be mapped or unmapped.")
+    if sort not in {"newest", "oldest", "recently_edited"}:
+        raise HTTPException(status_code=400, detail="Unsupported sort.")
     items, total = db.list_instagram_media(page=page, page_size=page_size, media_type=media_type,
-        route_mode=route_mode, needs_review=needs_review, topic_id=topic_id, search=search, sort=sort)
+        route_mode=route_mode, needs_review=needs_review, topic_id=topic_id, search=search,
+        sort=sort, source_type=source_type, mapping_status=mapping_status,
+        context_active=context_active)
     for item in items:
         item["needs_review"] = bool(item["needs_review"])
         item["active"] = bool(item["active"])
@@ -3254,13 +3269,29 @@ def delete_instagram_media_mapping(item_id: int, x_admin_key: Optional[str] = He
 
 @app.get("/admin/instagram-story-sources")
 def list_instagram_story_sources(
-    include_deleted: bool = False,
+    include_deleted: bool = False, page: int = 1,
+    page_size: int = 24, search: Optional[str] = None,
+    mapping_status: Optional[str] = None, context_active: Optional[bool] = None,
+    sort: str = "newest",
     x_admin_key: Optional[str] = Header(None),
     x_admin_pin: Optional[str] = Header(None),
 ):
     """Lists captured Story IDs, including unmapped IDs, for admin routing."""
     require_admin(x_admin_key, x_admin_pin)
-    return {"status": "success", "story_sources": db.list_instagram_story_sources(include_deleted=include_deleted)}
+    if page < 1 or page_size < 1 or page_size > 100:
+        raise HTTPException(status_code=422, detail="page must be positive and page_size must be between 1 and 100.")
+    if mapping_status and mapping_status not in {"UNMAPPED", "MAPPED", "DISABLED", "ACTIVE", "EXPIRED", "REMOVED", "DELETED"}:
+        raise HTTPException(status_code=400, detail="Unsupported Story mapping filter.")
+    if sort not in {"newest", "oldest", "recently_edited"}:
+        raise HTTPException(status_code=400, detail="Unsupported sort.")
+    items, total = db.list_instagram_story_sources(
+        include_deleted=include_deleted, page=page, page_size=page_size,
+        search=search, mapping_status_filter=mapping_status,
+        context_active=context_active, sort=sort, with_total=True,
+    )
+    return {"status": "success", "story_sources": items, "page": page,
+            "page_size": page_size, "total": total,
+            "has_more": page * page_size < total}
 
 
 @app.post("/admin/instagram-story-sources/sync")
@@ -6535,18 +6566,21 @@ def get_admin_dashboard():
         .admin-kpi-label { color: var(--text-muted); font-size: .72rem; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; }
         .admin-kpi-value { color: var(--primary); font-family: 'Outfit', sans-serif; font-size: 1.8rem; margin-top: 5px; }
         .admin-kpi-note { color: var(--text-muted); font-size: .76rem; margin-top: 4px; }
-        .instagram-gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(245px, 1fr)); gap: 16px; margin-top: 18px; }
+        .instagram-gallery { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; margin-top: 18px; }
         .instagram-gallery .ig-media-card { display: flex; flex-direction: column; gap: 12px; height: 100%; padding: 0 0 14px; overflow: hidden; background: #fff; border: 1px solid #e1e5eb; border-radius: 14px; box-shadow: 0 4px 12px rgba(24,32,45,.05); cursor: pointer; transition: transform .18s, box-shadow .18s, border-color .18s; }
         .instagram-gallery .ig-media-card:hover, .instagram-gallery .ig-media-card:focus-visible { transform: translateY(-2px); border-color: #b9c5d5; box-shadow: 0 8px 20px rgba(24,32,45,.10); outline: none; }
-        .instagram-gallery .ig-media-preview { width: 100%; height: 190px; border-radius: 0; }
+        .instagram-gallery .ig-media-preview { width: 100%; height: 142px; border-radius: 0; }
         .instagram-gallery .ig-media-thumb { object-fit: cover; }
         .instagram-gallery .ig-media-main { padding: 0 14px; }
         .instagram-gallery .ig-media-title { margin-bottom: 7px; }
         .instagram-gallery .ig-media-topic { font-size: .92rem; }
-        .instagram-gallery .ig-media-summary { min-height: 2.2em; }
+        .instagram-gallery .ig-media-summary { min-height: 2.7em; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; text-overflow: ellipsis; overflow-wrap: anywhere; }
         .instagram-gallery .ig-media-facts { padding: 0 14px; }
         .instagram-gallery .ig-media-actions { padding: 0 14px; justify-content: flex-start; margin-top: auto; }
         .instagram-gallery .ig-media-details { display: none; }
+        @media (max-width: 1100px) { .instagram-gallery { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+        @media (max-width: 820px) { .instagram-gallery { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+        @media (max-width: 560px) { .instagram-gallery { grid-template-columns: minmax(0, 1fr); } .instagram-gallery .ig-media-preview { height: 128px; } .instagram-gallery .ig-media-actions .btn-secondary { width: 100%; } }
         .instagram-table { width: 100%; border-collapse: collapse; margin-top: 18px; }
         .instagram-table th, .instagram-table td { padding: 11px 10px; border-bottom: 1px solid var(--border); text-align: left; font-size: .8rem; vertical-align: top; }
         .instagram-table th { color: var(--text-muted); font-size: .7rem; text-transform: uppercase; letter-spacing: .05em; }
@@ -6874,12 +6908,17 @@ def get_admin_dashboard():
             <div class="admin-page-heading"><div><h2>Instagram Media</h2><p>Visual workspace for exact Meta content IDs. Captions are context only; they never establish routing facts.</p></div><div style="display:flex;gap:8px;"><button class="btn-secondary" type="button" onclick="syncInstagramMediaNow()">↻ Sync Now</button><button class="btn-secondary" type="button" onclick="loadInstagramContentGallery()">Refresh</button></div></div>
             <div class="result-box info" id="igMediaSyncStatus" style="display:block;">Auto Sync: OFF · Auto Route: OFF</div>
             <div class="gallery-toolbar" aria-label="Post and Reel filters">
-                <input class="field-control" id="igContentSearch" type="search" placeholder="Search exact ID, topic, or route" autocomplete="off">
+                <input class="field-control" id="igContentSearch" type="search" placeholder="Search Posts, Reels, or Topics..." autocomplete="off">
                 <button class="ig-media-filter active" data-content-filter="all" type="button" onclick="setInstagramContentFilter('all')">All</button>
                 <button class="ig-media-filter" data-content-filter="post" type="button" onclick="setInstagramContentFilter('post')">Posts</button>
                 <button class="ig-media-filter" data-content-filter="reel" type="button" onclick="setInstagramContentFilter('reel')">Reels</button>
+                <button class="ig-media-filter active" data-content-map-filter="all" type="button" onclick="setInstagramContentMappingFilter('all')">All mappings</button>
+                <button class="ig-media-filter" data-content-map-filter="mapped" type="button" onclick="setInstagramContentMappingFilter('mapped')">Mapped</button>
+                <button class="ig-media-filter" data-content-map-filter="unmapped" type="button" onclick="setInstagramContentMappingFilter('unmapped')">Unmapped</button>
+                <label class="ig-media-muted" for="igContentSort">Sort</label><select class="field-control" id="igContentSort" style="width:auto;min-width:140px"><option value="newest">Newest</option><option value="oldest">Oldest</option><option value="recently_edited">Recently edited</option></select>
             </div>
             <div id="igContentGallery" class="instagram-gallery"><span class="ig-media-muted">Open Posts &amp; Reels to load content.</span></div>
+            <div class="gallery-toolbar" style="justify-content:center;margin-top:16px"><span id="igContentPageSummary" class="ig-media-muted"></span><button class="btn-secondary" id="igContentLoadMore" type="button" onclick="loadInstagramContentGallery(false)" style="display:none">Load more</button></div>
         </div>
 
         <div id="tab-handoffs" class="panel-card" data-group="handoffs" style="display:none;">
@@ -7056,7 +7095,7 @@ def get_admin_dashboard():
             <div id="igStoryResult" class="result-box" role="status" aria-live="polite"></div>
             <div id="igStoryRefreshStatus" class="result-box" role="status" aria-live="polite" style="display:none;"></div>
             <div class="ig-media-toolbar" aria-label="Instagram Story filters">
-                <input class="field-control ig-media-search" id="igStorySearch" type="search" placeholder="Search Story ID or Topic" autocomplete="off">
+                <input class="field-control ig-media-search" id="igStorySearch" type="search" placeholder="Search Stories or Topics..." autocomplete="off">
                 <button class="ig-media-filter active ig-story-filter" type="button" data-story-filter="all">All</button>
                 <button class="ig-media-filter ig-story-filter" type="button" data-story-filter="UNMAPPED">Unmapped</button>
                 <button class="ig-media-filter ig-story-filter" type="button" data-story-filter="MAPPED">Mapped</button>
@@ -7065,6 +7104,7 @@ def get_admin_dashboard():
                 <button class="ig-media-filter ig-story-filter" type="button" data-story-filter="EXPIRED">Expired</button>
                 <button class="ig-media-filter ig-story-filter" type="button" data-story-filter="REMOVED">Removed</button>
                 <button class="ig-media-filter ig-story-filter" type="button" data-story-filter="DELETED">Deleted</button>
+                <label class="ig-media-muted" for="igStorySort">Sort</label><select class="field-control" id="igStorySort" style="width:auto;min-width:140px"><option value="newest">Newest</option><option value="oldest">Oldest</option><option value="recently_edited">Recently edited</option></select>
             </div>
 
             <div id="igStoryMapForm" class="ig-story-form-card" style="display:none;">
@@ -7115,6 +7155,7 @@ def get_admin_dashboard():
                 <div class="source-danger" id="igStoryDeleteSection" style="display:none;"><b>Delete Mapping</b><p class="source-map-help">Removes chatbot mapping only. The Instagram Story will not be deleted.</p><button class="btn-danger" id="igStoryDeleteMappingButton" type="button" onclick="removeInstagramStoryMapping()">Delete Mapping</button></div>
             </div>
             <div id="igStoryList" class="instagram-gallery"><p style="color:var(--text-muted);font-size:0.84rem;">Open this tab to load captured Stories.</p></div>
+            <div class="gallery-toolbar" style="justify-content:center;margin-top:16px"><span id="igStoryPageSummary" class="ig-media-muted"></span><button class="btn-secondary" id="igStoryLoadMore" type="button" onclick="loadInstagramStories(igStoryFilter === 'DELETED', {append:true})" style="display:none">Load more</button></div>
         </div>
 
         <!-- MENU tab, panel 3 of 4: same job again, from a shared sheet -->
@@ -8023,7 +8064,11 @@ THIS WEEK'S BENGAL SPECIALS
             document.addEventListener('visibilitychange', syncInstagramStoryAutoRefresh);
             document.getElementById('igStorySyncButton')?.addEventListener('click', syncInstagramStoriesNow);
             document.getElementById('igStoryRefreshButton')?.addEventListener('click', loadInstagramStories);
-            document.getElementById('igStorySearch')?.addEventListener('input', renderInstagramStories);
+            document.getElementById('igStorySearch')?.addEventListener('input', () => {
+                clearTimeout(igStorySearchTimer);
+                igStorySearchTimer = setTimeout(() => loadInstagramStories(igStoryFilter === 'DELETED'), 250);
+            });
+            document.getElementById('igStorySort')?.addEventListener('change', () => loadInstagramStories(igStoryFilter === 'DELETED'));
             document.querySelectorAll('.ig-story-filter').forEach(button => {
                 button.addEventListener('click', () => setInstagramStoryFilter(button.dataset.storyFilter || 'all'));
             });
@@ -8032,7 +8077,11 @@ THIS WEEK'S BENGAL SPECIALS
             document.getElementById('igStoryAddPriorityButton')?.addEventListener('click', addInstagramStoryPriorityProduct);
             document.getElementById('igStorySaveButton')?.addEventListener('click', saveInstagramStoryMapping);
             document.getElementById('igStoryCancelButton')?.addEventListener('click', cancelInstagramStoryMapping);
-            document.getElementById('igContentSearch')?.addEventListener('input', renderInstagramContentGallery);
+            document.getElementById('igContentSearch')?.addEventListener('input', () => {
+                clearTimeout(igContentSearchTimer);
+                igContentSearchTimer = setTimeout(() => loadInstagramContentGallery(true), 250);
+            });
+            document.getElementById('igContentSort')?.addEventListener('change', () => loadInstagramContentGallery(true));
             document.getElementById('contentDetailsClose')?.addEventListener('click', closeContentDetails);
             document.getElementById('contentDetailsBackdrop')?.addEventListener('click', closeContentDetails);
             document.addEventListener('keydown', event => { if (event.key === 'Escape') { closeContentDetails(); toggleHandoffPopover(false); } });
@@ -8211,7 +8260,13 @@ THIS WEEK'S BENGAL SPECIALS
         let handoffSnapshotReady = false;
         let igContentRoutes = [];
         let igContentFilter = 'all';
+        let igContentMappingFilter = 'all';
         let igContentView = 'gallery';
+        let igContentPage = 1;
+        let igContentHasMore = false;
+        let igContentTotal = 0;
+        let igContentLoadInFlight = false;
+        let igContentSearchTimer = null;
 
         function setDashboardValue(id, value) {
             const element = document.getElementById(id);
@@ -8398,7 +8453,13 @@ THIS WEEK'S BENGAL SPECIALS
         function setInstagramContentFilter(filter) {
             igContentFilter = filter || 'all';
             document.querySelectorAll('[data-content-filter]').forEach(button => button.classList.toggle('active', button.dataset.contentFilter === igContentFilter));
-            renderInstagramContentGallery();
+            loadInstagramContentGallery(true);
+        }
+
+        function setInstagramContentMappingFilter(filter) {
+            igContentMappingFilter = filter || 'all';
+            document.querySelectorAll('[data-content-map-filter]').forEach(button => button.classList.toggle('active', button.dataset.contentMapFilter === igContentMappingFilter));
+            loadInstagramContentGallery(true);
         }
 
         function setInstagramContentView(view) {
@@ -8416,8 +8477,8 @@ THIS WEEK'S BENGAL SPECIALS
 
         function renderInstagramContentCard(route) {
             const status = instagramContentStatus(route); const label = route.gallery_media ? (route.media_type === 'VIDEO' ? 'REEL' : route.media_type === 'CAROUSEL_ALBUM' ? 'CAROUSEL' : 'POST') : (route.source_type === 'reel' ? 'REEL' : 'POST'); const image = route.preview_url || route.admin_preview_url;
-            const preview = image ? `<img class="ig-media-thumb" src="${escapeHtml(image)}" alt="${label} preview" onerror="this.style.display='none';this.nextElementSibling.style.display='flex';"><div class="ig-media-placeholder" style="display:none;"><span class="ig-media-placeholder-icon">◎</span><span>${label}</span></div>` : `<div class="ig-media-placeholder"><span class="ig-media-placeholder-icon">◎</span><span>${label}</span></div>`;
-            return `<article class="ig-media-card" tabindex="0" data-content-route-id="${escapeHtml(String(route.routing_id || ''))}"><div class="ig-media-preview">${preview}<span class="ig-media-badge">${label}</span></div><div class="ig-media-main"><div class="ig-media-title"><b class="ig-media-topic">${escapeHtml(route.routing_topic ? 'Mapped to: ' + route.routing_topic : 'Not mapped')}</b></div><div class="ig-media-summary">${escapeHtml(route.source_description || 'No description added.')}</div><div class="ig-media-facts"><span><b>Chatbot context:</b> ${(route.mapping_route?.active || (!route.mapping_route && route.topic_id && route.route_mode !== 'DISABLED')) ? 'On' : 'Off'}</span><span><b>Published:</b> ${escapeHtml(route.published_at || route.created_at || '—')}</span></div></div><div class="ig-media-actions"><button class="btn-secondary" type="button" data-content-action="details">${route.mapping_route || route.topic_id ? 'Edit Mapping' : label === 'REEL' ? 'Map Reel' : 'Map Post'}</button></div></article>`;
+            const preview = image ? `<img class="ig-media-thumb" loading="lazy" decoding="async" src="${escapeHtml(image)}" alt="${label} preview" onerror="this.style.display='none';this.nextElementSibling.style.display='flex';"><div class="ig-media-placeholder" style="display:none;"><span class="ig-media-placeholder-icon">◎</span><span>${label}</span></div>` : `<div class="ig-media-placeholder"><span class="ig-media-placeholder-icon">◎</span><span>${label}</span></div>`;
+            return `<article class="ig-media-card" tabindex="0" data-content-route-id="${escapeHtml(String(route.routing_id || ''))}"><div class="ig-media-preview">${preview}<span class="ig-media-badge">${label}</span></div><div class="ig-media-main"><div class="ig-media-title"><b class="ig-media-topic">${escapeHtml(route.routing_topic || 'Unmapped')}</b></div><div class="ig-media-summary">${escapeHtml(route.source_description || 'No description added.')}</div><div class="ig-media-facts"><span>${route.mapping_route?.active || (!route.mapping_route && route.topic_id && route.route_mode !== 'DISABLED') ? '● Context active' : '○ Context off'}</span><span>${escapeHtml(route.published_at || route.created_at || '—')}</span></div></div><div class="ig-media-actions"><button class="btn-secondary" type="button" data-content-action="details">${route.mapping_route || route.topic_id ? 'Edit Mapping' : label === 'REEL' ? 'Map Reel' : 'Map Post'}</button></div></article>`;
         }
 
         function renderInstagramContentGallery() {
@@ -8433,7 +8494,7 @@ THIS WEEK'S BENGAL SPECIALS
             });
             if (!filtered.length) { list.innerHTML = '<span class="ig-media-muted">No Instagram media matches this filter.</span>'; return; }
             if (igContentView === 'table') {
-                list.className = ''; list.innerHTML = `<table class="instagram-table"><thead><tr><th>Type</th><th>Topic</th><th>Attachment</th><th>Auto reply</th><th></th></tr></thead><tbody>${filtered.map(route => `<tr><td>${route.source_type === 'reel' ? 'Reel' : 'Post'}</td><td>${escapeHtml(route.routing_topic || 'Not mapped')}</td><td>${escapeHtml((igMenus.find(menu => menu.menu_id === route.menu_id) || {}).name || 'None')}</td><td>${route.mapping_route?.active ? 'Active' : 'Off'}</td><td><button class="btn-secondary" type="button" data-content-table-id="${escapeHtml(String(route.routing_id || ''))}" style="padding:6px 9px;font-size:.72rem;">${route.mapping_route ? 'Edit Mapping' : 'Map'}</button></td></tr>`).join('')}</tbody></table>`;
+                list.className = ''; list.innerHTML = `<table class="instagram-table"><thead><tr><th>Type</th><th>Topic</th><th>Attachment</th><th>Chatbot context</th><th></th></tr></thead><tbody>${filtered.map(route => `<tr><td>${route.source_type === 'reel' ? 'Reel' : 'Post'}</td><td>${escapeHtml(route.routing_topic || 'Not mapped')}</td><td>${escapeHtml((igMenus.find(menu => menu.menu_id === route.menu_id) || {}).name || 'None')}</td><td>${route.mapping_route?.active ? 'On' : 'Off'}</td><td><button class="btn-secondary" type="button" data-content-table-id="${escapeHtml(String(route.routing_id || ''))}" style="padding:6px 9px;font-size:.72rem;">${route.mapping_route ? 'Edit Mapping' : 'Map'}</button></td></tr>`).join('')}</tbody></table>`;
                 list.querySelectorAll('[data-content-table-id]').forEach(button => button.addEventListener('click', () => openContentDetails('content', igContentRoutes.find(route => String(route.routing_id) === button.dataset.contentTableId))));
                 return;
             }
@@ -8441,17 +8502,37 @@ THIS WEEK'S BENGAL SPECIALS
             list.querySelectorAll('[data-content-route-id]').forEach(card => { const route = igContentRoutes.find(item => String(item.routing_id) === card.dataset.contentRouteId); card.addEventListener('click', event => { if (event.target.closest('button,a')) return; openContentDetails('content', route); }); card.querySelector('[data-content-action="details"]')?.addEventListener('click', event => { event.stopPropagation(); openContentDetails('content', route); }); });
         }
 
-        async function loadInstagramContentGallery() {
-            if (!adminAuthenticated) return;
+        async function loadInstagramContentGallery(reset = true) {
+            if (!adminAuthenticated || igContentLoadInFlight) return;
             const list = document.getElementById('igContentGallery'); if (!list) return;
+            if (reset) { igContentPage = 1; igContentRoutes = []; }
+            if (!reset && !igContentHasMore) return;
+            igContentLoadInFlight = true;
             try {
                 if (!igTopics.length) await loadTopicsAndMenus();
-                const responses = await Promise.all([fetch('/admin/instagram-media?page_size=100', { headers: getAuthHeaders() }), fetch('/admin/instagram-routes', { headers: getAuthHeaders() })]);
-                const payloads = await Promise.all(responses.map(response => response.json().catch(() => ({})))); const response = responses[0]; const payload = payloads[0];
+                const params = new URLSearchParams({ page: String(igContentPage), page_size: '24', sort: document.getElementById('igContentSort')?.value || 'newest' });
+                const sourceType = ['post', 'reel'].includes(igContentFilter) ? igContentFilter : '';
+                const search = document.getElementById('igContentSearch')?.value.trim() || '';
+                if (sourceType) params.set('source_type', sourceType);
+                if (igContentMappingFilter !== 'all') params.set('mapping_status', igContentMappingFilter);
+                if (search) params.set('search', search);
+                const response = await fetch(`/admin/instagram-media?${params}`, { headers: getAuthHeaders() });
+                const payload = await response.json().catch(() => ({}));
                 if (!response.ok) throw new Error(payload.detail || 'Could not load Instagram media.');
-                window.igGalleryCustomRoutes = payloads[1].routes || [];
-                igContentRoutes = (payload.items || []).map(item => { const mapping = (window.igGalleryCustomRoutes || []).find(route => route.media_id === item.instagram_media_id && !route.archived_at); const topicId = (mapping || {}).topic_id || item.topic_id; const topic = igTopics.find(t => t.topic_id === topicId); return { ...item, gallery_media: true, routing_id: item.id, media_id: item.instagram_media_id, preview_url: item.thumbnail_url || item.media_url, canonical_url: item.permalink, source_type: item.media_type === 'VIDEO' ? 'reel' : 'post', routing_topic: topic?.name || mapping?.routing_topic || '', source_description: mapping?.source_description || '', menu_id: mapping?.menu_id || null, mapping_route: mapping || null }; }); window.igContentRoutes = igContentRoutes; renderInstagramContentGallery();
+                const pageMediaIds = (payload.items || []).map(item => item.instagram_media_id).filter(Boolean);
+                const mappingParams = new URLSearchParams({ media_ids: pageMediaIds.join(',') });
+                const mappingResponse = pageMediaIds.length ? await fetch(`/admin/instagram-routes?${mappingParams}`, { headers: getAuthHeaders() }) : null;
+                const mappingPayload = mappingResponse ? await mappingResponse.json().catch(() => ({})) : { routes: [] };
+                if (mappingResponse && !mappingResponse.ok) throw new Error(mappingPayload.detail || 'Could not load source mappings.');
+                window.igGalleryCustomRoutes = mappingPayload.routes || [];
+                const pageItems = (payload.items || []).map(item => { const mapping = (window.igGalleryCustomRoutes || []).find(route => route.media_id === item.instagram_media_id && !route.archived_at); const topicId = (mapping || {}).topic_id || item.topic_id; const topic = igTopics.find(t => t.topic_id === topicId); return { ...item, gallery_media: true, routing_id: item.id, media_id: item.instagram_media_id, preview_url: item.thumbnail_url || item.media_url, canonical_url: item.permalink, source_type: item.media_type === 'VIDEO' ? 'reel' : 'post', routing_topic: topic?.name || mapping?.routing_topic || '', source_description: mapping?.source_description || '', menu_id: mapping?.menu_id || null, mapping_route: mapping || null }; });
+                igContentRoutes = reset ? pageItems : [...igContentRoutes, ...pageItems];
+                igContentHasMore = Boolean(payload.has_more); igContentTotal = Number(payload.total || 0); igContentPage += 1;
+                window.igContentRoutes = igContentRoutes; renderInstagramContentGallery();
+                const summary = document.getElementById('igContentPageSummary'); if (summary) summary.textContent = `Showing ${igContentRoutes.length} of ${igContentTotal}`;
+                const more = document.getElementById('igContentLoadMore'); if (more) more.style.display = igContentHasMore ? '' : 'none';
             } catch (error) { list.innerHTML = `<span style="color:var(--danger);">${escapeHtml(error.message || 'Could not load Instagram content.')}</span>`; }
+            finally { igContentLoadInFlight = false; }
         }
 
         async function syncInstagramMediaNow() {
@@ -8497,7 +8578,10 @@ THIS WEEK'S BENGAL SPECIALS
             const auditSummary = [item.source || 'Existing Admin record', item.first_seen ? `first seen ${item.first_seen}` : '', item.updated_at ? `updated ${item.updated_at}` : ''].filter(Boolean).join(' · ');
             document.getElementById('contentDetailsFacts').innerHTML = [['Exact Meta ID', id], ['Content type', typeLabel], ['Status', status], ['Route health', routeHealth], ['Topic / intent', item.routing_topic || 'Unmapped'], ['Route destination', item.menu_id || item.canonical_url || 'Not mapped'], ['Published', item.published_at || item.created_at || 'Not supplied'], ['Expiry / last seen', item.expires_at || item.last_seen || 'Not supplied'], ['Routing history / audit', auditSummary || 'No additional history supplied']].map(([label, value]) => `<div class="drawer-fact"><span class="drawer-fact-label">${escapeHtml(label)}</span><span class="drawer-fact-value">${escapeHtml(value)}</span></div>`).join('');
             const actions = [];
-            if (isStory) { if (item.story_media_id && !storyIsAdminDeleted(item)) actions.push(`<button class="btn-secondary" type="button" onclick="closeContentDetails(); openInstagramStoryMapping('${escapeHtml(item.story_media_id)}')">Edit</button>`); }
+            if (isStory) {
+                if (item.story_media_id && !storyIsAdminDeleted(item)) actions.push(`<button class="btn-secondary" type="button" onclick="closeContentDetails(); openInstagramStoryMapping('${escapeHtml(item.story_media_id)}')">Edit Mapping</button>`);
+                if (item.routing_id && ['MAPPED', 'DISABLED'].includes(status)) actions.push(`<button class="btn-danger" type="button" onclick="closeContentDetails(); removeInstagramStoryMapping(${Number(item.routing_id)})">Delete Mapping</button>`);
+            }
             else if (item.routing_id) { actions.push(`<button class="btn-secondary" type="button" onclick="openAdminRoute(igContentRoutes.find(route => Number(route.routing_id) === ${Number(item.routing_id)}))">Edit</button>`); }
             actions.push(`<button class="btn-secondary" type="button" onclick="switchTab('tab-image', null); closeContentDetails();">Open full details</button>`);
             document.getElementById('contentDetailsActions').innerHTML = actions.join(''); drawer.classList.add('open'); backdrop.classList.add('open'); drawer.setAttribute('aria-hidden', 'false'); backdrop.setAttribute('aria-hidden', 'false'); document.getElementById('contentDetailsClose').focus();
@@ -9660,7 +9744,7 @@ THIS WEEK'S BENGAL SPECIALS
                 actions = `<button class="btn-secondary" type="button" onclick="restoreInstagramRoute(${route.routing_id})">Restore</button> <button class="btn-danger" type="button" onclick="openIgRemoveModal(${route.routing_id})">Delete</button>`;
             } else if (route.routing_id) {
                 const connect = route.source_type === 'post' ? `<button class="btn-secondary" type="button" onclick="pairInstagramPost(${route.routing_id})">${route.media_id ? 'Reconnect Post' : 'Connect Post'}</button>` : '';
-                actions = `<button class="btn-secondary" type="button" onclick="editInstagramRoute(${route.routing_id})">Edit Mapping</button><button class="btn-secondary" type="button" onclick="setInstagramRouteActive(${route.routing_id},${!route.active})">${route.active ? 'Auto reply: On' : 'Auto reply: Off'}</button><button class="btn-danger" type="button" onclick="openIgRemoveModal(${route.routing_id})">Delete Mapping</button>${connect}`;
+                actions = `<button class="btn-secondary" type="button" onclick="editInstagramRoute(${route.routing_id})">Edit Mapping</button><button class="btn-secondary" type="button" onclick="setInstagramRouteActive(${route.routing_id},${!route.active})">${route.active ? 'Context: On' : 'Context: Off'}</button><button class="btn-danger" type="button" onclick="openIgRemoveModal(${route.routing_id})">Delete Mapping</button>${connect}`;
             } else {
                 actions = `<button class="btn-danger" type="button" onclick="removeAdRoute('${escapeHtml(route.ad_id || '')}')">Remove</button>`;
             }
@@ -9678,6 +9762,10 @@ THIS WEEK'S BENGAL SPECIALS
         let igStoryKnowledgeScopes = [];
         let igStoryRefreshTimer = null;
         let igStoryRefreshInFlight = false;
+        let igStoryPage = 1;
+        let igStoryHasMore = false;
+        let igStoryTotal = 0;
+        let igStorySearchTimer = null;
         let igStoryRestoreInFlight = new Set();
 
         function storyStatusClass(status) {
@@ -9725,8 +9813,7 @@ THIS WEEK'S BENGAL SPECIALS
         function setInstagramStoryFilter(filter) {
             igStoryFilter = filter || 'all';
             document.querySelectorAll('.ig-story-filter').forEach(button => button.classList.toggle('active', (button.dataset.storyFilter || 'all') === igStoryFilter));
-            if (igStoryFilter === 'DELETED') loadInstagramStories(true);
-            else renderInstagramStories();
+            loadInstagramStories(igStoryFilter === 'DELETED');
         }
 
         function populateInstagramStoryPickers() {
@@ -9971,21 +10058,19 @@ THIS WEEK'S BENGAL SPECIALS
                     : String(source.mapping_status || source.status || 'UNMAPPED').toUpperCase();
                 const status = rawStatus === 'ARCHIVED' ? 'UNMAPPED' : rawStatus;
                 const lifecycle = String(source.story_status || 'ACTIVE').toUpperCase();
-                const routeId = source.routing_id ? Number(source.routing_id) : null;
                 let actions = '';
                 if (status === 'DELETED') actions = `<button class="btn-secondary" type="button" data-story-action="restore-source" data-story-media-id="${escapeHtml(source.story_media_id || '')}">Restore</button>`;
                 else if (status === 'UNMAPPED') actions = `<button class="btn-secondary" type="button" data-story-action="map" data-story-media-id="${escapeHtml(source.story_media_id || '')}">Map Story</button>`;
-                else if (status === 'MAPPED' || status === 'DISABLED') actions = `<button class="btn-secondary" type="button" data-story-action="edit" data-story-media-id="${escapeHtml(source.story_media_id || '')}">Edit Mapping</button><button class="btn-danger" type="button" data-story-action="delete-mapping" data-routing-id="${routeId}">Delete Mapping</button>`;
+                else if (status === 'MAPPED' || status === 'DISABLED') actions = `<button class="btn-secondary" type="button" data-story-action="edit" data-story-media-id="${escapeHtml(source.story_media_id || '')}">Edit Mapping</button>`;
                 else actions = '';
                 const topic = source.routing_topic || 'Unmapped Story';
                 const isNewUnmapped = source.source === 'META_STORY_SYNC' && status === 'UNMAPPED';
                 // Sequence is an admin convenience label only — routing and
                 // mapping always use the exact story_media_id shown below.
                 const sequenceDisplay = source.story_sequence_display || 'Story — sequence unavailable';
-                const details = `<details class="ig-media-details"><summary style="cursor:pointer;">Details</summary><div>Meta Story ID: ${escapeHtml(source.story_media_id || '—')}<br>Preview source: ${escapeHtml(storyPreviewMetadata(source.temporary_url))}<br>Media type: ${escapeHtml(source.media_type || 'Not supplied')}<br>Published: ${escapeHtml(source.published_at || 'Not supplied')}<br>Last seen: ${escapeHtml(source.last_seen || '—')}</div></details>`;
-                const mappingLabel = status === 'UNMAPPED' ? 'Not mapped' : `Mapped to: ${topic}`;
-                const autoLabel = status === 'MAPPED' ? 'Auto reply: Active' : 'Auto reply: Off';
-                return `<article class="ig-media-card ig-story-card" tabindex="0" data-story-media-id="${escapeHtml(source.story_media_id || '')}"><div class="ig-media-preview"><div class="ig-media-placeholder"><span class="ig-media-placeholder-icon">📖</span><span>STORY</span></div><span class="ig-media-badge">STORY</span></div><div class="ig-media-main"><div class="ig-media-title"><b class="ig-media-topic">${escapeHtml(mappingLabel)}</b></div><div class="ig-media-summary">${escapeHtml(source.source_description || sequenceDisplay)}</div><div class="ig-media-facts"><span>${autoLabel}</span><span><b>Last seen:</b> ${escapeHtml(source.last_seen || '—')}</span></div></div><div class="ig-media-actions">${actions}</div>${details}</article>`;
+                const mappingLabel = status === 'UNMAPPED' ? 'Unmapped' : topic;
+                const contextLabel = status === 'MAPPED' ? '● Context active' : '○ Context off';
+                return `<article class="ig-media-card ig-story-card" tabindex="0" data-story-media-id="${escapeHtml(source.story_media_id || '')}"><div class="ig-media-preview"><div class="ig-media-placeholder"><span class="ig-media-placeholder-icon">📖</span><span>STORY</span></div><span class="ig-media-badge">STORY</span></div><div class="ig-media-main"><div class="ig-media-title"><b class="ig-media-topic">${escapeHtml(mappingLabel)}</b></div><div class="ig-media-summary" title="${escapeHtml(source.source_description || sequenceDisplay)}">${escapeHtml(source.source_description || sequenceDisplay)}</div><div class="ig-media-facts"><span>${contextLabel}</span><span>${escapeHtml(source.published_at || source.last_seen || '—')}</span></div></div><div class="ig-media-actions">${actions}</div></article>`;
             }).join('');
             list.querySelectorAll('[data-story-action]').forEach(button => button.addEventListener('click', () => {
                 const action = button.dataset.storyAction;
@@ -10030,9 +10115,12 @@ THIS WEEK'S BENGAL SPECIALS
         // successful response; a failed one leaves igStorySources (and
         // everything rendered from it) exactly as it was, and reports the
         // failure in its own banner instead of overwriting the list.
-        async function loadInstagramStories(includeDeleted = igStoryFilter === 'DELETED') {
+        async function loadInstagramStories(includeDeleted = igStoryFilter === 'DELETED', options = {}) {
             const list = document.getElementById('igStoryList');
             if (!list || !adminAuthenticated || igStoryRefreshInFlight) return;
+            const append = Boolean(options.append);
+            if (append && !igStoryHasMore) return;
+            if (!append) igStoryPage = 1;
             igStoryRefreshInFlight = true;
             const isFirstLoad = !igStoriesEverLoaded;
             const refreshButton = document.getElementById('igStoryRefreshButton');
@@ -10045,22 +10133,34 @@ THIS WEEK'S BENGAL SPECIALS
             if (refreshButton) { refreshButton.disabled = true; refreshButton.textContent = '🔄 Refreshing…'; }
 
             try {
-                const [sourcesResponse, activeResponse] = await Promise.all([
-                    fetch('/admin/instagram-story-sources' + (includeDeleted ? '?include_deleted=true' : ''), { headers: getAuthHeaders() }),
-                    fetch('/admin/instagram-routes', { headers: getAuthHeaders() }),
-                ]);
-                const [sourcesData, activeData] = await Promise.all([sourcesResponse.json(), activeResponse.json()]);
+                const params = new URLSearchParams();
+                if (includeDeleted) params.set('include_deleted', 'true');
+                params.set('page', String(igStoryPage)); params.set('page_size', '24');
+                params.set('sort', document.getElementById('igStorySort')?.value || 'newest');
+                const query = document.getElementById('igStorySearch')?.value.trim() || '';
+                if (query) params.set('search', query);
+                if (igStoryFilter !== 'all') params.set('mapping_status', igStoryFilter);
+                const sourcesResponse = await fetch('/admin/instagram-story-sources?' + params, { headers: getAuthHeaders() });
+                const sourcesData = await sourcesResponse.json().catch(() => ({}));
                 if (!sourcesResponse.ok) throw new Error(sourcesData.detail || 'Could not load captured Stories.');
+                const storyIds = (sourcesData.story_sources || []).map(source => source.story_media_id).filter(Boolean);
+                const routeParams = new URLSearchParams({ media_ids: storyIds.join(',') });
+                const activeResponse = await fetch(`/admin/instagram-routes?${routeParams}`, { headers: getAuthHeaders() });
+                const activeData = await activeResponse.json().catch(() => ({}));
                 if (!activeResponse.ok) throw new Error(activeData.detail || 'Could not load Story mappings.');
                 const routes = (activeData.routes || []).filter(route => route.source_type === 'story');
                 const routesById = new Map(routes.filter(route => route.routing_id).map(route => [String(route.routing_id), route]));
-                igStorySources = (sourcesData.story_sources || []).map(source => ({ ...(routesById.get(String(source.routing_id)) || {}), ...source }));
+                const pageSources = (sourcesData.story_sources || []).map(source => ({ ...(routesById.get(String(source.routing_id)) || {}), ...source }));
+                igStorySources = append ? [...igStorySources, ...pageSources] : pageSources;
+                igStoryHasMore = Boolean(sourcesData.has_more); igStoryTotal = Number(sourcesData.total || 0); igStoryPage += 1;
                 window.igStorySources = igStorySources;
                 igProducts = activeData.product_catalogue || [];
                 igStoryKnowledgeScopes = activeData.knowledge_scopes || [];
                 if (!igTopics.length && !igMenus.length) await loadTopicsAndMenus();
                 populateInstagramStoryPickers();
                 renderInstagramStories();
+                const summary = document.getElementById('igStoryPageSummary'); if (summary) summary.textContent = `Showing ${igStorySources.length} of ${igStoryTotal}`;
+                const more = document.getElementById('igStoryLoadMore'); if (more) more.style.display = igStoryHasMore ? '' : 'none';
                 igStoriesEverLoaded = true;
                 setInstagramStoryRefreshStatus(null, null);
             } catch (err) {
