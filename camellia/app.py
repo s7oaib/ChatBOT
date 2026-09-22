@@ -5787,6 +5787,29 @@ async def update_instagram_topic_route(
     return {"status": "success", "topic": decode_topic(topic)}
 
 
+@app.get("/admin/instagram-topics/{topic_id}/usage")
+def instagram_topic_usage(topic_id: str, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    if not db.get_instagram_topic(topic_id): raise HTTPException(status_code=404, detail="Topic not found.")
+    return {"status": "success", "references": db.instagram_topic_references(topic_id)}
+
+
+@app.delete("/admin/instagram-topics/{topic_id}")
+async def delete_instagram_topic_route(topic_id: str, request: Request, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    if not db.get_instagram_topic(topic_id): raise HTTPException(status_code=404, detail="Topic not found.")
+    body = await request.json()
+    replacement = str(body.get("replacement_topic_id") or "").strip() or None
+    clear = bool(body.get("clear_associations", False))
+    refs = db.instagram_topic_references(topic_id)
+    if sum(refs.values()) and not (replacement or clear):
+        raise HTTPException(status_code=409, detail={"message": "Choose a replacement Topic or clear its associations.", "references": refs})
+    if replacement and (replacement == topic_id or not db.get_instagram_topic(replacement)):
+        raise HTTPException(status_code=400, detail="Choose a different existing Topic.")
+    db.delete_instagram_topic(topic_id, replacement)
+    return {"status": "deleted", "topic_id": topic_id, "references": refs, "replacement_topic_id": replacement}
+
+
 @app.get("/admin/instagram-routes/preview")
 def preview_instagram_route_response(
     topic_id: str = "", product: str = "", menu_id: str = "", response_order: str = "", menu_mode: str = "INHERIT",
@@ -6681,21 +6704,11 @@ def get_admin_dashboard():
         <div id="tab-instagram-content" class="panel-card" data-group="instagram_content" style="display:none;">
             <div class="admin-page-heading"><div><h2>Instagram Media</h2><p>Visual workspace for exact Meta content IDs. Captions are context only; they never establish routing facts.</p></div><div style="display:flex;gap:8px;"><button class="btn-secondary" type="button" onclick="syncInstagramMediaNow()">↻ Sync Now</button><button class="btn-secondary" type="button" onclick="loadInstagramContentGallery()">Refresh</button></div></div>
             <div class="result-box info" id="igMediaSyncStatus" style="display:block;">Auto Sync: OFF · Auto Route: OFF</div>
-            <div class="content-subnav" aria-label="Posts and Reels views">
-                <button class="active" type="button" data-content-subview="gallery" onclick="setInstagramContentSubview('gallery')">Gallery</button>
-                <button type="button" data-content-subview="routing" onclick="setInstagramContentSubview('routing')">Routing</button>
-                <button type="button" data-content-subview="list" onclick="setInstagramContentSubview('list')">List</button>
-            </div>
             <div class="gallery-toolbar" aria-label="Post and Reel filters">
                 <input class="field-control" id="igContentSearch" type="search" placeholder="Search exact ID, topic, or route" autocomplete="off">
                 <button class="ig-media-filter active" data-content-filter="all" type="button" onclick="setInstagramContentFilter('all')">All</button>
                 <button class="ig-media-filter" data-content-filter="post" type="button" onclick="setInstagramContentFilter('post')">Posts</button>
                 <button class="ig-media-filter" data-content-filter="reel" type="button" onclick="setInstagramContentFilter('reel')">Reels</button>
-                <button class="ig-media-filter" data-content-filter="carousel" type="button" onclick="setInstagramContentFilter('carousel')">Carousels</button>
-                <button class="ig-media-filter" data-content-filter="DEFAULT" type="button" onclick="setInstagramContentFilter('DEFAULT')">Default</button>
-                <button class="ig-media-filter" data-content-filter="CUSTOM" type="button" onclick="setInstagramContentFilter('CUSTOM')">Custom</button>
-                <button class="ig-media-filter" data-content-filter="DISABLED" type="button" onclick="setInstagramContentFilter('DISABLED')">Disabled</button>
-                <button class="gallery-view-toggle active" id="igContentGalleryView" type="button" onclick="setInstagramContentView('gallery')">Gallery</button><button class="gallery-view-toggle" id="igContentTableView" type="button" onclick="setInstagramContentView('table')">List</button>
             </div>
             <div id="igContentGallery" class="instagram-gallery"><span class="ig-media-muted">Open Posts &amp; Reels to load content.</span></div>
         </div>
@@ -7686,6 +7699,7 @@ THIS WEEK'S BENGAL SPECIALS
                 </div>
             </details>
             <div style="display: flex; gap: 8px; justify-content: flex-end; margin-top:16px;">
+                <button class="btn-danger" id="topicDeleteButton" style="display:none;" onclick="deleteCurrentTopic()">Delete Topic</button>
                 <button class="btn-secondary" onclick="closeTopicModal()">Cancel</button>
                 <button class="btn-primary" onclick="submitTopic()">Save Topic</button>
             </div>
@@ -8977,6 +8991,7 @@ THIS WEEK'S BENGAL SPECIALS
                 renderTopicPriorityProducts();
                 Array.from(document.getElementById('topicKnowledgeScope').options).forEach(o => o.selected = (topic.knowledge_scope || []).includes(o.value));
             }
+            const deleteButton = document.getElementById('topicDeleteButton'); if (deleteButton) deleteButton.style.display = topic ? '' : 'none';
         }
         function openTopicEditor() {
             const id = document.getElementById('igTopicPicker').value;
@@ -9020,6 +9035,16 @@ THIS WEEK'S BENGAL SPECIALS
                 result.className = 'result-box error';
                 result.innerText = err.message || String(err);
             }
+        }
+        async function deleteCurrentTopic() {
+            const id = document.getElementById('topicModalEditingId').value; if (!id) return;
+            const usage = await fetch(`/admin/instagram-topics/${encodeURIComponent(id)}/usage`, { headers: getAuthHeaders() }).then(r => r.json());
+            const total = Object.values(usage.references || {}).reduce((a, b) => a + Number(b || 0), 0);
+            let replacement_topic_id = null, clear_associations = false;
+            if (total) { const options = igTopics.filter(t => t.topic_id !== id).map(t => `${t.topic_id}: ${t.name}`).join('\n'); const chosen = prompt(`This Topic is used by ${total} mapping(s). Enter a replacement Topic ID, or type CLEAR to remove the Topic association:\n${options}`); if (chosen === null) return; if (chosen.trim().toUpperCase() === 'CLEAR') clear_associations = true; else replacement_topic_id = chosen.trim(); }
+            if (!confirm('Delete this Topic? This cannot be undone.')) return;
+            const resp = await fetch(`/admin/instagram-topics/${encodeURIComponent(id)}`, { method: 'DELETE', headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ replacement_topic_id, clear_associations }) }); const data = await resp.json();
+            if (!resp.ok) return alert(data.detail?.message || data.detail || 'Could not delete Topic.'); closeTopicModal(); await loadTopicsAndMenus();
         }
 
         function refreshMenuCategoryPicker(preferredName = '') {

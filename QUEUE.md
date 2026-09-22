@@ -114,6 +114,22 @@ Risk: Medium
 - Webhook and canonical-QA byte comparison regressions.
 - Full repository suite, production Meta sync acceptance, and final deployment verification.
 
+### Q-002 — Gallery Simplification and Topic Safety
+
+Status: IMPLEMENTED / VALIDATION_PENDING
+Risk: Medium
+
+#### Implemented
+- Simplified Instagram Media to its gallery-first controls.
+- Added guarded Topic deletion with reference detection, replacement, or explicit association clearing.
+- Kept historical archive data intact while removing gallery archive controls.
+
+#### Deferred validation
+- Client-approved QA completeness and generated-template visibility audit.
+- Internal guard regression after QA-library separation.
+- Topic deletion/reference integrity, gallery and Story mapping regressions.
+- Archived-data compatibility, migration/restart durability, Admin auth/CSRF/security, privacy/logging, webhook, 5,000-media performance, full suite, and final production validation.
+
 ---
 
 # Final release gate

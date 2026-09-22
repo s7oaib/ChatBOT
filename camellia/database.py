@@ -2561,6 +2561,25 @@ class Database:
             conn.commit()
         return self.get_instagram_topic(topic_id) if cursor.rowcount else None
 
+    def instagram_topic_references(self, topic_id: str) -> Dict[str, int]:
+        with self.get_connection() as conn:
+            return {
+                "source_routes": conn.execute("SELECT COUNT(*) AS n FROM instagram_source_routes WHERE topic_id=?", (topic_id,)).fetchone()["n"],
+                "media_gallery": conn.execute("SELECT COUNT(*) AS n FROM instagram_media WHERE topic_id=?", (topic_id,)).fetchone()["n"],
+            }
+
+    def delete_instagram_topic(self, topic_id: str, replacement_topic_id: Optional[str] = None) -> bool:
+        with self.get_connection() as conn:
+            if replacement_topic_id:
+                conn.execute("UPDATE instagram_source_routes SET topic_id=? WHERE topic_id=?", (replacement_topic_id, topic_id))
+                conn.execute("UPDATE instagram_media SET topic_id=? WHERE topic_id=?", (replacement_topic_id, topic_id))
+            else:
+                conn.execute("UPDATE instagram_source_routes SET topic_id=NULL WHERE topic_id=?", (topic_id,))
+                conn.execute("UPDATE instagram_media SET topic_id=NULL WHERE topic_id=?", (topic_id,))
+            cursor = conn.execute("DELETE FROM instagram_topics WHERE topic_id=?", (topic_id,))
+            conn.commit()
+            return bool(cursor.rowcount)
+
     @staticmethod
     def _create_indexes(cursor) -> None:
         """
