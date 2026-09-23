@@ -140,10 +140,15 @@ the hosting provider's secret manager:
 Fill in your Meta App Credentials:
 ```env
 META_VERIFY_TOKEN=your_meta_verify_token
-INSTAGRAM_PAGE_ID=your_instagram_page_id
 INSTAGRAM_ACCESS_TOKEN=your_instagram_access_token
+INSTAGRAM_AUTH_MODE=instagram_login
 WHATSAPP_BUSINESS_NUMBER=919800000000
 ```
+
+Set `INSTAGRAM_AUTH_MODE=instagram_login` for Instagram Login credentials. The
+legacy Facebook Page-token path is retained only when explicitly configured as
+`INSTAGRAM_AUTH_MODE=legacy_page`; the app never infers the Graph host from a
+token prefix. `INSTAGRAM_PAGE_ID` is used only in legacy page mode.
 
 ### 3. Run Server
 

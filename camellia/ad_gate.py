@@ -40,6 +40,8 @@ class EntryPoint:
     media_id: Optional[str] = None
     from_ad_click: bool = False    # this event carried the ad referral itself
     raw_payload: Optional[str] = None
+    sender_id: Optional[str] = None
+    customer_username: Optional[str] = None
 
 
 def _referral_of(messaging_event: Dict[str, Any]) -> Dict[str, Any]:
@@ -81,6 +83,12 @@ def describe_entry_point(messaging_event: Dict[str, Any]) -> EntryPoint:
     story = reply_to.get("story") if isinstance(reply_to, dict) else None
     media_id = str(story.get("id")) if isinstance(story, dict) and story.get("id") else None
     story_mention = message_obj.get("story_mention") or messaging_event.get("story_mention")
+    sender_obj = messaging_event.get("sender") or messaging_event.get("from") or {}
+    sender_id = sender_obj.get("id") if isinstance(sender_obj, dict) else None
+    customer_username = (
+        str(sender_obj.get("username")).strip().lstrip("@")
+        if isinstance(sender_obj, dict) and sender_obj.get("username") else None
+    )
 
     payload = postback_obj.get("payload")
     if postback_obj:
@@ -106,12 +114,15 @@ def describe_entry_point(messaging_event: Dict[str, Any]) -> EntryPoint:
         media_id=media_id,
         from_ad_click=from_ad_click,
         raw_payload=str(payload) if payload else None,
+        sender_id=str(sender_id) if sender_id else None,
+        customer_username=customer_username,
     )
 
 def fetch_message_details_fallback(mid: str) -> Tuple[Optional[str], Optional[str]]:
     """
     Fallback Graph API lookup for message_edit events missing sender/from fields.
-    GET https://graph.facebook.com/{version}/{mid}?fields=from,to,message&access_token={token}
+    GET against the host selected by INSTAGRAM_AUTH_MODE for
+    `{version}/{mid}?fields=from,to,message`.
     """
     token = config.INSTAGRAM_ACCESS_TOKEN
     mid_hash = hashlib.sha256(str(mid or "").encode("utf-8")).hexdigest()[:12] if mid else None
@@ -121,7 +132,12 @@ def fetch_message_details_fallback(mid: str) -> Tuple[Optional[str], Optional[st
         log.warning("Graph API fallback skipped for message_hash=%s: missing mid or access token.", mid_hash)
         return None, None
 
-    url = f"https://graph.facebook.com/{config.INSTAGRAM_API_VERSION}/{mid}"
+    host = (
+        "graph.instagram.com"
+        if config.instagram_auth_mode() == "instagram_login"
+        else "graph.facebook.com"
+    )
+    url = f"https://{host}/{config.INSTAGRAM_API_VERSION}/{mid}"
     params = {
         "fields": "from,to,message",
         "access_token": token

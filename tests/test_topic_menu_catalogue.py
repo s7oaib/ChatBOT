@@ -58,8 +58,11 @@ def catalogue_db(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def admin_client(catalogue_db):
+def admin_client(catalogue_db, monkeypatch):
     db_module.db.init_db()
+    # This contract suite exercises authenticated Admin APIs. Keep it
+    # self-contained instead of depending on a developer's local .env file.
+    monkeypatch.setattr(app_module.config, "ADMIN_API_KEY", "catalogue-test-key")
     client = TestClient(app_module.app)
     headers = {"X-Admin-Key": app_module.config.ADMIN_API_KEY} if app_module.config.ADMIN_API_KEY else {}
     return client, headers
@@ -101,6 +104,32 @@ def test_new_menu_appears_in_the_catalogue_listing_immediately(catalogue_db):
     names = {m["name"] for m in menu_catalogue.list_menus()}
     assert "Meal Subscription" in names
     assert "Aamar Mishti Collection" in names  # built-ins still present
+
+
+def test_menu_metadata_edit_does_not_replace_its_image(catalogue_db, monkeypatch):
+    from camellia import menu_images
+
+    monkeypatch.setattr(menu_images.weekly_flyer, "uploads_dir", lambda: str(catalogue_db.db_path) + "-metadata")
+    entry = menu_catalogue.create_menu("Editable Menu", "Other", "Original description.")
+    menu_images.save_draft(entry["menu_id"], _png(), "image/png", "tester")
+    published = menu_images.publish(entry["menu_id"])
+
+    updated = menu_catalogue.update_menu(
+        entry["menu_id"], name="Renamed Menu", category="Event",
+        description="Updated description.", active=False,
+    )
+
+    assert updated["name"] == "Renamed Menu"
+    assert updated["category"] == "Event"
+    assert updated["description"] == "Updated description."
+    assert updated["active"] == 0
+    assert menu_images.current_url(entry["menu_id"]) == published["image_path"]
+
+
+def test_menu_metadata_edit_rejects_blank_description(catalogue_db):
+    entry = menu_catalogue.create_menu("Editable Menu", "Other", "Original description.")
+    with pytest.raises(MenuCatalogueError):
+        menu_catalogue.update_menu(entry["menu_id"], description="   ")
 
 
 # --- Menu image lifecycle on a dynamic menu -----------------------------
@@ -194,6 +223,20 @@ def test_topic_requires_name_and_description(catalogue_db):
 def test_topic_with_unknown_default_menu_rejected(catalogue_db):
     with pytest.raises(InstagramTopicError):
         create_topic("Some Topic", "A description.", default_menu_id="not_a_real_menu")
+
+
+def test_inactive_menus_cannot_be_new_topic_defaults_or_route_overrides(catalogue_db):
+    menu = menu_catalogue.create_menu("Inactive Menu", "Other", "Not currently selectable.", active=False)
+    with pytest.raises(InstagramTopicError, match="must be active"):
+        create_topic("Inactive Default", "A description.", default_menu_id=menu["menu_id"])
+
+    topic = create_topic("Active Topic", "A description.")
+    with pytest.raises(ValueError, match="inactive"):
+        validate_route_payload({
+            "source_type": "story", "media_id": "story-inactive-menu",
+            "topic_id": topic["topic_id"], "menu_mode": "SELECTED",
+            "menu_id": menu["menu_id"], "active": True,
+        })
 
 
 def test_topic_description_is_editable(catalogue_db):

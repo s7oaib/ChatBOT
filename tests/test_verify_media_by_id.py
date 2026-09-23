@@ -28,6 +28,7 @@ class _FakeResponse:
 
 def test_a_real_media_id_resolves_its_permalink_and_shortcode(monkeypatch):
     monkeypatch.setattr(instagram_routing.config, "INSTAGRAM_ACCESS_TOKEN", "IGAAtoken")
+    monkeypatch.setattr(instagram_routing.config, "INSTAGRAM_AUTH_MODE", "instagram_login")
     monkeypatch.setattr(instagram_routing.config, "INSTAGRAM_API_VERSION", "v25.0")
     captured = {}
 
@@ -59,6 +60,7 @@ def test_a_real_media_id_resolves_its_permalink_and_shortcode(monkeypatch):
 
 def test_a_page_token_asks_graph_facebook_instead(monkeypatch):
     monkeypatch.setattr(instagram_routing.config, "INSTAGRAM_ACCESS_TOKEN", "EAATpagetoken")
+    monkeypatch.setattr(instagram_routing.config, "INSTAGRAM_AUTH_MODE", "legacy_page")
     captured = {}
 
     class _Client:
@@ -79,6 +81,7 @@ def test_a_page_token_asks_graph_facebook_instead(monkeypatch):
 
 def test_an_id_that_is_not_ours_is_reported_not_guessed(monkeypatch):
     monkeypatch.setattr(instagram_routing.config, "INSTAGRAM_ACCESS_TOKEN", "IGAAtoken")
+    monkeypatch.setattr(instagram_routing.config, "INSTAGRAM_AUTH_MODE", "instagram_login")
 
     class _Client:
         def get(self, url, params=None):
@@ -98,6 +101,7 @@ def test_an_id_that_is_not_ours_is_reported_not_guessed(monkeypatch):
 
 def test_a_non_numeric_id_is_rejected_without_a_network_call(monkeypatch):
     monkeypatch.setattr(instagram_routing.config, "INSTAGRAM_ACCESS_TOKEN", "IGAAtoken")
+    monkeypatch.setattr(instagram_routing.config, "INSTAGRAM_AUTH_MODE", "instagram_login")
 
     def _boom(**kw):
         raise AssertionError("must not make a network call for an invalid id")
@@ -113,6 +117,7 @@ def test_no_token_is_reported_as_not_configured(monkeypatch):
 
 def test_a_transport_failure_is_reported_not_guessed(monkeypatch):
     monkeypatch.setattr(instagram_routing.config, "INSTAGRAM_ACCESS_TOKEN", "IGAAtoken")
+    monkeypatch.setattr(instagram_routing.config, "INSTAGRAM_AUTH_MODE", "instagram_login")
 
     class _Client:
         def get(self, url, params=None):
@@ -134,6 +139,7 @@ def test_a_transport_failure_is_reported_not_guessed(monkeypatch):
 ])
 def test_graph_failure_is_reported_as_a_sanitized_category(monkeypatch, code, expected):
     monkeypatch.setattr(instagram_routing.config, "INSTAGRAM_ACCESS_TOKEN", "IGAAtoken")
+    monkeypatch.setattr(instagram_routing.config, "INSTAGRAM_AUTH_MODE", "instagram_login")
 
     class _Client:
         def get(self, url, params=None):

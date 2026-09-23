@@ -66,6 +66,7 @@ def _story(story_id, timestamp):
 
 def _install_meta(monkeypatch, responses):
     monkeypatch.setattr(config, "INSTAGRAM_ACCESS_TOKEN", "PAGE_TOKEN")
+    monkeypatch.setattr(config, "INSTAGRAM_AUTH_MODE", "legacy_page")
     monkeypatch.setattr(config, "INSTAGRAM_PAGE_ID", "page-1")
     monkeypatch.setattr(config, "INSTAGRAM_API_VERSION", "v25.0")
     monkeypatch.setattr(sync_module.httpx, "Client", lambda timeout: FakeClient(responses))

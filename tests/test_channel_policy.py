@@ -81,7 +81,30 @@ def test_instagram_delivery_request_still_works():
     assert "wa.me" not in send_reply.call_args.args[1]
 
 
-def test_instagram_unsupported_topic_escalates_to_team_with_no_invented_fact():
+@pytest.mark.parametrize("selection", ["Bengali meal", "Bengali meals", "the Bengali one", "second one", "option 2"])
+def test_active_price_clarification_routes_bengali_meals_to_approved_answer_without_cam(selection):
+    """The exact production sequence must finish in the approved meal route."""
+    user_id = f"policy_ig_bengali_price_{uuid.uuid4().hex[:8]}"
+    session_memory.clear_session(user_id, "instagram")
+    with patch.object(app, "send_instagram_reply") as send_reply, patch.object(
+        app.escalator, "handle_escalation", return_value={"escalation_id": 1},
+    ) as escalate, patch.object(config, "WHATSAPP_BUSINESS_NUMBER", "919800000000"), \
+         patch.object(config, "GROQ_ENABLED", False), patch.object(config, "STRUCTURED_NLU_ENABLED", False), \
+         patch.object(config, "SEMANTIC_ROUTER_ENABLED", False):
+        app._process_instagram_event(user_id, "What's the pricing?", "ad-1")
+        app._process_instagram_event(user_id, selection, "ad-1")
+
+    approved = next(
+        item for item in responder.qa_data["templates"]
+        if item.get("id") == "savoury_food_intro"
+    )["response"]
+    assert approved in send_reply.call_args_list[-1].args[1]
+    assert "wa.me/" not in send_reply.call_args_list[-1].args[1]
+    assert escalate.call_count == 0
+    assert not [row for row in db.get_handoffs(limit=200) if row["source_user_id"] == user_id]
+
+
+def test_instagram_unsupported_topic_escalates_to_whatsapp_with_no_invented_fact():
     """"Do you offer wedding gift wrapping?" — no approved fact exists, so
     knowledge is insufficient and the customer is offered a WhatsApp
     continuation instead of an invented answer."""
@@ -144,7 +167,9 @@ def test_verified_order_receipt_adds_concise_order_handoff_and_reuses_cam():
     session_memory.clear_session(user_id, "instagram")
     with patch.object(app, "send_instagram_reply") as send_reply, patch.object(
         app.escalator, "handle_escalation", return_value={"escalation_id": 1},
-    ) as escalate, patch.object(config, "WHATSAPP_BUSINESS_NUMBER", "919800000000"):
+    ) as escalate, patch.object(config, "WHATSAPP_BUSINESS_NUMBER", "919800000000"), \
+         patch.object(config, "GROQ_ENABLED", False), patch.object(config, "STRUCTURED_NLU_ENABLED", False), \
+         patch.object(config, "SEMANTIC_ROUTER_ENABLED", False):
         app._process_instagram_event(user_id, "I want Jolbhora 250g", "ad-1")
         receipt, order_link = [call.args[1] for call in send_reply.call_args_list[-2:]]
         sent_before_waiting = send_reply.call_count

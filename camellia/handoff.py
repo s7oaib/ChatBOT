@@ -242,6 +242,7 @@ def get_or_create_handoff(
     instagram_username: Optional[str] = None,
     query_summary: Optional[str] = None,
     contact_mode: Optional[str] = None,
+    customer_identity: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Returns the customer's active handoff, creating one only if needed.
 
@@ -293,6 +294,8 @@ def get_or_create_handoff(
         instagram_username=safe_username,
         query_summary=effective_query_summary,
         contact_mode=effective_mode,
+        customer_username=(customer_identity or {}).get("customer_username"),
+        customer_external_id=(customer_identity or {}).get("customer_external_id") or user_id,
     )
     if newly_created:
         log.info("Created handoff %s for channel=%s user_hash=%s (%s).", reference, channel, _user_hash(user_id), reason)
@@ -361,7 +364,10 @@ def customer_facing_notice(*, order_receipt: bool = False, finalized_order: bool
         )
     if order_receipt:
         return "Continue on WhatsApp to send this order draft to our team."
-    return "Of course. I’ve shared your message with our team and someone will get back to you shortly."
+    return (
+        "Thanks for your question. Our Manager of Kitchens will connect with "
+        "you here shortly and help you with this."
+    )
 
 
 def customer_facing_link_message(

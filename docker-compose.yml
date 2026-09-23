@@ -20,6 +20,10 @@ services:
       - WHATSAPP_BUSINESS_NUMBER=${WHATSAPP_BUSINESS_NUMBER:-}
       - INSTAGRAM_PAGE_ID=${INSTAGRAM_PAGE_ID}
       - INSTAGRAM_ACCESS_TOKEN=${INSTAGRAM_ACCESS_TOKEN:-}
+      - INSTAGRAM_APP_ID=${INSTAGRAM_APP_ID:-}
+      - INSTAGRAM_APP_SECRET=${INSTAGRAM_APP_SECRET:-}
+      - INSTAGRAM_REDIRECT_URI=${INSTAGRAM_REDIRECT_URI:-https://web-production-0cad70.up.railway.app/auth/instagram/callback}
+      - INSTAGRAM_EXPECTED_USERNAME=${INSTAGRAM_EXPECTED_USERNAME:-camellia.artisanal}
       # Must live under the mounted volume or all history is lost on rebuild.
       # Deliberately /app/var, not /app/data: the volume would otherwise hide
       # the menu.json and qa_templates.json baked into the image.

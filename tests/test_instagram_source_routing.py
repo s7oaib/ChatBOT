@@ -55,6 +55,7 @@ def test_graph_lookup_verifies_media_without_inventing_metadata(monkeypatch):
                 return Response({"instagram_business_account": {"id": "ig-1"}})
             return Response({"data": [{"id": "media-1", "media_type": "VIDEO", "permalink": "https://instagram.com/reel/DdAnO6MTok1/", "thumbnail_url": "https://cdn.example/thumb.jpg", "caption": "Verified caption"}]})
     monkeypatch.setattr(config, "INSTAGRAM_ACCESS_TOKEN", "token")
+    monkeypatch.setattr(config, "INSTAGRAM_AUTH_MODE", "legacy_page")
     monkeypatch.setattr(config, "INSTAGRAM_PAGE_ID", "page-1")
     monkeypatch.setattr("camellia.instagram_routing.httpx.Client", lambda *args, **kwargs: Client())
     result = lookup_instagram_media(normalize_instagram_url("https://instagram.com/reel/DdAnO6MTok1/"))
@@ -129,10 +130,11 @@ def test_ordered_priorities_handle_vague_then_what_else_without_overriding_expli
     first = responder.match_and_respond("Tell me more", **common)
     second = responder.match_and_respond("what else", **common)
     explicit = responder.match_and_respond("what is the price of kanchagolla?", **common)
-    assert first[2].startswith("source_jolbhora_")
-    assert second[2].startswith("source_bento_")
-    assert explicit[2] == "kanchagolla"
-    assert facts["source_priority_cursor"] == 2
+    unsupported = "Thanks for your question. Our Manager of Kitchens will connect with you here shortly and help you with this."
+    assert first[:3] == (unsupported, False, None)
+    assert second[:3] == (unsupported, False, None)
+    assert explicit[:3] == (unsupported, False, None)
+    assert facts["source_priority_cursor"] == 0
 
 
 def test_admin_route_ui_has_ordering_crud_and_advanced_compatibility():
@@ -174,5 +176,5 @@ def test_general_handoff_is_one_callback_ack_and_minimal_cam():
         app._process_instagram_event(user_id, "I need an agent", "ad-source")
     assert send.call_count == 1
     notice = send.call_args.args[1]
-    assert notice == "Of course. I’ve shared your message with our team and someone will get back to you shortly."
+    assert notice == "Thanks for your question. Our Manager of Kitchens will connect with you here shortly and help you with this."
     assert "wa.me/" not in notice

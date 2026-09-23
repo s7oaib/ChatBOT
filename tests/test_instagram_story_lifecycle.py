@@ -72,6 +72,7 @@ def _story(story_id=STORY_ID, timestamp=YOUNG_PUBLISHED_AT):
 def _install_meta(monkeypatch, responses):
     calls = []
     monkeypatch.setattr(config, "INSTAGRAM_ACCESS_TOKEN", "PAGE_TOKEN")
+    monkeypatch.setattr(config, "INSTAGRAM_AUTH_MODE", "legacy_page")
     monkeypatch.setattr(config, "INSTAGRAM_PAGE_ID", "page-1")
     monkeypatch.setattr(config, "INSTAGRAM_API_VERSION", "v25.0")
     monkeypatch.setattr(
@@ -183,6 +184,7 @@ def test_partial_malformed_story_page_does_not_increment_misses(sync_db, monkeyp
 def test_lock_busy_run_does_not_increment_misses(sync_db, monkeypatch):
     sync_db.upsert_instagram_story_sync(STORY_ID, published_at=YOUNG_PUBLISHED_AT)
     monkeypatch.setattr(config, "INSTAGRAM_ACCESS_TOKEN", "PAGE_TOKEN")
+    monkeypatch.setattr(config, "INSTAGRAM_AUTH_MODE", "legacy_page")
     with patch.object(sync_db, "try_acquire_instagram_story_sync_lock", return_value=False):
         result = sync_module.sync_instagram_stories(sync_db)
     assert result["status"] == "busy"
@@ -193,6 +195,7 @@ def test_lock_busy_run_does_not_increment_misses(sync_db, monkeypatch):
 def test_application_exception_does_not_increment_misses(sync_db, monkeypatch):
     sync_db.upsert_instagram_story_sync(STORY_ID, published_at=YOUNG_PUBLISHED_AT)
     monkeypatch.setattr(config, "INSTAGRAM_ACCESS_TOKEN", "PAGE_TOKEN")
+    monkeypatch.setattr(config, "INSTAGRAM_AUTH_MODE", "legacy_page")
     monkeypatch.setattr(config, "INSTAGRAM_PAGE_ID", "page-1")
 
     class RaisingClient:

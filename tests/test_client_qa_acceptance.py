@@ -12,7 +12,7 @@ from camellia.session_memory import session_memory
         ("price is high", "pricing_value_context"),
         ("what is the price of chicken kosha", "chicken_kosha_price"),
         ("how much time do you take to deliver sondesh", "sondesh_dispatch_time"),
-        ("tell me more about sondesh", "sondesh_details"),
+        ("tell me more about sondesh", "sondesh_tell_me_more"),
         ("sondesh is unfamiliar to me", "sondesh_unfamiliar"),
         ("why is the minimum order 9 pieces 250g for some flavours", "minimum_sondesh_quantity"),
         ("share weekly menu", "savoury_food_intro"),
@@ -41,7 +41,7 @@ def test_sondesh_overview_uses_available_menu_assets():
         referral_source="ADS",
     )
     assert matched is True
-    assert template_id == "sondesh_details"
+    assert template_id == "sondesh_tell_me_more"
     assert images
 
 
@@ -82,6 +82,51 @@ def test_instagram_prebook_question_beats_stale_subscription_context(monkeypatch
     assert template_id == "alacarte_prebooking_steps"
     from camellia.client_qa import REGISTRY_BY_ID
     assert response == REGISTRY_BY_ID["alacarte_prebook"].answer
+
+
+@pytest.mark.parametrize("message", [
+    "how do i order",
+    "how can i order",
+    "how to order",
+    "how do I place an order",
+    "I want to place an order",
+    "I want to order",
+    "what are the next steps to order",
+    "how do I pre book",
+    "how can I pre-book",
+])
+def test_order_process_phrases_start_the_customer_order_draft(monkeypatch, message):
+    from camellia.order_intake import ORDER_DRAFT_INCOMPLETE, instruction_message
+
+    monkeypatch.setattr("camellia.config.config.BYPASS_AD_GATE", True)
+    user_id = "client-qa-order-process-" + str(abs(hash(message)))
+    session_memory.clear_session(user_id, "instagram")
+
+    response, matched, template_id, _images = responder.match_and_respond(
+        message, user_id=user_id, channel="instagram",
+    )
+
+    assert matched is True
+    assert template_id == "order_intake_draft"
+    assert response == instruction_message()
+    assert session_memory.get_facts(user_id, "instagram")["order_intake_draft"]["status"] == ORDER_DRAFT_INCOMPLETE
+
+
+@pytest.mark.parametrize(
+    ("message", "expected_template"),
+    [
+        ("How do I pay", "GUARD_payment_method"),
+        ("I've finalized my order", "order_next_steps"),
+    ],
+)
+def test_payment_and_finalized_order_remain_distinct_from_order_process(monkeypatch, message, expected_template):
+    monkeypatch.setattr("camellia.config.config.BYPASS_AD_GATE", True)
+    user_id = "client-qa-distinct-order-intent-" + str(abs(hash(message)))
+    session_memory.clear_session(user_id, "instagram")
+    _response, _matched, template_id, _images = responder.match_and_respond(
+        message, user_id=user_id, channel="instagram",
+    )
+    assert template_id == expected_template
 
 
 def test_instagram_bengali_bento_details_beats_stale_story_context(monkeypatch):

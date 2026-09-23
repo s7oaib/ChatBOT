@@ -163,8 +163,23 @@ still goes out as text, built from `menu.json`'s structured items.
 ## Secrets — set in the dashboard, never committed
 
 `META_APP_SECRET`, `META_VERIFY_TOKEN`, `INSTAGRAM_ACCESS_TOKEN`,
-`INSTAGRAM_PAGE_ID`, `WHATSAPP_BUSINESS_NUMBER`,
+`INSTAGRAM_AUTH_MODE`,
+`INSTAGRAM_ACCOUNT_ID`, `INSTAGRAM_PAGE_ID`, `WHATSAPP_BUSINESS_NUMBER`,
 `ADMIN_API_KEY`, `ADMIN_PIN`, `GROQ_API_KEY`.
+
+Instagram Business Login uses a separate, explicit credential pair:
+`INSTAGRAM_APP_ID`, `INSTAGRAM_APP_SECRET`,
+`INSTAGRAM_REDIRECT_URI`, and `INSTAGRAM_EXPECTED_USERNAME`. The app ID and
+secret must be copied from the same Meta app that issues the authorization
+code. Do not use the old Page/webhook secret by assumption. The default
+redirect URI is:
+
+`https://web-production-0cad70.up.railway.app/auth/instagram/callback`
+
+After setting the matching pair, sign in to Admin and open
+`/auth/instagram/start`. The callback verifies the returned account and shows
+only its non-secret ID and username; the access token is not stored by the
+application and must be updated through the Railway dashboard/control plane.
 
 Once `META_APP_SECRET` is set and `/health` reports `webhook_signature:
 "enforced"`, also set `REQUIRE_WEBHOOK_SIGNATURE=true` so unsigned payloads are

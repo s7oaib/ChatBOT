@@ -60,7 +60,7 @@ def _media_field_presence(media: Dict[str, Any]) -> Dict[str, bool]:
 
 def _media_list_details(client: httpx.Client, token: str, version: str) -> tuple[Optional[str], Optional[str]]:
     """Return the owned-media endpoint and a sanitized setup failure, if any."""
-    if token.startswith("IGAA"):
+    if config.instagram_auth_mode() == "instagram_login":
         return f"https://graph.instagram.com/{version}/me/media", None
     base = f"https://graph.facebook.com/{version}"
     page_id = (config.INSTAGRAM_PAGE_ID or "me").strip()
@@ -81,13 +81,9 @@ def _media_list_url(client: httpx.Client, token: str, version: str) -> Optional[
     """
     Where this token can list the account's own media, or None.
 
-    The two token flavours do not share a host. An Instagram Login token
-    ("IGAA...") addresses the account directly on graph.instagram.com and is
-    rejected by graph.facebook.com outright — which is what this function used
-    to ask unconditionally, so every lookup on such a deployment came back as
-    "permission_or_account_unavailable" and looked like a missing permission
-    rather than the wrong address. A page token still has to go the long way
-    round, via the page's linked instagram_business_account.
+    The two explicitly configured auth modes do not share a host. Instagram
+    Login addresses the account directly on graph.instagram.com. A legacy Page
+    token goes through graph.facebook.com and the linked business account.
     """
     return _media_list_details(client, token, version)[0]
 
@@ -110,7 +106,11 @@ def verify_media_by_id(media_id: str) -> Dict[str, Any]:
     if not media_id or not media_id.isdigit():
         return {"status": "invalid_media_id"}
     version = config.INSTAGRAM_API_VERSION
-    host = "graph.instagram.com" if token.startswith("IGAA") else "graph.facebook.com"
+    host = (
+        "graph.instagram.com"
+        if config.instagram_auth_mode() == "instagram_login"
+        else "graph.facebook.com"
+    )
     url = f"https://{host}/{version}/{media_id}"
     try:
         with httpx.Client(timeout=8.0) as client:
@@ -384,8 +384,11 @@ def validate_route_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         menu_id = topic.get("default_menu_id") or None
     if menu_mode == "SELECTED" and not menu_id:
         raise ValueError("A selected menu is required when menu_mode is SELECTED.")
-    if menu_id and not db.get_menu_catalogue_entry(menu_id):
+    selected_menu = db.get_menu_catalogue_entry(menu_id) if menu_id else None
+    if menu_id and not selected_menu:
         raise ValueError("Unknown menu.")
+    if selected_menu and not bool(selected_menu.get("active")):
+        raise ValueError("That menu is inactive. Choose an active menu or No menu.")
 
     priority = payload.get("priority_products", [])
     if priority is None:
@@ -428,6 +431,9 @@ def validate_route_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     routing_topic = (
         topic["name"] if topic else str(payload.get("routing_topic") or "").strip()
     )
+    source_description = str(payload.get("source_description") or "").strip()
+    if len(source_description) > 2000:
+        raise ValueError("Description must be 2,000 characters or fewer.")
 
     preview_url = str(payload.get("preview_url") or "").strip() or None
     if preview_url and (len(preview_url) > 2000 or not preview_url.lower().startswith(("http://", "https://"))):
@@ -445,7 +451,7 @@ def validate_route_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     clean = {
         "source_type": source_type,
         "canonical_url": normalized.get("canonical_url"),
-        "shortcode": normalized.get("shortcode"),
+        "shortcode": normalized.get("shortcode") or (str(payload.get("shortcode") or "").strip() or None if media_id else None),
         "media_id": media_id,
         "ad_id": str(payload.get("ad_id") or "").strip() or None,
         "campaign_id": str(payload.get("campaign_id") or "").strip() or None,
@@ -455,6 +461,7 @@ def validate_route_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         "preview_url": str(payload.get("preview_url") or "").strip() or None,
         "media_type": str(payload.get("media_type") or "").strip() or None,
         "routing_topic": routing_topic,
+        "source_description": source_description,
         "knowledge_scope": scope,
         "escalation_policy": escalation,
         "priority_products": priority,
@@ -611,8 +618,6 @@ def create_topic(
     description = (description or "").strip()
     if not name:
         raise InstagramTopicError("Topic name is required.")
-    if not description:
-        raise InstagramTopicError("Description is required.")
     response_order = str(response_order or "description_first").strip().lower()
     if response_order not in RESPONSE_ORDERS:
         raise InstagramTopicError("Reply order must be Description First or Menu First.")
@@ -628,8 +633,11 @@ def create_topic(
     if unknown_scope:
         raise InstagramTopicError(f"Unknown knowledge scope: {unknown_scope[0]}")
 
-    if default_menu_id and not db.get_menu_catalogue_entry(default_menu_id):
+    default_menu = db.get_menu_catalogue_entry(default_menu_id) if default_menu_id else None
+    if default_menu_id and not default_menu:
         raise InstagramTopicError("Unknown default menu.")
+    if default_menu and not bool(default_menu.get("active")):
+        raise InstagramTopicError("The default menu must be active.")
 
     topic_id = _slugify_topic(name)
     if db.get_instagram_topic(topic_id):
@@ -657,8 +665,12 @@ def update_topic(topic_id: str, **fields: Any) -> Dict[str, Any]:
         if existing and existing["topic_id"] != topic_id:
             raise InstagramTopicError(f"A topic named '{name}' already exists.")
         fields["name"] = name
-    if fields.get("default_menu_id") and not db.get_menu_catalogue_entry(fields["default_menu_id"]):
+    default_menu_id = fields.get("default_menu_id")
+    default_menu = db.get_menu_catalogue_entry(default_menu_id) if default_menu_id else None
+    if default_menu_id and not default_menu:
         raise InstagramTopicError("Unknown default menu.")
+    if default_menu and not bool(default_menu.get("active")):
+        raise InstagramTopicError("The default menu must be active.")
     if "response_order" in fields:
         response_order = str(fields["response_order"] or "description_first").strip().lower()
         if response_order not in RESPONSE_ORDERS:
