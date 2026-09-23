@@ -139,7 +139,7 @@ def test_ad_routing_panel_still_present_alongside_menu_manager(page):
     """Routing remains available, now as a Posts & Reels subview."""
     assert 'id="tab-ad-routing"' in page
     assert 'data-group="instagram_content"' in page[page.index('id="tab-ad-routing"'):]
-    assert "Posts &amp; Reels Routing" in page
+    assert "Posts &amp; Reels Mapping" in page
     assert 'id="igPriorityProducts"' in page
 
 
@@ -248,15 +248,14 @@ def test_instagram_stories_map_flow_uses_a_read_only_captured_id(page):
 
 def test_instagram_story_menu_choice_offers_inherit_none_and_active_menus(page):
     """
-    The client-facing selector represents all three persisted states without
-    exposing the internal menu-mode terminology.
+    New mappings default to no asset; legacy inherited links remain supported.
     """
     section = page[page.index('id="tab-instagram-stories"'):page.index('<!-- MENU tab, panel 3 of 4')]
     menu_select = section[section.index('id="igStoryMenuPicker"'):section.index('</select>', section.index('id="igStoryMenuPicker"'))]
-    assert '<option value="__inherit__">Inherit topic default</option>' in menu_select
-    assert '<option value="__none__">No menu</option>' in menu_select
-    assert "Menu to send" in section
-    assert "Choose the menu customers should receive when this content starts the conversation." in section
+    assert '<option value="__none__">Choose menu or image</option>' in menu_select
+    assert 'Existing Topic-linked menu' in page
+    assert "Menu / Image" in section
+    assert 'id="igStoryMenuSelected"' in section
     assert "openMenuModal('igStoryMenuPicker')" in section
 
     save = page[page.index('async function saveInstagramStoryMapping'):page.index('async function setInstagramStoryActive')]
@@ -295,17 +294,19 @@ def test_instagram_story_refresh_does_not_clear_the_list_before_it_settles(page)
 def test_instagram_stories_exposes_status_filters_and_safe_actions(page):
     section = page[page.index('id="tab-instagram-stories"'):page.index('<!-- MENU tab, panel 3 of 4')]
     render = page[page.index('function renderInstagramStories'):page.index('async function loadInstagramStories')]
-    for label in ("All", "Unmapped", "Mapped", "Disabled", "Archived", "Deleted", "Map Story", "Edit", "Disable", "Enable", "Archive", "Restore", "Delete"):
+    for label in ("All", "Unmapped", "Mapped", "Disabled", "Deleted", "Map Story", "Edit Mapping", "Delete Mapping"):
         assert label in section or label in render
-    assert 'data-story-action="delete"' in render
+    assert 'data-story-filter="ARCHIVED"' not in section
+    assert 'data-story-action="archive"' not in render
+    assert 'data-story-action="delete-mapping"' not in render
     assert 'data-story-action="restore-source"' in render
     assert 'Delete this Story from Camellia Admin?' in page
     assert 'This removes the Story from the Admin dashboard and disables its Story routing.' in page
     assert '/admin/instagram-story-sources/${encodeURIComponent(mediaId)}' in page
     assert '/permanent' not in render
-    assert "setInstagramStoryActive" in render
-    assert "archiveInstagramStory" in render
-    assert "restoreInstagramStory" in render
+    drawer = page[page.index('function openContentDetails'):page.index('async function saveInstagramMediaRoute')]
+    assert "removeInstagramStoryMapping" in drawer
+    assert 'id="igStoryActive"' in section
 
 
 def test_instagram_story_delete_is_local_and_history_is_explicit(page):
@@ -341,7 +342,7 @@ def test_instagram_stories_refreshes_from_source_and_mapping_endpoints(page):
     section = page[page.index('async function loadInstagramStories'):page.index('function renderInstagramMediaRegistry')]
     assert "igStoryRefreshButton" in page
     assert "instagram-story-sources" in section
-    assert "instagram-routes?include_archived=true" in section
+    assert "instagram-routes?include_archived=true" not in section
     assert "populateInstagramStoryPickers" in section
     assert "renderInstagramStories()" in section
 
@@ -351,7 +352,9 @@ def test_instagram_story_preview_metadata_never_exposes_temporary_url(page):
     assert "new URL(String(value), window.location.origin)" in section
     assert "parsed.hostname" in section and "parsed.pathname" in section
     story_render = page[page.index('function renderInstagramStories'):page.index('async function loadInstagramStories')]
-    assert "storyPreviewMetadata(source.temporary_url)" in story_render
+    assert "storyPreviewMetadata(source.temporary_url)" not in story_render
+    assert "Meta Story ID:" not in story_render
+    assert "data-story-media-id" in story_render
     assert "temporary_url}" not in story_render
 
 
@@ -430,8 +433,8 @@ def test_instagram_routing_has_a_simple_client_first_default_view(page):
     assert ">Identify<" not in section
     assert "id=\"igTopicPicker\"" in section and "+ Add Topic" in section
     assert "Save Mapping" in section
-    assert "Menu to send" in section
-    assert "Choose the menu customers should receive when this content starts the conversation." in section
+    assert "Menu / Image" in section
+    assert 'id="igMenuSelected"' in section
     assert "openMenuModal('igMenuPicker')" in section
     assert "Preview Reply" in section
     assert "Preview Customer Response" not in section
@@ -456,11 +459,12 @@ def test_topic_selectors_explain_empty_catalogues_and_refresh_together(page):
 
 def test_topic_and_menu_edit_actions_are_clear_and_metadata_only(page):
     story_section = page[page.index('id="tab-instagram-stories"'):page.index('<!-- MENU tab, panel 3 of 4')]
-    assert 'id="igStoryEditTopicButton"' in story_section
-    assert '>Edit Topic</button>' in story_section
-    assert 'id="igEditTopicButton"' in page
+    assert 'id="igStoryEditTopicButton"' not in story_section
+    assert 'openManageTopics(\'igStoryTopicPicker\')' in story_section
+    assert 'id="igEditTopicButton"' not in page
+    assert 'id="manageTopicsModal"' in page
     assert 'id="topicModalTitle">+ Add Topic</h3>' in page
-    assert "openMenuModal('topicDefaultMenu')" in page
+    assert 'id="topicDescription"' not in page
 
     catalogue = page[page.index('id="tab-menu-manager"'):page.index('<!-- CUSTOMERS tab')]
     assert "openMenuEditModal" in page
@@ -475,8 +479,8 @@ def test_topic_and_menu_edit_actions_are_clear_and_metadata_only(page):
 
 def test_instagram_routing_keeps_client_friendly_cards_and_existing_actions(page):
     section = page[page.index('function renderInstagramMediaCard'):page.index('// Shared-post pairing')]
-    assert "View Details" in section
-    for action in ("Edit", "Disable", "Archive", "Status:", "Menu:", "Priority:"):
+    assert "Edit Mapping" in section
+    for action in ("Edit Mapping", "Context: On", "Delete Mapping", "Status:", "Menu:"):
         assert action in section
     assert "/admin/instagram-routes/${id}/active" in page
     assert "/admin/instagram-routes/${id}" in page
@@ -626,7 +630,7 @@ def test_admin_redesign_has_dashboard_gallery_and_drawer(page):
     assert 'id="igContentGallery"' in page
     assert 'data-content-filter="post"' in page
     assert 'data-content-filter="reel"' in page
-    assert 'id="igContentTableView"' in page
+    assert 'id="igContentTableView"' not in page
     assert 'id="contentDetailsDrawer"' in page
     assert 'Open full details' in page
     assert "function openContentDetails" in page
@@ -645,7 +649,8 @@ def test_handoff_notifications_are_global_and_persistent(page):
 
 
 def test_handoff_identity_and_current_menu_actions_are_wired(page):
-    assert "Customer: ${escapeHtml(customer)}" in page
+    assert "${escapeHtml(customer)}" in page
+    assert "Instagram ID: ${escapeHtml(item.customer_external_id" in page
     assert "function handoffCustomerIdentity" in page
     assert "function showGroup(group, selectedTabId = null)" in page
     assert "panel.id === selectedTabId" in page
@@ -673,12 +678,11 @@ def test_second_pass_layout_and_drilldown_navigation_are_explicit(page):
     assert "No published menu is currently serving customers" in page
 
 
-def test_posts_reels_owns_routing_as_a_first_class_subview(page):
+def test_posts_reels_is_a_single_gallery_without_routing_subview(page):
     section = page[page.index('id="tab-instagram-content"'):page.index('id="tab-handoffs"')]
-    assert "data-content-subview=\"gallery\"" in section
-    assert "data-content-subview=\"routing\"" in section
-    assert "data-content-subview=\"list\"" in section
-    assert "setInstagramContentSubview('routing')" in page
+    assert "data-content-subview=\"gallery\"" not in section
+    assert "data-content-subview=\"routing\"" not in section
+    assert "data-content-subview=\"list\"" not in section
     assert "Exact Meta ID" in page
     assert "Instagram Content Routing" not in page[page.index('<aside class="admin-sidebar"'):page.index('</aside>')]
 

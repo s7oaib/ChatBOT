@@ -5,6 +5,7 @@ import re
 import uuid
 from unittest.mock import patch
 
+import pytest
 from fastapi.testclient import TestClient
 
 from camellia import app as app_module
@@ -38,9 +39,9 @@ def _create_cam(identity):
             user_id, "Do you offer wedding gift wrapping?", "ad-identity",
             customer_identity=identity,
         )
-    match = re.search(r"CAM-\d{5,6}", send_reply.call_args.args[1])
-    assert match and escalated.call_count == 1
-    return user_id, match.group(0)
+    rows = [row for row in db.get_handoffs(limit=200) if row["source_user_id"] == user_id]
+    assert len(rows) == 1 and escalated.call_count == 1
+    return user_id, rows[0]["handoff_ref"]
 
 
 def test_username_available_is_stored_and_authenticated_admin_can_display_it():
@@ -61,11 +62,10 @@ def test_username_available_is_stored_and_authenticated_admin_can_display_it():
     item = next(entry for entry in response.json()["handoffs"] if entry["handoff_ref"] == handoff_ref)
     assert item["customer_display_name"] == "@bengalifoodie"
     assert item["customer_username"] == "bengalifoodie"
-    assert "customer_external_id" not in item
-    assert sender_id not in str(item)
+    assert item["customer_external_id"] == sender_id
 
 
-def test_username_unavailable_degrades_to_safe_anonymous_customer_label():
+def test_username_unavailable_uses_neutral_label_and_retains_separate_sender_id():
     sender_id = _sender_id()
     _user_id, handoff_ref = _create_cam({
         "customer_external_id": sender_id,
@@ -74,9 +74,20 @@ def test_username_unavailable_degrades_to_safe_anonymous_customer_label():
     with patch.object(app_module, "require_admin", lambda *args, **kwargs: None):
         response = TestClient(app_module.app).get("/admin/handoffs?limit=200")
     item = next(entry for entry in response.json()["handoffs"] if entry["handoff_ref"] == handoff_ref)
-    assert "customer_external_id" not in item
+    assert item["customer_external_id"] == sender_id
     assert item["customer_display_name"] == "Instagram customer"
-    assert sender_id not in str(item)
+    assert item["identity_status"] == "UNRESOLVED"
+
+
+def test_resolved_display_name_is_used_only_when_username_is_missing():
+    sender_id = _sender_id()
+    db.save_instagram_customer_identity(sender_id, display_name="A Customer")
+    _, ref = _create_cam({"customer_external_id": sender_id, "customer_username": None})
+    with patch.object(app_module, "require_admin", lambda *args, **kwargs: None):
+        response = TestClient(app_module.app).get("/admin/handoffs?limit=200")
+    item = next(entry for entry in response.json()["handoffs"] if entry["handoff_ref"] == ref)
+    assert item["customer_display_name"] == "A Customer"
+    assert item["identity_status"] == "UNRESOLVED"
 
 
 def test_identity_lookup_returns_username_without_exposing_provider_payload(monkeypatch):
@@ -98,15 +109,113 @@ def test_identity_lookup_returns_username_without_exposing_provider_payload(monk
             return False
 
         def get(self, _url, params=None):
-            assert params["fields"] == "username"
+            assert params["fields"] == "name,username,profile_pic"
             return FakeResponse()
 
     monkeypatch.setattr(config, "INSTAGRAM_ACCESS_TOKEN", "test-token")
+    monkeypatch.setattr(config, "INSTAGRAM_AUTH_MODE", "instagram_login")
     monkeypatch.setattr("camellia.instagram_identity.httpx.Client", FakeClient)
     sender_id = _sender_id()
     identity = resolve_instagram_identity(sender_id)
     assert identity.external_id == sender_id
     assert identity.username == "lookup_name"
+
+
+@pytest.mark.parametrize(
+    ("auth_mode", "expected_host"),
+    [("instagram_login", "graph.instagram.com"), ("legacy_page", "graph.facebook.com")],
+)
+def test_identity_lookup_host_comes_from_configured_auth_mode(monkeypatch, auth_mode, expected_host):
+    class FakeResponse:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"username": "meta_name", "name": "Customer", "profile_pic": "https://example.com/p.jpg"}
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def get(self, url, params=None):
+            assert expected_host in url
+            assert params["fields"] == "name,username,profile_pic"
+            return FakeResponse()
+
+    monkeypatch.setattr(config, "INSTAGRAM_AUTH_MODE", auth_mode)
+    monkeypatch.setattr(config, "INSTAGRAM_ACCESS_TOKEN", "opaque-token")
+    monkeypatch.setattr("camellia.instagram_identity.httpx.Client", FakeClient)
+    identity = resolve_instagram_identity(_sender_id())
+    assert identity.username == "meta_name"
+    assert identity.display_name == "Customer"
+    assert identity.profile_pic == "https://example.com/p.jpg"
+
+
+def test_non_200_identity_lookup_logs_only_safe_failure_metadata(monkeypatch, caplog):
+    class FakeResponse:
+        status_code = 400
+
+        @staticmethod
+        def json():
+            return {"error": {"code": 100, "message": "Unknown field in private provider message"}}
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def get(self, _url, params=None):
+            assert params["fields"] == "name,username,profile_pic"
+            return FakeResponse()
+
+    token = "secret-access-token"
+    sender_id = _sender_id()
+    monkeypatch.setattr(config, "INSTAGRAM_AUTH_MODE", "instagram_login")
+    monkeypatch.setattr(config, "INSTAGRAM_ACCESS_TOKEN", token)
+    monkeypatch.setattr("camellia.instagram_identity.httpx.Client", FakeClient)
+    with caplog.at_level(logging.INFO, logger="camellia.instagram_identity"):
+        identity = resolve_instagram_identity(sender_id)
+    assert identity.external_id == sender_id
+    assert identity.username is None
+    assert "INSTAGRAM_IDENTITY_LOOKUP status=failed http_status=400 category=unsupported_field auth_mode=instagram_login" in caplog.text
+    assert token not in caplog.text
+    assert sender_id not in caplog.text
+    assert "Unknown field in private provider message" not in caplog.text
+
+
+def test_unexpected_identity_lookup_exception_is_nonblocking_and_redacted(monkeypatch, caplog):
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def get(self, *_args, **_kwargs):
+            raise RuntimeError("private error includes secret-access-token")
+
+    monkeypatch.setattr(config, "INSTAGRAM_AUTH_MODE", "legacy_page")
+    monkeypatch.setattr(config, "INSTAGRAM_ACCESS_TOKEN", "secret-access-token")
+    monkeypatch.setattr("camellia.instagram_identity.httpx.Client", FakeClient)
+    with caplog.at_level(logging.INFO, logger="camellia.instagram_identity"):
+        identity = resolve_instagram_identity(_sender_id())
+    assert identity.username is None
+    assert "category=provider_unavailable" in caplog.text
+    assert "secret-access-token" not in caplog.text
 
 
 def test_identity_and_username_are_not_emitted_into_ordinary_logs(caplog):
@@ -133,3 +242,75 @@ def test_cam_identity_preserves_deduplication():
     rows = [row for row in db.get_handoffs(limit=200) if row["source_user_id"] == user_id]
     assert len(rows) == 1
     assert escalated.call_count == 1
+
+
+def test_inbound_meta_lookup_persists_username_and_exact_igsid():
+    sender_id = _sender_id()
+    with patch.object(app_module, "resolve_instagram_identity") as lookup:
+        lookup.return_value.username = "meta_customer"
+        identity = app_module._cached_instagram_identity(sender_id, lookup=True)
+    assert identity["customer_external_id"] == sender_id
+    assert identity["customer_username"] == "meta_customer"
+    assert db.get_instagram_customer_identity(sender_id)["identity_status"] == "RESOLVED"
+    _, ref = _create_cam(identity)
+    assert db.get_handoff_by_ref(ref)["customer_username"] == "meta_customer"
+
+
+def test_failed_lookup_preserves_cached_username_and_does_not_repeat_immediately():
+    sender_id = _sender_id()
+    db.save_instagram_customer_identity(sender_id, username="known_name", lookup_at="2020-01-01T00:00:00")
+    with patch.object(app_module, "resolve_instagram_identity") as lookup:
+        lookup.return_value.username = None
+        identity = app_module._cached_instagram_identity(sender_id, lookup=True)
+        app_module._cached_instagram_identity(sender_id, lookup=True)
+    assert lookup.call_count == 1
+    assert identity["customer_username"] == "known_name"
+
+
+def test_username_change_updates_same_igsid_and_active_handoff():
+    sender_id = _sender_id()
+    _, ref = _create_cam({"customer_external_id": sender_id, "customer_username": "old_name"})
+    with patch.object(app_module, "send_instagram_reply") as reply:
+        app_module._process_instagram_event(sender_id, "Another question", "ad-identity", instagram_username="new_name")
+    assert not reply.called  # Staff still own the active conversation.
+    assert db.get_handoff_by_ref(ref)["customer_username"] == "new_name"
+    assert db.get_instagram_customer_identity(sender_id)["customer_username"] == "new_name"
+    assert len([row for row in db.get_handoffs(limit=200) if row["source_user_id"] == sender_id]) == 1
+
+
+def test_handoff_ui_search_and_profile_link_are_username_guarded():
+    html = TestClient(app_module.app).get("/admin").text
+    assert "handoffMatchesSearch(item, query)" in html
+    assert "replace(/^@+/, '')" in html
+    assert "item.customer_external_id, item.handoff_ref" in html
+    assert "Open Instagram Profile" in html
+    assert "test(username) ?" in html
+    assert "Instagram ID: ${escapeHtml(item.customer_external_id" in html
+
+
+def test_lookup_outage_does_not_block_handoff_creation():
+    sender_id = _sender_id()
+    with patch.object(app_module, "resolve_instagram_identity", side_effect=RuntimeError("Meta unavailable")):
+        identity = app_module._cached_instagram_identity(sender_id, lookup=True)
+    assert identity["identity_status"] == "UNRESOLVED"
+    _, ref = _create_cam(identity)
+    assert db.get_handoff_by_ref(ref)["customer_external_id"] == sender_id
+
+
+def test_new_handoff_retries_missing_username_once_then_replies():
+    sender_id = _sender_id()
+    session_memory.clear_session(sender_id, "instagram")
+    with patch.object(app_module, "resolve_instagram_identity") as lookup, \
+         patch.object(app_module, "send_instagram_reply") as reply, \
+         patch.object(app_module.escalator, "handle_escalation", return_value={"escalation_id": 1}), \
+         patch.object(config, "WHATSAPP_BUSINESS_NUMBER", "919800000000"), \
+         patch.object(config, "GROQ_ENABLED", False), \
+         patch.object(config, "STRUCTURED_NLU_ENABLED", False), \
+         patch.object(config, "SEMANTIC_ROUTER_ENABLED", False):
+        lookup.return_value.username = None
+        app_module._process_instagram_event(sender_id, "Do you offer wedding gift wrapping?", "ad-identity", resolve_identity=True)
+    assert lookup.call_count == 2
+    assert reply.called
+    rows = [row for row in db.get_handoffs(limit=200) if row["source_user_id"] == sender_id]
+    assert len(rows) == 1
+    assert db.get_instagram_customer_identity(sender_id)["identity_status"] == "UNRESOLVED"

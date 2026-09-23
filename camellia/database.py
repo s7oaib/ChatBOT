@@ -683,6 +683,19 @@ class Database:
             self._ensure_column(cursor, "cross_channel_handoffs", "customer_username", "TEXT")
             self._ensure_column(cursor, "cross_channel_handoffs", "customer_external_id", "TEXT")
 
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS instagram_customer_identities (
+                customer_external_id TEXT PRIMARY KEY,
+                customer_username TEXT,
+                customer_display_name TEXT,
+                customer_profile_pic TEXT,
+                identity_resolved_at TEXT,
+                identity_status TEXT NOT NULL DEFAULT 'UNRESOLVED',
+                last_lookup_at TEXT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+
             # Admin notification state is deliberately separate from the
             # handoff lifecycle. Reading a notification must never mutate a
             # CAM, and marking it seen must never change WAITING_FOR_HUMAN.
@@ -754,6 +767,7 @@ class Database:
                 ad_id TEXT,
                 campaign_id TEXT,
                 routing_topic TEXT NOT NULL DEFAULT '',
+                source_description TEXT NOT NULL DEFAULT '',
                 knowledge_scope TEXT NOT NULL DEFAULT '[]',
                 escalation_policy TEXT NOT NULL DEFAULT 'human_if_unsupported',
                 priority_products TEXT NOT NULL DEFAULT '[]',
@@ -770,6 +784,38 @@ class Database:
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_instagram_routes_media ON instagram_source_routes(media_id, active)")
             # A reel shared into a DM is matched by its normalized shortcode.
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_instagram_routes_shortcode ON instagram_source_routes(shortcode, active)")
+
+            # Posts and Reels are an inventory, not routing rows.  Keep this
+            # registry separate so discovery can scale without turning every
+            # item into a customer-facing source route.
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS instagram_media (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                instagram_media_id TEXT UNIQUE,
+                media_type TEXT NOT NULL,
+                permalink TEXT,
+                shortcode TEXT,
+                caption TEXT,
+                media_url TEXT,
+                thumbnail_url TEXT,
+                published_at TIMESTAMP,
+                route_mode TEXT NOT NULL DEFAULT 'DEFAULT'
+                    CHECK(route_mode IN ('DEFAULT', 'CUSTOM', 'DISABLED')),
+                topic_id TEXT,
+                category TEXT,
+                custom_route_id INTEGER,
+                sync_status TEXT NOT NULL DEFAULT 'DISCOVERED',
+                needs_review INTEGER NOT NULL DEFAULT 0,
+                active INTEGER NOT NULL DEFAULT 1,
+                first_seen_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                last_seen_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+            cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_instagram_media_permalink ON instagram_media(permalink) WHERE permalink IS NOT NULL")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_instagram_media_shortcode ON instagram_media(shortcode)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_instagram_media_gallery ON instagram_media(media_type, route_mode, needs_review, published_at DESC)")
 
             # A Story reply is useful evidence even before an operator maps it
             # to a Topic. Keep this registry separate from routes so an
@@ -981,6 +1027,7 @@ class Database:
             cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_topics_normalized_name ON instagram_topics(name COLLATE NOCASE)")
 
             self._ensure_column(cursor, "instagram_source_routes", "topic_id", "TEXT")
+            self._ensure_column(cursor, "instagram_source_routes", "source_description", "TEXT NOT NULL DEFAULT ''")
             # The menu shown for this route. Defaults from the selected
             # Topic's default_menu_id at save time (see validate_route_payload)
             # but is its own column so a route can override it independently —
@@ -1298,6 +1345,100 @@ class Database:
             conn.commit()
             return dict(conn.execute("SELECT * FROM menu_image_versions WHERE id = ?", (version_id,)).fetchone())
 
+    def upsert_instagram_media(self, media: Dict[str, Any]) -> Dict[str, Any]:
+        """Upsert Graph metadata without changing an operator's route mode."""
+        now = datetime.utcnow().isoformat()
+        media_id = str(media.get("instagram_media_id") or "").strip()
+        if not media_id:
+            raise ValueError("instagram_media_id is required")
+        with self.get_connection() as conn:
+            existing = conn.execute(
+                "SELECT * FROM instagram_media WHERE instagram_media_id=?", (media_id,)
+            ).fetchone()
+            if existing:
+                conn.execute(
+                    """UPDATE instagram_media SET media_type=?, permalink=?, shortcode=?, caption=?,
+                       media_url=?, thumbnail_url=?, published_at=?, sync_status=?, last_seen_at=?, updated_at=?
+                       WHERE instagram_media_id=?""",
+                    (media.get("media_type") or existing["media_type"], media.get("permalink"),
+                     media.get("shortcode"), media.get("caption"), media.get("media_url"),
+                     media.get("thumbnail_url"), media.get("published_at"), media.get("sync_status", "SYNCED"),
+                     now, now, media_id),
+                )
+            else:
+                conn.execute(
+                    """INSERT INTO instagram_media (instagram_media_id, media_type, permalink, shortcode, caption,
+                       media_url, thumbnail_url, published_at, route_mode, sync_status, needs_review, active,
+                       first_seen_at, last_seen_at, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'DEFAULT', ?, 0, 1, ?, ?, ?, ?)""",
+                    (media_id, media.get("media_type") or "IMAGE", media.get("permalink"), media.get("shortcode"),
+                     media.get("caption"), media.get("media_url"), media.get("thumbnail_url"), media.get("published_at"),
+                     media.get("sync_status", "SYNCED"), now, now, now, now),
+                )
+            conn.commit()
+            return dict(conn.execute("SELECT * FROM instagram_media WHERE instagram_media_id=?", (media_id,)).fetchone())
+
+    def list_instagram_media(self, *, page: int = 1, page_size: int = 24, media_type: Optional[str] = None,
+                             route_mode: Optional[str] = None, needs_review: Optional[bool] = None,
+                             topic_id: Optional[str] = None, search: Optional[str] = None,
+                             sort: str = "newest", source_type: Optional[str] = None,
+                             mapping_status: Optional[str] = None,
+                             context_active: Optional[bool] = None) -> tuple[List[Dict[str, Any]], int]:
+        clauses, params = ["1=1"], []
+        if source_type == "reel":
+            clauses.append("media_type='VIDEO'")
+        elif source_type == "post":
+            clauses.append("media_type!='VIDEO'")
+        if media_type:
+            clauses.append("media_type=?"); params.append(media_type.upper())
+        if route_mode:
+            clauses.append("route_mode=?"); params.append(route_mode.upper())
+        if needs_review is not None:
+            clauses.append("needs_review=?"); params.append(int(needs_review))
+        if topic_id:
+            clauses.append("topic_id=?"); params.append(topic_id)
+        if mapping_status == "mapped":
+            clauses.append("(topic_id IS NOT NULL OR route_mode IN ('CUSTOM','DISABLED') OR EXISTS (SELECT 1 FROM instagram_source_routes r WHERE r.media_id=instagram_media.instagram_media_id AND r.source_type IN ('post','reel') AND r.archived_at IS NULL))")
+        elif mapping_status == "unmapped":
+            clauses.append("(topic_id IS NULL AND route_mode='DEFAULT' AND NOT EXISTS (SELECT 1 FROM instagram_source_routes r WHERE r.media_id=instagram_media.instagram_media_id AND r.source_type IN ('post','reel') AND r.archived_at IS NULL))")
+        if context_active is not None:
+            clauses.append("EXISTS (SELECT 1 FROM instagram_source_routes r WHERE r.media_id=instagram_media.instagram_media_id AND r.source_type IN ('post','reel') AND r.archived_at IS NULL AND r.active=?)")
+            params.append(int(context_active))
+        if search:
+            pattern = f"%{search[:200]}%"
+            clauses.append("(instagram_media_id LIKE ? OR permalink LIKE ? OR caption LIKE ? OR EXISTS (SELECT 1 FROM instagram_source_routes r WHERE r.media_id=instagram_media.instagram_media_id AND r.source_type IN ('post','reel') AND r.archived_at IS NULL AND (r.routing_topic LIKE ? OR r.source_description LIKE ?)))")
+            params.extend([pattern] * 5)
+        where = " AND ".join(clauses)
+        direction = "ASC" if sort == "oldest" else "DESC"
+        order_column = "updated_at" if sort == "recently_edited" else "published_at"
+        with self.get_connection() as conn:
+            total = int(conn.execute(f"SELECT COUNT(*) AS n FROM instagram_media WHERE {where}", params).fetchone()["n"])
+            rows = conn.execute(
+                f"SELECT * FROM instagram_media WHERE {where} ORDER BY {order_column} {direction}, id {direction} LIMIT ? OFFSET ?",
+                [*params, page_size, (page - 1) * page_size],
+            ).fetchall()
+        return [dict(row) for row in rows], total
+
+    def get_instagram_media(self, item_id: int) -> Optional[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            row = conn.execute("SELECT * FROM instagram_media WHERE id=?", (item_id,)).fetchone()
+            return dict(row) if row else None
+
+    def get_instagram_media_by_meta_id(self, media_id: str) -> Optional[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            row = conn.execute("SELECT * FROM instagram_media WHERE instagram_media_id=?", (media_id,)).fetchone()
+            return dict(row) if row else None
+
+    def update_instagram_media_route(self, item_id: int, *, route_mode: str, topic_id: Optional[str],
+                                     custom_route_id: Optional[int], needs_review: bool) -> Optional[Dict[str, Any]]:
+        now = datetime.utcnow().isoformat()
+        with self.get_connection() as conn:
+            conn.execute("UPDATE instagram_media SET route_mode=?, topic_id=?, custom_route_id=?, needs_review=?, updated_at=? WHERE id=?",
+                         (route_mode, topic_id, custom_route_id, int(needs_review), now, item_id))
+            conn.commit()
+            row = conn.execute("SELECT * FROM instagram_media WHERE id=?", (item_id,)).fetchone()
+            return dict(row) if row else None
+
     def save_instagram_source_route(self, route: Dict[str, Any], routing_id: Optional[int] = None) -> Dict[str, Any]:
         """Create/update one source route, deduplicating URL and identifiers."""
         now = datetime.utcnow().isoformat()
@@ -1307,7 +1448,7 @@ class Database:
         values = (
             route["source_type"], route.get("canonical_url"), route.get("shortcode"),
             route.get("media_id"), route.get("ad_id"), route.get("campaign_id"),
-            route.get("routing_topic", ""), json.dumps(route.get("knowledge_scope", [])),
+            route.get("routing_topic", ""), route.get("source_description", ""), json.dumps(route.get("knowledge_scope", [])),
             route.get("escalation_policy", "human_if_unsupported"),
             json.dumps(route.get("priority_products", [])), int(bool(route.get("active", True))),
             route.get("topic_id"), route.get("menu_id"), menu_mode,
@@ -1329,16 +1470,16 @@ class Database:
                 cursor = conn.execute(
                     """INSERT INTO instagram_source_routes
                     (source_type, canonical_url, shortcode, media_id, ad_id, campaign_id,
-                     routing_topic, knowledge_scope, escalation_policy, priority_products,
+                     routing_topic, source_description, knowledge_scope, escalation_policy, priority_products,
                     active, topic_id, menu_id, menu_mode, preview_url, media_type, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     values[:-1] + (now, now),
                 )
                 routing_id = int(cursor.lastrowid)
             else:
                 cursor = conn.execute(
                     """UPDATE instagram_source_routes SET source_type=?, canonical_url=?, shortcode=?,
-                    media_id=?, ad_id=?, campaign_id=?, routing_topic=?, knowledge_scope=?,
+                    media_id=?, ad_id=?, campaign_id=?, routing_topic=?, source_description=?, knowledge_scope=?,
                     escalation_policy=?, priority_products=?, active=?, topic_id=?, menu_id=?, menu_mode=?,
                     preview_url=?, media_type=?, updated_at=?, archived_at=NULL
                     WHERE routing_id=?""",
@@ -1425,11 +1566,21 @@ class Database:
             conn.commit()
         return dict(row)
 
-    def list_instagram_source_routes(self, include_archived: bool = False) -> List[Dict[str, Any]]:
-        where = "" if include_archived else "WHERE archived_at IS NULL"
+    def list_instagram_source_routes(self, include_archived: bool = False,
+                                     media_ids: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+        clauses, params = [], []
+        if not include_archived:
+            clauses.append("archived_at IS NULL")
+        if media_ids is not None:
+            if not media_ids:
+                return []
+            clauses.append(f"media_id IN ({','.join('?' for _ in media_ids)})")
+            params.extend(media_ids)
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
         with self.get_connection() as conn:
             rows = conn.execute(
-                f"SELECT * FROM instagram_source_routes {where} ORDER BY updated_at DESC, routing_id DESC"
+                f"SELECT * FROM instagram_source_routes {where} ORDER BY updated_at DESC, routing_id DESC",
+                params,
             ).fetchall()
         return [dict(row) for row in rows]
 
@@ -1724,35 +1875,61 @@ class Database:
             )
             conn.commit()
 
-    def list_instagram_story_sources(self, include_deleted: bool = False) -> List[Dict[str, Any]]:
+    def list_instagram_story_sources(self, include_deleted: bool = False, *, page: int = 1,
+                                     page_size: Optional[int] = None, search: Optional[str] = None,
+                                     mapping_status_filter: Optional[str] = None,
+                                     context_active: Optional[bool] = None,
+                                     sort: str = "newest", with_total: bool = False):
         """Return captured Stories with exact mapping status for admin.
 
         Deleted Stories stay in the database as local tombstones. The normal
         list hides them; History asks explicitly for ``include_deleted``.
         """
+        clauses, params = [], []
+        if not include_deleted:
+            clauses.append("s.admin_deleted=0")
+            if mapping_status_filter is None:
+                clauses.append("UPPER(COALESCE(s.story_status,'ACTIVE')) NOT IN ('EXPIRED','REMOVED')")
+        if search:
+            pattern = f"%{search[:200]}%"
+            clauses.append("(s.story_media_id LIKE ? OR COALESCE(r.routing_topic,'') LIKE ? OR COALESCE(r.source_description,'') LIKE ?)")
+            params.extend([pattern] * 3)
+        if mapping_status_filter == "MAPPED":
+            clauses.append("r.routing_id IS NOT NULL AND r.archived_at IS NULL AND r.active=1")
+        elif mapping_status_filter == "DISABLED":
+            clauses.append("r.routing_id IS NOT NULL AND r.archived_at IS NULL AND r.active=0")
+        elif mapping_status_filter == "UNMAPPED":
+            clauses.append("(r.routing_id IS NULL OR r.archived_at IS NOT NULL)")
+        elif mapping_status_filter in {"ACTIVE", "EXPIRED", "REMOVED"}:
+            clauses.append("UPPER(COALESCE(s.story_status,'ACTIVE'))=?")
+            params.append(mapping_status_filter)
+        elif mapping_status_filter == "DELETED":
+            clauses.append("s.admin_deleted=1")
+        if context_active is not None:
+            clauses.append("COALESCE(r.active,0)=?")
+            params.append(int(context_active))
+        where = " AND ".join(clauses) if clauses else "1=1"
+        sort_column = "r.updated_at" if sort == "recently_edited" else "s.last_seen"
+        direction = "ASC" if sort == "oldest" else "DESC"
         with self.get_connection() as conn:
-            rows = conn.execute(
-                "SELECT * FROM instagram_story_sources "
-                + ("" if include_deleted else "WHERE admin_deleted = 0 ")
-                + "ORDER BY last_seen DESC, story_media_id"
-            ).fetchall()
+            join = "LEFT JOIN instagram_source_routes r ON r.routing_id=(SELECT rr.routing_id FROM instagram_source_routes rr WHERE rr.source_type='story' AND rr.media_id=s.story_media_id ORDER BY rr.updated_at DESC, rr.routing_id DESC LIMIT 1)"
+            total = int(conn.execute(f"SELECT COUNT(*) AS n FROM instagram_story_sources s {join} WHERE {where}", params).fetchone()["n"])
+            sql = f"SELECT s.*, r.routing_id, r.topic_id, r.routing_topic, r.source_description, r.menu_id, r.menu_mode, r.active AS route_active, r.archived_at AS route_archived_at FROM instagram_story_sources s {join} WHERE {where} ORDER BY {sort_column} {direction}, s.story_media_id"
+            if page_size is not None:
+                sql += " LIMIT ? OFFSET ?"
+                params = [*params, page_size, (page - 1) * page_size]
+            rows = conn.execute(sql, params).fetchall()
             output = []
             for row in rows:
                 item = dict(row)
-                route = conn.execute(
-                    """
-                    SELECT routing_id, topic_id, routing_topic, active, archived_at
-                    FROM instagram_source_routes
-                    WHERE source_type = 'story' AND media_id = ?
-                    ORDER BY updated_at DESC, routing_id DESC LIMIT 1
-                    """,
-                    (item["story_media_id"],),
-                ).fetchone()
+                route_active = item.pop("route_active")
+                route_archived_at = item.pop("route_archived_at")
+                route = item.get("routing_id")
                 if item.get("admin_deleted"):
                     mapping_status = "DELETED"
-                elif route and route["archived_at"]:
+                elif route and route_archived_at:
                     mapping_status = "ARCHIVED"
-                elif route and not route["active"]:
+                elif route and not route_active:
                     mapping_status = "DISABLED"
                 elif route:
                     mapping_status = "MAPPED"
@@ -1761,9 +1938,13 @@ class Database:
                 item["media_id"] = item["story_media_id"]
                 item["mapping_status"] = mapping_status
                 item["status"] = mapping_status
-                item["routing_id"] = route["routing_id"] if route else None
-                item["topic_id"] = route["topic_id"] if route else None
-                item["routing_topic"] = route["routing_topic"] if route else None
+                item["routing_id"] = route
+                item["topic_id"] = item.get("topic_id") if route else None
+                item["routing_topic"] = item.get("routing_topic") if route else None
+                item["source_description"] = item.get("source_description") or ""
+                item["menu_id"] = item.get("menu_id") if route else None
+                item["menu_mode"] = item.get("menu_mode") if route else "INHERIT"
+                item["active"] = bool(route_active) if route else False
                 # Admin-only ordinal convenience label — never a routing
                 # identity. story_media_id above remains what any reply/
                 # webhook or mapping actually matches against.
@@ -1776,7 +1957,7 @@ class Database:
                 else:
                     item["story_sequence_display"] = "Story — sequence unavailable"
                 output.append(item)
-        return output
+        return (output, total) if with_total else output
 
     def get_instagram_story_source(self, story_media_id: str) -> Optional[Dict[str, Any]]:
         media_id = str(story_media_id or "").strip()
@@ -2447,8 +2628,32 @@ class Database:
         values.append(topic_id)
         with self.get_connection() as conn:
             cursor = conn.execute(f"UPDATE instagram_topics SET {', '.join(fields)} WHERE topic_id = ?", values)
+            if cursor.rowcount and name is not None:
+                conn.execute("UPDATE instagram_source_routes SET routing_topic=?, updated_at=? WHERE topic_id=?", (name, datetime.utcnow().isoformat(), topic_id))
             conn.commit()
         return self.get_instagram_topic(topic_id) if cursor.rowcount else None
+
+    def instagram_topic_references(self, topic_id: str) -> Dict[str, int]:
+        with self.get_connection() as conn:
+            return {
+                "source_routes": conn.execute("SELECT COUNT(*) AS n FROM instagram_source_routes WHERE topic_id=?", (topic_id,)).fetchone()["n"],
+                "media_gallery": conn.execute("SELECT COUNT(*) AS n FROM instagram_media WHERE topic_id=?", (topic_id,)).fetchone()["n"],
+            }
+
+    def delete_instagram_topic(self, topic_id: str, replacement_topic_id: Optional[str] = None) -> bool:
+        with self.get_connection() as conn:
+            if replacement_topic_id:
+                replacement = conn.execute("SELECT name FROM instagram_topics WHERE topic_id=?", (replacement_topic_id,)).fetchone()
+                if not replacement:
+                    return False
+                conn.execute("UPDATE instagram_source_routes SET topic_id=?, routing_topic=? WHERE topic_id=?", (replacement_topic_id, replacement["name"], topic_id))
+                conn.execute("UPDATE instagram_media SET topic_id=? WHERE topic_id=?", (replacement_topic_id, topic_id))
+            else:
+                conn.execute("UPDATE instagram_source_routes SET topic_id=NULL, routing_topic='' WHERE topic_id=?", (topic_id,))
+                conn.execute("UPDATE instagram_media SET topic_id=NULL WHERE topic_id=?", (topic_id,))
+            cursor = conn.execute("DELETE FROM instagram_topics WHERE topic_id=?", (topic_id,))
+            conn.commit()
+            return bool(cursor.rowcount)
 
     @staticmethod
     def _create_indexes(cursor) -> None:
@@ -3367,6 +3572,46 @@ class Database:
                 (customer_username, customer_external_id, handoff_ref),
             )
             conn.commit()
+
+    def get_instagram_customer_identity(self, external_id: str) -> Optional[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM instagram_customer_identities WHERE customer_external_id = ?",
+                (external_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def save_instagram_customer_identity(
+        self, external_id: str, *, username: Optional[str] = None,
+        display_name: Optional[str] = None, profile_pic: Optional[str] = None,
+        lookup_at: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Cache Meta identity without erasing a previously resolved value."""
+        resolved_at = lookup_at if (username or display_name) else None
+        status = "RESOLVED" if username else "UNRESOLVED"
+        with self.get_connection() as conn:
+            conn.execute(
+                """INSERT INTO instagram_customer_identities
+                   (customer_external_id, customer_username, customer_display_name,
+                    customer_profile_pic, identity_resolved_at, identity_status, last_lookup_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(customer_external_id) DO UPDATE SET
+                    customer_username=COALESCE(excluded.customer_username, customer_username),
+                    customer_display_name=COALESCE(excluded.customer_display_name, customer_display_name),
+                    customer_profile_pic=COALESCE(excluded.customer_profile_pic, customer_profile_pic),
+                    identity_resolved_at=COALESCE(excluded.identity_resolved_at, identity_resolved_at),
+                    identity_status=CASE WHEN excluded.identity_status='RESOLVED' OR customer_username IS NOT NULL
+                        THEN 'RESOLVED' ELSE 'UNRESOLVED' END,
+                    last_lookup_at=COALESCE(excluded.last_lookup_at, last_lookup_at),
+                    updated_at=CURRENT_TIMESTAMP""",
+                (external_id, username, display_name, profile_pic, resolved_at, status, lookup_at),
+            )
+            row = conn.execute(
+                "SELECT * FROM instagram_customer_identities WHERE customer_external_id = ?",
+                (external_id,),
+            ).fetchone()
+            conn.commit()
+            return dict(row)
 
     def get_handoff_by_ref(self, handoff_ref: str) -> Optional[Dict[str, Any]]:
         """Looks up a handoff by its customer-facing reference."""

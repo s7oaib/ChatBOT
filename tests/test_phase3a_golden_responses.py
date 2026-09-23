@@ -356,7 +356,6 @@ def test_kolkata_move_question_keeps_expansion_route():
 
 
 @pytest.mark.parametrize("message", [
-    "I want to order",
     "I'm ready to place the order",
     "Let's confirm",
     "finalise it",
@@ -397,7 +396,6 @@ def _ask_instagram(message, user_id=None):
 
 
 @pytest.mark.parametrize("message", [
-    "I want to order",
     "I'm ready to place the order",
     "Let's confirm",
     "finalise it",

@@ -25,6 +25,13 @@ class ApprovedQA:
     answer: str
     context: str = "general"
     asset_keys: Tuple[str, ...] = ()
+    blocks: Tuple["ResponseBlock", ...] = ()
+
+
+@dataclass(frozen=True)
+class ResponseBlock:
+    kind: str
+    value: str
 
 
 @dataclass(frozen=True)
@@ -66,7 +73,6 @@ _STOP_MARKERS = (
     "After custoner has finalized order:",
     "When customer is asking questions that are not in this list",
     "24 HOURS AFTER SENDING ABOVE, SEND THIS",
-    "SHARE WEEKLY MENU",
 )
 _PLACEHOLDER_ASSETS = {
     "INSERT CURRENT MENU HERE": "weekly_menu",
@@ -75,6 +81,7 @@ _PLACEHOLDER_ASSETS = {
     "INSERT AAMAR MENU HERE": "aamar_menu",
     "INSERT SIGNATURE MENU HERE": "signature_menu",
     "INSERT LATEST WEEKLY LUNCH/ DINNER MENU HERE": "weekly_menu",
+    "SHARE WEEKLY MENU": "weekly_menu",
 }
 
 
@@ -109,6 +116,42 @@ def _clean_answer(raw_lines: Sequence[str]) -> Tuple[str, Tuple[str, ...]]:
     # normalized, but sentence order and wording are not changed.
     answer = re.sub(r"\n[ \t]*\n(?:[ \t]*\n)+", "\n\n", answer)
     return answer, tuple(dict.fromkeys(assets))
+
+
+def _ordered_blocks(raw_lines: Sequence[str], qa_id: str) -> Tuple[ResponseBlock, ...]:
+    """Keep approved wording and place each asset at its approved response slot."""
+    lines = list(raw_lines)
+    if qa_id in {"sondesh_details_client", "sondesh_price_client"}:
+        # The latest client delivery instruction explicitly places Signature's
+        # card before the Porter sentence. Keep that sentence verbatim.
+        signature = next((i for i, line in enumerate(lines) if line.strip() == "INSERT SIGNATURE MENU HERE"), None)
+        if signature is not None:
+            porter = next((i for i, line in enumerate(lines[:signature]) if line.strip() == "Porter charges are on actuals."), None)
+            if porter is not None:
+                sentence = lines.pop(porter)
+                signature -= 1
+                lines.insert(signature + 1, sentence)
+    blocks: List[ResponseBlock] = []
+    pending: List[str] = []
+
+    def flush() -> None:
+        if pending:
+            text = re.sub(r"\n[ \t]*\n(?:[ \t]*\n)+", "\n\n", "\n".join(pending).strip())
+            if text:
+                blocks.append(ResponseBlock("TEXT", text))
+            pending.clear()
+
+    for line in lines:
+        marker = line.strip()
+        asset = _PLACEHOLDER_ASSETS.get(marker)
+        if asset:
+            flush()
+            kind = "IMAGE_GROUP" if asset == "sondesh_addon_images" else "MENU" if "menu" in asset else "ASSET"
+            blocks.append(ResponseBlock(kind, asset))
+        elif marker != "ADD LINK TO WHATSAPP":
+            pending.append(line.rstrip())
+    flush()
+    return tuple(blocks)
 
 
 def parse_source(source_text: Optional[str] = None) -> Tuple[ApprovedQA, ...]:
@@ -154,7 +197,7 @@ def parse_source(source_text: Optional[str] = None) -> Tuple[ApprovedQA, ...]:
             r"sharing our full menu for the week below", answer, re.I,
         ):
             assets = tuple(dict.fromkeys((*assets, "weekly_menu")))
-        entries.append(ApprovedQA(qa_id, question, answer, context, assets))
+        entries.append(ApprovedQA(qa_id, question, answer, context, assets, _ordered_blocks(raw_answer, qa_id)))
     return tuple(entries)
 
 
@@ -276,13 +319,30 @@ def match(message: str, facts: Optional[Dict[str, Any]] = None) -> Optional[Appr
 
     if re.search(r"\b(?:how\s+to\s+pay|how\s+do\s+i\s+pay|payment\s+(?:method|options?))\b", text, re.I):
         return result("home_table_payment" if home else "general_payment_client")
+    if re.search(
+        r"\b(?:how\s+(?:do\s+i|can\s+i|to)\s+(?:place\s+)?(?:an?\s+)?order|"
+        r"how\s+can\s+i\s+place\s+(?:an?\s+)?order|"
+        r"i\s+(?:want|would\s+like)\s+to\s+(?:place\s+)?(?:an?\s+)?order|"
+        r"what\s+are\s+the\s+next\s+steps\s+to\s+(?:order|place\s+(?:an?\s+)?order)|"
+        r"how\s+(?:do\s+i|can\s+i)\s+(?:pre\s*[- ]?book|pre\s*[- ]?order))\b",
+        text,
+        re.I,
+    ):
+        return result("order_prebook")
     if re.search(r"\b(?:pre\s*[- ]?book|pre\s*[- ]?order|how\s+to\s+order\s+(?:from|an?)\s+menu|order\s+ala\s*[- ]?carte)\b", text, re.I):
         return result(
             "order_prebook"
             if state.get("order_flow_context") or re.search(r"\bto\s+place\s+an\s+order\b", text, re.I)
             else "alacarte_prebook"
         )
-    if re.search(r"\b(?:ready\s+to\s+(?:place|order)|placed\s+(?:my|the)\s+order|confirm\s+(?:my|the)\s+order|finali[sz]e\s+(?:it|my\s+order))\b", text, re.I):
+    if re.search(
+        r"\b(?:ready\s+to\s+(?:place|order)|placed\s+(?:my|the)\s+order|"
+        r"confirm\s+(?:my|the)\s+order|finali[sz]e\s+(?:it|my\s+order)|"
+        r"(?:i\s*(?:'ve|have)\s+)?finali[sz]ed\s+(?:my\s+)?order|"
+        r"order\s+is\s+final|i\s*(?:'ve|have)\s+selected\s+everything)\b",
+        text,
+        re.I,
+    ):
         return result("order_ready_handoff")
     if re.search(r"\b(?:how\s+do\s+i\s+pay|payment)\b", text, re.I):
         return result("general_payment_client")

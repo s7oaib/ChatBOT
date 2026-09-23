@@ -101,6 +101,7 @@ class SessionMemoryManager:
                     "size": None,
                     "quantity": 1,
                 },
+                "order_intake_draft": None,
             },
             "turns": [],
         }
@@ -158,7 +159,7 @@ class SessionMemoryManager:
             "active_topic", "active_entity", "active_intent",
             "pending_clarification", "clarification_options", "clarification_intent", "presented_options",
             "last_bot_question", "last_answer_id", "last_assets_sent", "last_asset_ids", "active_asset",
-            "cart", "order_draft",
+            "cart", "order_draft", "order_intake_draft",
         }
         for key in transient:
             facts[key] = defaults[key]

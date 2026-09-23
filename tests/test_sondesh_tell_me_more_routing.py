@@ -40,7 +40,7 @@ def test_explicit_sondesh_overview_uses_frozen_canonical_route(message, monkeypa
     assert assets == EXPECTED_ASSETS
     assert "Which one would you like to see" not in response
     assert "CAM-" not in response
-    assert facts["last_route_source"] == "client_approved_qa"
+    assert facts["last_route_source"] == "EXACT_APPROVED"
     assert facts["last_llm_called"] is False
 
 

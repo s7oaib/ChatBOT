@@ -218,7 +218,7 @@ def resolve(text: str, state: Dict[str, Any]) -> ContextResolution:
         if _DELIVERY.search(value) or value in {"where", "when", "tomorrow"}:
             return ContextResolution("followup_delivery", str(topic), confidence=0.9)
         if value in {"veg", "vegetarian", "non veg", "non-veg", "chicken", "mangsho", "fish"}:
-            return ContextResolution("followup_option", str(topic), entity=value, confidence=0.95)
+            return ContextResolution("followup_option", value, confidence=0.95)
         if _RESEND_WORDS.search(value):
             return ContextResolution("asset_request", str(topic), asset="active", confidence=0.9)
 

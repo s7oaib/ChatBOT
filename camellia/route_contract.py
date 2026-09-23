@@ -14,6 +14,10 @@ EXACT_APPROVED = "EXACT_APPROVED"
 GROUNDED_APPROVED = "GROUNDED_APPROVED"
 INSUFFICIENT_KNOWLEDGE = "INSUFFICIENT_KNOWLEDGE"
 SENSITIVE_BUSINESS_FACT = "SENSITIVE_BUSINESS_FACT"
+SYSTEM_CONVERSATION = "SYSTEM_CONVERSATION"
+GROUNDED_DERIVED = "GROUNDED_DERIVED"
+HUMAN_HANDOFF = "HUMAN_HANDOFF"
+SOURCE_DESCRIPTION = "SOURCE_DESCRIPTION"
 
 _HANDOFF_TEMPLATES = frozenset({
     None,
@@ -53,6 +57,14 @@ def classify_lane(
     facts: Dict[str, Any],
 ) -> str:
     """Map the existing response metadata to the authoritative decision lane."""
+    if facts.get("last_route_source") == HUMAN_HANDOFF:
+        return HUMAN_HANDOFF
+    if not was_matched and facts.get("last_route_source") == EXACT_APPROVED:
+        return HUMAN_HANDOFF
+    if was_matched and facts.get("last_route_source") in {
+        SYSTEM_CONVERSATION, EXACT_APPROVED, GROUNDED_DERIVED, SOURCE_DESCRIPTION,
+    }:
+        return facts["last_route_source"]
     if (
         not was_matched
         or template_id in _HANDOFF_TEMPLATES
