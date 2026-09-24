@@ -118,8 +118,10 @@ class TestNothingIsClaimedThatTheClientDidNotSay:
         # The one question in the client's list they did not answer. It must
         # keep escalating rather than being guessed at.
         assert TEMPLATES["GUARD_customization_flavour_mixing"].get("escalate") is True
-        _text, _matched, template_id, _ = reply_to("can i mix flavours in one box")
-        assert template_id == "GUARD_customization_flavour_mixing"
+        text, matched, template_id, _ = reply_to("can i mix flavours in one box")
+        assert matched is False
+        assert template_id is None
+        assert "Manager of Kitchens" in text
 
 
 def test_the_seed_version_was_bumped_so_the_edits_actually_ship():

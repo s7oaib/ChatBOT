@@ -61,7 +61,7 @@ class TestASubtopicIsNotImpliedByItsDomain:
         assert facts["last_knowledge_sufficiency"]
         assert not any(facts["last_knowledge_sufficiency"].values())
         assert "cornstarch" not in text.lower()
-        assert "team" in text.lower()
+        assert "manager of kitchens" in text.lower()
 
     @pytest.mark.parametrize("message, expected_template", [
         # These subtopics ARE in the approved copy, so they stay answerable.
@@ -433,7 +433,7 @@ class TestAmenityWordsOverrideACooccurringDomainKeyword:
         # delivery/packaging in passing; what must never happen is the
         # question being *answered* with that copy as if it responded to it.
         assert "cornstarch" not in text.lower()
-        assert "team" in text.lower()
+        assert "manager of kitchens" in text.lower()
 
     def test_a_genuine_reader_gap_still_defers_to_the_compatibility_floor(self):
         """Not every unknown_business_query is an amenity override — a real

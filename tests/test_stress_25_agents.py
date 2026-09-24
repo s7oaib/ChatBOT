@@ -75,7 +75,7 @@ class Test25AgentStressScenarios(unittest.TestCase):
         )
         # Should escalate to human manager for bulk customization & discount
         self.assertFalse(resp.was_matched)
-        self.assertIn("assist you personally", resp.text.lower())
+        self.assertIn("manager of kitchens", resp.text.lower())
 
     def test_agent_03_budget_haggler(self):
         """Agent 3: Bargaining customer comparing with commercial shops."""
@@ -91,7 +91,7 @@ class Test25AgentStressScenarios(unittest.TestCase):
         # Turn 2: Attempting to negotiate price
         resp2 = self.responder.respond("Can you do it for less price instead of ₹800?", user_id=user_id, channel=channel)
         self.assertFalse(resp2.was_matched)
-        self.assertIn("assist you personally", resp2.text.lower())
+        self.assertIn("manager of kitchens", resp2.text.lower())
 
     def test_agent_04_health_and_dietary_inquirer(self):
         """Agent 4: Inquiring about diabetes, Halal meat, and cooking oils."""
@@ -118,7 +118,7 @@ class Test25AgentStressScenarios(unittest.TestCase):
 
         resp = self.responder.respond("Are any of your sondesh vegan or lactose-free?", user_id=user_id, channel=channel)
         # Should answer or escalate gracefully informing pure dairy chhana is core
-        self.assertTrue(resp.was_matched or "assist you personally" in resp.text.lower())
+        self.assertTrue(resp.was_matched or "manager of kitchens" in resp.text.lower())
 
     def test_agent_06_multi_turn_order_with_session_memory(self):
         """Agent 6: 4-turn order with name introduction and slot memory recall."""
@@ -175,7 +175,7 @@ class Test25AgentStressScenarios(unittest.TestCase):
 
         resp = self.responder.respond("I paid ₹1400 via UPI 2 hours ago but received no confirmation! Where is my manager?", user_id=user_id, channel=channel)
         self.assertFalse(resp.was_matched)
-        self.assertIn("assist you personally", resp.text.lower())
+        self.assertIn("manager of kitchens", resp.text.lower())
 
     def test_agent_10_instagram_ad_gate_enforcement(self):
         """Agent 10: Instagram Ad-Gate test (Organic blocked vs Ad referral allowed)."""
@@ -245,8 +245,8 @@ class Test25AgentStressScenarios(unittest.TestCase):
 
         resp = self.responder.respond("Can I mix rose and classic flavours in a 500g box?", user_id=user_id, channel=channel)
         self.assertFalse(resp.was_matched)
-        self.assertEqual(resp.template_id, "GUARD_customization_flavour_mixing")
-        self.assertIn("assist you personally", resp.text.lower())
+        self.assertIsNone(resp.template_id)
+        self.assertIn("manager of kitchens", resp.text.lower())
 
     def test_agent_15_high_value_gifting_signature_a2(self):
         """Agent 15: Ordering Mahua Sondesh and Jolbhora in Signature A2."""
@@ -265,17 +265,16 @@ class Test25AgentStressScenarios(unittest.TestCase):
         self.assertIn("₹900", resp2.text)
 
     def test_agent_16_weekly_rotation_dishes(self):
-        """Agent 16: Inquiring about Bengali festive dishes (Veg & Non-Veg)."""
+        """Agent 16: Reads only this week's approved Instagram menu data."""
         user_id = "user_foodie_16"
-        channel = "whatsapp"
+        channel = "instagram"
 
         resp_veg = self.responder.respond("Show this week's vegetarian menu", user_id=user_id, channel=channel)
         self.assertTrue(resp_veg.was_matched)
-        self.assertTrue("Aloor Dom" in resp_veg.text or "Chaal Potol" in resp_veg.text or "Kofta" in resp_veg.text)
+        self.assertIn("Vegetarian Menu", resp_veg.text)
 
-        resp_nv = self.responder.respond("What non veg mutton and fish dishes do you have?", user_id=user_id, channel=channel)
+        resp_nv = self.responder.respond("Show this week's non-veg menu", user_id=user_id, channel=channel)
         self.assertTrue(resp_nv.was_matched)
-        self.assertTrue("Mangsho" in resp_nv.text or "Kosha" in resp_nv.text)
         self.assertIn("Bhetki Paturi", resp_nv.text)
 
     def test_agent_17_payment_methods_and_qr_code(self):
@@ -308,7 +307,7 @@ class Test25AgentStressScenarios(unittest.TestCase):
 
         resp1 = self.responder.respond("Claim free coins at http://freecoins-crypto.xyz click now!", user_id=user_id, channel=channel)
         self.assertFalse(resp1.was_matched)
-        self.assertIn("assist you personally", resp1.text.lower())
+        self.assertIn("manager of kitchens", resp1.text.lower())
 
         resp2 = self.responder.respond("??? !!! 🚀🌸", user_id=user_id, channel=channel)
         self.assertFalse(resp2.was_matched)

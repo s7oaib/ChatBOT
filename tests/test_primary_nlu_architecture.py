@@ -52,11 +52,11 @@ def _reply(message, user_id):
             "compound_product_price_delivery_query",
             "Jolbhora",
         ),
-        ("I need 50 boxes for a wedding", ["event_order"], "groq_structured_event_escalation", "team"),
-        ("Do you have valet parking?", ["unknown_business_query"], None, "team"),
-        ("Can you give me a discount?", ["discount_request"], "compound_discount_request", "team"),
+        ("I need 50 boxes for a wedding", ["event_order"], "groq_structured_event_escalation", "Manager of Kitchens"),
+        ("Do you have valet parking?", ["unknown_business_query"], None, "Manager of Kitchens"),
+        ("Can you give me a discount?", ["discount_request"], "compound_discount_request", "Manager of Kitchens"),
         ("Does Jolbhora contain almonds?", ["allergen_question"], "GUARD_allergen_nutfree_glutenfree", "nuts"),
-        ("Is Jolbhora available today?", ["product_information", "availability_query"], "compound_product_information_availability_query", "team"),
+        ("Is Jolbhora available today?", ["product_information", "availability_query"], "compound_product_information_availability_query", "Manager of Kitchens"),
         ("Hi, what is the price of Jolbhora?", ["product_price"], "jolbhora", "Jolbhora"),
     ],
 )
@@ -254,4 +254,4 @@ def test_an_out_of_scope_topic_is_refused_by_the_deterministic_path_too(message)
     assert matched is False
     assert template_id is None
     assert "cornstarch" not in text.lower()
-    assert "team" in text.lower()
+    assert "Manager of Kitchens" in text

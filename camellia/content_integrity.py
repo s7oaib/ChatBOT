@@ -439,6 +439,8 @@ def _weekly_text(title: str, emoji: str, entries: Iterable[Mapping[str, Any]], c
         quantity = item.get("quantity", "")
         price = item.get("price_inr", "")
         description = item.get("description", "")
+        if contains_unconfirmed_claim(description):
+            description = ""
         suffix = f" ({quantity})" if quantity else ""
         detail = f" • _{description}_" if description else ""
         lines.append(f"• *{name}*{suffix} — *₹{price}*{detail}")

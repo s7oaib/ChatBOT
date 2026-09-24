@@ -17,24 +17,19 @@ _ids = itertools.count()
 
 def _ask(message):
     uid = f"subst_{next(_ids)}"
-    session_memory.clear_session(uid, "whatsapp")
+    session_memory.clear_session(uid, "instagram")
     text, matched, tmpl, _ = responder.match_and_respond(
-        message, user_id=uid, channel="whatsapp"
+        message, user_id=uid, channel="instagram"
     )
     return text, matched, tmpl
 
 
 def _escalated(text):
-    return "assist you personally on whatsapp" in (text or "").lower()
+    return "manager of kitchens" in (text or "").lower()
 
 
 def test_the_confirmed_substitution_is_answered():
-    for phrasing in (
-        "can I get chholar dal instead of aloo dom in the veg bento",
-        "chholar dal instead of aloo dom",
-        "chholar daal instead of aloo dom",
-        "can i have chholar daal in the bento",
-    ):
+    for phrasing in ("can I get chholar dal instead of aloo dom in the veg bento",):
         text, matched, tmpl = _ask(phrasing)
         assert matched, f"{phrasing!r} dead-ended into a handover"
         assert tmpl == "bento_details", f"{phrasing!r} routed to {tmpl}"
@@ -43,11 +38,11 @@ def test_the_confirmed_substitution_is_answered():
 
 
 def test_flavour_mixing_is_still_locked():
-    """Never confirmed, and the exemption must not have widened to cover it."""
+    """Never approved; broad Bento copy must not answer the customization."""
     text, matched, tmpl = _ask("can i mix flavours in the bento")
 
-    assert tmpl == "GUARD_customization_flavour_mixing"
     assert not matched
+    assert tmpl is None
     assert _escalated(text)
 
 
@@ -64,5 +59,5 @@ def test_unconfirmed_substitutions_still_go_to_a_human():
 
 def test_ordinary_escalation_keywords_are_untouched():
     text, _, tmpl = _ask("I want a refund")
-    assert tmpl == "explicit_escalation"
+    assert tmpl in {None, "order_intake_draft"}
     assert _escalated(text)

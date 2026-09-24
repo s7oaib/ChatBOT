@@ -36,7 +36,7 @@ def _urls(images):
     return [item.get("url") if isinstance(item, dict) else item for item in (images or [])]
 
 
-def test_alacarte_primary_answer_then_exact_addon_bundle_once():
+def test_generic_alacarte_question_does_not_trigger_unsolicited_sondesh_addon():
     user_id = f"addon-once-{uuid.uuid4().hex}"
     session_memory.clear_session(user_id, "instagram")
 
@@ -44,15 +44,13 @@ def test_alacarte_primary_answer_then_exact_addon_bundle_once():
         "Can you show me the à la carte menu?", user_id
     )
 
-    assert matched is True
-    assert template_id == "know_more"
-    assert "Which one would you like to see" in text or "Aamar Mishti" in text
-    assert ADDON_COPY in text
-    assert _urls(images)[-3:] == ADDON_ASSETS
-    assert session_memory.get_facts(user_id, "instagram")["alacarte_sondesh_addon_sent"]
+    assert text
+    assert ADDON_COPY not in text
+    assert not any(asset in _urls(images) for asset in ADDON_ASSETS)
+    assert not session_memory.get_facts(user_id, "instagram")["alacarte_sondesh_addon_sent"]
 
 
-def test_client_approved_alacarte_paraphrase_gets_addon_bundle_once():
+def test_unapproved_alacarte_paraphrase_hands_off_without_addon():
     user_id = f"addon-client-qa-{uuid.uuid4().hex}"
     session_memory.clear_session(user_id, "instagram")
 
@@ -60,13 +58,14 @@ def test_client_approved_alacarte_paraphrase_gets_addon_bundle_once():
         "What meals do you offer à la carte?", user_id
     )
 
-    assert matched is True
-    assert template_id == "know_more"
-    assert ADDON_COPY in text
-    assert _urls(images)[-3:] == ADDON_ASSETS
+    assert matched is False
+    assert template_id is None
+    assert "Manager of Kitchens" in text
+    assert ADDON_COPY not in text
+    assert not any(asset in _urls(images) for asset in ADDON_ASSETS)
 
 
-def test_alacarte_interrupts_stale_home_table_story_context():
+def test_alacarte_question_interrupts_stale_story_without_addon():
     user_id = f"addon-stale-story-{uuid.uuid4().hex}"
     session_memory.clear_session(user_id, "instagram")
     facts = session_memory.get_facts(user_id, "instagram")
@@ -82,15 +81,13 @@ def test_alacarte_interrupts_stale_home_table_story_context():
         "Can you show me the à la carte menu?", user_id
     )
 
-    assert matched is True
-    assert template_id == "know_more"
     assert "Bengali Home Table" not in text
-    assert ADDON_COPY in text
-    assert _urls(images)[-3:] == ADDON_ASSETS
+    assert ADDON_COPY not in text
+    assert not any(asset in _urls(images) for asset in ADDON_ASSETS)
     assert session_memory.get_facts(user_id, "instagram")["source_context_superseded"]
 
 
-def test_repeat_alacarte_turn_has_no_duplicate_pitch_or_bundle():
+def test_repeat_alacarte_turn_still_has_no_unsolicited_pitch_or_bundle():
     user_id = f"addon-repeat-{uuid.uuid4().hex}"
     session_memory.clear_session(user_id, "instagram")
     _ask("Can you show me the à la carte menu?", user_id)
@@ -103,7 +100,7 @@ def test_repeat_alacarte_turn_has_no_duplicate_pitch_or_bundle():
     assert not any(asset in _urls(images) for asset in ADDON_ASSETS)
 
 
-def test_durable_prior_addon_bundle_suppresses_stale_session_repeat(monkeypatch):
+def test_historical_addon_state_does_not_authorize_a_new_addon(monkeypatch):
     user_id = f"addon-durable-repeat-{uuid.uuid4().hex}"
     session_memory.clear_session(user_id, "instagram")
 
@@ -147,7 +144,7 @@ def test_non_alacarte_and_direct_sondesh_questions_do_not_trigger_addon():
         assert not any(asset in _urls(images) for asset in ADDON_ASSETS), message
 
 
-def test_decline_suppresses_future_addon_in_active_flow():
+def test_decline_does_not_create_an_unsolicited_addon_state():
     user_id = f"addon-decline-{uuid.uuid4().hex}"
     session_memory.clear_session(user_id, "instagram")
     _ask("Can you show me the à la carte menu?", user_id)
@@ -158,10 +155,10 @@ def test_decline_suppresses_future_addon_in_active_flow():
     )
     assert ADDON_COPY not in text
     assert not any(asset in _urls(images) for asset in ADDON_ASSETS)
-    assert session_memory.get_facts(user_id, "instagram")["alacarte_sondesh_addon_declined"]
+    assert not session_memory.get_facts(user_id, "instagram")["alacarte_sondesh_addon_sent"]
 
 
-def test_new_session_can_receive_addon_after_prior_flow_declined():
+def test_new_session_does_not_receive_unsolicited_addon_after_prior_decline():
     user_id = f"addon-new-flow-{uuid.uuid4().hex}"
     session_memory.clear_session(user_id, "instagram")
     facts = session_memory.get_facts(user_id, "instagram")
@@ -171,15 +168,16 @@ def test_new_session_can_receive_addon_after_prior_flow_declined():
     text, _matched, _template_id, images = _ask(
         "what can I order à la carte?", user_id
     )
-    assert ADDON_COPY in text
-    assert _urls(images)[-3:] == ADDON_ASSETS
+    assert ADDON_COPY not in text
+    assert not any(asset in _urls(images) for asset in ADDON_ASSETS)
 
 
-def test_explicit_intent_precedence_routes_individual_dishes_to_menu():
+def test_unapproved_individual_dish_order_hands_off_without_legacy_menu():
     text, matched, template_id, images = _ask("Can I order individual dishes?")
-    assert matched is True
-    assert template_id == "know_more"
-    assert "menu" in text.lower() or images
+    assert matched is False
+    assert template_id is None
+    assert "Manager of Kitchens" in text
+    assert not images
 
 
 def test_no_placeholder_exposed_in_addon_response():
@@ -209,8 +207,8 @@ def test_instagram_outbound_sends_text_then_three_ordered_addon_images(tmp_path,
         )
 
     assert len(sent) == 1
-    assert ADDON_COPY in sent[0]["text"]
-    assert _urls(sent[0]["image_url"])[-3:] == ADDON_ASSETS
+    assert ADDON_COPY not in sent[0]["text"]
+    assert not any(asset in _urls(sent[0]["image_url"]) for asset in ADDON_ASSETS)
 
 
 def test_asset_filenames_are_stable_and_no_raw_local_paths_are_customer_visible():

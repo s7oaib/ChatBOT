@@ -618,6 +618,8 @@ def create_topic(
     description = (description or "").strip()
     if not name:
         raise InstagramTopicError("Topic name is required.")
+    if not description:
+        raise InstagramTopicError("Topic description is required.")
     response_order = str(response_order or "description_first").strip().lower()
     if response_order not in RESPONSE_ORDERS:
         raise InstagramTopicError("Reply order must be Description First or Menu First.")
@@ -665,6 +667,8 @@ def update_topic(topic_id: str, **fields: Any) -> Dict[str, Any]:
         if existing and existing["topic_id"] != topic_id:
             raise InstagramTopicError(f"A topic named '{name}' already exists.")
         fields["name"] = name
+    if "description" in fields and not str(fields["description"] or "").strip():
+        raise InstagramTopicError("Topic description is required.")
     default_menu_id = fields.get("default_menu_id")
     default_menu = db.get_menu_catalogue_entry(default_menu_id) if default_menu_id else None
     if default_menu_id and not default_menu:

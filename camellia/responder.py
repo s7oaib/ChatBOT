@@ -45,6 +45,7 @@ from camellia.knowledge import HUMAN_ONLY_INTENTS, approved_knowledge
 from camellia.route_contract import build_trace, classify_lane
 from camellia.content_integrity import (
     ALACARTE_SONDESH_ADDON_COPY,
+    contains_unconfirmed_claim,
     quarantine_template_response,
     quarantine_unconfirmed_claims,
     runtime_quarantine_enabled,
@@ -161,7 +162,9 @@ _CONFIRMED_BENTO_SUBSTITUTION_RE = re.compile(
 _UNSUPPORTED_CUSTOMIZATION_RE = re.compile(
     r"\b(?:can|could|would|do)\s+you\s+(?:make|prepare|do|customi[sz]e|modify)\b.*"
     r"\b(?:without|no|remove|replace|substitute|change)\b|"
-    r"\b(?:make|prepare|customi[sz]e|modify)\b.*\b(?:without|no|remove|replace|substitute)\b",
+    r"\b(?:make|prepare|customi[sz]e|modify)\b.*\b(?:without|no|remove|replace|substitute)\b|"
+    r"\b(?:can|could|would)\s+(?:i|we)\s+(?:get|have|order)\b.*\b(?:instead\s+of|in\s+place\s+of)\b|"
+    r"\b(?:can|could|would)\s+(?:i|we)\s+(?:mix|swap|change|substitute)\b.*\b(?:bento|flavou?rs?|items?)\b",
     re.IGNORECASE,
 )
 _HIGH_RISK_UNSUPPORTED_RE = re.compile(
@@ -1650,23 +1653,8 @@ class DeterministicResponder:
 
         price_question = BARE_PRICE_QUESTION_RE.fullmatch(text)
         if price_question and not facts.get("last_topic") and not structured_owns_price:
-            # The client Q&A flow uses a bare Instagram "what's the price?"
-            # after the conversation has already entered through a Story/Post
-            # route as a request for the approved food overview and current
-            # menu.  Keep the no-context path cautious, but do not force a
-            # customer who arrived through an established route into a
-            # product-choice clarification after that route has been
-            # superseded by an explicit subject.
-            if channel == "instagram" and isinstance(facts.get("source_route"), dict):
-                template_id = "savoury_food_intro"
-                template = self._template_by_id(template_id) or {}
-                response, images = self._format_dynamic_response(
-                    template_id, template.get("response") or self._generic_fallback(),
-                    user_id=user_id, channel=channel, user_message=message,
-                )
-                facts["last_topic"] = "savoury"
-                facts["source_context_used"] = False
-                return finish(response, template_id, images)
+            # A mapped Story/Post/Reel is not authority to guess which product
+            # a bare price question refers to or to replay a legacy menu.
             facts["awaiting_area_confirmation"] = False
             facts["awaiting_product_price"] = True
             return finish("Would you like prices for Sondesh or Bengali Meals?", "price_clarify_product")
@@ -2567,6 +2555,149 @@ class DeterministicResponder:
         facts["source_context_used"] = False
         facts["source_referential_intent"] = None
 
+        # The client-approved fail-closed lane can return before the legacy
+        # session extraction point. Preserve only a customer's explicit
+        # self-identification so an ensuing human handoff brief is useful;
+        # this does not change the reply or extract names from arbitrary text.
+        if re.search(r"\b(?:call\s+me|my\s+name\s+is|'?my\s+name's)\s+[A-Za-z]", user_message, re.I):
+            session_memory.extract_and_update_facts(user_id, channel, user_message)
+
+        # Home Table booking is staff-coordinated, not an ordinary order
+        # draft. Resolve it before order-intake slot filling can ask for
+        # quantity or imply that an order is being placed.
+        if (
+            channel == "instagram"
+            and HOME_TABLE_RE.search(lowered_text)
+            and HOME_TABLE_BOOKING_RE.search(lowered_text)
+        ):
+            handoff = self._generic_fallback()
+            facts.update({
+                "last_route_source": "HUMAN_HANDOFF",
+                "last_intents": [Intent.ESCALATION.value],
+                "last_entities": {},
+                "last_actions": [BusinessAction.ESCALATE_TO_TEAM.value],
+                "knowledge_sufficient": False,
+                "last_grounding": "home_table_booking_requires_human",
+                "last_llm_called": False,
+                "last_fallback_used": True,
+            })
+            session_memory.add_turn(user_id, channel, user_message, handoff)
+            return handoff, False, "home_table_booking_handoff", None
+
+        # Explicit complaints, refunds, cancellations, and direct human
+        # requests must be recognized before order-intake slot filling. In
+        # particular, an “I want a refund” message must never receive an
+        # unrelated quantity prompt.
+        if channel == "instagram" and self.check_explicit_escalation_triggers(user_message):
+            handoff = self._generic_fallback()
+            facts.update({
+                "last_route_source": "HUMAN_HANDOFF",
+                "last_intents": [Intent.ESCALATION.value],
+                "last_entities": {},
+                "last_actions": [BusinessAction.ESCALATE_TO_TEAM.value],
+                "knowledge_sufficient": False,
+                "last_grounding": "explicit_human_handoff",
+                "last_llm_called": False,
+                "last_fallback_used": True,
+            })
+            session_memory.add_turn(user_id, channel, user_message, handoff)
+            return handoff, False, None, None
+
+        # Interrupt stale conversation slots before any channel-specific
+        # approved-answer or fail-closed route can return early.
+        explicit_subject_match = EXPLICIT_SUBJECT_RE.search(
+            semantic_remainder or user_message
+        )
+        explicit_context_switch = bool(
+            SUBSCRIPTION_DELIVERY_TIME_RE.search(lowered_text)
+            or SUBSCRIPTION_CANONICAL_QUERY_RE.search(lowered_text)
+            or SUBSCRIPTION_AREA_QUERY_RE.search(lowered_text)
+            or MANAGER_CONTACT_QUERY_RE.search(lowered_text)
+            or (
+                TIME_INTENT_RE.search(lowered_text)
+                and any(word in lowered_text for word in SONDESH_CONTEXT_WORDS)
+            )
+        )
+        normalized_slot_answer = re.sub(
+            r"[?!.,]+$", "", " ".join((semantic_remainder or user_message).lower().split())
+        ).strip()
+        is_relevant_slot_answer = (
+            (
+                facts.get("pending_clarification") in {"product_price", "product_topic", "menu_choice"}
+                and bool(explicit_subject_match)
+                and (
+                    facts.get("pending_clarification") != "product_price"
+                    or bool(re.search(
+                        r"\b(?:sondesh|sandesh|mishti|mithai|sweets?|bengali\s+meals?)\b",
+                        semantic_remainder or user_message,
+                        re.I,
+                    ))
+                )
+            )
+            or (
+                facts.get("awaiting_area_confirmation")
+                and _looks_like_an_area_answer(user_message)
+                and not (
+                    explicit_subject_match
+                    and GENERIC_DETAIL_WRAPPER_RE.search(semantic_remainder or user_message)
+                )
+            )
+            or (
+                facts.get("awaiting_product_price")
+                and normalized_slot_answer in {"meals", "meal", "sondesh", "sweets", "mishti", "mithai"}
+            )
+            or (
+                facts.get("awaiting_menu_choice")
+                and normalized_slot_answer in {
+                    "veg", "vegetarian", "niramish", "veg menu",
+                    "non veg", "non-veg", "nonveg", "non vegetarian", "non-vegetarian",
+                    "non veg menu", "non-veg menu", "nonveg menu",
+                }
+            )
+            or (
+                (facts.get("awaiting_subscription_booking") or facts.get("subscription_context"))
+                and bool(
+                    SUBSCRIPTION_OPTION_RE.search(normalized_slot_answer)
+                    or SUBSCRIPTION_BOOKING_INTENT_RE.search(normalized_slot_answer)
+                    or SUBSCRIPTION_DATE_CHANGE_RE.search(normalized_slot_answer)
+                )
+            )
+        )
+        if (explicit_subject_match or explicit_context_switch) and not is_relevant_slot_answer:
+            # Keep prior source context for audit, but don't let it answer as
+            # though its old subject were still current.
+            facts["source_context_superseded"] = True
+            facts["last_topic"] = None
+            facts["active_topic"] = None
+            facts["active_entity"] = None
+            facts["active_product_context"] = None
+            if facts.get("pending_clarification"):
+                facts["pending_clarification"] = None
+                facts["clarification_options"] = []
+                facts["presented_options"] = []
+                facts["last_bot_question"] = None
+            interrupted_flags = []
+            for flow_flag in (
+                "awaiting_area_confirmation", "awaiting_product_price",
+                "awaiting_menu_choice", "awaiting_subscription_booking",
+                "subscription_context", "awaiting_instagram_contact",
+                "awaiting_instagram_contact_confirmation", "awaiting_name",
+                "home_table_context",
+            ):
+                if facts.get(flow_flag):
+                    facts[flow_flag] = False
+                    interrupted_flags.append(flow_flag)
+            if facts.get("pending_instagram_escalation") is not None:
+                facts["pending_instagram_escalation"] = None
+                interrupted_flags.append("pending_instagram_escalation")
+            if interrupted_flags:
+                facts["last_flow_interrupted"] = interrupted_flags
+                log.info(
+                    "INTENT_INTERRUPT subject=%r flags=%s",
+                    explicit_subject_match.group(0) if explicit_subject_match else "canonical_context",
+                    interrupted_flags,
+                )
+
         if channel == "instagram" and facts.pop("unmapped_shared_attachment", False):
             if re.fullmatch(r"\s*(?:tell me more|more details|tell me about it)\s*[?.!]*\s*", user_message, re.I):
                 clarification = "Of course — what would you like to know more about?"
@@ -2580,7 +2711,12 @@ class DeterministicResponder:
                 return clarification, True, "clarify_request", None
 
         if channel == "instagram":
-            conversation_reply = grounded_answers.system_reply(user_message)
+            # Stateless social turns can be answered immediately. Short
+            # acknowledgements wait until active order/clarification state
+            # has had a chance to consume them.
+            conversation_reply = grounded_answers.system_reply(
+                user_message, include_contextual_acknowledgement=False,
+            )
             if conversation_reply is not None:
                 facts.update({
                     "last_route_source": "SYSTEM_CONVERSATION",
@@ -2682,14 +2818,23 @@ class DeterministicResponder:
                             draft, user_message,
                             active_product_context=facts.get("active_product_context"),
                         )
-                        if draft.get("status") == order_intake.ORDER_DRAFT_READY:
-                            response_text = order_intake.request_summary(draft)
-                            response_text += "\n\n[Edit Order]\nReply with the change you want."
+                        if order_intake.has_meaningful_order_details(draft):
+                            response_text = (
+                                "I've prepared your order draft. Please continue on WhatsApp "
+                                "to send it to our team. Missing details are left blank, and "
+                                "our manager can help complete them.\n\n"
+                                + order_intake.request_summary(draft)
+                                + "\n\nOur manager will review availability, delivery charges, "
+                                "and the final invoice.\n\n[Edit Order]\nReply with the change you want."
+                            )
                             link = order_intake.whatsapp_draft_link(draft)
                             if link:
                                 response_text += f"\n\n[Continue on WhatsApp]\n{link}"
                             else:
-                                response_text += "\n\nContinue on WhatsApp is not available right now."
+                                response_text += (
+                                    "\n\nYour order draft is ready, but the WhatsApp handoff "
+                                    "link is temporarily unavailable. Our team can assist you directly."
+                                )
                         else:
                             if (
                                 is_new_draft
@@ -2719,31 +2864,6 @@ class DeterministicResponder:
                     session_memory.add_turn(user_id, channel, user_message, safe_turn_response)
                     return response_text, True, "order_intake_draft", None
 
-            # A referential order question belongs to the exact mapped source,
-            # not to an empty generic draft. Resolve only the source's saved
-            # priority product and keep the source route available for follow-up.
-            source_route = facts.get("source_route") if isinstance(facts.get("source_route"), dict) else None
-            if source_referential_order and source_route and not facts.get("source_context_superseded"):
-                source_product = next((
-                    product for product in source_route.get("priority_products", [])
-                    if route_template_id(product)
-                ), None)
-                source_template_id = route_template_id(source_product) if source_product else None
-                source_template = self._template_by_id(source_template_id) if source_template_id else None
-                if source_template and source_template.get("response") and not source_template.get("escalate"):
-                    source_response, source_images = self._format_dynamic_response(
-                        source_template_id, source_template["response"],
-                        user_id=user_id, channel=channel, user_message=user_message,
-                    )
-                    facts.update({
-                        "last_route_source": "MAPPED_SOURCE_ORDER_FOLLOWUP",
-                        "source_context_used": True,
-                        "last_topic": TOPIC_MAP.get(source_template_id, source_product),
-                        "active_product_context": source_product,
-                    })
-                    session_memory.add_turn(user_id, channel, user_message, source_response)
-                    return source_response, True, f"source_{source_product}_{source_template_id}", source_images
-
             source = facts.get("source_route") if isinstance(facts.get("source_route"), dict) else {}
             source_description = str(source.get("source_description") or "").strip()
             source_reference = bool(re.fullmatch(
@@ -2751,7 +2871,10 @@ class DeterministicResponder:
                 r"(?:(?:me\s+)?(?:more\s+)?about\s+)?(?:this|that|the)\s*"
                 r"(?:(?:post|reel|story|video|photo)\s*)?(?:about)?\s*[?.!]*",
                 user_message, re.I,
-            ) or re.fullmatch(r"\s*what are you showing here[?.!]*\s*", user_message, re.I))
+            ) or re.fullmatch(
+                r"\s*(?:tell me more|what are you showing here)[?.!]*\s*",
+                user_message, re.I,
+            ))
             if source.get("active", True) and source_description and source_reference and (
                 not facts.get("source_context_superseded") or re.search(r"\b(?:post|reel|story|video|photo)\b", user_message, re.I)
             ) and not re.search(
@@ -2768,6 +2891,78 @@ class DeterministicResponder:
                 session_memory.add_turn(user_id, channel, user_message, source_description)
                 return source_description, True, "source_description", None
 
+        # A mapped source's configured Topic description is the answer to a
+        # genuine, vague source-details request. Resolve this before the broad
+        # client-QA matcher can turn source metadata (including priority
+        # products) into an unrelated legacy product answer. The menu image is
+        # included only when the operator explicitly selected/inherited one.
+        source_route = facts.get("source_route") if isinstance(facts.get("source_route"), dict) else None
+        source_detail_request = bool(re.fullmatch(
+            r"\s*(?:tell\s+me\s+more|more\s+details?|tell\s+me\s+about\s+(?:this|that)|"
+            r"what\s+is\s+this|what\s+is\s+that|what\s+is\s+this\s+(?:post|reel|story|video))\s*[?.!]*\s*",
+            user_message,
+            re.I,
+        ))
+        source_topic = (
+            db.get_instagram_topic(source_route["topic_id"])
+            if source_route and source_route.get("topic_id") else None
+        )
+        if (
+            channel == "instagram"
+            and source_route
+            and source_route.get("active", True)
+            and not facts.get("source_context_superseded")
+            and source_detail_request
+            and source_topic
+            and str(source_topic.get("description") or "").strip()
+        ):
+            description = str(source_topic["description"]).strip()
+            mode = str(source_route.get("menu_mode") or "INHERIT").strip().upper()
+            menu_id = source_route.get("menu_id")
+            if mode == "INHERIT" and not menu_id:
+                menu_id = source_topic.get("default_menu_id")
+            image_url = current_menu_image(str(menu_id), None) if mode != "NONE" and menu_id else None
+            facts.update({
+                "last_route_source": "SOURCE_DESCRIPTION",
+                "last_knowledge_ids": [f"topic:{source_topic.get('topic_id')}"],
+                "last_grounding": "explicit_admin_source_description",
+                "last_actions": [BusinessAction.SEND_RESPONSE.value],
+                "knowledge_sufficient": True,
+                "source_context_used": True,
+            })
+            session_memory.add_turn(user_id, channel, user_message, description)
+            return description, True, "source_topic_description_only", image_url
+
+        # Direct à-la-carte / individual-dish requests have no current
+        # client-approved answer. They interrupt stale source context, then
+        # fail closed to a human; the retired generic menu template and
+        # unsolicited Sondesh cross-sell are not authority for this question.
+        if (
+            channel == "instagram"
+            and _ALACARTE_DIRECT_QUERY_RE.search(lowered_text)
+            and not MEAL_PREORDER_QUERY_RE.search(lowered_text)
+            and not _ALACARTE_ADDON_EXCLUSION_RE.search(lowered_text)
+        ):
+            facts.update({
+                "source_context_superseded": True,
+                "source_context_used": False,
+                "home_table_context": False,
+                "last_topic": None,
+                "active_topic": None,
+                "active_entity": None,
+                "last_route_source": "HUMAN_HANDOFF",
+                "last_intents": [Intent.ESCALATION.value],
+                "last_entities": {},
+                "last_actions": [BusinessAction.ESCALATE_TO_TEAM.value],
+                "knowledge_sufficient": False,
+                "last_grounding": "unsupported_alacarte_menu_handoff",
+                "last_llm_called": False,
+                "last_fallback_used": True,
+            })
+            response_text = self._generic_fallback()
+            session_memory.add_turn(user_id, channel, user_message, response_text)
+            return response_text, False, None, None
+
         # Asset requests are a deterministic intent class, so resolve them
         # before the broad client-approved-QA matcher can replay a canonical
         # topic answer.  An unresolved first-turn Story/Post/Reel request is
@@ -2778,6 +2973,22 @@ class DeterministicResponder:
                 contextual = self._contextual_resolution(user_message, user_id, channel)
                 if contextual is not None:
                     return contextual
+
+        # Opening hours are a canonical approved fact. Resolve this explicit
+        # question before the strict client-QA miss path can hand it off, and
+        # before stale Story context can reinterpret it.
+        if channel == "instagram" and OPENING_HOURS_RE.search(lowered_text):
+            template = self._template_by_id("opening_hours") or {}
+            response_text, images = self._format_dynamic_response(
+                "opening_hours", template.get("response") or self._generic_fallback(),
+                user_id=user_id, channel=channel, user_message=user_message,
+            )
+            facts["last_route_source"] = "explicit_rule"
+            facts["last_intents"] = ["opening_hours"]
+            facts["last_knowledge_ids"] = ["delivery:opening_hours"]
+            facts["last_grounding"] = "grounded_approved"
+            session_memory.add_turn(user_id, channel, user_message, response_text)
+            return response_text, True, "opening_hours", images
 
         # Client-approved QA is the hard deterministic fast path.  The
         # matcher may understand a paraphrase, but the response itself is
@@ -2825,6 +3036,20 @@ class DeterministicResponder:
             and not explicit_client_subject
             and not order_process_question
         )
+        source_subscription_asset_request = bool(
+            source_route_active
+            and re.search(r"\bsubscription\b", source_topic_text, re.I)
+            and re.search(
+                r"\b(?:share|send|show|get|forward)\b.*\b(?:menu|chart|rate|rates)\b",
+                lowered_text,
+            )
+        )
+        if source_subscription_asset_request:
+            # An exact mapped Subscription source supplies the missing subject
+            # for this genuine menu/chart request. Resolve through the
+            # client-approved Subscription QA record, never the source label
+            # or a legacy response template.
+            source_context_blocks_client_qa = False
         price_followup = bool(re.fullmatch(r"\s*(?:price|cost|rate|how much)\s*[?.!]*\s*", user_message, re.I))
         details_followup = bool(re.fullmatch(r"\s*(?:tell me more|more details|tell me about it)\s*[?.!]*\s*", user_message, re.I))
         context_topic = str(facts.get("last_topic") or "").casefold()
@@ -2840,15 +3065,18 @@ class DeterministicResponder:
         contextual_details_topic = (
             "sondesh" if context_topic.startswith("sondesh") else
             "subscription" if context_topic == "subscription" else
-            "bento" if context_topic == "bento" else
-            "subscription" if "subscription" in source_topic else
-            "sondesh" if "sondesh" in source_topic else
-            "bento" if "bento" in source_topic else ""
+            "bento" if context_topic == "bento" else ""
         ) if details_followup else ""
         contextual_topic = contextual_price_topic or contextual_details_topic
         client_qa_candidate = client_qa.match(
-            (f"{contextual_price_topic} price" if contextual_price_topic else
-             f"tell me about {contextual_details_topic}" if contextual_details_topic else user_message), facts,
+            (
+                "tell me more about subscription"
+                if source_subscription_asset_request
+                else f"{contextual_price_topic} price" if contextual_price_topic
+                else f"tell me about {contextual_details_topic}" if contextual_details_topic
+                else user_message
+            ),
+            facts,
         )
         if contextual_topic and context_topic:
             facts["source_context_superseded"] = True
@@ -2861,7 +3089,10 @@ class DeterministicResponder:
             and client_qa_candidate.entry.qa_id in {"alacarte_prebook", "order_prebook"}
         )
         client_qa_excluded = bool(
-            _UNSUPPORTED_CUSTOMIZATION_RE.search(lowered_text)
+            (
+                _UNSUPPORTED_CUSTOMIZATION_RE.search(lowered_text)
+                and not _CONFIRMED_BENTO_SUBSTITUTION_RE.search(lowered_text)
+            )
             or _HIGH_RISK_UNSUPPORTED_RE.search(lowered_text)
             or _bento_grounded_comparison(
                 user_message,
@@ -2884,7 +3115,7 @@ class DeterministicResponder:
             or source_context_blocks_client_qa
             or BULK_CONTEXT_RE.search(lowered_text)
             or BULK_QTY_RE.search(lowered_text)
-            or re.search(r"\b(?:discount|offer|cater|wedding|guests|no\s+onion|gluten[- ]free)\b", lowered_text)
+            or re.search(r"\b(?:discount|special\s+offers?|cater|wedding|guests|no\s+onion|gluten[- ]free)\b", lowered_text)
             or (
                 re.search(r"\bbento\b", lowered_text)
                 and re.search(r"\b(?:available|availability|stock|vegan|allerg\w*|gluten|deliver\w*|ship\w*|discount|offer|customi[sz]\w*)\b", lowered_text)
@@ -2911,6 +3142,8 @@ class DeterministicResponder:
         )
         if client_match:
             entry = client_match.entry
+            if source_subscription_asset_request:
+                facts["source_context_used"] = True
             asset_urls: List[str] = []
             asset_missing: List[str] = []
             ordered_response_blocks: List[Dict[str, Any]] = []
@@ -3032,11 +3265,124 @@ class DeterministicResponder:
                 asset_urls or None,
             )
 
-        # Customer-answer policy: Instagram may serve only the authoritative
-        # client registry above. Legacy templates, learned knowledge, RAG and
-        # generative providers remain available for internal classification,
-        # safety and review workflows, but they cannot produce customer copy.
         if channel == "instagram":
+            contextual_ack = grounded_answers.system_reply(user_message)
+            if contextual_ack is not None:
+                active_context = bool(
+                    (isinstance(facts.get("order_intake_draft"), dict)
+                     and facts["order_intake_draft"].get("status"))
+                    or facts.get("pending_clarification")
+                    or facts.get("clarification_options")
+                    or facts.get("presented_options")
+                    or any(facts.get(flag) for flag in (
+                        "awaiting_menu_choice", "awaiting_product_price",
+                        "awaiting_area_confirmation", "awaiting_subscription_booking",
+                        "subscription_context", "awaiting_instagram_contact",
+                        "awaiting_instagram_contact_confirmation", "awaiting_name",
+                        "pending_instagram_escalation",
+                    ))
+                    or bool(facts.get("cart"))
+                    or sum(
+                        1 for slot in ("flavour", "collection", "pack_size", "quantity")
+                        if (facts.get("order_draft") or {}).get(slot)
+                    ) >= 2
+                )
+                if active_context and config.CONVERSATION_IMPROVEMENTS_ENABLED:
+                    contextual = self._contextual_resolution(user_message, user_id, channel)
+                    if contextual is not None:
+                        return contextual
+                elif not active_context:
+                    facts.update({
+                        "last_route_source": "SYSTEM_CONVERSATION",
+                        "last_grounding": "system_conversation",
+                        "last_actions": [BusinessAction.SEND_RESPONSE.value],
+                        "knowledge_sufficient": True,
+                    })
+                    session_memory.add_turn(user_id, channel, user_message, contextual_ack)
+                    return contextual_ack, True, "system_conversation", None
+
+        # Customer-answer policy: Instagram may serve only the authoritative
+        # client registry above, plus a narrowly scoped deterministic route for
+        # the live weekly menu. menu.json is the documented source of current
+        # menu facts; the route does not consult an LLM or arbitrary templates.
+        if channel == "instagram":
+            menu_reading = understanding_engine.deterministic_fallback(user_message)
+            bento_option_selection = bool(
+                (facts.get("active_product_context") == "bento"
+                 or facts.get("active_topic") in {"bento", "bengali_bento"})
+                and re.fullmatch(
+                    r"(?:the\s+)?(?:vegetarian|veg|chicken|mangsho)(?:\s+bento)?[.! ]*",
+                    lowered_text,
+                )
+            )
+            if (
+                Intent.MENU_REQUEST.value in menu_reading.intents
+                and not bento_option_selection
+                and set(menu_reading.intents).issubset({
+                    Intent.MENU_REQUEST.value, Intent.PRODUCT_INFORMATION.value,
+                })
+                and not menu_reading.requires_human
+                and not menu_reading.unmapped_terms
+            ):
+                menu_resolution = approved_knowledge.resolve(
+                    menu_reading, self.qa_data.get("templates", []),
+                )
+                allowed_menu_templates = {
+                    "know_more", "product_overview",
+                    "weekly_menu_veg", "weekly_menu_nonveg",
+                }
+                if (
+                    menu_resolution.fully_sufficient
+                    and menu_resolution.items
+                    and all(item.template_id in allowed_menu_templates for item in menu_resolution.items)
+                ):
+                    menu_replies = []
+                    menu_images = []
+                    weekly_items = [
+                        item for item in menu_resolution.items
+                        if item.domain == "weekly_menu"
+                    ]
+                    response_items = weekly_items or [
+                        item for item in menu_resolution.items
+                        if item.template_id in {"know_more", "product_overview"}
+                    ]
+                    for item in response_items:
+                        rendered, images = self._format_dynamic_response(
+                            item.template_id, item.approved_response,
+                            user_id=user_id, channel=channel, user_message=user_message,
+                        )
+                        # The legacy menu renderer appends packaging and
+                        # delivery promises that are not part of menu.json.
+                        # Keep only the menu facts and approved next-step copy.
+                        rendered = "\n".join(
+                            line for line in rendered.splitlines()
+                            if not line.lstrip().startswith((
+                                "📦 *Packaging*:", "🚚 *Delivery*:",
+                            ))
+                        ).strip()
+                        if rendered:
+                            menu_replies.append(rendered)
+                        if images:
+                            menu_images.extend(images if isinstance(images, list) else [images])
+                    menu_text = "\n\n".join(menu_replies)
+                    if menu_text or menu_images:
+                        facts.update({
+                            "last_route_source": "APPROVED_MENU_SOURCE",
+                            "last_intents": list(menu_reading.intents),
+                            "last_entities": dict(menu_reading.entities),
+                            "last_knowledge_ids": [item.knowledge_id for item in menu_resolution.items],
+                            "last_actions": list(dict.fromkeys(
+                                action for item in menu_resolution.items for action in item.actions
+                            )),
+                            "knowledge_sufficient": True,
+                            "last_grounding": "menu_json_deterministic",
+                            "last_llm_called": False,
+                            "last_fallback_used": False,
+                        })
+                        session_memory.add_turn(user_id, channel, user_message, menu_text)
+                        template_id = menu_resolution.items[0].template_id
+                        return menu_text, True, template_id, menu_images or None
+
             derived = grounded_answers.derive(user_message, facts)
             if derived is not None:
                 facts.update({
@@ -3062,6 +3408,22 @@ class DeterministicResponder:
                 "last_llm_called": False,
                 "last_fallback_used": True,
             })
+            # Preserve deterministic event/bulk classification in the handoff
+            # audit even when structured NLU is disabled or unavailable. This
+            # changes routing metadata only; unsupported facts still fail
+            # closed to a human and never produce customer-facing copy.
+            handoff_understanding = understanding_engine.deterministic_fallback(user_message)
+            handoff_intents = [
+                intent for intent in handoff_understanding.intents
+                if intent in {Intent.EVENT_ORDER.value, Intent.BULK_ORDER.value}
+            ]
+            if handoff_intents:
+                facts["last_intents"] = handoff_intents
+                facts["last_entities"] = {
+                    key: handoff_understanding.entities[key]
+                    for key in ("event", "quantity", "location")
+                    if handoff_understanding.entities.get(key) not in (None, "")
+                }
             try:
                 db.record_knowledge_gap(
                     user_message=user_message,
@@ -3081,91 +3443,6 @@ class DeterministicResponder:
             and _ALACARTE_ADDON_DECLINE_RE.fullmatch(lowered_text.strip(" .!?"))
         ):
             facts["alacarte_sondesh_addon_declined"] = True
-
-        # A new, explicit business subject must be able to interrupt a stale
-        # conversational slot before any slot handler runs. Without this
-        # boundary a persisted contact, menu, price, or area confirmation can
-        # consume a substantive request (for example, ``hi tell me more
-        # about Kanchagolla``) as though it were an answer to an older
-        # yes/no prompt. Bare confirmations remain untouched and continue
-        # through their normal flow.
-        explicit_subject_match = EXPLICIT_SUBJECT_RE.search(
-            semantic_remainder or user_message
-        )
-        explicit_context_switch = bool(
-            SUBSCRIPTION_DELIVERY_TIME_RE.search(lowered_text)
-            or SUBSCRIPTION_CANONICAL_QUERY_RE.search(lowered_text)
-            or SUBSCRIPTION_AREA_QUERY_RE.search(lowered_text)
-            or MANAGER_CONTACT_QUERY_RE.search(lowered_text)
-            or (
-                TIME_INTENT_RE.search(lowered_text)
-                and any(word in lowered_text for word in SONDESH_CONTEXT_WORDS)
-            )
-        )
-        normalized_slot_answer = re.sub(
-            r"[?!.,]+$", "", " ".join((semantic_remainder or user_message).lower().split())
-        ).strip()
-        is_relevant_slot_answer = (
-            (
-                facts.get("pending_clarification") in {"product_price", "product_topic", "menu_choice"}
-                and bool(explicit_subject_match)
-            )
-            or
-            (
-                facts.get("awaiting_area_confirmation")
-                and _looks_like_an_area_answer(user_message)
-                and not (
-                    explicit_subject_match
-                    and GENERIC_DETAIL_WRAPPER_RE.search(semantic_remainder or user_message)
-                )
-            )
-            or (
-                facts.get("awaiting_product_price")
-                and normalized_slot_answer in {"meals", "meal", "sondesh", "sweets", "mishti", "mithai"}
-            )
-            or (
-                facts.get("awaiting_menu_choice")
-                and normalized_slot_answer in {
-                    "veg", "vegetarian", "niramish", "veg menu",
-                    "non veg", "non-veg", "nonveg", "non vegetarian", "non-vegetarian",
-                    "non veg menu", "non-veg menu", "nonveg menu",
-                }
-            )
-            or (
-                (facts.get("awaiting_subscription_booking") or facts.get("subscription_context"))
-                and bool(
-                    SUBSCRIPTION_OPTION_RE.search(normalized_slot_answer)
-                    or SUBSCRIPTION_BOOKING_INTENT_RE.search(normalized_slot_answer)
-                    or SUBSCRIPTION_DATE_CHANGE_RE.search(normalized_slot_answer)
-                )
-            )
-        )
-        if (explicit_subject_match or explicit_context_switch) and not is_relevant_slot_answer:
-            # The named product/topic is a deliberate subject switch. Keep
-            # the source route for audit/history, but stop it from answering
-            # the next vague message as though the old subject were current.
-            facts["source_context_superseded"] = True
-            interrupted_flags = []
-            for flow_flag in (
-                "awaiting_area_confirmation", "awaiting_product_price",
-                "awaiting_menu_choice", "awaiting_subscription_booking",
-                "subscription_context", "awaiting_instagram_contact",
-                "awaiting_instagram_contact_confirmation", "awaiting_name",
-                "home_table_context",
-            ):
-                if facts.get(flow_flag):
-                    facts[flow_flag] = False
-                    interrupted_flags.append(flow_flag)
-            if facts.get("pending_instagram_escalation") is not None:
-                facts["pending_instagram_escalation"] = None
-                interrupted_flags.append("pending_instagram_escalation")
-            if interrupted_flags:
-                facts["last_flow_interrupted"] = interrupted_flags
-                log.info(
-                    "INTENT_INTERRUPT subject=%r flags=%s",
-                    explicit_subject_match.group(0) if explicit_subject_match else "canonical_context",
-                    interrupted_flags,
-                )
 
         # Resolve active clarifications and asset requests before structured
         # NLU.  Short turns are answers to the bot's immediately preceding
@@ -3198,48 +3475,10 @@ class DeterministicResponder:
         if ad_product:
             facts["ad_product"] = ad_product
 
-        # An explicit à la carte question is a new subject, even when the
-        # session still carries a previous Story/Post topic. Resolve it before
-        # source-topic handling so stale campaign context cannot answer the
-        # customer's new menu question.
-        if (
-            _ALACARTE_DIRECT_QUERY_RE.search(lowered_text)
-            and not MEAL_PREORDER_QUERY_RE.search(lowered_text)
-            and not _ALACARTE_ADDON_EXCLUSION_RE.search(lowered_text)
-        ):
-            facts["source_context_superseded"] = True
-            facts["home_table_context"] = False
-            facts["last_route_source"] = "canonical_alacarte"
-            template = self._template_by_id("know_more") or {}
-            response_text, images = self._format_dynamic_response(
-                "know_more", template.get("response") or self._generic_fallback(),
-                user_id=user_id, channel=channel, user_message=user_message,
-            )
-            facts["last_topic"] = "savoury"
-            response_text, images = self._apply_crosssell_nudges(
-                "know_more", response_text, images, facts, user_message,
-                user_id=user_id, channel=channel,
-            )
-            session_memory.add_turn(user_id, channel, user_message, response_text)
-            return response_text, True, "know_more", images
-
         # Explicit current intent outranks stale Story/Reel/Post context and
         # any conversational slot.  Opening hours is a canonical fact, so it
         # must be resolved before the Home Table branch can reinterpret the
         # question as a campaign follow-up.
-        if channel == "instagram" and OPENING_HOURS_RE.search(lowered_text):
-            template = self._template_by_id("opening_hours") or {}
-            response_text, images = self._format_dynamic_response(
-                "opening_hours", template.get("response") or self._generic_fallback(),
-                user_id=user_id, channel=channel, user_message=user_message,
-            )
-            facts["last_route_source"] = "explicit_rule"
-            facts["last_intents"] = ["opening_hours"]
-            facts["last_knowledge_ids"] = ["delivery:opening_hours"]
-            facts["last_grounding"] = "grounded_approved"
-            session_memory.add_turn(user_id, channel, user_message, response_text)
-            return response_text, True, "opening_hours", images
-
         # Bengali Home Table is a live Kolkata campaign and must be resolved
         # before the broad ``kolkata_expansion_info`` matcher.  The campaign has
         # four separate deterministic trigger paths; the ambiguous bare-price
@@ -5705,6 +5944,8 @@ class DeterministicResponder:
                     for itm in veg_list:
                         name = itm.get("item", "")
                         desc = itm.get("description", "")
+                        if contains_unconfirmed_claim(desc):
+                            desc = ""
                         qty = itm.get("quantity", "")
                         price = itm.get("price_inr", "")
                         desc_str = f" • _{desc}_" if desc else ""
@@ -5728,6 +5969,8 @@ class DeterministicResponder:
                     for itm in nonveg_list:
                         name = itm.get("item", "")
                         desc = itm.get("description", "")
+                        if contains_unconfirmed_claim(desc):
+                            desc = ""
                         qty = itm.get("quantity", "")
                         price = itm.get("price_inr", "")
                         desc_str = f" • _{desc}_" if desc else ""

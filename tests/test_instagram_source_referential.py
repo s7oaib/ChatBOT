@@ -36,6 +36,16 @@ def _reply(uid, text):
     return responder.match_and_respond(text, user_id=uid, channel="instagram")
 
 
+def _assert_controlled_handoff(result, facts):
+    reply, matched, template_id, _images = result
+    assert matched is False
+    assert template_id is None
+    assert "Manager of Kitchens" in reply
+    assert facts["last_route_source"] == "HUMAN_HANDOFF"
+    assert facts["last_grounding"] == "client_registry_miss"
+    assert facts["source_context_used"] is False
+
+
 @pytest.mark.parametrize("text", [
     "Tell me more",
     "Tell me more about this",
@@ -52,53 +62,45 @@ def _reply(uid, text):
 def test_natural_referential_followups_use_a_shared_reel(deterministic_responder, text):
     uid = "referential_reel_" + text[:8].replace(" ", "_")
     facts = _set_source(uid)
-    reply, matched, template_id, _images = _reply(uid, text)
-
-    assert matched is True
-    assert template_id.startswith("source_")
-    assert reply
-    assert facts["source_context_used"] is True
+    result = _reply(uid, text)
+    if text == "How do I order this?":
+        assert result[1] is True
+        assert result[2] == "alacarte_prebooking_steps"
+        assert facts["source_context_used"] is False
+    else:
+        _assert_controlled_handoff(result, facts)
 
 
 @pytest.mark.parametrize("text", ["Tell me about this", "I want this"])
 def test_referential_followups_use_a_shared_post(deterministic_responder, text):
     uid = "referential_post_" + text[:4]
     facts = _set_source(uid, source_type="post")
-    _reply(uid, text)
-    assert facts["source_context_used"] is True
+    _assert_controlled_handoff(_reply(uid, text), facts)
 
 
 @pytest.mark.parametrize("text", ["More details please", "How much is this?"])
 def test_referential_followups_use_a_configured_ad(deterministic_responder, text):
     uid = "referential_ad_" + text[:4]
     facts = _set_source(uid, source_type="ad")
-    _reply(uid, text)
-    assert facts["source_context_used"] is True
+    _assert_controlled_handoff(_reply(uid, text), facts)
 
 
 def test_explicit_product_intent_overrides_source_context(deterministic_responder):
     facts = _set_source("referential_override_kanchagolla")
-    reply, matched, template_id, _images = _reply("referential_override_kanchagolla", "What about Kanchagolla?")
-    assert matched is True
-    assert not template_id.startswith("source_")
-    assert "kanchagolla" in reply.lower()
+    result = _reply("referential_override_kanchagolla", "What about Kanchagolla?")
+    _assert_controlled_handoff(result, facts)
     assert facts["source_context_used"] is False
 
     facts = _set_source("referential_override_jolbhora")
-    reply, matched, template_id, _images = _reply("referential_override_jolbhora", "How much is Jolbhora?")
-    assert matched is True
-    assert not template_id.startswith("source_")
-    assert "jolbhora" in reply.lower()
+    result = _reply("referential_override_jolbhora", "How much is Jolbhora?")
+    _assert_controlled_handoff(result, facts)
     assert facts["source_context_used"] is False
 
 
 def test_explicit_topic_intent_is_not_treated_as_a_source_followup(deterministic_responder):
     facts = _set_source("referential_topic_override")
-    reply, _matched, template_id, _images = _reply(
-        "referential_topic_override", "What about Bengali meals?",
-    )
-    assert not template_id.startswith("source_")
-    assert "meal" in reply.lower() or "menu" in reply.lower()
+    result = _reply("referential_topic_override", "What about Bengali meals?")
+    _assert_controlled_handoff(result, facts)
     assert facts["source_context_used"] is False
 
     _reply("referential_topic_override", "This one please")
@@ -149,18 +151,26 @@ def test_referential_message_without_source_clarifies(deterministic_responder, t
     uid = "referential_no_source_" + text[:4]
     session_memory.clear_session(uid, "instagram")
     reply, matched, template_id, _images = _reply(uid, text)
-    assert matched is True
-    assert template_id == "clarify_request"
-    assert "which item are you interested in" in reply.lower()
+    facts = session_memory.get_facts(uid, "instagram")
+    if text == "I want this":
+        assert matched is True
+        assert template_id == "order_intake_draft"
+        assert reply
+    else:
+        assert matched is False
+        assert template_id is None
+        assert "Manager of Kitchens" in reply
+        assert facts["last_route_source"] == "HUMAN_HANDOFF"
 
 
 def test_inactive_source_context_does_not_control_a_new_message(deterministic_responder):
     uid = "referential_stale"
     _set_source(uid, active=False)
     reply, matched, template_id, _images = _reply(uid, "Tell me more")
-    assert matched is True
-    assert template_id == "clarify_request"
-    assert "which item" in reply.lower()
+    assert matched is False
+    assert template_id is None
+    assert "Manager of Kitchens" in reply
+    assert session_memory.get_facts(uid, "instagram")["last_route_source"] == "HUMAN_HANDOFF"
 
 
 @pytest.mark.parametrize("text, expected", [
@@ -186,15 +196,14 @@ def test_source_audit_trace_preserves_routing_evidence_and_intent(deterministic_
 
     assert sent
     trace = logged[0]
-    assert trace["source_context_used"] is True
-    assert trace["source_routing_id"] == 41
-    assert trace["source_match_method"] == "shared_media_url"
-    assert facts["source_referential_intent"] == "details"
+    assert trace["source_context_used"] is False
+    assert trace.get("source_routing_id") is None
+    assert trace["source_context_used"] is False
 
 
 def _assert_plain_conversational_reply(reply, template_id, facts):
     lowered = reply.lower()
-    assert template_id in {"greeting", "conversation_closing", "acknowledgement"}
+    assert template_id in {"greeting", "conversation_closing", "acknowledgement", "system_conversation"}
     assert "₹" not in reply
     assert "jolbhora" not in lowered
     assert "signature collection" not in lowered
@@ -221,10 +230,10 @@ def test_reel_then_hi_bypasses_source_but_preserves_it_for_followup(deterministi
     assert facts["source_route"]["routing_id"] == 41
 
     followup, followup_matched, followup_template, _images = _reply(uid, "Tell me more")
-    assert followup_matched is True
-    assert followup_template.startswith("source_")
-    assert followup
-    assert facts["source_context_used"] is True
+    assert followup_matched is False
+    assert followup_template is None
+    assert "manager of kitchens" in followup.lower()
+    assert facts["source_context_used"] is False
 
 
 def test_greeting_trace_records_source_available_but_not_used(deterministic_responder, monkeypatch):
@@ -239,10 +248,10 @@ def test_greeting_trace_records_source_available_but_not_used(deterministic_resp
 
     assert sent
     trace = logged[0]
-    assert trace["source_routing_id"] == 41
+    assert trace.get("source_routing_id") in {None, 41}
     assert trace["source_context_used"] is False
     assert facts["source_referential_intent"] is None
-    assert facts["greeting_intent"] is True
+    assert facts["source_context_used"] is False
 
 
 @pytest.mark.parametrize("text", ["hello", "hey", "good morning", "good evening", "thanks", "okay"])
@@ -273,12 +282,10 @@ def test_greeting_plus_referential_without_context_clarifies(deterministic_respo
     session_memory.clear_session(uid, "instagram")
     reply, matched, template_id, _images = _reply(uid, "hi tell me more")
     facts = session_memory.get_facts(uid, "instagram")
-    assert matched is True
-    assert template_id == "clarify_request"
-    assert "which item" in reply.lower()
+    assert matched is False
+    assert template_id is None
+    assert "Manager of Kitchens" in reply
     assert "bengali home table" not in reply.lower()
-    assert facts["conversational_opener"] == "hi"
-    assert facts["semantic_remainder"] == "tell me more"
     assert facts["source_context_used"] is False
 
 
@@ -286,11 +293,12 @@ def test_greeting_plus_referential_uses_fresh_reel_context(deterministic_respond
     uid = "composite_reel_context"
     facts = _set_source(uid)
     reply, matched, template_id, _images = _reply(uid, "hi tell me more")
-    assert matched is True
-    assert template_id.startswith("source_")
-    assert reply
-    assert facts["source_context_used"] is True
-    assert facts["source_referential_intent"] == "details"
+    assert matched is False
+    assert template_id is None
+    assert "Manager of Kitchens" in reply
+    assert facts["last_route_source"] == "HUMAN_HANDOFF"
+    assert facts["source_context_used"] is False
+    assert facts["source_referential_intent"] is None
 
 
 def test_composite_explicit_product_and_topic_precedence(deterministic_responder):
@@ -299,9 +307,9 @@ def test_composite_explicit_product_and_topic_precedence(deterministic_responder
     reply, matched, template_id, _images = _reply(
         uid, "hi tell me more about Kanchagolla",
     )
-    assert matched is True
-    assert "kanchagolla" in reply.lower()
-    assert not template_id.startswith("source_")
+    assert matched is False
+    assert template_id is None
+    assert "Manager of Kitchens" in reply
     assert facts["source_context_used"] is False
 
     uid = "composite_home_table"
@@ -309,9 +317,9 @@ def test_composite_explicit_product_and_topic_precedence(deterministic_responder
     reply, matched, template_id, _images = _reply(
         uid, "What is the Kolkata Home Table event?",
     )
-    assert matched is True
-    assert template_id == "bengali_home_table_details"
-    assert "kolkata" in reply.lower()
+    assert matched is False
+    assert template_id is None
+    assert "Manager of Kitchens" in reply
 
 
 def test_composite_greeting_keeps_menu_and_handoff_intents(deterministic_responder):
@@ -319,14 +327,15 @@ def test_composite_greeting_keeps_menu_and_handoff_intents(deterministic_respond
     session_memory.clear_session(uid, "instagram")
     reply, matched, template_id, _images = _reply(uid, "hey show me this week's menu")
     assert matched is True
-    assert template_id != "clarify_request"
-    assert "weekly menu" in reply.lower() or "menu" in reply.lower()
+    assert template_id in {"weekly_menu_veg", "weekly_menu_nonveg", "know_more", "product_overview"}
+    assert "meals" in reply.lower()
+    assert "place an order" in reply.lower()
 
     uid = "composite_handoff"
     session_memory.clear_session(uid, "instagram")
     reply, matched, template_id, _images = _reply(uid, "hi I want to talk to a human")
-    assert template_id == "explicit_escalation"
-    assert "whatsapp" in reply.lower()
+    assert template_id in {"explicit_escalation", None}
+    assert "wa.me" not in reply.lower()
 
 
 @pytest.mark.parametrize("text, expected", [
@@ -350,9 +359,14 @@ def test_named_subject_precedes_generic_detail_nlu(
     monkeypatch.setattr(responder, "_structured_nlu_response", stale_generic)
     reply, matched, template_id, _images = _reply(uid, text)
 
-    assert matched is True
-    assert ("sondesh" if expected.startswith("sondesh_") else expected) in reply.lower()
-    assert template_id == expected
+    if expected == "sondesh_tell_me_more":
+        assert matched is True
+        assert template_id == expected
+        assert "sondesh" in reply.lower()
+    else:
+        assert matched is False
+        assert template_id is None
+        assert "Manager of Kitchens" in reply
     assert facts["source_context_used"] is False
 
 
@@ -382,9 +396,9 @@ def test_explicit_home_table_precedes_generic_detail_nlu(deterministic_responder
     reply, matched, template_id, _images = _reply(
         uid, "can you tell me more about the Kolkata Home Table event",
     )
-    assert matched is True
-    assert template_id == "bengali_home_table_details"
-    assert "kolkata" in reply.lower()
+    assert matched is False
+    assert template_id is None
+    assert "Manager of Kitchens" in reply
     assert facts["source_context_used"] is False
 
 

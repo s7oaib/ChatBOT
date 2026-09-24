@@ -1,5 +1,7 @@
 """Client-approved Q&A routing regressions for the September acceptance pass."""
 
+from unittest.mock import patch
+
 import pytest
 
 from camellia.responder import responder
@@ -161,22 +163,32 @@ def test_unsupported_event_after_home_table_context_hands_off(monkeypatch):
         "priority_products": [],
     }
 
-    response, matched, template_id, _images = responder.match_and_respond(
-        "Can you cater a wedding in Mumbai?",
-        user_id=user_id,
-        channel="instagram",
-    )
+    with patch("camellia.responder.rag_fallback_engine.retrieve") as rag, patch(
+        "camellia.ai_responder.ai_responder._query_groq",
+        return_value=("", False, "must_not_run"),
+    ) as groq:
+        response, matched, template_id, _images = responder.match_and_respond(
+            "Can you cater a wedding in Mumbai for 50 guests? My number is 9876543210.",
+            user_id=user_id,
+            channel="instagram",
+        )
 
     facts = session_memory.get_facts(user_id, "instagram")
     assert matched is False
-    assert template_id == "groq_structured_event_escalation"
+    assert template_id is None
     assert facts["knowledge_sufficient"] is False
     assert "event_order" in facts["last_intents"]
     assert "ESCALATE_TO_TEAM" in facts["last_actions"]
     assert "bengali home table" not in response.lower()
+    assert "Manager of Kitchens" in response
+    assert set(facts["last_entities"]).issubset({"event", "quantity", "location"})
+    assert "9876543210" not in repr(facts["last_entities"])
+    assert facts["last_llm_called"] is False
+    rag.assert_not_called()
+    groq.assert_not_called()
 
 
-def test_sensitive_question_after_home_table_context_uses_safety_lane(monkeypatch):
+def test_sensitive_question_after_home_table_context_fails_closed(monkeypatch):
     monkeypatch.setattr("camellia.config.config.BYPASS_AD_GATE", True)
     user_id = "client-qa-sensitive-after-story"
     session_memory.clear_session(user_id, "instagram")
@@ -196,9 +208,12 @@ def test_sensitive_question_after_home_table_context_uses_safety_lane(monkeypatc
         channel="instagram",
     )
 
-    assert matched is True
-    assert template_id == "GUARD_allergen_nutfree_glutenfree"
+    assert matched is False
+    assert template_id is None
     assert "Bengali Home Table" not in response
+    assert "Manager of Kitchens" in response
+    facts = session_memory.get_facts(user_id, "instagram")
+    assert facts["last_route_source"] == "HUMAN_HANDOFF"
 
 
 def test_booking_help_after_home_table_context_uses_order_handoff(monkeypatch):

@@ -1,5 +1,4 @@
 import json
-import re
 import urllib.parse
 import uuid
 from unittest.mock import patch
@@ -7,8 +6,92 @@ from unittest.mock import patch
 from camellia import app
 from camellia.config import config
 from camellia.database import db
+from camellia.handoff import whatsapp_link
+from camellia.order_intake import ORDER_DRAFT_INCOMPLETE, new_order_draft
 from camellia.responder import responder
 from camellia.session_memory import session_memory
+
+
+def test_fresh_yes_keeps_the_safe_generic_acknowledgement():
+    user_id = "client-followup-fresh-yes"
+    session_memory.clear_session(user_id, "instagram")
+
+    reply = responder.match_and_respond("yes", user_id=user_id, channel="instagram")
+
+    assert reply[0] == "Got it! 😊 How can I help you?"
+    assert reply[2] == "system_conversation"
+
+
+def test_pending_clarification_gets_first_chance_at_contextual_yes_or_no():
+    for acknowledgement in ("yes", "no"):
+        user_id = f"client-followup-clarification-{acknowledgement}"
+        session_memory.clear_session(user_id, "instagram")
+        facts = session_memory.get_facts(user_id, "instagram")
+        facts.update({
+            "pending_clarification": "product_price",
+            "clarification_options": ["SONDESH", "BENGALI_MEAL"],
+            "last_bot_question": "Are you asking about Sondesh or Bengali meals?",
+        })
+
+        with patch.object(responder, "_contextual_resolution", wraps=responder._contextual_resolution) as resolve:
+            reply = responder.match_and_respond(acknowledgement, user_id, "instagram")
+
+        assert reply[0] != "Got it! 😊 How can I help you?"
+        assert reply[2] is None
+        assert facts["last_route_source"] == "HUMAN_HANDOFF"
+        resolve.assert_called_once_with(acknowledgement, user_id, "instagram")
+
+
+def test_order_draft_yes_does_not_invent_missing_address_or_finalize():
+    for acknowledgement in ("yes", "no", "ok"):
+        user_id = f"client-followup-order-{acknowledgement}"
+        session_memory.clear_session(user_id, "instagram")
+        facts = session_memory.get_facts(user_id, "instagram")
+        facts["order_intake_draft"] = draft = new_order_draft()
+        draft.update({
+            "item": "Sondesh", "quantity": "2 boxes", "delivery_area": "Gurgaon",
+            "delivery_slot": "Friday dinner",
+        })
+
+        reply = responder.match_and_respond(acknowledgement, user_id, "instagram")
+
+        assert reply[2] == "order_intake_draft"
+        assert "ORDER DRAFT" in reply[0]
+        assert "Delivery address: \n" in reply[0]
+        assert "Receiver phone: \n" in reply[0]
+        assert facts["order_intake_draft"]["delivery_address"] is None
+        assert facts["order_intake_draft"]["receiver_phone"] is None
+        assert facts["order_intake_draft"]["status"] == ORDER_DRAFT_INCOMPLETE
+
+
+def test_ok_with_explicit_sondesh_question_is_not_a_generic_acknowledgement():
+    user_id = "client-followup-ok-sondesh"
+    session_memory.clear_session(user_id, "instagram")
+
+    reply = responder.match_and_respond("ok, tell me about Sondesh", user_id, "instagram")
+
+    assert reply[2] != "system_conversation"
+    assert "sondesh" in reply[0].casefold()
+
+
+def test_long_messages_containing_acknowledgements_keep_their_business_intent():
+    user_id = "client-followup-ack-business-intent"
+    session_memory.clear_session(user_id, "instagram")
+    order = responder.match_and_respond("yes, I want to order", user_id, "instagram")
+    assert order[2] == "order_intake_draft"
+    assert order[0] != "Got it! 😊 How can I help you?"
+
+    session_memory.clear_session(user_id, "instagram")
+    sondesh = responder.match_and_respond(
+        "no, tell me about Sondesh instead", user_id, "instagram",
+    )
+    assert "sondesh" in sondesh[0].casefold()
+    assert sondesh[2] != "system_conversation"
+
+    session_memory.clear_session(user_id, "instagram")
+    bento = responder.match_and_respond("ok, what is the Bento price?", user_id, "instagram")
+    assert bento[2] == "bento_details"
+    assert bento[0] != "Got it! 😊 How can I help you?"
 
 
 def test_delivery_area_followup_confirms_a_serviceable_area_and_keeps_area_flow_active():
@@ -98,9 +181,9 @@ def test_instagram_generic_human_help_uses_callback_ack_without_whatsapp():
     NEW REQUIREMENT: generic support requests receive a callback acknowledgement
     and never expose the booking-only WhatsApp continuation.
 
-    WHY CHANGED: explicit client channel-policy requirement — Instagram AI,
-    WhatsApp human-only, connected by a handoff link rather than a collected
-    phone number.
+    WHY CHANGED: Instagram support stays in-channel with a callback
+    acknowledgement; a WhatsApp continuation is offered only for approved
+    order workflows.
     """
     # Suffixed so a fresh handoff (and staff alert) is created regardless of
     # what an earlier test run already wrote to the persistent handoffs table
@@ -122,12 +205,12 @@ def test_instagram_generic_human_help_uses_callback_ack_without_whatsapp():
     reply_text = send_reply.call_args.args[1]
     assert "standard escalation" not in reply_text
     assert "wa.me" not in reply_text
-    assert "someone will get back to you shortly" in reply_text
+    assert "Manager of Kitchens will connect with you here shortly" in reply_text
 
 
 def test_repeated_human_requests_reuse_the_same_handoff_without_duplicate_alerts():
     """A customer saying "human" again while waiting gets no second CAM or alert."""
-    user_id = "client_instagram_repeat_handoff"
+    user_id = "client_instagram_repeat_handoff_" + uuid.uuid4().hex[:8]
     session_memory.clear_session(user_id, "instagram")
 
     with patch.object(
@@ -143,7 +226,7 @@ def test_repeated_human_requests_reuse_the_same_handoff_without_duplicate_alerts
         app._process_instagram_event(user_id, "is anyone there", "ad-1")
 
     assert "wa.me" not in first_reply
-    assert "someone will get back to you shortly" in first_reply
+    assert "Manager of Kitchens will connect with you here shortly" in first_reply
     assert send_reply.call_count == 1
     rows_for_this_user = [
         h for h in db.get_handoffs(limit=200) if h["source_user_id"] == user_id
@@ -152,10 +235,8 @@ def test_repeated_human_requests_reuse_the_same_handoff_without_duplicate_alerts
 
 
 def test_known_instagram_details_reach_the_handoff_without_being_re_asked():
-    """"50 boxes of Jolbhora for a wedding in Delhi" already told the bot the
-    product, quantity, event and area — the handoff must carry them, not make
-    the customer repeat them before generating the WhatsApp link."""
-    user_id = "client_instagram_known_details"
+    """Known current-turn facts stay with staff even when the customer gets no link."""
+    user_id = "client_instagram_known_details_" + uuid.uuid4().hex[:8]
     session_memory.clear_session(user_id, "instagram")
     facts = session_memory.get_facts(user_id, "instagram")
     facts["last_entities"] = {
@@ -173,8 +254,10 @@ def test_known_instagram_details_reach_the_handoff_without_being_re_asked():
             user_id, "I need 50 boxes of Jolbhora for my wedding in Delhi", "ad-1",
         )
 
-    reference = re.search(r"CAM-\d{5,6}", send_reply.call_args.args[1]).group(0)
-    handoff = db.get_handoff_by_ref(reference)
+    handoff = next(
+        item for item in db.get_handoffs(limit=200)
+        if item["source_user_id"] == user_id
+    )
     known = json.loads(handoff["known_entities"])
     assert known["product"] == "Jolbhora"
     assert known["quantity"] == 50
@@ -184,34 +267,21 @@ def test_known_instagram_details_reach_the_handoff_without_being_re_asked():
     assert "50" in handoff["summary"]
 
 
-def test_the_handoff_link_carries_no_conversation_or_personal_data():
-    """The public wa.me URL holds only the opaque reference — no product
-    details, no customer data, no conversation contents."""
-    user_id = "client_instagram_opaque_link"
-    session_memory.clear_session(user_id, "instagram")
-    facts = session_memory.get_facts(user_id, "instagram")
-    facts["last_entities"] = {"product": "Jolbhora", "location": "Delhi", "event": "wedding"}
+def test_order_handoff_link_carries_only_opaque_reference_not_customer_data():
+    """The click-to-chat URL does not expose identity or free-text enquiry data."""
+    with patch.object(config, "WHATSAPP_BUSINESS_NUMBER", "919800000000"):
+        link = whatsapp_link("CAM-12345")
 
-    with patch.object(
-        app.responder,
-        "match_and_respond",
-        return_value=("standard escalation", False, None, None),
-    ), patch.object(app, "send_instagram_reply") as send_reply, patch.object(
-        app.escalator, "handle_escalation", return_value={"escalation_id": 1},
-    ), patch.object(config, "WHATSAPP_BUSINESS_NUMBER", "919800000000"):
-        app._process_instagram_event(user_id, "50 boxes of Jolbhora for a wedding in Delhi", "ad-1")
-
-    reply_text = send_reply.call_args.args[1]
-    link = re.search(r"https://wa\.me/\S+", reply_text).group(0)
     decoded = urllib.parse.unquote(link)
+    assert "Ref: CAM-12345" in decoded
     assert "Jolbhora" not in decoded
     assert "Delhi" not in decoded
     assert "wedding" not in decoded
-    assert user_id not in decoded
+    assert "customer-id" not in decoded
 
 
 def test_savoury_ad_context_does_not_hijack_a_greeting_and_explicit_sweet_wins():
-    user_id = "client_savoury_ad"
+    user_id = "client_savoury_ad_" + uuid.uuid4().hex[:8]
     session_memory.clear_session(user_id, "instagram")
     with patch.object(app, "send_instagram_reply") as send_reply:
         app._process_instagram_event(
@@ -222,8 +292,15 @@ def test_savoury_ad_context_does_not_hijack_a_greeting_and_explicit_sweet_wins()
         assert "Bengali food" not in send_reply.call_args.args[1]
         assert "₹" not in send_reply.call_args.args[1]
 
+        before_sweet_question = len(send_reply.call_args_list)
         app._process_instagram_event(user_id, "Sondesh price", "ad-savoury")
-        assert "Sondesh" in send_reply.call_args.args[1]
+        sweet_texts = [
+            call.args[1]
+            for call in send_reply.call_args_list[before_sweet_question:]
+            if len(call.args) > 1 and call.args[1]
+        ]
+        assert sweet_texts
+        assert any("Sondesh" in text for text in sweet_texts)
 
 
 def test_bare_price_question_with_no_topic_asks_which_product_instead_of_guessing_sondesh():

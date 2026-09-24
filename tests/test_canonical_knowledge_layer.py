@@ -250,7 +250,7 @@ class TestPartialMultiIntent:
         assert "₹750" in text            # the approved Jolbhora price still ships
         assert "30%" not in text
         assert "discount" not in text.lower()
-        assert "team" in text.lower()    # the unsupported half goes to a person
+        assert "Manager of Kitchens" in text    # the unsupported half goes to a person
         assert matched is False
         assert template_id == "compound_product_price_discount_request"
 
@@ -266,7 +266,7 @@ class TestPartialMultiIntent:
             "availability_query": False,
         }
         assert "available today" not in text.lower()
-        assert "team" in text.lower()
+        assert "Manager of Kitchens" in text
 
 
 class TestGeneratedProseCannotIntroduceFacts:

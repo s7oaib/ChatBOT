@@ -43,6 +43,7 @@ def test_admin_maintenance_on_blocks_shell_apis_and_auth_state_without_details(m
 
 def test_admin_maintenance_does_not_block_health_or_instagram_webhook_verification(monkeypatch):
     monkeypatch.setattr(config, "ADMIN_MAINTENANCE_MODE", True)
+    monkeypatch.setattr(config, "META_VERIFY_TOKEN", "unit-test-maintenance-token")
     client = TestClient(app_module.app)
 
     health = client.get("/health")
@@ -53,7 +54,7 @@ def test_admin_maintenance_does_not_block_health_or_instagram_webhook_verificati
         "/webhook/instagram",
         params={
             "hub.mode": "subscribe",
-            "hub.verify_token": config.META_VERIFY_TOKEN,
+            "hub.verify_token": "unit-test-maintenance-token",
             "hub.challenge": "maintenance-still-works",
         },
     )

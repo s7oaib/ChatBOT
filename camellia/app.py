@@ -10,6 +10,7 @@ import re
 import secrets
 import time
 import uuid
+from dataclasses import asdict
 import httpx
 from datetime import datetime
 from contextlib import asynccontextmanager
@@ -112,6 +113,9 @@ log = get_logger("camellia.app")
 ADMIN_SESSION_COOKIE = "camellia_admin_session"
 ADMIN_CSRF_COOKIE = "camellia_admin_csrf"
 _admin_context: ContextVar[Optional[Dict[str, Any]]] = ContextVar("admin_context", default=None)
+_instagram_job_context: ContextVar[Optional[Dict[str, int]]] = ContextVar(
+    "instagram_job_context", default=None,
+)
 
 
 def _admin_security_version() -> str:
@@ -245,16 +249,20 @@ async def lifespan(app: FastAPI):
         migrate_legacy_routing_topics()
     except Exception:
         log.exception("Could not migrate legacy Instagram routing topics.")
-    if not config.META_APP_SECRET and not config.REQUIRE_WEBHOOK_SIGNATURE:
-        # CRITICAL rather than WARNING: an unsigned webhook endpoint on a public
-        # domain lets anyone POST fake customer messages, which this bot turns
-        # into real escalation alerts on the manager's phone.
-        log.critical(
-            "META_APP_SECRET is not set. Webhook signature verification is DISABLED — "
-            "anyone who finds the webhook URL can POST fake customer messages and "
-            "trigger real escalation alerts. Set META_APP_SECRET (Meta App Dashboard "
-            "> Settings > Basic > App Secret), then set REQUIRE_WEBHOOK_SIGNATURE=true."
-        )
+    if not (config.META_APP_SECRET or "").strip():
+        if config.REQUIRE_WEBHOOK_SIGNATURE:
+            log.critical(
+                "META_APP_SECRET is not set while REQUIRE_WEBHOOK_SIGNATURE is enabled. "
+                "Instagram webhook POSTs will be rejected until the Meta app secret is configured."
+            )
+        else:
+            # CRITICAL rather than WARNING: an unsigned webhook endpoint on a public
+            # domain lets anyone POST fake customer messages and trigger real alerts.
+            log.critical(
+                "META_APP_SECRET is not set. Webhook signature verification is DISABLED — "
+                "unsigned Instagram webhook POSTs can be accepted. Configure the Meta app "
+                "secret and enable REQUIRE_WEBHOOK_SIGNATURE."
+            )
     if not (config.ADMIN_USERNAME and config.ADMIN_PASSWORD_HASH):
         log.critical("Browser admin authentication is not configured; password login fails closed.")
     if config.ADMIN_PIN:
@@ -313,9 +321,17 @@ async def lifespan(app: FastAPI):
     notification_task = asyncio.create_task(
         _human_notification_loop(notification_stop),
     )
+    instagram_job_stop = asyncio.Event()
+    instagram_job_task = asyncio.create_task(_instagram_job_loop(instagram_job_stop))
     try:
         yield
     finally:
+        instagram_job_stop.set()
+        instagram_job_task.cancel()
+        try:
+            await instagram_job_task
+        except asyncio.CancelledError:
+            pass
         notification_stop.set()
         notification_task.cancel()
         try:
@@ -653,7 +669,12 @@ def verify_instagram_webhook(
     hub_challenge: Optional[str] = Query(None, alias="hub.challenge")
 ):
     """Meta Webhook verification endpoint for Instagram."""
-    if (hub_mode in ("subscribe", None)) and hub_verify_token == config.META_VERIFY_TOKEN:
+    configured_token = str(config.META_VERIFY_TOKEN or "").strip()
+    if (
+        configured_token
+        and hub_mode in ("subscribe", None)
+        and hub_verify_token == configured_token
+    ):
         log.info("Instagram webhook verification successful.")
         return Response(content=str(hub_challenge or ""), media_type="text/plain", status_code=200)
     log.warning("Instagram webhook verification failed (mode=%s).", hub_mode)
@@ -1063,12 +1084,12 @@ def _process_instagram_event(
         if ordered_blocks and not needs_escalation:
             send_instagram_response_blocks(sender_id, ordered_blocks, inbound_message_id=conversation_id)
         else:
-            send_instagram_reply(
+            _send_or_queue_instagram_reply(
                 sender_id, response_text, image_url=image_url,
                 inbound_message_id=conversation_id, response_type="reply",
             )
         if needs_escalation and link_message:
-            send_instagram_reply(
+            _send_or_queue_instagram_reply(
                 sender_id, link_message,
                 inbound_message_id=conversation_id, response_type="handoff",
             )
@@ -1079,6 +1100,8 @@ def _process_instagram_event(
             "Failed to process Instagram message from sender_hash=%s.",
             _safe_identifier_hash(sender_id),
         )
+        if _instagram_job_context.get() is not None:
+            raise
 
 
 # Webhook events the bot received and did not answer. Kept in memory and
@@ -1155,7 +1178,7 @@ def _reply_to_unreadable_attachment(
             shortcode=shortcode, source_match_method=source_match_method,
             source_media_present=source_media_present,
         )
-        send_instagram_reply(
+        _send_or_queue_instagram_reply(
             sender_id, _UNREADABLE_ATTACHMENT_REPLY,
             inbound_message_id=conversation_id, response_type="attachment_notice",
         )
@@ -1164,6 +1187,8 @@ def _reply_to_unreadable_attachment(
             "Failed to answer an unreadable attachment from sender_hash=%s.",
             _safe_identifier_hash(sender_id),
         )
+        if _instagram_job_context.get() is not None:
+            raise
 
 
 def _apply_source_context(sender_id: str, route: Dict[str, Any], match_method: str) -> None:
@@ -1649,6 +1674,159 @@ def _instagram_account_guard_matches(entry_id: Any, configured_account_id: Any) 
     return hmac.compare_digest(entry_value, configured_value)
 
 
+def _instagram_event_key(account_id: Any, event: Dict[str, Any]) -> str:
+    """Use Meta's message ID when present; hash the full event otherwise."""
+    message = event.get("message") or {}
+    postback = event.get("postback") or {}
+    message_id = message.get("mid") or postback.get("mid")
+    if message_id and not event.get("message_edit"):
+        identity = f"{account_id}:{message_id}"
+    else:
+        # Identical text without a Meta ID or event timestamp can be a real
+        # second customer message. Prefer processing it to suppressing it.
+        if not message_id and not (event.get("timestamp") or event.get("time")):
+            return uuid.uuid4().hex
+        identity = json.dumps(
+            {"account_id": account_id, "event": event}, sort_keys=True,
+            separators=(",", ":"), ensure_ascii=False,
+        )
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()
+
+
+def _instagram_task_value(value: Any) -> Any:
+    if isinstance(value, EntryPoint):
+        return {"__entry_point__": asdict(value)}
+    if isinstance(value, (tuple, list)):
+        return [_instagram_task_value(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _instagram_task_value(item) for key, item in value.items()}
+    return value
+
+
+def _restore_instagram_task_value(value: Any) -> Any:
+    if isinstance(value, dict) and set(value) == {"__entry_point__"}:
+        return EntryPoint(**value["__entry_point__"])
+    if isinstance(value, list):
+        return [_restore_instagram_task_value(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _restore_instagram_task_value(item) for key, item in value.items()}
+    return value
+
+
+class _DurableInstagramTasks:
+    """Commit accepted work before scheduling an in-process wakeup."""
+
+    def __init__(self, background_tasks: BackgroundTasks):
+        self.background_tasks = background_tasks
+        self.event_key: Optional[str] = None
+        self.sender_id: Optional[str] = None
+
+    def set_event(self, account_id: Any, event: Dict[str, Any]) -> None:
+        self.event_key = _instagram_event_key(account_id, event)
+        sender = event.get("sender") or event.get("from") or {}
+        self.sender_id = str(sender.get("id") or "") if isinstance(sender, dict) else ""
+
+    def add_task(self, fn, *args, **kwargs) -> None:
+        if fn is _process_instagram_event:
+            task_name = "_process_instagram_event"
+        elif fn is _handle_shared_attachment:
+            task_name = "_handle_shared_attachment"
+        else:
+            raise ValueError("Unsupported Instagram task")
+        sender_id = self.sender_id or (str(args[0]) if args else "")
+        if not self.event_key or not sender_id:
+            raise ValueError("Instagram event identity is missing")
+        job_id, _ = db.enqueue_instagram_inbound_job(
+            self.event_key, sender_id, task_name,
+            {"args": _instagram_task_value(args), "kwargs": _instagram_task_value(kwargs)},
+        )
+        self.background_tasks.add_task(_process_instagram_inbound_jobs, job_id=job_id)
+
+
+def _send_or_queue_instagram_reply(recipient_id: str, text: str, image_url=None, **kwargs) -> Dict[str, Any]:
+    context = _instagram_job_context.get()
+    if context is None:
+        return send_instagram_reply(recipient_id, text, image_url=image_url, **kwargs)
+    context["sequence"] += 1
+    db.enqueue_instagram_outbound_job(
+        context["job_id"], context["sequence"], recipient_id,
+        {"text": text, "image_url": image_url, **kwargs},
+    )
+    return {"status": "queued"}
+
+
+def _process_instagram_outbound_jobs(*, inbound_job_id: Optional[int] = None) -> None:
+    for _ in range(50):
+        jobs = db.claim_instagram_outbound_jobs(limit=1, inbound_job_id=inbound_job_id)
+        if not jobs:
+            return
+        job = jobs[0]
+        try:
+            payload = json.loads(job["payload"])
+            result = send_instagram_reply(
+                job["recipient_id"], payload.pop("text"),
+                retry_count=max(0, int(job["attempts"]) - 1), **payload,
+            )
+            if isinstance(result, dict) and result.get("status") == "failed":
+                db.complete_instagram_outbound_job(
+                    int(job["id"]), success=False,
+                    retryable=result.get("delivery_status") != "PERMANENT_RECIPIENT_FAILURE",
+                    error=str(result.get("delivery_status") or "Meta send failed"),
+                )
+                return
+            db.complete_instagram_outbound_job(int(job["id"]), success=True)
+        except Exception as exc:
+            db.complete_instagram_outbound_job(
+                int(job["id"]), success=False, error=type(exc).__name__,
+            )
+            log.warning("Instagram outbound job %s failed: %s", job["id"], type(exc).__name__)
+            return
+
+
+def _process_instagram_inbound_jobs(*, job_id: Optional[int] = None) -> None:
+    for _ in range(50):
+        jobs = db.claim_instagram_inbound_jobs(limit=1, job_id=job_id)
+        job_id = None
+        if not jobs:
+            return
+        job = jobs[0]
+        try:
+            payload = json.loads(job["payload"])
+            args = _restore_instagram_task_value(payload.get("args", []))
+            kwargs = _restore_instagram_task_value(payload.get("kwargs", {}))
+            fn = {
+                "_process_instagram_event": _process_instagram_event,
+                "_handle_shared_attachment": _handle_shared_attachment,
+            }[job["task_name"]]
+            token = _instagram_job_context.set({"job_id": int(job["id"]), "sequence": 0})
+            try:
+                fn(*args, **kwargs)
+            finally:
+                _instagram_job_context.reset(token)
+            db.complete_instagram_inbound_job(int(job["id"]), success=True)
+            _process_instagram_outbound_jobs(inbound_job_id=int(job["id"]))
+        except Exception as exc:
+            db.complete_instagram_inbound_job(
+                int(job["id"]), success=False, error=type(exc).__name__,
+            )
+            log.error("Instagram inbound job %s will retry after %s.", job["id"], type(exc).__name__)
+
+
+async def _instagram_job_loop(stop_event: asyncio.Event) -> None:
+    while not stop_event.is_set():
+        try:
+            await asyncio.to_thread(_process_instagram_inbound_jobs)
+            await asyncio.to_thread(_process_instagram_outbound_jobs)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("Instagram durable job poll failed.")
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=5.0)
+        except asyncio.TimeoutError:
+            pass
+
+
 def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks) -> dict:
     entries = payload.get("entry", []) if isinstance(payload, dict) else []
     if not isinstance(entries, list):
@@ -1685,6 +1863,8 @@ def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks
                     events.append(val)
 
         for messaging_event in events:
+            if isinstance(background_tasks, _DurableInstagramTasks):
+                background_tasks.set_event(entry_id, messaging_event)
             is_ad_qualified, sender_id, message_text, ad_id = ad_gate.inspect_and_gate_message(messaging_event)
             entry_point = describe_entry_point(messaging_event)
             message = messaging_event.get("message") or {}
@@ -1747,8 +1927,6 @@ def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks
                 # matcher can be extended.
                 if reason == "attachment_only":
                     _record_attachment_debug_event(messaging_event, sender_id)
-                    if not shared_reel and not shared_post_id and not entry_point.media_id:
-                        _mark_unmapped_shared_attachment(sender_id)
 
                 # Parsed here because it is pure string work, but resolved and
                 # stored in the background task below — the webhook must keep
@@ -1856,7 +2034,7 @@ async def handle_instagram_webhook(request: Request, background_tasks: Backgroun
     if payload.get("object") not in ("instagram", "page"):
         return {"status": "ignored", "reason": f"Not an instagram or page object (got {payload.get('object')})"}
 
-    return _dispatch_instagram_payload(payload, background_tasks)
+    return _dispatch_instagram_payload(payload, _DurableInstagramTasks(background_tasks))
 
 def _audit_recipient_id(recipient_id: str) -> str:
     """Return a stable, non-reversible identifier for outbound audit rows."""
@@ -1993,12 +2171,12 @@ def send_instagram_response_blocks(recipient_id: str, blocks: list, *, inbound_m
     """Deliver one approved answer in its client-authored text/asset order."""
     for index, block in enumerate(blocks):
         if block.get("kind") == "TEXT":
-            result = send_instagram_reply(
+            result = _send_or_queue_instagram_reply(
                 recipient_id, block.get("text", ""),
                 inbound_message_id=inbound_message_id, response_type="reply",
             )
         else:
-            result = send_instagram_reply(
+            result = _send_or_queue_instagram_reply(
                 recipient_id, "", image_url=block.get("urls") or [],
                 inbound_message_id=inbound_message_id, response_type="reply",
             )
@@ -2065,7 +2243,7 @@ def send_instagram_reply(
         auth_mode = config.instagram_auth_mode()
     except ValueError as exc:
         log.error("Instagram outbound configuration is invalid: %s", exc)
-        return {"status": "failed", "error": str(exc)}
+        return {"status": "failed", "error": str(exc), "delivery_status": "AUTH_FAILURE"}
 
     token = (config.INSTAGRAM_ACCESS_TOKEN or "").strip()
     if not token:
@@ -2076,6 +2254,7 @@ def send_instagram_reply(
         return {
             "status": "failed",
             "error": f"INSTAGRAM_ACCESS_TOKEN is not set for auth mode {auth_mode}.",
+            "delivery_status": "AUTH_FAILURE",
         }
 
     if auth_mode == "instagram_login":
@@ -2299,7 +2478,12 @@ def send_instagram_reply(
                 "Instagram Meta API request failed: http_status=%s error_type=%s.",
                 e.response.status_code, type(e).__name__,
             )
-        return {"error": str(e), "status": "failed"}
+        return {
+            "error": str(e), "status": "failed",
+            "delivery_status": failure_classification or classify_instagram_delivery(
+                exception_class=type(e).__name__, exception_message=_safe_outbound_exception(e),
+            ),
+        }
 
 # --------------------------------------------------------------------------
 # Legal Pages (required by Meta before an app can go Live, and by the
@@ -2618,7 +2802,7 @@ def _delivery_capability() -> dict:
 
 def _webhook_signature_status() -> str:
     """How webhook payloads are being authenticated, in one word."""
-    if config.META_APP_SECRET:
+    if (config.META_APP_SECRET or "").strip():
         return "enforced"
     if config.REQUIRE_WEBHOOK_SIGNATURE:
         return "required_but_unconfigured"
@@ -2735,6 +2919,7 @@ def health_check():
     storage = _storage_durability()
     instagram_token = instagram_token_status()
     instagram_outbound = db.instagram_outbound_health()
+    instagram_jobs = db.instagram_job_counts()
 
     # Shadow mode is switched on in the host dashboard, which nothing in this
     # repo can read. Without this, turning it on and hoping is the only option.
@@ -2774,6 +2959,10 @@ def health_check():
     warnings.append("WhatsApp automation removed; manual human handoff via wa.me is available.")
     if signature == "DISABLED":
         warnings.append("META_APP_SECRET unset — webhook payloads are not verified.")
+    elif signature == "required_but_unconfigured":
+        warnings.append("META_APP_SECRET unset while signature enforcement is required — Instagram webhook POSTs are rejected.")
+    if instagram_jobs["inbound"].get("FAILED") or instagram_jobs["outbound"].get("FAILED"):
+        warnings.append("Instagram delivery jobs need operator review; see instagram_delivery_jobs.")
     if config.ENABLE_WEB_TESTER:
         warnings.append("ENABLE_WEB_TESTER is on — /chat is reachable by anyone with the URL.")
     if not storage["database"]["expected_durable"]:
@@ -2829,6 +3018,7 @@ def health_check():
             # Diagnostic only: no traffic is not an outage, so this block never
             # participates in the overall healthy/degraded calculation.
             "instagram_outbound": instagram_outbound,
+            "instagram_delivery_jobs": instagram_jobs,
             "human_escalation_notifications": {
                 "status": "SKIPPED",
                 "reason": "WhatsApp automation removed; staff alerts are manual-only.",
@@ -3109,7 +3299,11 @@ def list_instagram_routes(
     }
     route_ids = {route.get("routing_id") for route in routes}
     pairings = {key: value for key, value in db.list_latest_post_pairings().items() if key in route_ids}
-    previews = {row["routing_id"]: row for row in db.list_instagram_route_previews() if row["routing_id"] in route_ids}
+    previews = {
+        routing_id: preview
+        for routing_id, preview in db.list_instagram_route_previews().items()
+        if routing_id in route_ids
+    }
     for route in routes:
         topic = topics.get(route.get("topic_id")) or {}
         route["topic_description"] = topic.get("description") or ""
@@ -3217,6 +3411,8 @@ async def save_instagram_media_mapping(item_id: int, request: Request, x_admin_k
     if not item:
         raise HTTPException(status_code=404, detail="Instagram media not found.")
     body = await request.json()
+    if not str(body.get("source_description") or "").strip():
+        raise HTTPException(status_code=400, detail="Source Description is required.")
     topic_id = str(body.get("topic_id") or "").strip()
     if not topic_id:
         raise HTTPException(status_code=400, detail="Choose a Topic.")
@@ -3449,6 +3645,8 @@ async def save_instagram_route(
     require_admin(x_admin_key, x_admin_pin)
     try:
         body = await request.json()
+        if not str(body.get("source_description") or "").strip():
+            raise ValueError("Source Description is required.")
         route = validate_route_payload(body)
         routing_id = body.get("routing_id")
         if routing_id is not None:

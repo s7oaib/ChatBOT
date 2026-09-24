@@ -33,6 +33,49 @@ def _source(source_type, source_id):
     }
 
 
+@pytest.mark.parametrize("description", ["", "   "])
+def test_admin_route_requires_explicit_source_description_on_create_and_update(mapping_db, description):
+    database, _path = mapping_db
+    client = TestClient(app_module.app)
+    headers = {"x-admin-key": config.ADMIN_API_KEY}
+    payload = _source("story", "description-required-story")
+    rejected = client.post("/admin/instagram-routes", headers=headers, json={**payload, "source_description": description})
+    assert rejected.status_code == 400
+    assert "Source Description is required" in rejected.json()["detail"]
+    assert database.list_instagram_source_routes() == []
+
+    created = client.post("/admin/instagram-routes", headers=headers, json={**payload, "source_description": "  Operator-approved story copy.  "})
+    assert created.status_code == 200, created.text
+    route_id = created.json()["route"]["routing_id"]
+    assert created.json()["route"]["source_description"] == "Operator-approved story copy."
+    rejected_update = client.post("/admin/instagram-routes", headers=headers, json={**payload, "routing_id": route_id, "source_description": description})
+    assert rejected_update.status_code == 400
+    assert database.get_instagram_source_route(route_id)["source_description"] == "Operator-approved story copy."
+
+
+@pytest.mark.parametrize("description", ["", "   "])
+def test_gallery_mapping_requires_source_description(mapping_db, description):
+    database, _path = mapping_db
+    client = TestClient(app_module.app)
+    headers = {"x-admin-key": config.ADMIN_API_KEY}
+    topic_response = client.post("/admin/instagram-topics", headers=headers, json={"name": "Staging topic", "description": "Test classification."})
+    assert topic_response.status_code == 200, topic_response.text
+    topic = topic_response.json()["topic"]
+    media = database.upsert_instagram_media({"instagram_media_id": "description-required-post", "media_type": "IMAGE"})
+    path = f"/admin/instagram-media/{media['id']}/mapping"
+    payload = {"topic_id": topic["topic_id"], "source_description": description, "menu_mode": "NONE"}
+    rejected = client.put(path, headers=headers, json=payload)
+    assert rejected.status_code == 400
+    assert "Source Description is required" in rejected.json()["detail"]
+    assert database.list_instagram_source_routes() == []
+    created = client.put(path, headers=headers, json={**payload, "source_description": "Operator-approved post copy."})
+    assert created.status_code == 200, created.text
+    route_id = created.json()["route"]["routing_id"]
+    rejected_update = client.put(path, headers=headers, json=payload)
+    assert rejected_update.status_code == 400
+    assert database.get_instagram_source_route(route_id)["source_description"] == "Operator-approved post copy."
+
+
 @pytest.mark.parametrize("source_type,question", [
     ("post", "What is this post about?"),
     ("reel", "What's this reel about?"),
@@ -90,7 +133,7 @@ def test_explicit_subscription_price_keeps_approved_copy_and_relevant_mapped_ass
         "What is the subscription price?", user_id=user_id, channel="instagram"
     )
     assert matched and answer == client_qa.REGISTRY_BY_ID["subscription_price"].answer
-    assert "/images/mapped-chart.jpg" in images
+    assert "/images/Everyday%20Meal%20Subscription%20Rate%20Chart.jpeg" in images
     answer, matched, _template, images = responder.match_and_respond(
         "Tell me about Sondesh", user_id=user_id, channel="instagram"
     )
@@ -116,15 +159,21 @@ def test_greeting_does_not_use_source_description():
     ("Bengali Bento", "tell me more", "bento_details_client"),
     ("Bengali Bento", "price?", "bento_price_client"),
 ])
-def test_short_followup_uses_source_topic_approved_answer(topic, question, approved_id):
+def test_short_followup_uses_source_description_or_explicit_topic_qa(topic, question, approved_id):
     user_id = f"short-{topic}-{question}"
     session_memory.clear_session(user_id, "instagram")
     facts = session_memory.get_facts(user_id, "instagram")
+    source_description = f"Mapped description for {topic}."
     facts["source_route"] = {**_source("post", "exact-post"), "routing_id": 51,
-                             "routing_topic": topic, "source_description": "Mapped source description."}
-    answer, matched, _template, _images = responder.match_and_respond(
+                             "routing_topic": topic, "source_description": source_description}
+    answer, matched, template, _images = responder.match_and_respond(
         question, user_id=user_id, channel="instagram"
     )
+    if question == "tell me more":
+        assert matched and answer == source_description
+        assert template == "source_description"
+        assert facts["decision_lane"] == "SOURCE_DESCRIPTION"
+        return
     assert matched and answer == client_qa.REGISTRY_BY_ID[approved_id].answer
     assert facts["decision_lane"] == "EXACT_APPROVED"
 
@@ -282,7 +331,10 @@ def test_media_admin_list_paginates_bounds_page_size_and_searches_topics(mapping
     database, _path = mapping_db
     client = TestClient(app_module.app)
     headers = {"x-admin-key": config.ADMIN_API_KEY}
-    topic = client.post("/admin/instagram-topics", headers=headers, json={"name": "Bengali Bento"}).json()["topic"]
+    topic = client.post(
+        "/admin/instagram-topics", headers=headers,
+        json={"name": "Bengali Bento", "description": "Approved Bento details."},
+    ).json()["topic"]
     media_ids = []
     for index in range(30):
         media = database.upsert_instagram_media({

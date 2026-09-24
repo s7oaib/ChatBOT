@@ -74,7 +74,7 @@ class TestHybridRAGArchitecture(unittest.TestCase):
         # Test customer-facing responder behavior -> Must escalate safely, NOT auto-publish candidate
         text, was_matched, tmpl_id, img = responder.match_and_respond(user_msg, user_id=self.user_id, channel=self.channel)
         self.assertFalse(was_matched)
-        self.assertIn("assist you personally", text.lower())
+        self.assertIn("Manager of Kitchens", text)
 
     def test_scenario_c_unknown_query_no_relevant_source(self):
         """Scenario C: Unknown query with no relevant source context triggers immediate human escalation."""
@@ -82,7 +82,7 @@ class TestHybridRAGArchitecture(unittest.TestCase):
         text, was_matched, tmpl_id, img = responder.match_and_respond(user_msg, user_id=self.user_id, channel=self.channel)
         
         self.assertFalse(was_matched)
-        self.assertIn("assist you personally", text.lower())
+        self.assertIn("Manager of Kitchens", text)
 
     def test_scenario_d_unsupported_price_query(self):
         """Scenario D: Unsupported price query must never invent price, must escalate to human."""
@@ -99,7 +99,7 @@ class TestHybridRAGArchitecture(unittest.TestCase):
         # Bulk/custom enquiries get an intent-specific handover (quote request)
         # rather than the generic notice, but must still hand off to a human
         # and never invent a price for an unsupported request.
-        self.assertIn("our team", text.lower())
+        self.assertIn("Manager of Kitchens", text)
         self.assertNotRegex(text, r'₹\s?\d')
 
     def test_scenario_e_unsupported_shelf_life_query(self):
@@ -108,7 +108,7 @@ class TestHybridRAGArchitecture(unittest.TestCase):
         text, was_matched, tmpl_id, img = responder.match_and_respond(user_msg, user_id=self.user_id, channel=self.channel)
         
         # Non-standard unapproved storage conditions must return approved facts or escalate
-        self.assertTrue("refrigerated" in text.lower() or "assist you personally" in text.lower())
+        self.assertTrue("refrigerated" in text.lower() or "Manager of Kitchens" in text)
 
     def test_scenario_f_staff_manager_contact_query(self):
         """Scenario F: Staff/manager contact query must trigger deterministic manager info or human escalation."""
@@ -116,7 +116,7 @@ class TestHybridRAGArchitecture(unittest.TestCase):
         text, was_matched, tmpl_id, img = responder.match_and_respond(user_msg, user_id=self.user_id, channel=self.channel)
         
         # Guard template or escalation fallback
-        self.assertTrue("guru dayal singh" in text.lower() or "assist you personally" in text.lower())
+        self.assertTrue("guru dayal singh" in text.lower() or "Manager of Kitchens" in text)
 
     def test_scenario_g_first_contact_messages(self):
         """Scenario G: First-contact messages must be handled deterministically."""
@@ -140,7 +140,7 @@ class TestHybridRAGArchitecture(unittest.TestCase):
         text, was_matched, tmpl_id, img = responder.match_and_respond(user_msg, user_id=self.user_id, channel=self.channel)
         
         self.assertFalse(was_matched)
-        self.assertIn("assist you personally", text.lower())
+        self.assertIn("Manager of Kitchens", text)
 
     def test_scenario_i_conflicting_rag_sources(self):
         """Scenario I: Conflicting RAG sources flag conflict and escalate to human."""
@@ -152,7 +152,7 @@ class TestHybridRAGArchitecture(unittest.TestCase):
             self.assertLess(rag_res.confidence_score, 0.60)
 
         text, was_matched, tmpl_id, img = responder.match_and_respond(user_msg, user_id=self.user_id, channel=self.channel)
-        self.assertTrue("sondesh" in text.lower() or "assist you personally" in text.lower())
+        self.assertTrue("sondesh" in text.lower() or "Manager of Kitchens" in text)
 
     def test_scenario_j_qa_templates_vs_rag_conflict(self):
         """Scenario J: Conflict between qa_templates.json and RAG source -> qa_templates.json wins deterministically."""

@@ -100,6 +100,12 @@ Confirm it worked in `/health`:
 "storage": { "database": { "path": "/app/var/camellia.db", "expected_durable": true } }
 ```
 
+Instagram webhook work and pending replies are also stored in this SQLite
+database. Keep `DB_PATH` on the volume: otherwise a deploy can lose accepted
+messages or replies waiting for Meta. Check `/health` →
+`instagram_delivery_jobs` for `RETRY` or `FAILED` jobs; `FAILED` needs operator
+review, while retryable sends are attempted automatically.
+
 ## Menu updates — the Google Sheet is the source of truth
 
 With the production storage contract, a menu edited through `/admin` is written
@@ -181,11 +187,30 @@ After setting the matching pair, sign in to Admin and open
 only its non-secret ID and username; the access token is not stored by the
 application and must be updated through the Railway dashboard/control plane.
 
-Once `META_APP_SECRET` is set and `/health` reports `webhook_signature:
-"enforced"`, also set `REQUIRE_WEBHOOK_SIGNATURE=true` so unsigned payloads are
-rejected outright rather than merely unverified.
+For production, configure a private `META_VERIFY_TOKEN` both in the deployment
+environment and in Meta webhook settings. There is no built-in fallback; a
+missing or whitespace-only token makes the GET challenge fail closed. Configure
+`META_APP_SECRET` from the Meta App Dashboard and keep
+`REQUIRE_WEBHOOK_SIGNATURE=true` before deployment. Signature enforcement
+defaults to enabled; do not deploy with unsigned webhook acceptance. With the
+app secret missing, POST events are rejected and `/health` reports
+`webhook_signature: "required_but_unconfigured"` rather than claiming that
+signatures are enforced.
 
 ## Verifying a deploy
+
+1. Generate and configure a private `META_VERIFY_TOKEN` in the deployment environment.
+2. Configure the same verification token in Meta webhook settings.
+3. Configure `META_APP_SECRET` with the secret for the Meta app sending events.
+4. Keep `REQUIRE_WEBHOOK_SIGNATURE=true`.
+5. Deploy the configuration.
+6. Verify Meta's GET challenge succeeds and returns the supplied challenge.
+7. Send a correctly signed POST and confirm it is accepted.
+8. Send an unsigned POST and confirm it is rejected with `403`.
+
+Meta's `GET /webhook/instagram` challenge handshake uses `hub.mode`,
+`hub.verify_token`, and `hub.challenge`; POST signature enforcement does not
+change that GET flow.
 
 ```
 curl -s https://chatbot-production-8164.up.railway.app/health

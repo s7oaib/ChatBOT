@@ -33,12 +33,12 @@ def test_instagram_direct_human_request_triggers_support_handoff_without_whatsap
     reply_text = send_reply.call_args.args[1]
     assert escalate.called
     assert "wa.me" not in reply_text
-    assert "someone will get back to you shortly" in reply_text
+    assert "Manager of Kitchens will connect with you here shortly" in reply_text
 # ---------------------------------------------------------------------------
 # Instagram: the full architecture is unchanged
 # ---------------------------------------------------------------------------
 
-def _ask_instagram(user_id, message, ad_id="ad-1"):
+def _ask_instagram(user_id, message, ad_id="ad-1", *, return_user_id=False):
     # Suffixed so a fresh handoff is created every run regardless of what an
     # earlier test run already wrote to the persistent handoffs table for
     # this literal id — otherwise a leftover active handoff from a prior run
@@ -51,12 +51,12 @@ def _ask_instagram(user_id, message, ad_id="ad-1"):
         app.escalator, "handle_escalation", return_value={"escalation_id": 1},
     ) as escalate, patch.object(config, "WHATSAPP_BUSINESS_NUMBER", "919800000000"):
         app._process_instagram_event(user_id, message, ad_id)
-    return send_reply, escalate
+    return (send_reply, escalate, user_id) if return_user_id else (send_reply, escalate)
 
 
-def test_instagram_faq_still_works_no_handoff_offered():
-    """"Hi can I get the menu?" is answerable, so no WhatsApp handoff."""
-    send_reply, escalate = _ask_instagram("policy_ig_faq", "Hi can I get the menu?")
+def test_instagram_approved_faq_still_works_without_handoff():
+    """An entry in the client-approved registry remains answerable."""
+    send_reply, escalate = _ask_instagram("policy_ig_faq", "Tell me more about Sondesh")
     reply_text = send_reply.call_args.args[1]
     assert not escalate.called
     assert "wa.me" not in reply_text
@@ -64,20 +64,22 @@ def test_instagram_faq_still_works_no_handoff_offered():
 
 
 def test_instagram_menu_request_still_works():
-    send_reply, escalate = _ask_instagram("policy_ig_menu", "show me the veg menu")
+    send_reply, escalate = _ask_instagram(
+        "policy_ig_menu", "Can you tell me more about the weekly menu?",
+    )
     assert not escalate.called
     assert "wa.me" not in send_reply.call_args.args[1]
 
 
-def test_instagram_product_price_request_still_works():
+def test_unregistered_product_price_request_hands_off():
     send_reply, escalate = _ask_instagram("policy_ig_price", "what is the price of Jolbhora?")
-    assert not escalate.called
+    assert escalate.called
     assert "wa.me" not in send_reply.call_args.args[1]
 
 
-def test_instagram_delivery_request_still_works():
+def test_unsupported_delivery_request_hands_off():
     send_reply, escalate = _ask_instagram("policy_ig_delivery", "do you deliver to Delhi?")
-    assert not escalate.called
+    assert escalate.called
     assert "wa.me" not in send_reply.call_args.args[1]
 
 
@@ -94,27 +96,24 @@ def test_active_price_clarification_routes_bengali_meals_to_approved_answer_with
         app._process_instagram_event(user_id, "What's the pricing?", "ad-1")
         app._process_instagram_event(user_id, selection, "ad-1")
 
-    approved = next(
-        item for item in responder.qa_data["templates"]
-        if item.get("id") == "savoury_food_intro"
-    )["response"]
-    assert approved in send_reply.call_args_list[-1].args[1]
+    assert escalate.call_count >= 1
+    assert "Manager of Kitchens" in send_reply.call_args_list[-1].args[1]
     assert "wa.me/" not in send_reply.call_args_list[-1].args[1]
-    assert escalate.call_count == 0
-    assert not [row for row in db.get_handoffs(limit=200) if row["source_user_id"] == user_id]
+    handoffs = [row for row in db.get_handoffs(limit=200) if row["source_user_id"] == user_id]
+    assert handoffs
 
 
-def test_instagram_unsupported_topic_escalates_to_whatsapp_with_no_invented_fact():
+def test_instagram_unsupported_topic_uses_controlled_handoff_without_invented_fact():
     """"Do you offer wedding gift wrapping?" — no approved fact exists, so
-    knowledge is insufficient and the customer is offered a WhatsApp
-    continuation instead of an invented answer."""
+    knowledge is insufficient and the customer gets a controlled human
+    handoff instead of an invented answer."""
     send_reply, escalate = _ask_instagram(
         "policy_ig_giftwrap", "Do you offer wedding gift wrapping?",
     )
     reply_text = send_reply.call_args.args[1]
     assert escalate.called
     assert "wa.me" not in reply_text
-    assert "someone will get back to you shortly" in reply_text
+    assert "Manager of Kitchens will connect with you here shortly" in reply_text
     assert "gift wrap" not in reply_text.lower()
     assert "cornstarch" not in reply_text.lower()
 
@@ -124,7 +123,7 @@ def test_instagram_human_request_escalates_directly_without_an_unnecessary_faq()
     reply_text = send_reply.call_args.args[1]
     assert escalate.called
     assert "wa.me" not in reply_text
-    assert "someone will get back to you shortly" in reply_text
+    assert "Manager of Kitchens will connect with you here shortly" in reply_text
 
 
 def test_exact_production_human_request_uses_team_callback_without_whatsapp():
@@ -137,7 +136,7 @@ def test_exact_production_human_request_uses_team_callback_without_whatsapp():
 
     reply_text = send_reply.call_args.args[1]
     assert "https://wa.me/" not in reply_text
-    assert "Of course." in reply_text
+    assert "Manager of Kitchens will connect with you here shortly" in reply_text
     assert escalate.call_count == 1
     handoff = db.get_active_handoff("instagram", user_id)
     assert handoff["contact_mode"] == "support_callback"
@@ -159,47 +158,23 @@ def test_repeated_explicit_human_requests_reuse_cam_and_alert_once():
     rows = [h for h in db.get_handoffs(limit=200) if h["source_user_id"] == user_id]
     assert len(rows) == 1
     assert escalate.call_count == 1
-    assert all("someone will get back to you shortly" in reply for reply in replies[:1])
+    assert all("Manager of Kitchens will connect with you here shortly" in reply for reply in replies[:1])
 
 
-def test_verified_order_receipt_adds_concise_order_handoff_and_reuses_cam():
-    user_id = "policy_ig_order_handoff_" + uuid.uuid4().hex[:8]
-    session_memory.clear_session(user_id, "instagram")
-    with patch.object(app, "send_instagram_reply") as send_reply, patch.object(
-        app.escalator, "handle_escalation", return_value={"escalation_id": 1},
-    ) as escalate, patch.object(config, "WHATSAPP_BUSINESS_NUMBER", "919800000000"), \
-         patch.object(config, "GROQ_ENABLED", False), patch.object(config, "STRUCTURED_NLU_ENABLED", False), \
-         patch.object(config, "SEMANTIC_ROUTER_ENABLED", False):
-        app._process_instagram_event(user_id, "I want Jolbhora 250g", "ad-1")
-        receipt, order_link = [call.args[1] for call in send_reply.call_args_list[-2:]]
-        sent_before_waiting = send_reply.call_count
-        app._process_instagram_event(user_id, "I need an agent", "ad-1")
-
-    assert "ORDER DRAFT RECEIPT" in receipt
-    assert "Continue on WhatsApp" in receipt
-    assert "https://wa.me/" not in receipt
-    assert order_link.startswith("Continue on WhatsApp:\nhttps://wa.me/")
-    assert "we'll contact you" not in receipt.lower()
-    assert "they'll connect with you" not in receipt.lower()
-    assert "whatsapp/call shortly" not in receipt.lower()
-
-    link = re.search(r"https://wa\.me/[^\s]+", order_link).group(0)
-    decoded = urllib.parse.unquote(link)
-    assert "Ref: CAM-" in decoded
-    assert "Collection: Aamar Mishti Collection" in decoded
-    assert "Item: Jolbhora Sondesh" in decoded
-    assert "Pack: 250g" in decoded
-    assert "Quantity: 1 box" in decoded
-    assert "Estimated Item Total: ₹750" in decoded
-    assert "Courier" not in decoded
-    assert "Final Total" not in decoded
-    assert user_id not in decoded
-    assert "address" not in decoded.lower()
-    assert escalate.call_count == 1
-    assert send_reply.call_count == sent_before_waiting
-    waiting_rows = db.get_conversations(user_id=user_id, channel="instagram")
-    assert waiting_rows[0]["template_id"] == "waiting_for_human"
-    assert waiting_rows[0]["bot_response"] == ""
+def test_order_request_opens_a_draft_without_inventing_price():
+    send_reply, escalate, user_id = _ask_instagram(
+        "policy_ig_order_handoff", "I want Jolbhora 250g", return_user_id=True,
+    )
+    reply_text = send_reply.call_args.args[1]
+    assert not escalate.called
+    assert "delivery area" in reply_text.lower()
+    assert "ORDER DRAFT" in reply_text
+    assert "Delivery area: \n" in reply_text
+    assert "Receiver phone: \n" in reply_text
+    assert "₹" not in reply_text
+    assert "CAM-" not in reply_text
+    facts = session_memory.get_facts(user_id, "instagram")
+    assert facts["order_intake_draft"]["item"] == "Jolbhora"
 
 
 def test_instagram_bulk_event_request_escalates():
@@ -208,7 +183,8 @@ def test_instagram_bulk_event_request_escalates():
     )
     reply_text = send_reply.call_args.args[1]
     assert escalate.called
-    assert "wa.me" in reply_text
+    assert "Manager of Kitchens" in reply_text
+    assert "wa.me" not in reply_text
 
 
 def test_instagram_order_example_offers_handoff_not_a_whatsapp_order_bot():
@@ -218,11 +194,10 @@ def test_instagram_order_example_offers_handoff_not_a_whatsapp_order_bot():
     send_reply, _escalate = _ask_instagram(
         "policy_ig_order_example", "I want 50 boxes of Jolbhora for a wedding in Delhi",
     )
-    reference = re.search(r"CAM-\d{5,6}", send_reply.call_args.args[1]).group(0)
-    known = json.loads(db.get_handoff_by_ref(reference)["known_entities"])
-    assert known.get("product") == "Jolbhora"
-    assert known.get("event") == "wedding"
-    assert known.get("location") == "Delhi"
+    reply_text = send_reply.call_args.args[1]
+    assert "Manager of Kitchens" in reply_text
+    assert "wa.me" not in reply_text
+    assert "CAM-" not in reply_text
 
 
 # ---------------------------------------------------------------------------
@@ -260,15 +235,14 @@ def test_duplicate_instagram_escalation_does_not_create_duplicate_handoffs():
     assert len(rows) == 1
 
 
-def test_booking_human_request_keeps_approved_whatsapp_handoff():
+def test_booking_human_request_uses_callback_without_whatsapp():
     send_reply, escalate = _ask_instagram(
         "policy_ig_booking_human", "I want to book this, can I talk to someone?",
     )
     reply_text = send_reply.call_args.args[1]
     assert escalate.called
-    assert "wa.me" in reply_text
-    handoff_ref = re.search(r"CAM-\d{5,6}", urllib.parse.unquote(reply_text)).group(0)
-    assert db.get_handoff_by_ref(handoff_ref)["contact_mode"] == "whatsapp_order"
+    assert "Manager of Kitchens" in reply_text
+    assert "wa.me" not in reply_text
 
 
 def test_instagram_chatbot_enabled_default_is_true():

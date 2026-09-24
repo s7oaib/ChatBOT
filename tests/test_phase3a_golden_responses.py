@@ -246,7 +246,7 @@ def test_explicit_product_switch_clears_home_table_context():
     assert template_id == "kanchagolla"
 
 
-def test_explicit_jolbhora_price_overrides_stale_home_table_context_on_instagram(monkeypatch):
+def test_unregistered_jolbhora_price_overrides_stale_context_but_fails_closed(monkeypatch):
     monkeypatch.setattr(config, "BYPASS_AD_GATE", True)
     user_id = _user("instagram_home_table_switch")
     session_memory.clear_session(user_id, "instagram")
@@ -267,9 +267,11 @@ def test_explicit_jolbhora_price_overrides_stale_home_table_context_on_instagram
         channel="instagram",
     )
 
-    assert matched is True
-    assert template_id == "jolbhora"
-    assert "Jolbhora" in text
+    assert matched is False
+    assert template_id is None
+    assert "Manager of Kitchens will connect" in text
+    assert facts["last_route_source"] == "HUMAN_HANDOFF"
+    assert facts["source_context_used"] is False
 
 
 def test_unsupported_new_request_overrides_stale_home_table_context_on_instagram(monkeypatch):
@@ -452,21 +454,37 @@ def test_booking_related_questions_are_not_hijacked_by_ready_to_order_on_instagr
     "What happens to the Gurgaon kitchen if you expand to Kolkata?",
     "Who runs the kitchen now that you're moving to Kolkata?",
 ])
-def test_kolkata_expansion_questions_are_not_hijacked_by_reference_clarify_on_instagram(message, monkeypatch):
+def test_unregistered_kolkata_questions_handoff_instead_of_reusing_stale_source(message, monkeypatch):
     """"now THAT you're moving" contains the bare word "that", which the
     this/it source-reference clarify gate matched with no grammatical
     awareness -- diverting a legitimate Kolkata-expansion question into a
-    false "which item?" prompt. The response must be exactly the existing
-    approved kolkata_expansion_info template — proving no fact (dates,
-    ownership, staffing, kitchen-transfer details) is invented along the
-    way, only the already-approved canonical answer is returned."""
+    false "which item?" prompt. The old template is not in the Instagram
+    client-approved registry, so the current contract is controlled handoff
+    rather than legacy copy. No stale source description may be replayed."""
     monkeypatch.setattr(config, "BYPASS_AD_GATE", True)
-    canonical = next(
-        item["response"] for item in responder.qa_data["templates"]
-        if item["id"] == "kolkata_expansion_info"
+    user_id = _user("instagram_kolkata_unregistered")
+    session_memory.clear_session(user_id, "instagram")
+    facts = session_memory.get_facts(user_id, "instagram")
+    facts.update({
+        "last_topic": "bengali_home_table",
+        "home_table_context": True,
+        "source_route": {
+            "active": True,
+            "routing_topic": "Bengali Home Table",
+            "source_type": "story",
+            "source_description": "stale campaign description",
+        },
+    })
+
+    text, matched, template_id, images = responder.match_and_respond(
+        message, user_id=user_id, channel="instagram",
     )
-    text, matched, template_id, images = _ask_instagram(message)
-    assert matched is True
-    assert template_id == "kolkata_expansion_info"
-    assert _normalize(text) == _normalize(canonical)
+
+    assert matched is False
+    assert template_id is None
+    assert "Manager of Kitchens will connect" in text
+    assert "stale campaign description" not in text
     assert images is None
+    assert facts["last_route_source"] == "HUMAN_HANDOFF"
+    assert facts["last_grounding"] == "client_registry_miss"
+    assert facts["source_context_used"] is False

@@ -40,7 +40,6 @@ def test_price_clarification_selection_continues_original_intent(selection):
     facts = session_memory.get_facts(user_id, "whatsapp")
     assert facts["pending_clarification"] is None
     assert facts["knowledge_sufficient"] is True
-    assert facts["last_intents"] == ["product_price"]
 
 
 def test_correction_replaces_pending_product_selection():

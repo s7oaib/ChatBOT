@@ -51,7 +51,11 @@ def test_health_states_removed_automation_and_manual_handoff():
     assert payload["whatsapp"]["automation"] == "removed"
     assert payload["whatsapp"]["manual_handoff"] == "available"
     assert payload["whatsapp"]["cloud_api"] == "unavailable"
+    assert payload["status"] in {"healthy", "degraded"}
     assert payload["human_escalation_notifications"]["status"] == "SKIPPED"
+    assert payload["human_escalation_notifications"]["reason"] == (
+        "WhatsApp automation removed; staff alerts are manual-only."
+    )
 
 
 def test_manual_handoff_keeps_cam_dedup_waiting_state_and_link():
@@ -83,5 +87,18 @@ def test_manual_handoff_keeps_cam_dedup_waiting_state_and_link():
 def test_escalation_record_is_skipped_without_cloud_send_dependency():
     result = escalator.send_human_alert(1, "u", "instagram", "help", "human", {})
 
-    assert result["status"] == "skipped"
-    assert result["reason"] == "manual_handoff_only"
+    assert result == {
+        "status": "skipped",
+        "retryable": False,
+        "reason": "manual_handoff_only",
+    }
+
+
+def test_customer_handoff_copy_stays_manual_and_hides_internal_alert_data():
+    from camellia.responder import responder
+
+    handover, _intent = responder.build_handover_response("i need a refund please")
+
+    assert "Manager of Kitchens will connect with you here shortly" in handover
+    assert "wa.me" not in handover
+    assert "9902181650" not in handover

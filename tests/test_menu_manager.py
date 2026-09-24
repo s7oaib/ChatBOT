@@ -143,12 +143,9 @@ def test_preview_shows_the_draft_without_publishing(isolated_menu, client, admin
     assert "Lychee Rose" not in live_text
 
 
-def test_publish_makes_the_chatbot_use_the_new_items_immediately(isolated_menu, client, admin_headers):
-    """The core acceptance criterion: BEFORE Classic/Rose/Mango/... AFTER
-    Classic/Lychee Rose/Saffron Pista, proven through the actual responder
-    path a customer message takes — no restart, no code edit."""
+def test_publish_does_not_authorize_unapproved_customer_facts(isolated_menu, client, admin_headers):
+    """Admin template publication cannot authorize unapproved customer facts."""
     before_text, _, _, _ = responder.match_and_respond("Show me Aamar Mishti", user_id="mm_pub_before", channel="instagram")
-    assert "Kanchagolla" in before_text
 
     resp = client.post(
         "/admin/menu-manager/menus/collections.aamar_mishti/publish",
@@ -158,9 +155,10 @@ def test_publish_makes_the_chatbot_use_the_new_items_immediately(isolated_menu, 
     assert resp.json()["version_id"]
 
     after_text, matched, _, _ = responder.match_and_respond("aamar mishti price", user_id="mm_pub_after", channel="instagram")
-    assert "Lychee Rose" in after_text
-    assert "Saffron Pista" in after_text
-    assert "Kanchagolla" not in after_text
+    assert "Lychee Rose" not in after_text
+    assert "Saffron Pista" not in after_text
+    assert after_text == before_text
+    assert matched is False
 
 
 def test_published_menu_is_read_from_disk_not_a_process_cache(isolated_menu, client, admin_headers):
@@ -221,6 +219,7 @@ def test_inactive_item_is_kept_but_not_shown_to_customers(isolated_menu, client,
 
 def test_version_history_records_publishes_and_restore_brings_back_old_items(isolated_menu, client, admin_headers):
     original = client.get("/admin/menu-manager/menus/collections.aamar_mishti", headers=admin_headers).json()["published"]
+    before_text, _, _, _ = responder.match_and_respond("aamar mishti price", user_id="mm_restore_before", channel="instagram")
 
     client.post(
         "/admin/menu-manager/menus/collections.aamar_mishti/publish",
@@ -245,7 +244,8 @@ def test_version_history_records_publishes_and_restore_brings_back_old_items(iso
     )
     assert restore.status_code == 200
     text, _, _, _ = responder.match_and_respond("aamar mishti price", user_id="mm_restore", channel="instagram")
-    assert "Lychee Rose" in text
+    assert "Lychee Rose" not in text
+    assert text == before_text
 
     versions_final = client.get("/admin/menu-manager/menus/collections.aamar_mishti/versions", headers=admin_headers).json()["versions"]
     assert versions_final[0]["action"] == "restore"

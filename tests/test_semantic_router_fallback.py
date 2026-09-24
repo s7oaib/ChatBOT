@@ -26,7 +26,7 @@ def test_provider_failure_does_not_try_a_second_llm_router():
     assert not classify.called
     assert matched is False
     assert template_id is None
-    assert "team" in text.lower()
+    assert "manager of kitchens" in text.lower()
 
 
 def test_semantic_fallback_refuses_to_auto_route_a_guarded_template():

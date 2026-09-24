@@ -10,10 +10,13 @@ gap left behind.
 import json
 import re
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
+from camellia.database import db
 from camellia.responder import _strip_flower_emoji, responder
+from camellia.text_rules import FLOWER_RE
 
 # Cherry blossom, hibiscus, sunflower, blossom, rose, tulip, bouquet, rosette.
 FLOWERS = re.compile(
@@ -215,3 +218,60 @@ def test_every_greeting_names_the_brand_in_full():
         f"greeting responses {missing} do not name the brand in full; whichever "
         "customer draws one gets a different introduction from everyone else"
     )
+
+
+@pytest.mark.parametrize(
+    "flower",
+    ["\U0001F338", "\U0001F33A", "\U0001F33B", "\U0001F33C",
+     "\U0001F339", "\U0001F337", "\U0001F490", "\U0001F3F5"],
+)
+def test_each_named_flower_is_removed(flower):
+    cleaned = _strip_flower_emoji(f"Hello {flower} there")
+    assert cleaned == "Hello there"
+    assert not FLOWER_RE.search(cleaned)
+
+
+def test_drafted_candidate_is_stored_without_flowers():
+    candidate_id = db.save_candidate_template(
+        name="flower_test",
+        response="Hi there! \U0001F338 Our Sondesh is lovely \U0001F33A",
+        user_message="tell me about sondesh",
+    )
+
+    with db.get_connection() as conn:
+        stored = conn.execute(
+            "SELECT response FROM candidate_templates WHERE id = ?", (candidate_id,)
+        ).fetchone()["response"]
+
+    assert not FLOWER_RE.search(stored)
+    assert "Our Sondesh is lovely" in stored
+
+
+def test_legacy_candidate_is_cleaned_when_read_from_approval_queue():
+    with db.get_connection() as conn:
+        conn.execute(
+            "INSERT INTO candidate_templates (name, status, user_message, response) "
+            "VALUES ('legacy_flower', 'PENDING_APPROVAL', 'q', 'Legacy \U0001F338 answer')"
+        )
+        conn.commit()
+
+    pending = db.get_pending_candidates()
+    legacy = [candidate for candidate in pending if candidate["name"] == "legacy_flower"]
+
+    assert legacy, "the legacy row should still be listed"
+    assert not FLOWER_RE.search(legacy[0]["response"])
+
+
+def test_generation_prompts_forbid_flower_emoji():
+    from camellia.ai_responder import ai_responder
+
+    with patch.object(ai_responder, "_query_groq", return_value=("", False, "x")) as query, \
+         patch.object(ai_responder, "get_active_provider", return_value="groq"):
+        ai_responder.generate_response("anything")
+        drafting_prompt = query.call_args.args[0]
+
+        ai_responder.answer_from_retrieved_context("anything", ["an excerpt"])
+        grounded_prompt = query.call_args.args[0]
+
+    assert "flower emoji" in drafting_prompt
+    assert "flower emoji" in grounded_prompt

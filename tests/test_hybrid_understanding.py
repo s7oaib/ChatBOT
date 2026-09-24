@@ -54,7 +54,7 @@ def test_a_greeting_next_to_a_request_does_not_swallow_the_request():
 
     assert template_id != "greeting"
     assert "Hello from Camellia Artisanal" not in text
-    assert "event" in text.lower() or "bulk" in text.lower() or "team" in text.lower()
+    assert "Manager of Kitchens" in text
 
 
 @pytest.mark.parametrize("greeting", ["hi", "hello there", "hey!", "good morning", "Namaste"])
@@ -175,7 +175,9 @@ def test_an_unmatched_reply_carrying_the_slow_notice_does_not_also_promise_a_cal
             "something we cannot answer", user_id=user_id, channel="instagram"
         )
 
-    assert text == "Our team can assist you personally on WhatsApp. Please continue your enquiry using the link below."
+    assert "Manager of Kitchens" in text
+    assert "WhatsApp" not in text
+    assert "wa.me" not in text
     assert "notified our team" not in text
     assert "Guru Dayal" not in text
 

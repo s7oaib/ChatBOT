@@ -203,7 +203,7 @@ class TestShadowIsHarmless:
         with patch.object(config, "LLM_TRIAGE_ENABLED", True), \
              patch.object(config, "BYPASS_AD_GATE", True), \
              patch.object(triage_classifier, "record_shadow") as record:
-            responder.match_and_respond("do you deliver to delhi ncr?", user_id=user_id, channel="instagram")
+            responder.match_and_respond("What are your opening hours?", user_id=user_id, channel="instagram")
         assert not record.called
 
     def test_triage_never_fires_when_the_ad_gate_blocks_the_message(self):

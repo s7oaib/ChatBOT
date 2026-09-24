@@ -12,6 +12,10 @@ on:
       - "codex/**"
   pull_request:
   workflow_dispatch:
+  schedule:
+    - cron: "23 2 * * *"
+  release:
+    types: [published]
 
 permissions:
   contents: read
@@ -21,8 +25,73 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test-and-validate:
+  fast-gate:
+    name: Fast current-contract gate (Python 3.11)
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+
+    env:
+      PYTHONHASHSEED: "0"
+      META_APP_SECRET: "test_secret_for_ci_pipeline"
+      ADMIN_API_KEY: "test_admin_api_key_ci"
+      ADMIN_PIN: "51990"
+      DB_PATH: "test_camellia_ci.db"
+      ENABLE_WEB_TESTER: "true"
+      WHATSAPP_BUSINESS_NUMBER: "919800000000"
+      INSTAGRAM_STORY_AUTO_SYNC_ENABLED: "false"
+      LLM_AUTO_RESOLVE_ENABLED: "false"
+      GEMINI_ENABLED: "false"
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install pytest pytest-asyncio flake8
+
+      - name: Syntax and undefined-name checks
+        run: flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics --exclude=.venv,venv,.git,__pycache__
+
+      - name: Validate menu and QA schemas
+        run: python scripts/validate_schemas.py
+
+      - name: Run Meta webhook signature and verification-token security tests
+        run: >-
+          python -m pytest -q tests/test_admin_portal.py
+          -k "signature or token or challenge"
+
+      - name: Run critical current-contract suites
+        run: >-
+          python -m pytest -q
+          tests/test_client_approved_only_policy.py
+          tests/test_client_approved_qa.py
+          tests/test_client_qa_acceptance.py
+          tests/test_ordered_approved_response.py
+          tests/test_channel_policy.py
+          tests/test_admin_security.py
+          tests/test_session_persistence.py
+          tests/test_explicit_intent_interrupts_stale_flow.py
+          tests/test_order_intake.py
+          tests/test_instagram_identity.py
+          tests/test_instagram_source_referential.py
+          tests/test_instagram_story_routing.py
+          tests/test_shared_post_pairing.py
+          tests/test_shared_reel_precedence.py
+          tests/test_simple_source_mapping.py
+
+  full-regression:
     name: Full regression (Python 3.11)
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || github.event_name == 'release'
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -55,18 +124,10 @@ jobs:
           python -m pip install pytest pytest-asyncio flake8
 
       - name: Syntax and undefined-name checks
-        run: |
-          flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics --exclude=.venv,venv,.git,__pycache__
-
-      - name: Informational lint report
-        continue-on-error: true
-        run: |
-          flake8 . --count --max-complexity=15 --max-line-length=127 --statistics --exclude=.venv,venv,.git,__pycache__ || true
+        run: flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics --exclude=.venv,venv,.git,__pycache__
 
       - name: Validate menu and QA schemas
-        run: |
-          python scripts/validate_schemas.py
+        run: python scripts/validate_schemas.py
 
-      - name: Run full pytest suite
-        run: |
-          python -m pytest -q
+      - name: Run full regression suite
+        run: python -m pytest -q

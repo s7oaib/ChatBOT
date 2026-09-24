@@ -352,11 +352,10 @@ def test_explicit_none_sends_description_only_for_every_instagram_source(catalog
     assert "₹" not in text
 
 
-def test_selected_menu_keeps_description_and_approved_menu(catalogue_db, bypass_ad_gate):
+def test_selected_menu_does_not_turn_priority_product_into_an_answer(catalogue_db, bypass_ad_gate):
     topic = create_topic(
         "Sondesh", "TEST DESCRIPTION ONLY", default_menu_id="aamar_mishti", priority_products=["jolbhora"],
     )
-    expected_menu = responder._template_by_id("jolbhora")["response"]
     uid = "selected_sondesh_menu"
     session_memory.clear_session(uid, "instagram")
     facts = session_memory.get_facts(uid, "instagram")
@@ -370,8 +369,8 @@ def test_selected_menu_keeps_description_and_approved_menu(catalogue_db, bypass_
     )
 
     assert matched is True
-    assert "TEST DESCRIPTION ONLY" in text
-    assert expected_menu.splitlines()[0] in text
+    assert text == "TEST DESCRIPTION ONLY"
+    assert "Jolbhora" not in text
 
 
 def test_topic_identity_does_not_inherit_menu_when_none_is_explicit(catalogue_db, bypass_ad_gate):
@@ -423,7 +422,6 @@ def test_preview_and_runtime_use_identical_none_composition(catalogue_db, admin_
 
 def test_topic_response_order_applies_to_reel_post_and_ad_contexts(catalogue_db, bypass_ad_gate):
     topic = create_topic("Ordered Topic", "Description from the Topic.", default_menu_id="aamar_mishti", response_order="menu_first", priority_products=["jolbhora"])
-    expected_menu = responder._template_by_id("jolbhora")["response"]
     for source_type in ("reel", "post", "ad"):
         uid = f"ordered_{source_type}"
         session_memory.clear_session(uid, "instagram")
@@ -432,7 +430,8 @@ def test_topic_response_order_applies_to_reel_post_and_ad_contexts(catalogue_db,
         facts["source_match_method"] = "test"
         text, matched, _template_id, _images = responder.match_and_respond("Tell me more", user_id=uid, channel="instagram")
         assert matched is True
-        assert text.index(expected_menu.splitlines()[0]) < text.index("Description from the Topic.")
+        assert text == "Description from the Topic."
+        assert "Jolbhora" not in text
 
 
 def test_existing_topic_without_reply_order_uses_description_first(catalogue_db):
