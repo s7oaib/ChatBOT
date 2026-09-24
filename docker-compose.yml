@@ -10,7 +10,7 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - META_VERIFY_TOKEN=${META_VERIFY_TOKEN:-camellia_verify_secret_2026}
+      - META_VERIFY_TOKEN=${META_VERIFY_TOKEN:-}
       - META_APP_SECRET=${META_APP_SECRET}
       - PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-}
       - ADMIN_API_KEY=${ADMIN_API_KEY}

@@ -250,6 +250,12 @@ def missing_fields(draft: dict) -> list[str]:
     return missing
 
 
+def has_meaningful_order_details(draft: dict) -> bool:
+    """A named item is enough for a draft; a bare referential pronoun is not."""
+    item = str(draft.get("item") or "").strip().casefold()
+    return bool(item and item not in {"this", "that", "it", "one", "something"})
+
+
 def instruction_message() -> str:
     return (
         "Please send your order in one simple sentence like this:\n\n"
@@ -297,18 +303,15 @@ def next_question(draft: dict) -> str:
 
 
 def request_summary(draft: dict) -> str:
-    pin = draft.get("location_pin") or ("Not required" if not draft.get("location_pin_required") else "Needed")
     return (
-        "ORDER REQUEST\n\n"
-        f"Item: {draft.get('item') or 'Not supplied'}\n"
-        f"Quantity: {draft.get('quantity') or 'Not supplied'}\n"
-        f"Delivery area: {draft.get('delivery_area') or 'Not supplied'}\n"
-        f"Delivery address: {draft.get('delivery_address') or 'Not supplied'}\n"
-        f"Preferred slot: {draft.get('delivery_slot') or 'Not supplied'}\n"
-        f"Receiver phone: {draft.get('receiver_phone') or 'Not supplied'}\n"
-        f"Location pin: {pin}\n\n"
-        "This is an order request only.\n"
-        "Our kitchen team will confirm availability, delivery charges and the invoice."
+        "ORDER DRAFT\n\n"
+        f"Item: {draft.get('item') or ''}\n"
+        f"Quantity: {draft.get('quantity') or ''}\n"
+        f"Delivery area: {draft.get('delivery_area') or ''}\n"
+        f"Preferred day/slot: {draft.get('delivery_slot') or ''}\n"
+        f"Delivery address: {draft.get('delivery_address') or ''}\n"
+        f"Receiver phone: {draft.get('receiver_phone') or ''}\n"
+        f"Location pin: {draft.get('location_pin') or ''}"
     )
 
 
@@ -316,20 +319,11 @@ def whatsapp_draft_link(draft: dict) -> str | None:
     number = re.sub(r"\D", "", config.WHATSAPP_BUSINESS_NUMBER or "")
     if not number:
         return None
-    pin = draft.get("location_pin")
     lines = [
         "Hi, I'd like to place an order with Camellia Artisanal.",
         "",
-        "ORDER REQUEST",
+        request_summary(draft),
         "",
-        f"Item: {draft.get('item') or ''}",
-        f"Quantity: {draft.get('quantity') or ''}",
-        f"Delivery area: {draft.get('delivery_area') or ''}",
-        f"Delivery address: {draft.get('delivery_address') or ''}",
-        f"Preferred slot: {draft.get('delivery_slot') or ''}",
-        f"Receiver phone: {draft.get('receiver_phone') or ''}",
+        "Please help me complete and confirm this order.",
     ]
-    if pin:
-        lines.append(f"Location pin: {pin}")
-    lines.extend(["", "Please confirm availability, final delivery charges and invoice."])
     return f"https://wa.me/{number}?text={quote(chr(10).join(lines))}"

@@ -183,8 +183,8 @@ class TestResponseLibrary:
         assert resp.json()["response"] == "Short approved greeting."
         assert isolated_db.get_analytics().get("total_conversations", 0) == before
 
-    def test_greeting_copy_is_identical_in_search_preview_dry_run_and_instagram(self, isolated_db, monkeypatch):
-        """The editable Greeting key is the one source used by every surface."""
+    def test_greeting_override_stays_in_admin_surfaces_not_customer_runtime(self, isolated_db, monkeypatch):
+        """An admin preview override cannot replace the protected live greeting."""
         monkeypatch.setattr(config, "BYPASS_AD_GATE", True)
         copy = "Hello hello from Camellia Artisanal!"
         assert client.patch(
@@ -206,7 +206,8 @@ class TestResponseLibrary:
             headers=_auth(),
         ).json()["items"]
 
-        assert live == preview == dry_run == copy
+        assert live.startswith("Hi! Thanks for reaching out")
+        assert preview == dry_run == copy
         assert search and search[0]["template_id"] == "greeting"
 
     def test_custom_trigger_conflict_includes_system_template(self, isolated_db):
@@ -340,7 +341,7 @@ class TestMatching:
         match = isolated_db.search_learned_knowledge("gift hampers", count_usage=False)
         assert match["verified_answer"] == "High-priority hamper answer."
 
-    def test_instagram_source_context_still_wins(self):
+    def test_incomplete_source_metadata_does_not_authorize_priority_product_answer(self):
         user_id = "custom_qa_source_" + "x"
         session_memory.clear_session(user_id, "instagram")
         kid = db.add_learned_knowledge("Topic", "what else can you tell me", "A broad learned answer about what else we offer.")
@@ -350,12 +351,14 @@ class TestMatching:
             common = {"user_id": user_id, "channel": "instagram", "referral_source": "ADS", "referral_ad_id": "route-ad"}
             responder.match_and_respond("hi", **common)
             resp = responder.match_and_respond("what else", **common)
-            assert resp[2].startswith("source_")
+            assert resp[1] is False
+            assert resp[2] is None
+            assert "Manager of Kitchens" in resp[0]
         finally:
             db.delete_learned_knowledge(kid)
 
     def test_learned_3_precedence_regression_remains_fixed(self):
-        """The precise regression this session fixed earlier: a stale last_topic must not let a broad learned answer win over active source context."""
+        """A fabricated/incomplete source route cannot authorize a learned answer."""
         user_id = "custom_qa_learned3_regr"
         session_memory.clear_session(user_id, "instagram")
         kid = db.add_learned_knowledge("Broad", "tell me more", "A generic broad learned answer.")
@@ -364,7 +367,9 @@ class TestMatching:
             facts["source_route"] = {"priority_products": ["jolbhora"], "routing_topic": "reel", "active": True}
             common = {"user_id": user_id, "channel": "instagram", "referral_source": "ADS", "referral_ad_id": "route-ad"}
             resp = responder.match_and_respond("tell me more", **common)
-            assert not resp[2].startswith("learned_")
+            assert resp[1] is False
+            assert resp[2] is None
+            assert "Manager of Kitchens" in resp[0]
         finally:
             db.delete_learned_knowledge(kid)
 
@@ -472,16 +477,24 @@ class TestDryRunAndUsage:
         assert data["preview_text"] == "The exact verbatim customer-facing answer."
         assert "nothing has been sent" in data["note"].lower()
 
-    def test_real_matched_response_increments_usage_exactly_once(self, isolated_db):
+    def test_non_registry_custom_qa_does_not_increment_customer_runtime_usage(self, isolated_db):
         kid = isolated_db.add_learned_knowledge("Topic", "what is our catering process exactly", "It is handled by our team.")
-        responder.match_and_respond("what is our catering process exactly", user_id="custom_qa_usage_1", channel="instagram", referral_source="ADS")
-        assert isolated_db.get_custom_qa(kid)["usage_count"] == 1
+        text, matched, _template, _images = responder.match_and_respond(
+            "what is our catering process exactly", user_id="custom_qa_usage_1", channel="instagram", referral_source="ADS",
+        )
+        assert matched is False
+        assert "Manager of Kitchens" in text
+        assert isolated_db.get_custom_qa(kid)["usage_count"] == 0
 
     def test_last_used_at_updates(self, isolated_db):
         kid = isolated_db.add_learned_knowledge("Topic", "what is our catering process exactly", "It is handled by our team.")
         assert isolated_db.get_custom_qa(kid)["last_used_at"] is None
-        responder.match_and_respond("what is our catering process exactly", user_id="custom_qa_usage_2", channel="instagram", referral_source="ADS")
-        assert isolated_db.get_custom_qa(kid)["last_used_at"] is not None
+        text, matched, _template, _images = responder.match_and_respond(
+            "what is our catering process exactly", user_id="custom_qa_usage_2", channel="instagram", referral_source="ADS",
+        )
+        assert matched is False
+        assert "Manager of Kitchens" in text
+        assert isolated_db.get_custom_qa(kid)["last_used_at"] is None
 
     def test_shadow_does_not_increment_usage(self, isolated_db):
         kid = isolated_db.add_learned_knowledge("Topic", "how much is one meal exactly", "It is 250 rupees.")
@@ -714,7 +727,3 @@ class TestRegression:
             mp.setattr(config, "LLM_TRIAGE_ENABLED", True)
             mp.setattr(triage_classifier, "record_shadow", lambda **kw: (_ for _ in ()).throw(AssertionError("must not fire on whatsapp")))
             responder.match_and_respond("test message for whatsapp gate", user_id=user_id, channel="whatsapp")
-
-    def test_full_regression_suite_marker(self):
-        """A placeholder asserting this module itself collected without error; the real full-suite count is reported separately."""
-        assert True

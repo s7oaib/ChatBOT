@@ -24,6 +24,7 @@ os.environ.setdefault("DB_PATH", "test_camellia.db")
 import pytest
 
 import camellia.app as app_module
+from camellia import client_qa
 from camellia.database import Database
 from camellia.responder import responder
 from camellia.session_memory import session_memory
@@ -80,36 +81,43 @@ def _share_reel(uid, configured_route, *, stale_topic="sondesh_general"):
 
 # --- the reported failure --------------------------------------------------
 
-def test_tell_me_more_after_a_shared_reel_uses_the_source_route(configured_route):
+def test_tell_me_more_without_a_configured_description_hands_off(configured_route):
     uid = "prec_tell_more"
     _share_reel(uid, configured_route)
-    _text, template_id, used = _ask(uid, "Tell me more")
-    assert used is True
-    assert template_id.startswith("source_jolbhora")
+    text, template_id, used = _ask(uid, "Tell me more")
+    assert template_id is None
+    assert used is False
+    assert "manager of kitchens" in text.lower()
 
 
-def test_a_stale_topic_no_longer_blocks_the_shared_reel(configured_route):
-    """The exact production condition: session had a topic before the share."""
+def test_a_stale_topic_does_not_authorize_a_legacy_reel_answer(configured_route):
+    """A source label/priority is not customer-answer authority."""
     uid = "prec_stale"
     _share_reel(uid, configured_route, stale_topic="savoury")
     assert session_memory.get_facts(uid, "instagram").get("last_topic") is None
-    _text, template_id, used = _ask(uid, "Tell me more")
-    assert used is True
+    text, template_id, used = _ask(uid, "Tell me more")
+    assert used is False
+    assert template_id is None
+    assert "manager of kitchens" in text.lower()
 
 
-def test_price_after_a_shared_reel_uses_the_source_route(configured_route):
+def test_bare_price_after_a_shared_reel_hands_off_without_product_authority(configured_route):
     uid = "prec_price"
+    # The source has legacy priority products, but its mapped topic does not
+    # identify a product or provide an approved Description.
+    configured_route.save_instagram_source_route({**ROUTE, "routing_topic": "Wedding / Event"})
     _share_reel(uid, configured_route)
-    _text, template_id, used = _ask(uid, "Price?")
-    assert used is True
-    assert "jolbhora" in template_id
+    text, template_id, used = _ask(uid, "Price?")
+    assert used is False
+    assert template_id is None
+    assert "manager of kitchens" in text.lower()
 
 
 def test_what_about_this_after_a_shared_reel_uses_the_source_route(configured_route):
     uid = "prec_what_about"
     _share_reel(uid, configured_route)
     _text, template_id, used = _ask(uid, "What about this?")
-    assert used is True
+    assert used is False
 
 
 # --- explicit intent still wins -------------------------------------------
@@ -182,13 +190,11 @@ def test_vague_source_message_creates_no_order(configured_route):
     assert not facts.get("handoff_ref")
 
 
-def test_the_source_answer_is_approved_copy_not_invented_text(configured_route):
-    """The route supplies priority only; the words come from the catalogue."""
+def test_priority_products_cannot_authorize_a_legacy_source_answer(configured_route):
+    """Without an approved QA match or Description, source context hands off."""
     uid = "prec_canonical"
     _share_reel(uid, configured_route)
     text, template_id, used = _ask(uid, "Tell me more")
-    assert used is True
-    approved = responder._template_by_id(template_id.replace("source_jolbhora_", ""))
-    assert approved is not None
-    # The routing topic is an admin label, never a business fact in the reply.
-    assert "Wedding / Event Sondesh" not in text
+    assert used is False
+    assert template_id is None
+    assert "manager of kitchens" in text.lower()

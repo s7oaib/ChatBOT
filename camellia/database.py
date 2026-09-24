@@ -734,6 +734,44 @@ class Database:
             );
             """)
 
+            # The webhook acknowledges only after accepted work is committed.
+            # Separate outbound jobs survive a crash or a temporary Meta outage.
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS instagram_inbound_jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_key TEXT NOT NULL UNIQUE,
+                sender_id TEXT NOT NULL,
+                task_name TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'PENDING',
+                attempts INTEGER NOT NULL DEFAULT 0,
+                next_attempt_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                locked_until TIMESTAMP,
+                last_error TEXT,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """)
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS instagram_outbound_jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                inbound_job_id INTEGER NOT NULL,
+                sequence_number INTEGER NOT NULL,
+                recipient_id TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'PENDING',
+                attempts INTEGER NOT NULL DEFAULT 0,
+                next_attempt_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                locked_until TIMESTAMP,
+                last_error TEXT,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(inbound_job_id, sequence_number)
+            )
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_ig_inbound_jobs_due ON instagram_inbound_jobs(status, next_attempt_at, id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_ig_outbound_jobs_due ON instagram_outbound_jobs(status, next_attempt_at, id)")
+
             # Meta changes ad titles freely, so the stable ad ID is mapped by
             # kitchen staff and kept on the same durable volume as the rest of
             # the bot state. The environment JSON remains a deployment-time
@@ -4429,6 +4467,12 @@ class Database:
 
         with self.get_connection() as conn:
             cursor = conn.cursor()
+            cursor.execute(
+                "DELETE FROM instagram_outbound_jobs WHERE " + older_than("created_at"), (cutoff,)
+            )
+            cursor.execute(
+                "DELETE FROM instagram_inbound_jobs WHERE " + older_than("created_at"), (cutoff,)
+            )
             cursor.execute(f"DELETE FROM conversations WHERE {older_than('timestamp')}", (cutoff,))
             removed_conversations = cursor.rowcount
             cursor.execute(
@@ -4455,6 +4499,8 @@ class Database:
         """
         with self.get_connection() as conn:
             cursor = conn.cursor()
+            cursor.execute("DELETE FROM instagram_outbound_jobs WHERE recipient_id = ?", (user_id,))
+            cursor.execute("DELETE FROM instagram_inbound_jobs WHERE sender_id = ?", (user_id,))
             cursor.execute("DELETE FROM conversations WHERE user_id = ?", (user_id,))
             removed_conversations = cursor.rowcount
             cursor.execute(
@@ -4658,6 +4704,162 @@ class Database:
                     updated_at = excluded.updated_at
             """, (str(user_id), str(channel), json.dumps(payload, ensure_ascii=False), float(updated_at)))
             conn.commit()
+
+    def enqueue_instagram_inbound_job(
+        self, event_key: str, sender_id: str, task_name: str, payload: Dict[str, Any]
+    ) -> Tuple[int, bool]:
+        """Commit a webhook task before its HTTP acknowledgement."""
+        with self.get_connection() as conn:
+            cursor = conn.execute(
+                "INSERT OR IGNORE INTO instagram_inbound_jobs "
+                "(event_key, sender_id, task_name, payload) VALUES (?, ?, ?, ?)",
+                (event_key, sender_id, task_name, json.dumps(payload, ensure_ascii=False)),
+            )
+            created = cursor.rowcount == 1
+            row = conn.execute(
+                "SELECT id FROM instagram_inbound_jobs WHERE event_key = ?", (event_key,)
+            ).fetchone()
+            conn.commit()
+            return int(row["id"]), created
+
+    def claim_instagram_inbound_jobs(
+        self, *, limit: int = 10, job_id: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
+        """Lease oldest due task per sender; expired leases are recoverable."""
+        with self.get_connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            rows = conn.execute(
+                """
+                SELECT job.* FROM instagram_inbound_jobs AS job
+                WHERE (? IS NULL OR job.id = ?)
+                  AND ((job.status IN ('PENDING', 'RETRY') AND job.next_attempt_at <= CURRENT_TIMESTAMP)
+                       OR (job.status = 'PROCESSING' AND job.locked_until <= CURRENT_TIMESTAMP))
+                  AND NOT EXISTS (
+                      SELECT 1 FROM instagram_inbound_jobs AS earlier
+                      WHERE earlier.sender_id = job.sender_id AND earlier.id < job.id
+                        AND earlier.status NOT IN ('DONE', 'FAILED')
+                  )
+                ORDER BY job.id LIMIT ?
+                """,
+                (job_id, job_id, max(1, min(int(limit), 50))),
+            ).fetchall()
+            claimed = []
+            for row in rows:
+                conn.execute(
+                    "UPDATE instagram_inbound_jobs SET status = 'PROCESSING', "
+                    "attempts = attempts + 1, locked_until = datetime('now', '+15 minutes'), "
+                    "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (row["id"],),
+                )
+                claimed.append(dict(conn.execute(
+                    "SELECT * FROM instagram_inbound_jobs WHERE id = ?", (row["id"],)
+                ).fetchone()))
+            conn.commit()
+            return claimed
+
+    def complete_instagram_inbound_job(self, job_id: int, *, success: bool, error: str = "") -> None:
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT attempts FROM instagram_inbound_jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+            if not row:
+                return
+            attempts = int(row["attempts"])
+            status = "DONE" if success else "FAILED" if attempts >= 6 else "RETRY"
+            delay = min(300, 5 * (2 ** max(0, attempts - 1)))
+            conn.execute(
+                "UPDATE instagram_inbound_jobs SET status = ?, "
+                "next_attempt_at = datetime('now', ?), locked_until = NULL, "
+                "last_error = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (status, f"+{delay} seconds", str(error)[:300] or None, job_id),
+            )
+            conn.commit()
+
+    def enqueue_instagram_outbound_job(
+        self, inbound_job_id: int, sequence_number: int, recipient_id: str,
+        payload: Dict[str, Any],
+    ) -> int:
+        with self.get_connection() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO instagram_outbound_jobs "
+                "(inbound_job_id, sequence_number, recipient_id, payload) "
+                "VALUES (?, ?, ?, ?)",
+                (inbound_job_id, sequence_number, recipient_id, json.dumps(payload, ensure_ascii=False)),
+            )
+            row = conn.execute(
+                "SELECT id FROM instagram_outbound_jobs WHERE inbound_job_id = ? AND sequence_number = ?",
+                (inbound_job_id, sequence_number),
+            ).fetchone()
+            conn.commit()
+            return int(row["id"])
+
+    def claim_instagram_outbound_jobs(
+        self, *, limit: int = 10, inbound_job_id: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
+        """Lease due sends, keeping each recipient's reply sequence ordered."""
+        with self.get_connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            rows = conn.execute(
+                """
+                SELECT job.* FROM instagram_outbound_jobs AS job
+                WHERE (? IS NULL OR job.inbound_job_id = ?)
+                  AND ((job.status IN ('PENDING', 'RETRY') AND job.next_attempt_at <= CURRENT_TIMESTAMP)
+                       OR (job.status = 'SENDING' AND job.locked_until <= CURRENT_TIMESTAMP))
+                  AND NOT EXISTS (
+                      SELECT 1 FROM instagram_outbound_jobs AS earlier
+                      WHERE earlier.recipient_id = job.recipient_id AND earlier.id < job.id
+                        AND (earlier.status NOT IN ('SENT', 'FAILED')
+                             OR (earlier.inbound_job_id = job.inbound_job_id AND earlier.status = 'FAILED'))
+                  )
+                ORDER BY job.id LIMIT ?
+                """,
+                (inbound_job_id, inbound_job_id, max(1, min(int(limit), 50))),
+            ).fetchall()
+            claimed = []
+            for row in rows:
+                conn.execute(
+                    "UPDATE instagram_outbound_jobs SET status = 'SENDING', "
+                    "attempts = attempts + 1, locked_until = datetime('now', '+15 minutes'), "
+                    "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (row["id"],),
+                )
+                claimed.append(dict(conn.execute(
+                    "SELECT * FROM instagram_outbound_jobs WHERE id = ?", (row["id"],)
+                ).fetchone()))
+            conn.commit()
+            return claimed
+
+    def complete_instagram_outbound_job(
+        self, job_id: int, *, success: bool, error: str = "", retryable: bool = True
+    ) -> None:
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT attempts FROM instagram_outbound_jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+            if not row:
+                return
+            attempts = int(row["attempts"])
+            status = "SENT" if success else "RETRY" if retryable else "FAILED"
+            delay = min(1800, 5 * (2 ** min(max(0, attempts - 1), 9)))
+            conn.execute(
+                "UPDATE instagram_outbound_jobs SET status = ?, "
+                "next_attempt_at = datetime('now', ?), locked_until = NULL, "
+                "last_error = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (status, f"+{delay} seconds", str(error)[:300] or None, job_id),
+            )
+            conn.commit()
+
+    def instagram_job_counts(self) -> Dict[str, Dict[str, int]]:
+        with self.get_connection() as conn:
+            return {
+                name: {row["status"]: int(row["count"]) for row in conn.execute(
+                    f"SELECT status, COUNT(*) AS count FROM {table} GROUP BY status"
+                )}
+                for name, table in (
+                    ("inbound", "instagram_inbound_jobs"),
+                    ("outbound", "instagram_outbound_jobs"),
+                )
+            }
 
     def load_active_session(self, user_id: str, channel: str) -> Optional[Dict[str, Any]]:
         """Loads active state; the session layer expires transient fields."""

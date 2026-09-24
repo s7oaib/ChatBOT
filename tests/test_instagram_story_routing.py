@@ -7,6 +7,7 @@ import pytest
 
 import camellia.app as app_module
 import camellia.responder as responder_module
+from camellia import client_qa
 from camellia.ad_gate import EntryPoint, describe_entry_point
 from camellia.config import config
 from camellia.database import Database
@@ -118,7 +119,7 @@ def test_story_routes_require_exact_media_id_and_no_url(story_db):
         validate_route_payload({"source_type": "story", "routing_topic": "Jolbhora"})
 
 
-def test_mapped_story_uses_canonical_jolbhora_price_and_logs_story_evidence(story_db):
+def test_mapped_story_does_not_authorize_unregistered_jolbhora_price(story_db):
     saved = story_db.save_instagram_source_route(_story_route("story-price"))
     uid = "story-price-" + uuid.uuid4().hex[:8]
     with patch.object(app_module, "send_instagram_reply"), patch.object(app_module.escalator, "handle_escalation"):
@@ -131,7 +132,9 @@ def test_mapped_story_uses_canonical_jolbhora_price_and_logs_story_evidence(stor
         logged = conn.execute(
             "SELECT * FROM conversations WHERE user_id=? ORDER BY id DESC LIMIT 1", (uid,)
         ).fetchone()
-    assert logged["template_id"].startswith("source_jolbhora_")
+    assert logged["template_id"] == "instagram_support_handoff"
+    assert "Manager of Kitchens" in logged["bot_response"]
+    assert logged["source_context_used"] == 0
     assert logged["source_type"] == "story"
     assert logged["media_id"] == "story-price"
     assert logged["source_routing_id"] == saved["routing_id"]
@@ -146,20 +149,25 @@ def test_story_context_never_overrides_protected_guards(story_db, text, expected
     uid = "story-guard-result-" + uuid.uuid4().hex[:8]
     _with_story_context(uid)
     _response, matched, template_id, _images = _reply(uid, text)
-    assert matched is True
-    assert template_id == expected
+    assert matched is False
+    assert template_id is None
+    assert "Manager of Kitchens" in _response
+    assert session_memory.get_facts(uid, "instagram")["last_route_source"] == "HUMAN_HANDOFF"
 
 
 def test_explicit_product_beats_mapped_story_and_switches_followup(story_db):
     uid = "story-switch-" + uuid.uuid4().hex[:8]
     facts = _with_story_context(uid)
     _response, matched, template_id, _ = _reply(uid, "tell me more")
-    assert matched is True and template_id.startswith("source_jolbhora_")
+    assert matched is False and template_id is None
+    assert "Manager of Kitchens" in _response
     _response, matched, template_id, _ = _reply(uid, "Actually tell me about Kanchagolla")
-    assert matched is True and template_id == "kanchagolla"
+    assert matched is False and template_id is None
+    assert facts["pending_clarification"] is None
     _response, matched, template_id, _ = _reply(uid, "500g price?")
-    assert matched is True and template_id == "kanchagolla"
-    assert facts["active_product_context"] == "kanchagolla"
+    assert matched is True and template_id == "savoury_food_intro"
+    assert _response == client_qa.REGISTRY_BY_ID["general_price"].answer
+    assert facts["source_context_used"] is False
 
 
 def test_unmapped_story_is_recorded_but_does_not_guess(story_db):
@@ -177,9 +185,9 @@ def test_unmapped_story_is_recorded_but_does_not_guess(story_db):
     uid = "story-unmapped-" + uuid.uuid4().hex[:8]
     session_memory.clear_session(uid, "instagram")
     _response, matched, template_id, _ = _reply(uid, "price?")
-    assert matched is True
-    assert template_id == "price_clarify_product"
-    assert "jolbhora" not in _response.lower()
+    assert matched is False
+    assert template_id is None
+    assert "Manager of Kitchens" in _response
 
 
 def test_caption_and_similar_story_ids_never_route(story_db):
@@ -246,7 +254,7 @@ def test_mapped_media_with_same_event_text_uses_the_source_route(story_db, sourc
     assert logged["source_type"] == source_type
     assert logged["source_routing_id"] == route["routing_id"]
     assert logged["source_context_available"] == 1
-    assert logged["source_context_used"] == 1
+    assert logged["source_context_used"] == 0
     assert logged["customer_text_accompanied_media"] == 1
 
 
@@ -277,11 +285,8 @@ def test_mapped_media_without_text_uses_one_configured_source_response(story_db,
             source_type if source_type != "story" else None,
         )
 
-    assert len(sent) == 1
-    response = sent[0][0][1].lower()
-    assert "can't open photos" not in response
-    assert "voice notes" not in response
-    assert "could you type your question instead" not in response
+    assert sent == []  # media-only shares stay silent
+    assert session_memory.get_facts(uid, "instagram")["source_route"]["active"] is True
 
 
 def test_mapped_media_explicit_product_and_guard_override_the_source(story_db):
@@ -301,8 +306,7 @@ def test_mapped_media_explicit_product_and_guard_override_the_source(story_db):
             EntryPoint(source="shared_media"),
         )
     assert len(sent) == 2
-    assert "kanchagolla" in sent[0].lower()
-    assert "pickup" in sent[1].lower() or "kitchen" in sent[1].lower()
+    assert all("Manager of Kitchens" in text for text in sent)
 
 
 def test_unknown_media_does_not_block_explicit_product_but_vague_text_clarifies(story_db):
@@ -320,8 +324,8 @@ def test_unknown_media_does_not_block_explicit_product_but_vague_text_clarifies(
             EntryPoint(source="shared_media"),
             {"shortcode": "another-unmapped-reel"}, None, "reel",
         )
-    assert "kanchagolla" in sent[0].lower()
-    assert "which item" in sent[1].lower()
+    assert "Manager of Kitchens" in sent[0]
+    assert "what would you like to know more about" in sent[1].lower()
     assert "jolbhora" not in sent[1].lower()
 
 
@@ -330,7 +334,8 @@ def test_standalone_tell_me_more_and_unsupported_attachment_keep_safe_fallbacks(
     response = responder.match_and_respond(
         "Tell me more", user_id=uid, channel="instagram",
     )
-    assert response[2] == "clarify_request"
+    assert response[2] is None
+    assert "Manager of Kitchens" in response[0]
 
     fallback = []
     with patch.object(app_module, "_reply_to_unreadable_attachment", lambda sender, **_kwargs: fallback.append(sender)):
@@ -456,7 +461,7 @@ def test_mapped_shared_post_audit_retains_exact_source_media_id(story_db):
 
 
 @pytest.mark.parametrize("source_type", ["reel", "post", "story"])
-def test_unknown_media_without_text_logs_source_evidence_before_fallback(story_db, source_type):
+def test_unknown_media_without_text_stays_silent_and_never_guesses(story_db, source_type):
     identifiers = {
         "reel": {"shortcode": "unknown-audit-reel"},
         "post": {"media_id": "unknown-audit-post"},
@@ -483,20 +488,21 @@ def test_unknown_media_without_text_logs_source_evidence_before_fallback(story_d
                 EntryPoint(source="story_reply", media_id=identifiers["media_id"]),
             )
 
-    assert len(sent) == 1
-    row = sent[0][1]
-    assert row is not None
-    assert row["source_type"] == source_type
-    assert row["source_routing_id"] is None
-    assert row["source_context_available"] == 0
-    assert row["source_context_used"] == 0
-    assert row["source_media_present"] == 1
-    assert row["customer_text_accompanied_media"] == 0
-    if source_type == "reel":
-        assert row["shortcode"] == identifiers["shortcode"]
-        assert row["source_match_method"] == "shared_media_unmapped"
+    if source_type == "story":
+        assert sent == []
     else:
-        assert row["media_id"] == identifiers["media_id"]
-        assert row["source_match_method"] == (
-            "story_media_id_unmapped" if source_type == "story" else "shared_media_unmapped"
-        )
+        assert len(sent) == 1
+        row = sent[0][1]
+        assert row is not None
+        assert row["source_type"] == source_type
+        assert row["source_routing_id"] is None
+        assert row["source_context_available"] == 0
+        assert row["source_context_used"] == 0
+        assert row["source_media_present"] == 1
+        assert row["customer_text_accompanied_media"] == 0
+        if source_type == "reel":
+            assert row["shortcode"] == identifiers["shortcode"]
+            assert row["source_match_method"] == "shared_media_unmapped"
+        else:
+            assert row["media_id"] == identifiers["media_id"]
+            assert row["source_match_method"] == "shared_media_unmapped"

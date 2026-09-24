@@ -30,7 +30,7 @@ def test_mapping_ui_uses_one_source_description_and_manage_topics():
     assert 'id="igMediaAutoReply"' in page and 'id="igStoryActive"' in page
 
 
-def test_name_only_topic_preserves_old_description_and_source_owns_new_copy(tmp_path, monkeypatch):
+def test_named_topic_preserves_description_and_source_owns_new_copy(tmp_path, monkeypatch):
     database = Database(str(tmp_path / "ui-topics.db"))
     monkeypatch.setattr("camellia.database.db", database)
     monkeypatch.setattr(app_module, "db", database)
@@ -38,10 +38,12 @@ def test_name_only_topic_preserves_old_description_and_source_owns_new_copy(tmp_
     monkeypatch.setattr(config, "BYPASS_AD_GATE", True)
     client = TestClient(app_module.app)
     headers = {"x-admin-key": config.ADMIN_API_KEY}
-    created = client.post("/admin/instagram-topics", headers=headers, json={"name": "Bengali Bento"})
+    created = client.post("/admin/instagram-topics", headers=headers, json={
+        "name": "Bengali Bento", "description": "Approved classification description.",
+    })
     assert created.status_code == 200, created.text
     topic = created.json()["topic"]
-    assert topic["description"] == ""
+    assert topic["description"] == "Approved classification description."
     legacy = client.post("/admin/instagram-topics", headers=headers, json={
         "name": "Legacy Topic", "description": "Old internal Topic description",
     }).json()["topic"]

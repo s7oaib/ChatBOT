@@ -53,19 +53,25 @@ def _template_response(template_id):
     return template["response"]
 
 
-def test_subscription_delivery_uses_one_safe_primary_instagram_payload(tmp_path, monkeypatch):
+def test_subscription_delivery_uses_ordered_approved_instagram_payloads(tmp_path, monkeypatch):
     monkeypatch.setenv("CONTENT_INTEGRITY_REMEDIATION", "true")
     sent, escalated = _run_instagram(
         monkeypatch, _fixtures(tmp_path), "subscription delivery time"
     )
 
-    assert len(sent) == 1
+    # The approved QA answer intentionally sends text, its chart, then its
+    # approved manager next-steps block as separate ordered Meta payloads.
+    assert len(sent) == 3
     assert not escalated.called
     from camellia.client_qa import REGISTRY_BY_ID
-    assert sent[0]["text"] == REGISTRY_BY_ID["subscription_details_client"].answer
-    assert sent[0]["image_url"] == ["/images/Everyday%20Meal%20Subscription%20Rate%20Chart.jpeg"]
-    assert "45 minutes" not in sent[0]["text"]
-    assert "à la carte" not in sent[0]["text"].lower()
+    text_blocks = [item["text"] for item in sent if item["text"]]
+    assert "\n\n".join(text_blocks) == REGISTRY_BY_ID["subscription_details_client"].answer
+    assert sent[0]["image_url"] is None
+    assert sent[1]["text"] == ""
+    assert sent[1]["image_url"] == ["/images/Everyday%20Meal%20Subscription%20Rate%20Chart.jpeg"]
+    assert "Manager of Kitchens" in sent[2]["text"]
+    assert "45 minutes" not in " ".join(item["text"] for item in sent)
+    assert "à la carte" not in " ".join(item["text"] for item in sent).lower()
 
 
 def test_sondesh_dispatch_uses_exact_confirmed_copy_and_modified_copy_stays_quarantined(
@@ -132,21 +138,26 @@ def test_stale_always_human_source_policy_cannot_replace_new_informational_answe
         sent, escalated = _run_instagram(
             monkeypatch, _fixtures(tmp_path), message, facts={"source_route": stale_source}
         )
-        assert len(sent) == 1, message
-        assert not escalated.called, message
-        assert "wa.me" not in sent[0]["text"], message
+        if "contact your manager" in message.lower():
+            assert escalated.called, message
+            assert any("Manager of Kitchens" in item["text"] for item in sent), message
+        else:
+            assert sent, message
+            assert not escalated.called, message
+        assert all("wa.me" not in item["text"] for item in sent), message
 
 
 @pytest.mark.parametrize("message", [
     "who can i speak to directly",
     "How can I contact your manager?",
 ])
-def test_manager_contact_is_informational(tmp_path, monkeypatch, message):
+def test_manager_contact_request_uses_human_handoff(tmp_path, monkeypatch, message):
     database = _fixtures(tmp_path)
     sent, escalated = _run_instagram(monkeypatch, database, message)
     assert len(sent) == 1
-    assert not escalated.called
-    assert "camellia.artisanal.gurgaon@gmail.com" in sent[0]["text"]
+    assert escalated.called
+    assert "Manager of Kitchens" in sent[0]["text"]
+    assert "camellia.artisanal.gurgaon@gmail.com" not in sent[0]["text"]
     assert "wa.me" not in sent[0]["text"]
 
 
@@ -180,9 +191,9 @@ def test_vague_referential_instagram_messages_never_reuse_stale_media(tmp_path, 
     )
 
     assert len(sent) == 1
-    assert not escalated.called
+    assert escalated.called
     assert sent[0]["image_url"] is None
-    assert "Which item are you interested in?" in sent[0]["text"]
+    assert "Manager of Kitchens" in sent[0]["text"]
     assert "wa.me" not in sent[0]["text"]
 
 
@@ -203,5 +214,8 @@ def test_deterministic_instagram_output_does_not_require_groq(tmp_path, monkeypa
     ):
         sent, escalated = _run_instagram(monkeypatch, database, message)
         assert sent, message
-        assert not escalated.called, message
+        if "contact your manager" in message.lower():
+            assert escalated.called, message
+        else:
+            assert not escalated.called, message
         assert sent[0]["text"]

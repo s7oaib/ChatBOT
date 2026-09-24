@@ -124,7 +124,7 @@ def test_an_unsupported_topic_is_never_answered_with_a_near_miss(failure):
     assert matched is False
     assert template_id is None
     assert "packag" not in text.lower()
-    assert "team" in text.lower()
+    assert "Manager of Kitchens" in text
 
 
 @pytest.mark.parametrize("message", [
@@ -140,7 +140,7 @@ def test_a_complaint_reaches_a_human_even_with_no_open_flow(message):
         text, matched, _template_id, _images = _ask(message, user_id)
 
     assert matched is False
-    assert "team" in text.lower()
+    assert "Manager of Kitchens" in text
 
 
 @pytest.mark.parametrize("message", [

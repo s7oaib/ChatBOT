@@ -33,7 +33,7 @@ python -m pytest -q `
 | Structured understanding | Structured JSON contract, schema rejection, safe multi-intent behavior | `tests/test_structured_understanding.py`, `tests/test_primary_nlu_architecture.py` |
 | Safe AI refinement | Grounded response only; unsupported claims fall back to approved copy | `tests/test_structured_understanding.py`, `tests/test_canonical_knowledge_layer.py` |
 | Unsupported facts | Unknown topics do not borrow unrelated answers and route safely | `tests/test_canonical_knowledge_layer.py`, `tests/test_provider_outage_routing.py` |
-| Escalation | Direct request, unsupported request, event/order request and handoff references | `tests/test_channel_policy.py`, `tests/test_escalation_destination.py` |
+| Escalation | Direct request, unsupported request, event/order request and handoff references | `tests/test_channel_policy.py`, `tests/test_whatsapp_cleanup.py` |
 | Story reply | Exact Meta Story ID routing, unmapped safe fallback, no caption/OCR/similarity routing | `tests/test_instagram_story_routing.py` |
 | Post/Reel mapping | Exact source identity, shared media precedence, pairing and route persistence | `tests/test_instagram_source_routing.py`, `tests/test_shared_reel_routing.py`, `tests/test_shared_post_pairing.py`, `tests/test_topic_menu_catalogue.py` |
 | Topic catalogue | Create/edit/duplicate protection, active catalogue, selectors, exact mapping, restart persistence and legacy migration | `tests/test_topic_menu_catalogue.py`, `tests/test_admin_ui_structure.py`, `tests/test_instagram_story_runtime.py` |

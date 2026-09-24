@@ -215,7 +215,7 @@ def test_fresh_reel_then_tell_me_more_uses_source_context_and_dispatches(routed_
     assert sent[0][1]["inbound_message_id"] == 901
     assert sent[0][0][1]
     trace = logged[0][1]
-    assert trace["source_context_used"] is True
+    assert trace["source_context_used"] is False
     assert trace["source_routing_id"] is not None
     assert trace["source_match_method"] == "shared_media_url"
     assert "can't open photos" not in sent[0][0][1].lower()

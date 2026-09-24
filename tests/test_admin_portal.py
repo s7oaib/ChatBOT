@@ -1,6 +1,10 @@
 import os
 import json
 import re
+import hashlib
+import hmac
+import subprocess
+import sys
 import pytest
 from unittest import mock
 from fastapi.testclient import TestClient
@@ -615,15 +619,143 @@ def test_health_warns_about_silent_failure_modes():
     assert client.get("/health").status_code == 200
 
 
-def test_webhook_signature_status_is_reported_honestly():
-    saved = config.META_APP_SECRET
-    try:
-        config.META_APP_SECRET = ""
-        assert client.get("/health").json()["webhook_signature"] == "DISABLED"
-        config.META_APP_SECRET = "a_real_secret"
-        assert client.get("/health").json()["webhook_signature"] == "enforced"
-    finally:
-        config.META_APP_SECRET = saved
+def test_webhook_signature_status_is_reported_honestly(monkeypatch):
+    monkeypatch.setattr(config, "REQUIRE_WEBHOOK_SIGNATURE", False)
+    monkeypatch.setattr(config, "META_APP_SECRET", "")
+    assert client.get("/health").json()["webhook_signature"] == "DISABLED"
+    monkeypatch.setattr(config, "REQUIRE_WEBHOOK_SIGNATURE", True)
+    assert client.get("/health").json()["webhook_signature"] == "required_but_unconfigured"
+    assert any(
+        "META_APP_SECRET unset while signature enforcement is required" in warning
+        for warning in client.get("/health").json()["warnings"]
+    )
+    monkeypatch.setattr(config, "META_APP_SECRET", "   ")
+    assert client.get("/health").json()["webhook_signature"] == "required_but_unconfigured"
+    monkeypatch.setattr(config, "META_APP_SECRET", "test-secret")
+    assert client.get("/health").json()["webhook_signature"] == "enforced"
+
+
+def test_secure_webhook_signature_default_when_environment_value_is_absent():
+    env = os.environ.copy()
+    env.pop("REQUIRE_WEBHOOK_SIGNATURE", None)
+    code = (
+        "import dotenv; dotenv.load_dotenv = lambda *args, **kwargs: None; "
+        "from camellia.config import Config; "
+        "print(str(Config.REQUIRE_WEBHOOK_SIGNATURE).lower())"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code], cwd=os.path.dirname(os.path.dirname(__file__)),
+        env=env, capture_output=True, text=True, check=True,
+    )
+    assert result.stdout.strip().endswith("true")
+
+
+def _instagram_post_with_signature(signature=None):
+    raw_body = json.dumps({"object": "instagram", "entry": []}).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    if signature is not None:
+        headers["X-Hub-Signature-256"] = signature
+    return client.post("/webhook/instagram", content=raw_body, headers=headers)
+
+
+def test_signed_instagram_webhook_passes_signature_gate(monkeypatch):
+    secret = "test-secret"
+    monkeypatch.setattr(config, "META_APP_SECRET", secret)
+    monkeypatch.setattr(config, "REQUIRE_WEBHOOK_SIGNATURE", True)
+    raw_body = json.dumps({"object": "instagram", "entry": []}).encode("utf-8")
+    signature = "sha256=" + hmac.new(secret.encode(), raw_body, hashlib.sha256).hexdigest()
+
+    response = client.post(
+        "/webhook/instagram", content=raw_body,
+        headers={"Content-Type": "application/json", "X-Hub-Signature-256": signature},
+    )
+
+    assert response.status_code == 200
+
+
+@pytest.mark.parametrize("signature", [None, "sha256=incorrect"])
+def test_missing_or_invalid_instagram_signature_is_rejected(monkeypatch, caplog, signature):
+    monkeypatch.setattr(config, "META_APP_SECRET", "test-secret")
+    monkeypatch.setattr(config, "REQUIRE_WEBHOOK_SIGNATURE", True)
+
+    response = _instagram_post_with_signature(signature)
+
+    assert response.status_code == 403
+    assert "test-secret" not in response.text
+    assert "test-secret" not in caplog.text
+
+
+def test_missing_secret_with_enforcement_enabled_rejects_instagram_post(monkeypatch):
+    monkeypatch.setattr(config, "META_APP_SECRET", "")
+    monkeypatch.setattr(config, "REQUIRE_WEBHOOK_SIGNATURE", True)
+
+    response = _instagram_post_with_signature()
+
+    assert response.status_code == 403
+
+
+def test_missing_secret_is_fail_open_only_after_explicit_local_opt_out(monkeypatch):
+    monkeypatch.setattr(config, "META_APP_SECRET", "")
+    monkeypatch.setattr(config, "REQUIRE_WEBHOOK_SIGNATURE", False)
+
+    response = _instagram_post_with_signature()
+
+    assert response.status_code == 200
+
+
+def test_instagram_get_challenge_does_not_require_post_signature(monkeypatch):
+    monkeypatch.setattr(config, "META_VERIFY_TOKEN", "unit-test-token")
+    monkeypatch.setattr(config, "META_APP_SECRET", "test-secret")
+    monkeypatch.setattr(config, "REQUIRE_WEBHOOK_SIGNATURE", True)
+
+    response = client.get("/webhook/instagram", params={
+        "hub.mode": "subscribe",
+        "hub.verify_token": "unit-test-token",
+        "hub.challenge": "challenge-123",
+    })
+
+    assert response.status_code == 200
+    assert response.text == "challenge-123"
+
+
+@pytest.mark.parametrize(
+    ("configured_token", "supplied_token"),
+    [
+        ("unit-test-token", "wrong-token"),
+        ("", ""),
+        ("   ", "   "),
+    ],
+    ids=["wrong-token", "empty-token", "whitespace-token"],
+)
+def test_instagram_get_challenge_rejects_untrusted_verify_tokens(
+    monkeypatch, configured_token, supplied_token,
+):
+    monkeypatch.setattr(config, "META_VERIFY_TOKEN", configured_token)
+
+    response = client.get("/webhook/instagram", params={
+        "hub.mode": "subscribe",
+        "hub.verify_token": supplied_token,
+        "hub.challenge": "must-not-be-returned",
+    })
+
+    assert response.status_code == 403
+    assert response.text == "Forbidden"
+
+
+def test_meta_verify_token_defaults_to_unconfigured_when_environment_is_absent():
+    env = os.environ.copy()
+    env.pop("META_VERIFY_TOKEN", None)
+    code = (
+        "import dotenv; dotenv.load_dotenv = lambda *args, **kwargs: None; "
+        "from camellia.config import Config; "
+        "print(repr(Config.META_VERIFY_TOKEN))"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code], cwd=os.path.dirname(os.path.dirname(__file__)),
+        env=env, capture_output=True, text=True, check=True,
+    )
+
+    assert result.stdout.strip().endswith("''")
 
 
 def test_require_webhook_signature_rejects_unsigned_when_unconfigured():

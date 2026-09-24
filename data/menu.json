@@ -235,7 +235,7 @@
   },
   "weekly_menus": [
     {
-      "week_of": "Current Week (Friday Lunch - Thursday Dinner)",
+      "week_of": "22nd September - 28th September, 2026",
       "menu_image_till_thursday": "/images/Till%20Thursday.jpeg",
       "menu_image_from_friday": "/images/From%20Friday.jpeg",
       "signature_sondesh_image": "/images/Signature%20Sondesh.jpeg",
@@ -244,27 +244,9 @@
       "service_window": "Friday Lunch - Thursday Dinner",
       "vegetarian": [
         {
-          "item": "Aloor Dom",
-          "description": "Bengali style slow cooked spiced baby potatoes",
-          "price_inr": 280,
-          "quantity": "250g"
-        },
-        {
-          "item": "Chaal Potol",
-          "description": "Pointed gourd delicately cooked with aromatic Gobindobhog rice",
-          "price_inr": 340,
-          "quantity": "250g"
-        },
-        {
-          "item": "Chholar Daal",
-          "description": "Traditional Bengal gram dal with coconut slivers & mild spices",
-          "price_inr": 260,
-          "quantity": "250g"
-        },
-        {
-          "item": "Chanar Kofta / Dalna",
-          "description": "Fresh handmade cottage cheese dumplings in rich ginger-tomato gravy",
-          "price_inr": 360,
+          "item": "Shukto",
+          "description": "Freshly handcrafted (250g)",
+          "price_inr": 300,
           "quantity": "250g"
         }
       ],
@@ -348,7 +330,8 @@
         }
       ],
       "logistics_note": "Courier charges at actuals from Sushant Arcade, Gurgaon. Delivery across Delhi NCR.",
-      "week": "Test Rotation Week"
+      "week": "Test Rotation Week",
+      "is_published": true
     }
   ],
   "order_types": {
@@ -402,10 +385,22 @@
     "client_confirmed_facts": {
       "confirmed_at": "2026-09-13",
       "jolbhora_prices_inr": {
-        "aamar_mishti": {"250g": 750, "500g": 1400, "1kg": 2500},
-        "signature": {"250g": 900, "500g": 1600, "1kg": 2900}
+        "aamar_mishti": {
+          "250g": 750,
+          "500g": 1400,
+          "1kg": 2500
+        },
+        "signature": {
+          "250g": 900,
+          "500g": 1600,
+          "1kg": 2900
+        }
       },
-      "jolbhora_pieces": {"250g": 6, "500g": 12, "1kg": 24},
+      "jolbhora_pieces": {
+        "250g": 6,
+        "500g": 12,
+        "1kg": 24
+      },
       "approved_customer_claims": [
         "Signature Collection may be described as using desi A2 cow milk",
         "An all-women team makes the Sondesh",

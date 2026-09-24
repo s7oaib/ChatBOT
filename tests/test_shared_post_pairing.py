@@ -251,7 +251,7 @@ def test_a_reel_share_still_gets_the_unreadable_reply_exactly_as_before(post_rou
 
 # --- follow-up precedence: same guarantee as the reel fix ------------------
 
-def test_tell_me_more_after_a_paired_post_uses_source_routing(post_route):
+def test_tell_me_more_after_a_paired_post_without_description_hands_off(post_route):
     from camellia.responder import responder
     database, routing_id = post_route
     database.start_post_pairing(routing_id, ttl_seconds=600, started_by="admin")
@@ -261,9 +261,12 @@ def test_tell_me_more_after_a_paired_post_uses_source_routing(post_route):
     text, matched, template_id, _images = responder.match_and_respond(
         "Tell me more", user_id="uid_tmore", channel="instagram",
     )
-    used = bool(session_memory.get_facts("uid_tmore", "instagram").get("source_context_used"))
-    assert used is True
-    assert "signature" in template_id
+    facts = session_memory.get_facts("uid_tmore", "instagram")
+    assert text
+    assert matched is False
+    assert template_id is None
+    assert "manager of kitchens" in text.lower()
+    assert facts["source_context_used"] is False
 
 
 def test_learned_3_does_not_override_a_valid_post_source_context(post_route):

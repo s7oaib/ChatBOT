@@ -33,8 +33,10 @@ def test_story_subscription_then_price_chart_is_chart_only():
     user_id = "asset-story-subscription"
     facts = session_memory.get_facts(user_id, "instagram")
     facts["source_route"] = {
+        "routing_id": 41,
         "routing_topic": "Everyday Meal Subscription",
         "source_type": "story",
+        "media_id": "17841400000000001",
         "active": True,
     }
 

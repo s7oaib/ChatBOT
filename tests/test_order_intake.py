@@ -28,6 +28,7 @@ def _respond(uid, message):
 
 def test_generic_how_to_order_starts_request_draft_with_customer_instructions(monkeypatch):
     monkeypatch.setattr(config, "BYPASS_AD_GATE", True)
+    monkeypatch.setattr(config, "WHATSAPP_BUSINESS_NUMBER", "919800000000")
     uid = "order-intake-start-" + uuid.uuid4().hex[:8]
     session_memory.clear_session(uid, "instagram")
 
@@ -36,13 +37,15 @@ def test_generic_how_to_order_starts_request_draft_with_customer_instructions(mo
     assert matched is True
     assert template_id == "order_intake_draft"
     assert response == instruction_message()
+    assert "wa.me" not in response
     facts = session_memory.get_facts(uid, "instagram")
     assert facts["order_intake_draft"]["status"] == ORDER_DRAFT_INCOMPLETE
     assert not [row for row in db.get_handoffs(limit=300) if row["source_user_id"] == uid]
 
 
-def test_complete_natural_order_sentence_extracts_explicit_fields_and_asks_only_missing_details(monkeypatch):
+def test_complete_natural_order_sentence_immediately_hands_off_partial_draft(monkeypatch):
     monkeypatch.setattr(config, "BYPASS_AD_GATE", True)
+    monkeypatch.setattr(config, "WHATSAPP_BUSINESS_NUMBER", "919800000000")
     uid = "order-intake-natural-" + uuid.uuid4().hex[:8]
     session_memory.clear_session(uid, "instagram")
 
@@ -55,9 +58,21 @@ def test_complete_natural_order_sentence_extracts_explicit_fields_and_asks_only_
     assert (draft["item"], draft["quantity"], draft["delivery_slot"], draft["delivery_area"]) == (
         "Sondesh", "2 boxes", "Friday Dinner", "Gurgaon",
     )
-    assert "full delivery address" in response
-    assert "receiver's phone number" in response
-    assert "preferred delivery day" not in response
+    assert draft["status"] == ORDER_DRAFT_INCOMPLETE
+    assert "ORDER DRAFT" in response
+    assert "Preferred day/slot: Friday Dinner" in response
+    assert "Delivery address: \n" in response
+    assert "Receiver phone: \n" in response
+    assert "Location pin: \n" in response
+    assert "https://wa.me/919800000000?text=" in response
+    assert not any(value in response for value in ("Not supplied", "Needed", "N/A", "Unknown"))
+    assert not any(value in response.lower() for value in (
+        "confirmed", "available", "delivery confirmed", "price confirmed",
+    ))
+    assert "full delivery address" not in response
+    assert "receiver's phone number" not in response
+    assert "Please send your preferred delivery day" not in response
+    assert "Please send" not in response
 
 
 def test_bento_sentence_extracts_only_customer_supplied_fields():
@@ -76,8 +91,9 @@ def test_informational_menu_request_is_not_misclassified_as_order_request():
     assert not is_order_request("I want to see the menu")
 
 
-def test_sondesh_classic_size_and_area_only_asks_for_missing_slot(monkeypatch):
+def test_sondesh_classic_size_and_area_leaves_missing_fields_blank(monkeypatch):
     monkeypatch.setattr(config, "BYPASS_AD_GATE", True)
+    monkeypatch.setattr(config, "WHATSAPP_BUSINESS_NUMBER", "919800000000")
     uid = "order-intake-slot-" + uuid.uuid4().hex[:8]
     session_memory.clear_session(uid, "instagram")
 
@@ -90,9 +106,61 @@ def test_sondesh_classic_size_and_area_only_asks_for_missing_slot(monkeypatch):
     assert draft["quantity"] == "250g"
     assert draft["delivery_area"] == "Gurgaon"
     assert draft["delivery_slot"] is None
-    assert response == "Please send your preferred delivery day and slot, such as Friday lunch or Friday dinner."
-    assert "address" not in response.lower()
-    assert "phone" not in response.lower()
+    assert draft["status"] == ORDER_DRAFT_INCOMPLETE
+    assert "ORDER DRAFT" in response
+    assert "Preferred day/slot: \n" in response
+    assert "Delivery address: \n" in response
+    assert "Receiver phone: \n" in response
+    assert "https://wa.me/919800000000?text=" in response
+    body = unquote(response.split("?text=", 1)[1])
+    assert body == (
+        "Hi, I'd like to place an order with Camellia Artisanal.\n\n"
+        "ORDER DRAFT\n\n"
+        "Item: Sondesh Classic\n"
+        "Quantity: 250g\n"
+        "Delivery area: Gurgaon\n"
+        "Preferred day/slot: \n"
+        "Delivery address: \n"
+        "Receiver phone: \n"
+        "Location pin: \n\n"
+        "Please help me complete and confirm this order."
+    )
+
+
+def test_missing_whatsapp_number_keeps_draft_without_inventing_link(monkeypatch):
+    monkeypatch.setattr(config, "BYPASS_AD_GATE", True)
+    monkeypatch.setattr(config, "WHATSAPP_BUSINESS_NUMBER", "")
+    uid = "order-intake-no-number-" + uuid.uuid4().hex[:8]
+    session_memory.clear_session(uid, "instagram")
+
+    response, matched, template_id, _images = _respond(uid, "Sondesh Classic 250g to Gurgaon")
+
+    assert matched is True and template_id == "order_intake_draft"
+    assert "ORDER DRAFT" in response
+    assert "WhatsApp handoff link is temporarily unavailable" in response
+    assert "wa.me" not in response
+    assert session_memory.get_facts(uid, "instagram")["order_intake_draft"]["status"] == ORDER_DRAFT_INCOMPLETE
+
+
+@pytest.mark.parametrize("message", (
+    "Need 2 boxes Sondesh in Gurgaon",
+    "2 boxes Sondesh for Gurgaon",
+    "Chicken Bento 2 boxes to Noida",
+    "Need 1kg Sondesh for Friday dinner in Gurgaon",
+))
+def test_natural_partial_orders_immediately_offer_human_whatsapp_handoff(monkeypatch, message):
+    monkeypatch.setattr(config, "BYPASS_AD_GATE", True)
+    monkeypatch.setattr(config, "WHATSAPP_BUSINESS_NUMBER", "919800000000")
+    uid = "order-intake-variant-" + uuid.uuid4().hex[:8]
+    session_memory.clear_session(uid, "instagram")
+
+    response, matched, template_id, _images = _respond(uid, message)
+
+    assert matched is True and template_id == "order_intake_draft"
+    assert "ORDER DRAFT" in response
+    assert "https://wa.me/919800000000?text=" in response
+    assert "Please send" not in response
+    assert session_memory.get_facts(uid, "instagram")["order_intake_draft"]["status"] == ORDER_DRAFT_INCOMPLETE
 
 
 def test_ordering_question_keeps_product_named_in_the_same_message(monkeypatch):
@@ -108,7 +176,8 @@ def test_ordering_question_keeps_product_named_in_the_same_message(monkeypatch):
     assert draft["quantity"] == "250g"
     assert draft["delivery_area"] == "Gurgaon"
     assert "What quantity" not in response
-    assert "preferred delivery day and slot" in response
+    assert "ORDER DRAFT" in response
+    assert "Preferred day/slot: \n" in response
 
 
 def test_multiturn_draft_persists_supplied_fields_and_renders_customer_values(monkeypatch):
@@ -118,10 +187,11 @@ def test_multiturn_draft_persists_supplied_fields_and_renders_customer_values(mo
 
     _respond(uid, "Need 2 boxes Sondesh in Gurgaon")
     second, *_ = _respond(uid, "Friday dinner")
-    assert "full delivery address" in second and "receiver's phone number" in second
+    assert "Preferred day/slot: Friday Dinner" in second
+    assert "Delivery address: \n" in second and "Receiver phone: \n" in second
     third, *_ = _respond(uid, "DLF Phase 4, Gurgaon")
-    assert "receiver's phone number" in third
-    assert "full delivery address" not in third
+    assert "Delivery address: DLF Phase 4, Gurgaon" in third
+    assert "Receiver phone: \n" in third
     final, matched, template_id, _images = _respond(uid, "9876543210")
 
     draft = session_memory.get_facts(uid, "instagram")["order_intake_draft"]
@@ -131,11 +201,10 @@ def test_multiturn_draft_persists_supplied_fields_and_renders_customer_values(mo
     assert "Quantity: 2 boxes" in final
     assert "Delivery area: Gurgaon" in final
     assert "Delivery address: DLF Phase 4, Gurgaon" in final
-    assert "Preferred slot: Friday Dinner" in final
+    assert "Preferred day/slot: Friday Dinner" in final
     assert "Receiver phone: 9876543210" in final
-    assert "Location pin: Not required" in final
-    assert "This is an order request only." in final
-    assert "Our kitchen team will confirm availability, delivery charges and the invoice." in final
+    assert "Location pin: " in final
+    assert "Our manager will review availability, delivery charges, and the final invoice." in final
     assert "order confirmed" not in final.lower()
     assert "booking confirmed" not in final.lower()
     assert "order is placed" not in final.lower()
@@ -201,8 +270,9 @@ def test_standalone_house_requires_a_pin_before_ready(monkeypatch):
 
     draft = session_memory.get_facts(uid, "instagram")["order_intake_draft"]
     assert draft["location_pin_required"] is True
-    assert "receiver's phone number" in response
-    assert "Google Maps location pin" in response
+    assert "Receiver phone: \n" in response
+    assert "Location pin: " in response
+    assert "Please send" not in response
     assert draft["status"] == ORDER_DRAFT_INCOMPLETE
 
 
@@ -220,10 +290,11 @@ def test_whatsapp_link_prefills_the_order_request_but_only_creates_a_click_link(
     assert link.startswith("https://wa.me/919800000000?text=")
     body = unquote(link)
     for value in (
-        "Hi, I'd like to place an order with Camellia Artisanal.", "ORDER REQUEST",
+        "Hi, I'd like to place an order with Camellia Artisanal.", "ORDER DRAFT",
         "Item: Sondesh Classic", "Quantity: 250g", "Delivery area: Gurgaon",
-        "Delivery address: DLF Phase 4, Gurgaon", "Preferred slot: Friday Dinner",
-        "Receiver phone: 9876543210", "Please confirm availability, final delivery charges and invoice.",
+        "Delivery address: DLF Phase 4, Gurgaon", "Preferred day/slot: Friday Dinner",
+        "Receiver phone: 9876543210", "Location pin: ",
+        "Please help me complete and confirm this order.",
     ):
         assert value in body
     send_instagram.assert_not_called()
@@ -259,9 +330,9 @@ def test_complete_intake_is_a_click_to_chat_not_an_automatic_handoff(monkeypatch
         app_module._process_instagram_event(uid, "9876543210", "ad-order-intake")
 
     final_reply = send.call_args.args[1]
-    assert "ORDER REQUEST" in final_reply
+    assert "ORDER DRAFT" in final_reply
     assert "https://wa.me/919800000000?text=" in final_reply
-    assert "This is an order request only." in final_reply
+    assert "Our manager will review availability" in final_reply
     assert send.call_count == 3
     escalate.assert_not_called()
     assert not [row for row in db.get_handoffs(limit=300) if row["source_user_id"] == uid]

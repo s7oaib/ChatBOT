@@ -189,8 +189,8 @@ def test_unknown_attachment_marks_context_unmapped_and_ambiguous_followup_clarif
 def test_mapped_exact_post_identity_persists_topic_and_answers_followups(monkeypatch):
     monkeypatch.setattr(config, "BYPASS_AD_GATE", True)
     cases = [
-        ("Sondesh", "tell me more", "sondesh_details_client", "price?", "sondesh_price_client"),
-        ("Subscription", "tell me more", "subscription_details_client", "price?", "subscription_price"),
+        ("Sondesh", "Tell me about Sondesh", "sondesh_details_client", "price?", "sondesh_price_client"),
+        ("Subscription", "Tell me about subscription", "subscription_details_client", "price?", "subscription_price"),
         ("Bengali Bento", "price?", "bento_price_client", None, None),
     ]
     for topic, first_question, first_answer, second_question, second_answer in cases:

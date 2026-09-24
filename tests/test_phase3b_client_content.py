@@ -59,27 +59,27 @@ DELIVERY_TIME = (
 )
 
 
-def test_sondesh_to_savoury_crosssell_is_exact_and_attached_once():
+def test_unregistered_sondesh_crosssell_hands_off_without_legacy_menu_push():
     user_id = f"crosssell_{uuid.uuid4().hex[:10]}"
-    session_memory.clear_session(user_id, "whatsapp")
+    session_memory.clear_session(user_id, "instagram")
 
     first = responder.match_and_respond(
-        "What is the sondesh price?", user_id=user_id, channel="whatsapp"
+        "What is the sondesh price?", user_id=user_id, channel="instagram"
     )
     second = responder.match_and_respond(
-        "Do you also cook meals?", user_id=user_id, channel="whatsapp"
+        "Do you also cook meals?", user_id=user_id, channel="instagram"
     )
     third = responder.match_and_respond(
-        "How long to dispatch sondesh?", user_id=user_id, channel="whatsapp"
+        "How long to dispatch sondesh?", user_id=user_id, channel="instagram"
     )
 
-    assert SONDESH_CROSSSELL in second[0]
-    assert second[3] is not None
-    second_image = second[3][0] if isinstance(second[3], list) else second[3]
-    second_image_url = second_image.get("url", "") if isinstance(second_image, dict) else second_image
-    assert "/images/" in second_image_url
-    assert SONDESH_CROSSSELL not in third[0]
-    assert "We also cook fresh Bengali meals for Delhi NCR" in first[0]
+    assert first[1] is True
+    assert second[1] is False
+    assert second[2] is None
+    assert "manager of kitchens" in second[0].lower()
+    assert second[3] is None
+    assert SONDESH_CROSSSELL not in second[0]
+    assert third[1] is True
 
 
 def test_unrelated_query_does_not_trigger_sondesh_to_savoury_crosssell():

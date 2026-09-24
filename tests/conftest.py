@@ -7,6 +7,8 @@ needs the root on sys.path regardless of where it was invoked from.
 """
 
 import sys
+import os
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -14,6 +16,82 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+# Set DB_PATH before pytest imports application modules. Several legacy modules
+# initialize the shared Database singleton during collection, so a fixture
+# would be too late to prevent tests from touching the developer's ignored
+# camellia.db. Keep all suite-level DB work in an OS temporary directory.
+_ORIGINAL_DB_PATH = os.environ.get("DB_PATH")
+_TEST_ENV_KEYS = (
+    "GROQ_API_KEY",
+    "GROQ_ENABLED",
+    "SEMANTIC_ROUTER_ENABLED",
+    "LLM_TRIAGE_ENABLED",
+    "LLM_ASSISTED_RESOLUTION_ENABLED",
+    "LLM_AUTO_RESOLVE_SIMULATION_ENABLED",
+    "ENABLE_WEB_TESTER",
+    "ADMIN_API_KEY",
+    "INSTAGRAM_ACCESS_TOKEN",
+    "META_APP_SECRET",
+    "META_VERIFY_TOKEN",
+)
+_ORIGINAL_TEST_ENV = {key: os.environ.get(key) for key in _TEST_ENV_KEYS}
+_PYTEST_DB_DIR = tempfile.TemporaryDirectory(
+    prefix="camellia-pytest-", ignore_cleanup_errors=True,
+)
+_PYTEST_DB_PATH = str(Path(_PYTEST_DB_DIR.name) / "camellia-test.db")
+
+# config.py normally reloads .env with override=True. Do not load developer
+# credentials or service flags into normal tests; they must use explicit
+# per-test mocks. Pin the SQLite path and external-service settings before
+# importing application modules.
+os.environ["DB_PATH"] = _PYTEST_DB_PATH
+os.environ.update({
+    "GROQ_API_KEY": "",
+    "GROQ_ENABLED": "false",
+    "SEMANTIC_ROUTER_ENABLED": "true",
+    "LLM_TRIAGE_ENABLED": "false",
+    "LLM_ASSISTED_RESOLUTION_ENABLED": "false",
+    "LLM_AUTO_RESOLVE_SIMULATION_ENABLED": "false",
+    "ENABLE_WEB_TESTER": "true",
+    "ADMIN_API_KEY": "pytest-only-admin-api-key-7f410b33",
+    "INSTAGRAM_ACCESS_TOKEN": "",
+    "META_APP_SECRET": "",
+    "META_VERIFY_TOKEN": "",
+})
+
+# Application modules can be imported by other pytest plugins before ordinary
+# fixtures run. Pin the singleton as well as the environment before test-module
+# collection, when some legacy tests call init_db() at module import time.
+import dotenv as _dotenv_module
+
+_original_dotenv_loader = _dotenv_module.load_dotenv
+_dotenv_module.load_dotenv = lambda *args, **kwargs: False
+try:
+    from camellia.config import config as _app_config
+    from camellia.database import db as _app_db
+finally:
+    _dotenv_module.load_dotenv = _original_dotenv_loader
+
+_ORIGINAL_CONFIG_DB_PATH = _app_config.DB_PATH
+_ORIGINAL_DATABASE_PATH = _app_db.db_path
+_app_config.DB_PATH = _PYTEST_DB_PATH
+_app_db.db_path = _PYTEST_DB_PATH
+
+
+def pytest_unconfigure(config):
+    _app_db.db_path = _ORIGINAL_DATABASE_PATH
+    _app_config.DB_PATH = _ORIGINAL_CONFIG_DB_PATH
+    if _ORIGINAL_DB_PATH is None:
+        os.environ.pop("DB_PATH", None)
+    else:
+        os.environ["DB_PATH"] = _ORIGINAL_DB_PATH
+    for key, value in _ORIGINAL_TEST_ENV.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
+    _PYTEST_DB_DIR.cleanup()
 
 
 @pytest.fixture(autouse=True)
@@ -27,6 +105,9 @@ def isolate_process_session_cache(monkeypatch, request):
     # Security tests explicitly use HTTPS; ordinary unit tests use the local
     # HTTP TestClient and must not be mistaken for production edge traffic.
     monkeypatch.setattr(app_module.config, "ADMIN_REQUIRE_HTTPS", False)
+    # Unit responder tests are not Meta ad-gate integration tests. The handful
+    # of tests for the production gate set this explicitly to False.
+    monkeypatch.setattr(app_module.config, "BYPASS_AD_GATE", True)
     # Keep modules that imported the singleton before a test swapped it on a
     # single canonical object. Individual tests can still monkeypatch these
     # attributes and pytest will restore them afterwards.

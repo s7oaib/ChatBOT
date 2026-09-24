@@ -40,21 +40,27 @@ def test_client_approved_routing_golden(case, monkeypatch):
     [
         ("What subscriptions do you offer?", "What are the next steps to pre book?", "alacarte_prebooking_steps"),
         ("Tell me about Sondesh", "What payment methods do you accept?", "GUARD_payment_method"),
-        ("Tell me about Sondesh", "What meals do you offer à la carte?", "know_more"),
+        ("Tell me about Sondesh", "What meals do you offer à la carte?", None),
     ],
 )
 def test_dirty_state_explicit_intent_wins(first, second, expected_template, monkeypatch):
     monkeypatch.setattr(config, "BYPASS_AD_GATE", True)
-    user_id = "dirty_" + expected_template
+    user_id = "dirty_" + (expected_template or "unsupported_alacarte")
     session_memory.clear_session(user_id, "instagram")
     responder.match_and_respond(first, user_id=user_id, channel="instagram")
     response, matched, template_id, _images = responder.match_and_respond(
         second, user_id=user_id, channel="instagram",
     )
     facts = session_memory.get_facts(user_id, "instagram")
-    assert matched is True
-    assert template_id == expected_template
-    assert facts["decision_lane"] == "EXACT_APPROVED"
+    if expected_template is None:
+        assert matched is False
+        assert template_id is None
+        assert facts["decision_lane"] == "HUMAN_HANDOFF"
+        assert "Manager of Kitchens" in response
+    else:
+        assert matched is True
+        assert template_id == expected_template
+        assert facts["decision_lane"] == "EXACT_APPROVED"
     assert response
 
 

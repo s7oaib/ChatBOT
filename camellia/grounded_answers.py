@@ -13,13 +13,17 @@ BENTO_SOURCE = "bento_details_client"
 MIN_CONFIDENCE = 0.95
 
 
-def system_reply(message: str) -> Optional[str]:
+def system_reply(
+    message: str, *, include_contextual_acknowledgement: bool = True,
+) -> Optional[str]:
     text = re.sub(r"[\s.!?]+", " ", message.casefold()).strip()
     if re.fullmatch(r"hi|hello|hey|good morning|good afternoon|good evening", text):
         return "Hi! Thanks for reaching out to Camellia.artisanal 😊 How can I help you today?"
     if re.fullmatch(r"thanks|thank you|thank you so much|thx", text):
         return "You're most welcome! 😊"
-    if re.fullmatch(r"okay|ok|sure|great|nice|got it|yes|no|yep|nope|👍|😊|🙏", text):
+    if include_contextual_acknowledgement and re.fullmatch(
+        r"okay|ok|sure|great|nice|got it|yes|no|yep|nope|👍|😊|🙏", text,
+    ):
         return "Got it! 😊 How can I help you?"
     if re.fullmatch(r"bye|goodbye|see you|take care", text):
         return "Thank you for connecting with Camellia.artisanal. Have a lovely day!"

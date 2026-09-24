@@ -74,14 +74,24 @@ def test_exact_phase3b_copy_survives_active_runtime_quarantine(tmp_path, monkeyp
     assert runtime_quarantine_enabled(database.db_path) is True
 
     user_id = f"phase3b-runtime-{template_id}"
-    session_memory.clear_session(user_id, "whatsapp")
+    test_channel = "instagram" if template_id == "sondesh_crosssell_savoury" else "whatsapp"
+    session_memory.clear_session(user_id, test_channel)
     if template_id == "sondesh_crosssell_savoury":
         responder.match_and_respond(
-            "What is the sondesh price?", user_id=user_id, channel="whatsapp"
+            "What is the sondesh price?", user_id=user_id, channel=test_channel
         )
     text, matched, actual_id, _images = responder.match_and_respond(
-        message, user_id=user_id, channel="whatsapp"
+        message, user_id=user_id, channel=test_channel
     )
+
+    if template_id == "sondesh_crosssell_savoury":
+        # The standalone cross-sell exists only in the retired template path;
+        # it is not a canonical client-QA question. Instagram must hand off.
+        assert matched is False
+        assert actual_id is None
+        assert "manager of kitchens" in text.lower()
+        assert _images is None
+        return
 
     assert matched is True
     assert actual_id == template_id
@@ -248,14 +258,15 @@ def test_confirmed_phase3b_route_is_independent_of_ai_provider_failure(tmp_path,
 
     monkeypatch.setattr(ai, "refine_template_response", fail_refinement)
     user_id = "phase3b-ai-outage"
-    session_memory.clear_session(user_id, "whatsapp")
+    session_memory.clear_session(user_id, "instagram")
     responder.match_and_respond(
-        "What is the sondesh price?", user_id=user_id, channel="whatsapp"
+        "What is the sondesh price?", user_id=user_id, channel="instagram"
     )
     text, matched, template_id, _images = responder.match_and_respond(
-        "Do you also cook meals?", user_id=user_id, channel="whatsapp"
+        "Do you also cook meals?", user_id=user_id, channel="instagram"
     )
 
-    assert matched is True
-    assert template_id == "sondesh_crosssell_savoury"
-    assert text == CLIENT_CONFIRMED_EXACT_RESPONSES[template_id]
+    assert matched is False
+    assert template_id is None
+    assert "manager of kitchens" in text.lower()
+    assert session_memory.get_facts(user_id, "instagram")["last_llm_called"] is False

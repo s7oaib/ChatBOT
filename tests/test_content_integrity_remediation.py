@@ -40,7 +40,12 @@ def test_safe_remediation_creates_versioned_overrides_from_canonical_menu(tmp_pa
     assert actions["sugar_free_options"] == "created"
     assert actions["jolbhora"] == "created"
     veg = database.get_response_template_override("weekly_menu_veg")["response"]
-    assert "Aloor Dom" in veg and "₹280" in veg and "Dhokar Dalna" not in veg
+    current_veg = menu["weekly_menus"][-1]["vegetarian"]
+    assert current_veg
+    for dish in current_veg:
+        assert dish["item"] in veg
+        assert f"₹{dish['price_inr']}" in veg
+    assert "Freshly handcrafted" not in veg
     bento = database.get_response_template_override("combo_bento")["response"]
     assert "Veg Bento" in bento and "₹400" in bento and "Tomato Aamsottwo Chatni" in bento
     sugar = database.get_response_template_override("sugar_free_options")["response"].lower()

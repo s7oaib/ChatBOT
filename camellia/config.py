@@ -116,21 +116,15 @@ def _resolve_graph_api_version(env_var: str, default: str) -> str:
 class Config:
     CONVERSATION_IMPROVEMENTS_ENABLED: bool = os.getenv("CONVERSATION_IMPROVEMENTS_ENABLED", "true").lower() in ("true", "1", "yes")
     # Meta & Webhook Config
-    META_VERIFY_TOKEN: str = os.getenv("META_VERIFY_TOKEN", "camellia_verify_secret_2026")
+    META_VERIFY_TOKEN: str = os.getenv("META_VERIFY_TOKEN", "")
     META_APP_SECRET: str = os.getenv("META_APP_SECRET", "")
 
     # Public Domain / ngrok URL for serving images & webhooks
     PUBLIC_BASE_URL: str = os.getenv("PUBLIC_BASE_URL", "")
 
-    # When true, a webhook POST with a missing or wrong signature is rejected
-    # even if META_APP_SECRET is unset — meaning an unconfigured deployment
-    # stops answering rather than accepting forged customer messages.
-    #
-    # Left opt-in rather than defaulted on: turning it on before the secret is
-    # actually set in the live environment would take a running bot off the air.
-    # The intended order is set META_APP_SECRET, confirm /health reports
-    # webhook_signature "enforced", then set this to true.
-    REQUIRE_WEBHOOK_SIGNATURE: bool = os.getenv("REQUIRE_WEBHOOK_SIGNATURE", "false").lower() in ("true", "1", "t", "yes")
+    # Instagram webhook POSTs fail closed by default. A local test that
+    # deliberately sends unsigned synthetic traffic must opt out explicitly.
+    REQUIRE_WEBHOOK_SIGNATURE: bool = os.getenv("REQUIRE_WEBHOOK_SIGNATURE", "true").lower() in ("true", "1", "t", "yes")
 
     # Machine authentication for trusted tools. Never use this as a browser
     # password and never inject it into the Admin Portal JavaScript.
