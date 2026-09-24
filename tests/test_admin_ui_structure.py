@@ -294,12 +294,19 @@ def test_instagram_story_refresh_does_not_clear_the_list_before_it_settles(page)
 def test_instagram_stories_exposes_status_filters_and_safe_actions(page):
     section = page[page.index('id="tab-instagram-stories"'):page.index('<!-- MENU tab, panel 3 of 4')]
     render = page[page.index('function renderInstagramStories'):page.index('async function loadInstagramStories')]
-    for label in ("All", "Unmapped", "Mapped", "Disabled", "Deleted", "Map Story", "Edit Mapping", "Delete Mapping"):
+    toolbar = section[section.index('aria-label="Instagram Story filters"'):section.index('id="igStoryMapForm"')]
+    filters = re.findall(r'data-story-filter="([^"]+)"', toolbar)
+    assert filters == ["all", "UNMAPPED", "MAPPED", "DISABLED", "HISTORY"]
+    for label in ("All", "Unmapped", "Mapped", "Disabled", "History", "Map Story", "Edit Mapping", "Delete Mapping"):
         assert label in section or label in render
+    for retired in ("ACTIVE", "EXPIRED", "REMOVED", "DELETED"):
+        assert f'data-story-filter="{retired}"' not in toolbar
     assert 'data-story-filter="ARCHIVED"' not in section
     assert 'data-story-action="archive"' not in render
     assert 'data-story-action="delete-mapping"' not in render
     assert 'data-story-action="restore-source"' in render
+    assert 'Historical Story' in render
+    assert "lifecycleLabel" in render
     assert 'Delete this Story from Camellia Admin?' in page
     assert 'This removes the Story from the Admin dashboard and disables its Story routing.' in page
     assert '/admin/instagram-story-sources/${encodeURIComponent(mediaId)}' in page
@@ -311,8 +318,8 @@ def test_instagram_stories_exposes_status_filters_and_safe_actions(page):
 
 def test_instagram_story_delete_is_local_and_history_is_explicit(page):
     section = page[page.index('id="tab-instagram-stories"'):page.index('<!-- MENU tab, panel 3 of 4')]
-    assert 'data-story-filter="DELETED"' in section
-    assert "loadInstagramStories(true)" in page
+    assert 'data-story-filter="HISTORY"' in section
+    assert "loadInstagramStories(igStoryFilter === 'HISTORY'" in page
     assert "Story itself was not deleted" in page
     assert "does not delete the Story from Instagram" in page
     assert "admin_deleted" in page
@@ -324,8 +331,9 @@ def test_instagram_story_delete_is_local_and_history_is_explicit(page):
 
 def test_instagram_story_operational_filters_exclude_deleted_and_auto_refresh_is_safe(page):
     story_matches = page[page.index('function storyMatches'):page.index('function setInstagramStoryFilter')]
-    assert "igStoryFilter !== 'DELETED' && deleted" in story_matches
-    assert "igStoryFilter === 'all'" not in story_matches or "deleted" in story_matches
+    assert "igStoryFilter === 'HISTORY'" in story_matches
+    assert "['EXPIRED', 'REMOVED', 'DELETED'].includes(lifecycle)" in story_matches
+    assert "if (historical) return false" in story_matches
 
     refresh = page[page.index('function instagramStoriesTabIsVisible'):page.index('function renderInstagramMediaRegistry')]
     assert "document.visibilityState !== 'hidden'" in refresh
@@ -345,6 +353,13 @@ def test_instagram_stories_refreshes_from_source_and_mapping_endpoints(page):
     assert "instagram-routes?include_archived=true" not in section
     assert "populateInstagramStoryPickers" in section
     assert "renderInstagramStories()" in section
+
+
+def test_instagram_stories_default_empty_state_points_to_history(page):
+    render = page[page.index('function renderInstagramStories'):page.index('function setInstagramStoryRefreshStatus')]
+    assert "No active Instagram Stories" in render
+    assert "New Stories will appear here when they are detected from Instagram." in render
+    assert "Historical Stories are available under History." in render
 
 
 def test_instagram_story_preview_metadata_never_exposes_temporary_url(page):

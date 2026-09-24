@@ -634,13 +634,13 @@ class TestStoryDeleteActions:
         assert "does not delete the Story from Instagram" in result["confirmation"]
         assert "not deleted" in result["successText"]
 
-    def test_deleted_filter_requests_history_without_changing_default_load(self):
+    def test_history_filter_requests_deleted_sources_without_changing_default_load(self):
         result = _run_node(_seed_common_pickers() + textwrap.dedent("""
             adminAuthenticated = true;
             queueFetch('/admin/instagram-story-sources?include_deleted=true', 'GET', () => okResponse({ story_sources: [{ story_media_id: 'story-deleted', admin_deleted: 1, deleted_at: '2026-01-02', last_seen: '2026-01-02' }] }));
             queueFetch('/admin/instagram-routes?include_archived=true', 'GET', () => okResponse({ routes: [] }));
             queueFetch('/admin/instagram-routes', 'GET', () => okResponse({ routes: [] }));
-            setInstagramStoryFilter('DELETED');
+            setInstagramStoryFilter('HISTORY');
             setTimeout(() => {
                 console.log('RESULT::' + JSON.stringify({
                     historyUrl: fetchLog[0] && fetchLog[0].url,
@@ -649,28 +649,56 @@ class TestStoryDeleteActions:
             }, 10);
         """))
         assert "include_deleted=true" in result["historyUrl"]
+        assert "mapping_status=HISTORY" in result["historyUrl"]
         assert "story-deleted" in result["listHtml"]
+        assert "Historical Story" in result["listHtml"]
+        assert "Deleted" in result["listHtml"]
 
-    def test_deleted_story_is_excluded_from_every_operational_filter_and_all(self):
+    def test_operational_filters_exclude_all_history_and_history_shows_stored_lifecycle(self):
         result = _run_node(_seed_common_pickers() + textwrap.dedent("""
             igStorySources = [
-                { story_media_id: 'deleted', admin_deleted: 1, mapping_status: 'DELETED', last_seen: '2026-01-04' },
-                { story_media_id: 'unmapped', mapping_status: 'UNMAPPED', last_seen: '2026-01-03' },
-                { story_media_id: 'mapped', mapping_status: 'MAPPED', last_seen: '2026-01-02' },
-                { story_media_id: 'disabled', mapping_status: 'DISABLED', last_seen: '2026-01-01' },
+                { story_media_id: 'current-unmapped', story_status: 'ACTIVE', mapping_status: 'UNMAPPED', last_seen: '2026-09-22' },
+                { story_media_id: 'current-mapped', story_status: 'ACTIVE', mapping_status: 'MAPPED', last_seen: '2026-09-21' },
+                { story_media_id: 'current-disabled', story_status: 'ACTIVE', mapping_status: 'DISABLED', last_seen: '2026-09-20' },
+                { story_media_id: 'expired', story_status: 'EXPIRED', mapping_status: 'UNMAPPED', last_seen: '2026-09-19' },
+                { story_media_id: 'removed', story_status: 'REMOVED', mapping_status: 'MAPPED', last_seen: '2026-09-18' },
+                { story_media_id: 'deleted', story_status: 'ACTIVE', admin_deleted: 1, mapping_status: 'DELETED', last_seen: '2026-09-17' },
             ];
             const htmlFor = filter => { igStoryFilter = filter; renderInstagramStories(); return document.getElementById('igStoryList').innerHTML; };
             const operational = ['all', 'UNMAPPED', 'MAPPED', 'DISABLED'].map(htmlFor);
-            const history = htmlFor('DELETED');
+            const history = htmlFor('HISTORY');
             console.log('RESULT::' + JSON.stringify({
-                operationalHideDeleted: operational.every(html => !html.includes('deleted')),
-                operationalShowExpected: operational.map((html, index) => html.includes(['unmapped', 'unmapped', 'mapped', 'disabled'][index])),
-                historyOnlyDeleted: history.includes('deleted') && !history.includes('unmapped'),
+                allOnlyCurrent: ['current-unmapped', 'current-mapped', 'current-disabled'].every(id => operational[0].includes(id)) && ['expired', 'removed', 'deleted'].every(id => !operational[0].includes(id)),
+                unmappedOnlyCurrent: operational[1].includes('current-unmapped') && !operational[1].includes('expired') && !operational[1].includes('removed') && !operational[1].includes('deleted'),
+                mappedOnlyCurrent: operational[2].includes('current-mapped') && !operational[2].includes('expired') && !operational[2].includes('removed') && !operational[2].includes('deleted'),
+                disabledOnlyCurrent: operational[3].includes('current-disabled') && !operational[3].includes('expired') && !operational[3].includes('removed') && !operational[3].includes('deleted'),
+                historyIncludesAll: ['expired', 'removed', 'deleted'].every(id => history.includes(id)) && !['current-unmapped', 'current-mapped', 'current-disabled'].some(id => history.includes(id)),
+                lifecycleBadges: ['Historical Story', 'Expired', 'Removed', 'Deleted'].every(label => history.includes(label)),
+                oldActiveRemainsCurrent: operational[0].includes('current-unmapped'),
             }));
         """))
-        assert result["operationalHideDeleted"] is True
-        assert result["operationalShowExpected"] == [True, True, True, True]
-        assert result["historyOnlyDeleted"] is True
+        assert result["allOnlyCurrent"] is True
+        assert result["unmappedOnlyCurrent"] is True
+        assert result["mappedOnlyCurrent"] is True
+        assert result["disabledOnlyCurrent"] is True
+        assert result["historyIncludesAll"] is True
+        assert result["lifecycleBadges"] is True
+        assert result["oldActiveRemainsCurrent"] is True
+
+    def test_no_current_stories_gets_clean_default_empty_state(self):
+        result = _run_node(_seed_common_pickers() + textwrap.dedent("""
+            igStorySources = [
+                { story_media_id: 'old-expired', story_status: 'EXPIRED', mapping_status: 'UNMAPPED' },
+                { story_media_id: 'old-removed', story_status: 'REMOVED', mapping_status: 'UNMAPPED' },
+                { story_media_id: 'old-deleted', admin_deleted: 1, mapping_status: 'DELETED' },
+            ];
+            igStoryFilter = 'all';
+            renderInstagramStories();
+            console.log('RESULT::' + JSON.stringify({ html: document.getElementById('igStoryList').innerHTML }));
+        """))
+        assert "No active Instagram Stories" in result["html"]
+        assert "New Stories will appear here when they are detected from Instagram." in result["html"]
+        assert "Historical Stories are available under History." in result["html"]
 
     def test_restored_story_with_audit_timestamp_is_not_deleted(self):
         result = _run_node(_seed_common_pickers() + textwrap.dedent("""
@@ -683,7 +711,7 @@ class TestStoryDeleteActions:
                 renderInstagramStories();
                 return document.getElementById('igStoryList').innerHTML;
             });
-            igStoryFilter = 'DELETED';
+            igStoryFilter = 'HISTORY';
             renderInstagramStories();
             console.log('RESULT::' + JSON.stringify({
                 operationalShowsRestored: operational[0].includes('restored') && operational[1].includes('restored'),
@@ -699,7 +727,7 @@ class TestStoryDeleteActions:
         result = _run_node(_seed_common_pickers() + textwrap.dedent("""
             (async () => {
                 adminAuthenticated = true;
-                igStoryFilter = 'DELETED';
+                igStoryFilter = 'HISTORY';
                 igStorySources = [{ story_media_id: 'story-restore', admin_deleted: 1, deleted_at: '2026-01-02', mapping_status: 'DELETED' }];
                 renderInstagramStories();
                 const button = document.createElement('button');

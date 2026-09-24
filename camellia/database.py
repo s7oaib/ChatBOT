@@ -1924,10 +1924,14 @@ class Database:
         list hides them; History asks explicitly for ``include_deleted``.
         """
         clauses, params = [], []
-        if not include_deleted:
-            clauses.append("s.admin_deleted=0")
-            if mapping_status_filter is None:
-                clauses.append("UPPER(COALESCE(s.story_status,'ACTIVE')) NOT IN ('EXPIRED','REMOVED')")
+        if mapping_status_filter == "HISTORY":
+            clauses.append("(s.admin_deleted=1 OR UPPER(COALESCE(s.story_status,'ACTIVE')) IN ('EXPIRED','REMOVED','DELETED'))")
+        else:
+            operational_filter = mapping_status_filter in {"UNMAPPED", "MAPPED", "DISABLED"}
+            if not include_deleted or operational_filter:
+                clauses.append("s.admin_deleted=0")
+            if (not include_deleted or operational_filter) and mapping_status_filter in {None, "UNMAPPED", "MAPPED", "DISABLED"}:
+                clauses.append("UPPER(COALESCE(s.story_status,'ACTIVE')) NOT IN ('EXPIRED','REMOVED','DELETED')")
         if search:
             pattern = f"%{search[:200]}%"
             clauses.append("(s.story_media_id LIKE ? OR COALESCE(r.routing_topic,'') LIKE ? OR COALESCE(r.source_description,'') LIKE ?)")

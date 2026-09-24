@@ -324,7 +324,7 @@ def test_client_mapping_ui_hides_route_mode():
     story_cards = html[html.index("function renderInstagramStories"):html.index("function setInstagramStoryRefreshStatus")]
     assert "Meta Story ID:" not in story_cards
     assert 'data-story-action="delete-mapping"' not in story_cards
-    assert "igStoryFilter === 'DELETED'" in html
+    assert "igStoryFilter === 'HISTORY'" in html
 
 
 def test_media_admin_list_paginates_bounds_page_size_and_searches_topics(mapping_db):
@@ -376,3 +376,35 @@ def test_story_admin_list_paginates_and_searches_topics(mapping_db):
     assert client.get("/admin/instagram-story-sources?page_size=101", headers=headers).status_code == 422
     search = client.get("/admin/instagram-story-sources?search=page-story-07", headers=headers)
     assert [item["story_media_id"] for item in search.json()["story_sources"]] == ["page-story-07"]
+
+
+def test_story_admin_current_and_history_filters_use_stored_lifecycle(mapping_db):
+    database, _path = mapping_db
+    client = TestClient(app_module.app)
+    headers = {"x-admin-key": config.ADMIN_API_KEY}
+    database.record_instagram_story_source(
+        "old-but-active", story_status="ACTIVE", seen_at="2026-09-22T08:25:36.439647+00:00",
+    )
+    database.record_instagram_story_source("expired-story", story_status="EXPIRED")
+    database.record_instagram_story_source("removed-story", story_status="REMOVED")
+    database.record_instagram_story_source("deleted-story", story_status="ACTIVE")
+    database.delete_instagram_story_source("deleted-story", removed_by="admin")
+
+    current = client.get("/admin/instagram-story-sources", headers=headers)
+    unmapped = client.get("/admin/instagram-story-sources?mapping_status=UNMAPPED", headers=headers)
+    unmapped_including_deleted = client.get(
+        "/admin/instagram-story-sources?include_deleted=true&mapping_status=UNMAPPED", headers=headers,
+    )
+    history = client.get(
+        "/admin/instagram-story-sources?include_deleted=true&mapping_status=HISTORY", headers=headers,
+    )
+    assert current.status_code == unmapped.status_code == unmapped_including_deleted.status_code == history.status_code == 200
+    assert {item["story_media_id"] for item in current.json()["story_sources"]} == {"old-but-active"}
+    assert {item["story_media_id"] for item in unmapped.json()["story_sources"]} == {"old-but-active"}
+    assert {item["story_media_id"] for item in unmapped_including_deleted.json()["story_sources"]} == {"old-but-active"}
+    assert {item["story_media_id"] for item in history.json()["story_sources"]} == {
+        "expired-story", "removed-story", "deleted-story",
+    }
+    assert client.get(
+        "/admin/instagram-story-sources?mapping_status=HISTORY", headers=headers,
+    ).json()["total"] == 3

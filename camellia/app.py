@@ -3476,7 +3476,7 @@ def list_instagram_story_sources(
     require_admin(x_admin_key, x_admin_pin)
     if page < 1 or page_size < 1 or page_size > 100:
         raise HTTPException(status_code=422, detail="page must be positive and page_size must be between 1 and 100.")
-    if mapping_status and mapping_status not in {"UNMAPPED", "MAPPED", "DISABLED", "ACTIVE", "EXPIRED", "REMOVED", "DELETED"}:
+    if mapping_status and mapping_status not in {"UNMAPPED", "MAPPED", "DISABLED", "HISTORY", "ACTIVE", "EXPIRED", "REMOVED", "DELETED"}:
         raise HTTPException(status_code=400, detail="Unsupported Story mapping filter.")
     if sort not in {"newest", "oldest", "recently_edited"}:
         raise HTTPException(status_code=400, detail="Unsupported sort.")
@@ -6665,6 +6665,8 @@ def get_admin_dashboard():
         .ig-media-placeholder { width:100%; height:100%; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:3px; color:#7C6F66; font-size:0.68rem; font-weight:800; letter-spacing:.04em; }
         .ig-media-placeholder-icon { font-size:1.5rem; line-height:1; }
         .ig-media-badge { position:absolute; left:5px; bottom:5px; padding:3px 6px; border-radius:5px; background:rgba(34,29,26,.82); color:#fff; font-size:0.62rem; font-weight:800; letter-spacing:.05em; }
+        .ig-story-history-badges { position:absolute; left:5px; bottom:5px; display:flex; flex-direction:column; align-items:flex-start; gap:3px; }
+        .ig-story-history-badges .ig-media-badge { position:static; }
         .ig-media-main { min-width:0; }
         .ig-media-title { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:4px; }
         .ig-media-topic { color:var(--primary); font-size:1rem; }
@@ -7298,10 +7300,7 @@ def get_admin_dashboard():
                 <button class="ig-media-filter ig-story-filter" type="button" data-story-filter="UNMAPPED">Unmapped</button>
                 <button class="ig-media-filter ig-story-filter" type="button" data-story-filter="MAPPED">Mapped</button>
                 <button class="ig-media-filter ig-story-filter" type="button" data-story-filter="DISABLED">Disabled</button>
-                <button class="ig-media-filter ig-story-filter" type="button" data-story-filter="ACTIVE">Active</button>
-                <button class="ig-media-filter ig-story-filter" type="button" data-story-filter="EXPIRED">Expired</button>
-                <button class="ig-media-filter ig-story-filter" type="button" data-story-filter="REMOVED">Removed</button>
-                <button class="ig-media-filter ig-story-filter" type="button" data-story-filter="DELETED">Deleted</button>
+                <button class="ig-media-filter ig-story-filter" type="button" data-story-filter="HISTORY">History</button>
                 <label class="ig-media-muted" for="igStorySort">Sort</label><select class="field-control" id="igStorySort" style="width:auto;min-width:140px"><option value="newest">Newest</option><option value="oldest">Oldest</option><option value="recently_edited">Recently edited</option></select>
             </div>
 
@@ -7353,7 +7352,7 @@ def get_admin_dashboard():
                 <div class="source-danger" id="igStoryDeleteSection" style="display:none;"><b>Delete Mapping</b><p class="source-map-help">Removes chatbot mapping only. The Instagram Story will not be deleted.</p><button class="btn-danger" id="igStoryDeleteMappingButton" type="button" onclick="removeInstagramStoryMapping()">Delete Mapping</button></div>
             </div>
             <div id="igStoryList" class="instagram-gallery"><p style="color:var(--text-muted);font-size:0.84rem;">Open this tab to load captured Stories.</p></div>
-            <div class="gallery-toolbar" style="justify-content:center;margin-top:16px"><span id="igStoryPageSummary" class="ig-media-muted"></span><button class="btn-secondary" id="igStoryLoadMore" type="button" onclick="loadInstagramStories(igStoryFilter === 'DELETED', {append:true})" style="display:none">Load more</button></div>
+            <div class="gallery-toolbar" style="justify-content:center;margin-top:16px"><span id="igStoryPageSummary" class="ig-media-muted"></span><button class="btn-secondary" id="igStoryLoadMore" type="button" onclick="loadInstagramStories(igStoryFilter === 'HISTORY', {append:true})" style="display:none">Load more</button></div>
         </div>
 
         <!-- MENU tab, panel 3 of 4: same job again, from a shared sheet -->
@@ -8264,9 +8263,9 @@ THIS WEEK'S BENGAL SPECIALS
             document.getElementById('igStoryRefreshButton')?.addEventListener('click', loadInstagramStories);
             document.getElementById('igStorySearch')?.addEventListener('input', () => {
                 clearTimeout(igStorySearchTimer);
-                igStorySearchTimer = setTimeout(() => loadInstagramStories(igStoryFilter === 'DELETED'), 250);
+                igStorySearchTimer = setTimeout(() => loadInstagramStories(igStoryFilter === 'HISTORY'), 250);
             });
-            document.getElementById('igStorySort')?.addEventListener('change', () => loadInstagramStories(igStoryFilter === 'DELETED'));
+            document.getElementById('igStorySort')?.addEventListener('change', () => loadInstagramStories(igStoryFilter === 'HISTORY'));
             document.querySelectorAll('.ig-story-filter').forEach(button => {
                 button.addEventListener('click', () => setInstagramStoryFilter(button.dataset.storyFilter || 'all'));
             });
@@ -9989,19 +9988,17 @@ THIS WEEK'S BENGAL SPECIALS
 
         function storyMatches(source) {
             const deleted = storyIsAdminDeleted(source);
-            if (igStoryFilter !== 'DELETED' && deleted) return false;
             const status = deleted
                 ? 'DELETED'
                 : String(source.mapping_status || source.status || 'UNMAPPED').toUpperCase();
             const lifecycle = String(source.story_status || 'ACTIVE').toUpperCase();
-            // Default/current view: Stories that left Meta's inventory
-            // (EXPIRED or REMOVED) are current-view noise, not deleted — they
-            // stay fully visible under History (its own filter selection),
-            // never hard-deleted.
-            if (igStoryFilter === 'all' && !deleted && ['EXPIRED', 'REMOVED'].includes(lifecycle)) return false;
-            if (igStoryFilter !== 'all' && ['ACTIVE', 'EXPIRED', 'REMOVED'].includes(igStoryFilter)) {
-                if (lifecycle !== igStoryFilter) return false;
-            } else if (igStoryFilter !== 'all' && status !== igStoryFilter) return false;
+            const historical = deleted || ['EXPIRED', 'REMOVED', 'DELETED'].includes(lifecycle);
+            if (igStoryFilter === 'HISTORY') {
+                if (!historical) return false;
+            } else {
+                if (historical) return false;
+                if (igStoryFilter !== 'all' && status !== igStoryFilter) return false;
+            }
             const query = (document.getElementById('igStorySearch')?.value || '').trim().toLowerCase();
             if (!query) return true;
             return [source.story_media_id, source.routing_topic, source.topic_description, source.story_status, status]
@@ -10011,7 +10008,7 @@ THIS WEEK'S BENGAL SPECIALS
         function setInstagramStoryFilter(filter) {
             igStoryFilter = filter || 'all';
             document.querySelectorAll('.ig-story-filter').forEach(button => button.classList.toggle('active', (button.dataset.storyFilter || 'all') === igStoryFilter));
-            loadInstagramStories(igStoryFilter === 'DELETED');
+            loadInstagramStories(igStoryFilter === 'HISTORY');
         }
 
         function populateInstagramStoryPickers() {
@@ -10125,7 +10122,7 @@ THIS WEEK'S BENGAL SPECIALS
                     'success',
                     `Story sync complete: ${Number(data.fetched || 0)} fetched, ${Number(data.created || 0)} new, ${Number(data.updated || 0)} updated, ${Number(data.unchanged || 0)} unchanged, ${Number(data.expired || 0)} expired.`,
                 );
-                await loadInstagramStories(igStoryFilter === 'DELETED');
+                await loadInstagramStories(igStoryFilter === 'HISTORY');
             } catch (err) {
                 showInstagramStoryResult('error', err.message || String(err));
             } finally {
@@ -10249,13 +10246,22 @@ THIS WEEK'S BENGAL SPECIALS
                 return Number.isNaN(timestamp) ? 0 : timestamp;
             };
             const sources = [...igStorySources].filter(storyMatches).sort((left, right) => storyTimestamp(right) - storyTimestamp(left));
-            if (!sources.length) { list.innerHTML = '<p style="color:var(--text-muted);font-size:0.84rem;">No captured Stories match this filter.</p>'; return; }
+            if (!sources.length) {
+                list.innerHTML = igStoryFilter === 'all'
+                    ? '<p style="color:var(--text-muted);font-size:0.84rem;"><b>No active Instagram Stories</b><br>New Stories will appear here when they are detected from Instagram.<br>Historical Stories are available under History.</p>'
+                    : '<p style="color:var(--text-muted);font-size:0.84rem;">No captured Stories match this filter.</p>';
+                return;
+            }
             list.innerHTML = sources.map(source => {
                 const rawStatus = storyIsAdminDeleted(source)
                     ? 'DELETED'
                     : String(source.mapping_status || source.status || 'UNMAPPED').toUpperCase();
                 const status = rawStatus === 'ARCHIVED' ? 'UNMAPPED' : rawStatus;
                 const lifecycle = String(source.story_status || 'ACTIVE').toUpperCase();
+                const historical = storyIsAdminDeleted(source) || ['EXPIRED', 'REMOVED', 'DELETED'].includes(lifecycle);
+                const lifecycleLabel = storyIsAdminDeleted(source) || lifecycle === 'DELETED'
+                    ? 'Deleted'
+                    : lifecycle === 'EXPIRED' ? 'Expired' : lifecycle === 'REMOVED' ? 'Removed' : '';
                 let actions = '';
                 if (status === 'DELETED') actions = `<button class="btn-secondary" type="button" data-story-action="restore-source" data-story-media-id="${escapeHtml(source.story_media_id || '')}">Restore</button>`;
                 else if (status === 'UNMAPPED') actions = `<button class="btn-secondary" type="button" data-story-action="map" data-story-media-id="${escapeHtml(source.story_media_id || '')}">Map Story</button>`;
@@ -10268,7 +10274,10 @@ THIS WEEK'S BENGAL SPECIALS
                 const sequenceDisplay = source.story_sequence_display || 'Story — sequence unavailable';
                 const mappingLabel = status === 'UNMAPPED' ? 'Unmapped' : topic;
                 const contextLabel = status === 'MAPPED' ? '● Context active' : '○ Context off';
-                return `<article class="ig-media-card ig-story-card" tabindex="0" data-story-media-id="${escapeHtml(source.story_media_id || '')}"><div class="ig-media-preview"><div class="ig-media-placeholder"><span class="ig-media-placeholder-icon">📖</span><span>STORY</span></div><span class="ig-media-badge">STORY</span></div><div class="ig-media-main"><div class="ig-media-title"><b class="ig-media-topic">${escapeHtml(mappingLabel)}</b></div><div class="ig-media-summary" title="${escapeHtml(source.source_description || sequenceDisplay)}">${escapeHtml(source.source_description || sequenceDisplay)}</div><div class="ig-media-facts"><span>${contextLabel}</span><span>${escapeHtml(source.published_at || source.last_seen || '—')}</span></div></div><div class="ig-media-actions">${actions}</div></article>`;
+                const storyBadge = historical
+                    ? `<span class="ig-story-history-badges"><span class="ig-media-badge">Historical Story</span><span class="ig-media-badge">${escapeHtml(lifecycleLabel)}</span></span>`
+                    : '<span class="ig-media-badge">STORY</span>';
+                return `<article class="ig-media-card ig-story-card" tabindex="0" data-story-media-id="${escapeHtml(source.story_media_id || '')}"><div class="ig-media-preview"><div class="ig-media-placeholder"><span class="ig-media-placeholder-icon">📖</span><span>STORY</span></div>${storyBadge}</div><div class="ig-media-main"><div class="ig-media-title"><b class="ig-media-topic">${escapeHtml(mappingLabel)}</b></div><div class="ig-media-summary" title="${escapeHtml(source.source_description || sequenceDisplay)}">${escapeHtml(source.source_description || sequenceDisplay)}</div><div class="ig-media-facts"><span>${contextLabel}</span><span>${escapeHtml(source.published_at || source.last_seen || '—')}</span></div></div><div class="ig-media-actions">${actions}</div></article>`;
             }).join('');
             list.querySelectorAll('[data-story-action]').forEach(button => button.addEventListener('click', () => {
                 const action = button.dataset.storyAction;
@@ -10313,7 +10322,7 @@ THIS WEEK'S BENGAL SPECIALS
         // successful response; a failed one leaves igStorySources (and
         // everything rendered from it) exactly as it was, and reports the
         // failure in its own banner instead of overwriting the list.
-        async function loadInstagramStories(includeDeleted = igStoryFilter === 'DELETED', options = {}) {
+        async function loadInstagramStories(includeDeleted = igStoryFilter === 'HISTORY', options = {}) {
             const list = document.getElementById('igStoryList');
             if (!list || !adminAuthenticated || igStoryRefreshInFlight) return;
             const append = Boolean(options.append);
