@@ -75,6 +75,9 @@ if __name__ == "__main__":
         "camellia.app:app",
         host="0.0.0.0",
         port=port,
+        # Meta's GET verification token is a query parameter. Uvicorn's
+        # access log records full URLs, including that credential.
+        access_log=False,
         proxy_headers=True,
         forwarded_allow_ips="*"
     )
