@@ -3411,6 +3411,8 @@ async def save_instagram_media_mapping(item_id: int, request: Request, x_admin_k
     if not item:
         raise HTTPException(status_code=404, detail="Instagram media not found.")
     body = await request.json()
+    if not str(body.get("source_description") or "").strip():
+        raise HTTPException(status_code=400, detail="Source Description is required.")
     topic_id = str(body.get("topic_id") or "").strip()
     if not topic_id:
         raise HTTPException(status_code=400, detail="Choose a Topic.")
@@ -3643,6 +3645,8 @@ async def save_instagram_route(
     require_admin(x_admin_key, x_admin_pin)
     try:
         body = await request.json()
+        if not str(body.get("source_description") or "").strip():
+            raise ValueError("Source Description is required.")
         route = validate_route_payload(body)
         routing_id = body.get("routing_id")
         if routing_id is not None:
