@@ -1,9 +1,4 @@
-"""Phase 3C-A.1 contract tests: Story lifecycle reconciliation.
-
-Covers automatic ACTIVE -> REMOVED / EXPIRED reconciliation without ever
-hard-deleting a row, and the two-successful-miss safety rule that protects
-against a single flaky Meta response wrongly hiding a live Story.
-"""
+"""Current-only Story lifecycle and complete-sync-miss safety contracts."""
 
 from unittest.mock import patch
 
@@ -121,10 +116,7 @@ def test_second_consecutive_complete_missing_sync_marks_young_story_removed(sync
     sync_db.reconcile_instagram_story_lifecycle([], expired_before=EXPIRED_BEFORE)
     counts = sync_db.reconcile_instagram_story_lifecycle([], expired_before=EXPIRED_BEFORE)
     assert counts == {"expired": 0, "removed": 1, "miss_pending": 0}
-    row = sync_db.get_instagram_story_source(STORY_ID)
-    assert row["story_status"] == "REMOVED"
-    assert row["removed_reason"] == "missing_from_two_complete_meta_syncs"
-    assert row["removed_at"]
+    assert sync_db.get_instagram_story_source(STORY_ID) is None
 
 
 # --- 5: naturally expired missing Story becomes EXPIRED, not REMOVED -------
@@ -133,7 +125,7 @@ def test_naturally_expired_missing_story_becomes_expired(sync_db):
     sync_db.upsert_instagram_story_sync(STORY_ID, published_at=OLD_PUBLISHED_AT)
     counts = sync_db.reconcile_instagram_story_lifecycle([], expired_before=EXPIRED_BEFORE)
     assert counts == {"expired": 1, "removed": 0, "miss_pending": 0}
-    assert sync_db.get_instagram_story_source(STORY_ID)["story_status"] == "EXPIRED"
+    assert sync_db.get_instagram_story_source(STORY_ID) is None
 
 
 # --- 6-10: failures must never count as a miss -----------------------------
@@ -232,19 +224,19 @@ def test_removed_story_reappearing_with_exact_id_reactivates_safely(sync_db):
     sync_db.upsert_instagram_story_sync(STORY_ID, published_at=YOUNG_PUBLISHED_AT)
     sync_db.reconcile_instagram_story_lifecycle([], expired_before=EXPIRED_BEFORE)
     sync_db.reconcile_instagram_story_lifecycle([], expired_before=EXPIRED_BEFORE)
-    assert sync_db.get_instagram_story_source(STORY_ID)["story_status"] == "REMOVED"
+    assert sync_db.get_instagram_story_source(STORY_ID) is None
 
     sync_db.upsert_instagram_story_sync(STORY_ID, published_at=YOUNG_PUBLISHED_AT)
     row = sync_db.get_instagram_story_source(STORY_ID)
     assert row["story_status"] == "ACTIVE"
     assert row["sync_miss_count"] == 0
     # No duplicate row was created for the same exact Story ID.
-    assert len(sync_db.list_instagram_story_sources(include_deleted=True)) == 1
+    assert len(sync_db.list_instagram_story_sources()) == 1
 
 
 # --- 13-14: mapping survives lifecycle transitions -------------------------
 
-def test_mapping_survives_active_to_removed(sync_db):
+def test_mapping_is_hard_deleted_after_two_complete_misses(sync_db):
     sync_db.upsert_instagram_story_sync(STORY_ID, published_at=YOUNG_PUBLISHED_AT)
     sync_db.save_instagram_source_route({
         "source_type": "story", "media_id": STORY_ID,
@@ -252,67 +244,96 @@ def test_mapping_survives_active_to_removed(sync_db):
     })
     sync_db.reconcile_instagram_story_lifecycle([], expired_before=EXPIRED_BEFORE)
     sync_db.reconcile_instagram_story_lifecycle([], expired_before=EXPIRED_BEFORE)
-    assert sync_db.get_instagram_story_source(STORY_ID)["story_status"] == "REMOVED"
-    route = sync_db.get_instagram_source_route(
-        sync_db.list_instagram_story_sources(include_deleted=True)[0]["routing_id"]
-    )
-    assert route["routing_topic"] == "Jolbhora"
+    assert sync_db.get_instagram_story_source(STORY_ID) is None
+    assert sync_db.list_instagram_source_routes(include_archived=True) == []
 
 
-def test_mapping_survives_active_to_expired(sync_db):
+def test_mapping_is_hard_deleted_when_story_is_expired(sync_db):
     sync_db.upsert_instagram_story_sync(STORY_ID, published_at=OLD_PUBLISHED_AT)
-    route = sync_db.save_instagram_source_route({
+    sync_db.save_instagram_source_route({
         "source_type": "story", "media_id": STORY_ID,
         "routing_topic": "Jolbhora", "active": True,
     })
     sync_db.reconcile_instagram_story_lifecycle([], expired_before=EXPIRED_BEFORE)
-    assert sync_db.get_instagram_story_source(STORY_ID)["story_status"] == "EXPIRED"
-    assert sync_db.get_instagram_source_route(route["routing_id"])["routing_topic"] == "Jolbhora"
+    assert sync_db.get_instagram_story_source(STORY_ID) is None
+    assert sync_db.list_instagram_source_routes(include_archived=True) == []
 
 
-# --- 15: admin-deleted Story is never silently restored by sync -----------
+# --- 15: operator delete removes source and route ---------------------------
 
-def test_admin_deleted_story_never_silently_restored_by_sync(sync_db, monkeypatch):
-    _install_meta(monkeypatch, [_page(), _stories([_story()])])
-    sync_module.sync_instagram_stories(sync_db)
-    sync_db.delete_instagram_story_source(STORY_ID, removed_by="admin")
+def test_admin_delete_removes_source_and_route(sync_db):
+    sync_db.upsert_instagram_story_sync(STORY_ID, published_at=YOUNG_PUBLISHED_AT)
+    route = sync_db.save_instagram_source_route({"source_type": "story", "media_id": STORY_ID, "routing_topic": "Topic", "active": True})
+    with sync_db.get_connection() as conn:
+        post_route_id = conn.execute(
+            "INSERT INTO instagram_source_routes(source_type, canonical_url, media_id, routing_topic) "
+            "VALUES ('post', 'https://instagram.com/p/story-test-post/', ?, 'Unrelated Post')",
+            (STORY_ID,),
+        ).lastrowid
+        conn.commit()
+    sync_db.save_instagram_route_preview(route["routing_id"], "/tmp/story-preview.jpg", "image/jpeg", "qa")
+    with sync_db.get_connection() as conn:
+        conn.execute(
+            "INSERT INTO instagram_post_pairings(routing_id, status, expires_at) VALUES (?, 'cancelled', '2099-01-01')",
+            (route["routing_id"],),
+        )
+        conn.execute(
+            "INSERT INTO instagram_route_removals(routing_id, source_type, routing_topic) VALUES (?, 'story', 'Topic')",
+            (route["routing_id"],),
+        )
+        conn.commit()
+    assert sync_db.delete_instagram_story_source(STORY_ID) is True
+    assert sync_db.get_instagram_story_source(STORY_ID) is None
+    assert sync_db.get_instagram_source_route(route["routing_id"]) is None
+    assert sync_db.list_instagram_story_sources() == []
+    assert sync_db.get_instagram_source_route(post_route_id) is not None
+    assert sync_db.get_instagram_route_preview(route["routing_id"]) is None
+    with sync_db.get_connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM instagram_post_pairings WHERE routing_id=?", (route["routing_id"],)).fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM instagram_route_removals WHERE source_type='story'").fetchone()[0] == 0
 
-    _install_meta(monkeypatch, [_page(), _stories([_story()])])
-    sync_module.sync_instagram_stories(sync_db)
 
-    row = sync_db.get_instagram_story_source(STORY_ID)
-    assert row["admin_deleted"] == 1
-    assert STORY_ID not in {item["story_media_id"] for item in sync_db.list_instagram_story_sources()}
+def test_removing_story_mapping_does_not_create_route_removal_history(sync_db):
+    sync_db.record_instagram_story_source(STORY_ID)
+    route = sync_db.save_instagram_source_route({
+        "source_type": "story", "media_id": STORY_ID,
+        "routing_topic": "Topic", "active": True,
+    })
+    assert sync_db.delete_instagram_source_route(route["routing_id"], removed_by="admin") is True
+    assert sync_db.get_instagram_story_source(STORY_ID) is not None
+    assert sync_db.get_instagram_source_route(route["routing_id"]) is None
+    with sync_db.get_connection() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM instagram_route_removals WHERE source_type='story'"
+        ).fetchone()[0] == 0
 
 
 # --- 16-17: History retention, no hard deletes -----------------------------
 
-def test_removed_and_expired_remain_in_history(sync_db):
+def test_removed_story_is_not_retained(sync_db):
     sync_db.upsert_instagram_story_sync(STORY_ID, published_at=YOUNG_PUBLISHED_AT)
     sync_db.reconcile_instagram_story_lifecycle([], expired_before=EXPIRED_BEFORE)
     sync_db.reconcile_instagram_story_lifecycle([], expired_before=EXPIRED_BEFORE)
-    ids = {item["story_media_id"] for item in sync_db.list_instagram_story_sources(include_deleted=True)}
-    assert STORY_ID in ids
+    assert sync_db.get_instagram_story_source(STORY_ID) is None
 
 
-def test_no_database_hard_delete_occurs(sync_db):
+def test_admin_delete_permanently_removes_database_row(sync_db):
     sync_db.upsert_instagram_story_sync(STORY_ID, published_at=YOUNG_PUBLISHED_AT)
     sync_db.reconcile_instagram_story_lifecycle([], expired_before=EXPIRED_BEFORE)
     sync_db.reconcile_instagram_story_lifecycle([], expired_before=EXPIRED_BEFORE)
-    sync_db.delete_instagram_story_source(STORY_ID, removed_by="admin")
+    sync_db.delete_instagram_story_source(STORY_ID)
     with sync_db.get_connection() as conn:
         count = conn.execute(
             "SELECT COUNT(*) FROM instagram_story_sources WHERE story_media_id=?", (STORY_ID,)
         ).fetchone()[0]
-    assert count == 1
+    assert count == 0
 
 
 # --- Unknown-age safety correction ------------------------------------------
 #
-# REMOVED is a claim that a Story went missing *before* its normal expiry.
-# That claim requires knowing the Story's age. A missing or malformed
-# published_at means age is unknown, so the Story must stay ACTIVE forever —
-# never EXPIRED, never REMOVED — no matter how many complete misses pile up.
+# Unknown or malformed publication times never imply expiry. A single
+# complete miss is tolerated; a second consecutive complete miss is enough
+# to remove the exact missing Story without inferring identity from timestamps.
 
 def test_missing_published_at_first_miss_stays_active(sync_db):
     sync_db.upsert_instagram_story_sync(STORY_ID)  # no published_at at all
@@ -323,59 +344,53 @@ def test_missing_published_at_first_miss_stays_active(sync_db):
     assert row["sync_miss_count"] == 1
 
 
-def test_missing_published_at_second_miss_still_active(sync_db):
+def test_missing_published_at_is_deleted_after_second_complete_miss(sync_db):
     sync_db.upsert_instagram_story_sync(STORY_ID)
     sync_db.reconcile_instagram_story_lifecycle([], expired_before=EXPIRED_BEFORE)
     counts = sync_db.reconcile_instagram_story_lifecycle([], expired_before=EXPIRED_BEFORE)
-    assert counts == {"expired": 0, "removed": 0, "miss_pending": 1}
-    row = sync_db.get_instagram_story_source(STORY_ID)
-    assert row["story_status"] == "ACTIVE"
-    assert row["sync_miss_count"] == 2
+    assert counts == {"expired": 0, "removed": 1, "miss_pending": 0}
+    assert sync_db.get_instagram_story_source(STORY_ID) is None
 
 
-def test_missing_published_at_many_misses_never_removed_or_expired(sync_db):
+def test_missing_published_at_uses_two_miss_rule_without_date_guess(sync_db):
     sync_db.upsert_instagram_story_sync(STORY_ID)
-    for _ in range(10):
+    for _ in range(2):
         counts = sync_db.reconcile_instagram_story_lifecycle([], expired_before=EXPIRED_BEFORE)
-        assert counts["removed"] == 0
         assert counts["expired"] == 0
-    row = sync_db.get_instagram_story_source(STORY_ID)
-    assert row["story_status"] == "ACTIVE"
-    assert row["sync_miss_count"] == 10
-    assert row["removed_at"] is None
+    assert sync_db.get_instagram_story_source(STORY_ID) is None
 
 
 @pytest.mark.parametrize("bad_value", ["not-a-date", "2026-13-99", "", "   ", "yesterday"])
-def test_malformed_published_at_never_removed_or_expired(sync_db, bad_value):
+def test_malformed_published_at_uses_two_miss_rule_not_date_guess(sync_db, bad_value):
     sync_db.upsert_instagram_story_sync(STORY_ID, published_at=bad_value)
-    for _ in range(3):
+    for _ in range(2):
         counts = sync_db.reconcile_instagram_story_lifecycle([], expired_before=EXPIRED_BEFORE)
-        assert counts["removed"] == 0
         assert counts["expired"] == 0
-    assert sync_db.get_instagram_story_source(STORY_ID)["story_status"] == "ACTIVE"
+    assert counts["removed"] == 1
+    assert sync_db.get_instagram_story_source(STORY_ID) is None
 
 
-def test_valid_young_timestamp_two_misses_removed(sync_db):
+def test_valid_young_timestamp_two_misses_hard_delete(sync_db):
     sync_db.upsert_instagram_story_sync(STORY_ID, published_at=YOUNG_PUBLISHED_AT)
     sync_db.reconcile_instagram_story_lifecycle([], expired_before=EXPIRED_BEFORE)
     counts = sync_db.reconcile_instagram_story_lifecycle([], expired_before=EXPIRED_BEFORE)
     assert counts["removed"] == 1
-    assert sync_db.get_instagram_story_source(STORY_ID)["story_status"] == "REMOVED"
+    assert sync_db.get_instagram_story_source(STORY_ID) is None
 
 
 def test_valid_old_timestamp_expired(sync_db):
     sync_db.upsert_instagram_story_sync(STORY_ID, published_at=OLD_PUBLISHED_AT)
     counts = sync_db.reconcile_instagram_story_lifecycle([], expired_before=EXPIRED_BEFORE)
     assert counts["expired"] == 1
-    assert sync_db.get_instagram_story_source(STORY_ID)["story_status"] == "EXPIRED"
+    assert sync_db.get_instagram_story_source(STORY_ID) is None
 
 
 def test_z_and_offset_utc_timestamps_classify_identically(sync_db):
     sync_db.upsert_instagram_story_sync("z-story", published_at="2020-01-01T00:00:00Z")
     sync_db.upsert_instagram_story_sync("offset-story", published_at="2020-01-01T00:00:00+00:00")
     sync_db.reconcile_instagram_story_lifecycle([], expired_before=EXPIRED_BEFORE)
-    assert sync_db.get_instagram_story_source("z-story")["story_status"] == "EXPIRED"
-    assert sync_db.get_instagram_story_source("offset-story")["story_status"] == "EXPIRED"
+    assert sync_db.get_instagram_story_source("z-story") is None
+    assert sync_db.get_instagram_story_source("offset-story") is None
 
 
 def test_timezone_offset_compares_by_instant_not_lexical_string(sync_db):
@@ -387,7 +402,7 @@ def test_timezone_offset_compares_by_instant_not_lexical_string(sync_db):
     sync_db.upsert_instagram_story_sync(STORY_ID, published_at="2026-09-16T04:00:00+05:30")
     counts = sync_db.reconcile_instagram_story_lifecycle([], expired_before=EXPIRED_BEFORE)
     assert counts["expired"] == 1
-    assert sync_db.get_instagram_story_source(STORY_ID)["story_status"] == "EXPIRED"
+    assert sync_db.get_instagram_story_source(STORY_ID) is None
 
 
 def test_negative_timezone_offset_compares_by_instant(sync_db):
@@ -400,36 +415,35 @@ def test_negative_timezone_offset_compares_by_instant(sync_db):
         [], expired_before=EXPIRED_BEFORE,
     )
     assert counts["expired"] == 1
-    assert sync_db.get_instagram_story_source(STORY_ID)["story_status"] == "EXPIRED"
+    assert sync_db.get_instagram_story_source(STORY_ID) is None
 
 
-def test_timezone_naive_published_at_is_unknown_age(sync_db):
+def test_timezone_naive_published_at_is_not_used_to_infer_expiry(sync_db):
     sync_db.upsert_instagram_story_sync(
         STORY_ID, published_at="2026-09-17T08:00:00",
     )
-    for _ in range(3):
+    for _ in range(2):
         counts = sync_db.reconcile_instagram_story_lifecycle(
             [], expired_before=EXPIRED_BEFORE,
         )
         assert counts["expired"] == 0
-        assert counts["removed"] == 0
-    row = sync_db.get_instagram_story_source(STORY_ID)
-    assert row["story_status"] == "ACTIVE"
-    assert row["sync_miss_count"] == 3
+    assert counts["removed"] == 1
+    assert sync_db.get_instagram_story_source(STORY_ID) is None
 
 
-def test_unknown_age_lifecycle_does_not_touch_mapping(sync_db):
+def test_unknown_age_story_and_mapping_are_removed_after_two_misses(sync_db):
     sync_db.upsert_instagram_story_sync(STORY_ID)
     route = sync_db.save_instagram_source_route({
         "source_type": "story", "media_id": STORY_ID,
         "routing_topic": "Jolbhora", "active": True,
     })
-    for _ in range(5):
+    for _ in range(2):
         sync_db.reconcile_instagram_story_lifecycle([], expired_before=EXPIRED_BEFORE)
-    assert sync_db.get_instagram_source_route(route["routing_id"])["routing_topic"] == "Jolbhora"
+    assert sync_db.get_instagram_story_source(STORY_ID) is None
+    assert sync_db.get_instagram_source_route(route["routing_id"]) is None
 
 
-def test_unknown_age_lifecycle_does_not_touch_admin_tombstone(sync_db, monkeypatch):
+def test_admin_delete_does_not_write_tombstone_or_keep_restore_path(sync_db, monkeypatch):
     _install_meta(monkeypatch, [_page(), _stories([_story()])])
     sync_module.sync_instagram_stories(sync_db)
     with sync_db.get_connection() as conn:
@@ -438,26 +452,22 @@ def test_unknown_age_lifecycle_does_not_touch_admin_tombstone(sync_db, monkeypat
             (STORY_ID,),
         )
         conn.commit()
-    sync_db.delete_instagram_story_source(STORY_ID, removed_by="admin")
-    for _ in range(3):
-        sync_db.reconcile_instagram_story_lifecycle([], expired_before=EXPIRED_BEFORE)
-    row = sync_db.get_instagram_story_source(STORY_ID)
-    assert row["admin_deleted"] == 1
+    sync_db.delete_instagram_story_source(STORY_ID)
+    assert sync_db.get_instagram_story_source(STORY_ID) is None
+    assert not hasattr(sync_db, "restore_instagram_story_source")
 
 
-def test_unknown_age_lifecycle_does_not_touch_sequence_numbering(sync_db):
+def test_current_story_sequence_stays_stable_until_hard_delete(sync_db):
     sync_db.upsert_instagram_story_sync(STORY_ID, published_at=YOUNG_PUBLISHED_AT)
     sync_db.backfill_instagram_story_sequence_numbers()
     before = sync_db.get_instagram_story_source(STORY_ID)["story_sequence_number"]
     sync_db.upsert_instagram_story_sync("unknown-age-story")  # no published_at
-    for _ in range(3):
-        sync_db.reconcile_instagram_story_lifecycle([], expired_before=EXPIRED_BEFORE)
     sync_db.backfill_instagram_story_sequence_numbers()
     assert sync_db.get_instagram_story_source(STORY_ID)["story_sequence_number"] == before
     assert sync_db.get_instagram_story_source("unknown-age-story")["story_sequence_number"] is None
 
 
-def test_unknown_age_lifecycle_does_not_touch_exact_id_routing(sync_db, monkeypatch):
+def test_confirmed_missing_story_is_no_longer_routable_by_exact_id(sync_db, monkeypatch):
     from camellia.instagram_routing import route_for_inbound
 
     sync_db.upsert_instagram_story_sync(STORY_ID)  # no published_at
@@ -465,11 +475,10 @@ def test_unknown_age_lifecycle_does_not_touch_exact_id_routing(sync_db, monkeypa
         "source_type": "story", "media_id": STORY_ID,
         "routing_topic": "Jolbhora", "active": True,
     })
-    for _ in range(3):
+    for _ in range(2):
         sync_db.reconcile_instagram_story_lifecycle([], expired_before=EXPIRED_BEFORE)
     monkeypatch.setattr("camellia.database.db", sync_db)
 
     route, method = route_for_inbound(ad_id=None, media_id=STORY_ID, source_type="story_reply")
 
-    assert route["media_id"] == STORY_ID
-    assert method == "story_media_id"
+    assert (route, method) == (None, None)

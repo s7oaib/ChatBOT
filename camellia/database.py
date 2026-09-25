@@ -889,9 +889,8 @@ class Database:
                 ("source", "TEXT NOT NULL DEFAULT 'WEBHOOK_STORY_REPLY'"),
             ):
                 self._ensure_column(cursor, "instagram_story_sources", column, declaration)
-            # Admin deletion is a local tombstone, never a hard delete. Keep
-            # existing captured evidence and allow a later webhook to update
-            # last-seen metadata without silently restoring visibility.
+            # Legacy tombstone columns remain for migration compatibility;
+            # current application behavior never writes or restores them.
             self._ensure_column(cursor, "instagram_story_sources", "admin_deleted", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(cursor, "instagram_story_sources", "deleted_at", "TIMESTAMP")
             self._ensure_column(cursor, "instagram_story_sources", "deleted_by", "TEXT")
@@ -902,7 +901,7 @@ class Database:
             # expired from one that disappeared from Meta's inventory before
             # its normal lifetime — the latter only after two consecutive
             # COMPLETE successful syncs confirm it absent (see
-            # reconcile_instagram_story_lifecycle). Never a hard delete.
+            # reconcile_instagram_story_lifecycle), then delete it locally.
             self._ensure_column(cursor, "instagram_story_sources", "sync_miss_count", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(cursor, "instagram_story_sources", "last_confirmed_active_at", "TIMESTAMP")
             self._ensure_column(cursor, "instagram_story_sources", "removed_at", "TIMESTAMP")
@@ -1712,9 +1711,8 @@ class Database:
     ) -> Optional[Dict[str, Any]]:
         """Upsert one exact Story returned by Meta's owned-Stories edge.
 
-        This method deliberately never touches admin tombstones or routes.
-        A sync can refresh Meta metadata, but mapping, archive, disable and
-        restore decisions remain operator-owned.
+        A sync can refresh Meta metadata but never creates or edits mapping
+        state. Story rows are current operational records, not history.
         """
         media_id = str(story_media_id or "").strip()
         if not media_id:
@@ -1761,40 +1759,18 @@ class Database:
         page must never reach here, since only a complete successful fetch is
         trustworthy evidence that an ACTIVE Story is actually absent.
 
-        A sync-owned ACTIVE Story absent from this fetch is classified only
-        when its ``published_at`` parses into a trustworthy timezone-aware
-        instant (see ``_parse_trustworthy_datetime`` — never a raw string
-        comparison, so a non-UTC offset compares correctly against the UTC
-        cutoff):
-        - marked EXPIRED if that instant is at/before ``expired_before``
-          (it lived out its normal lifetime), regardless of miss count;
-        - otherwise, on its first complete miss, only has ``sync_miss_count``
-          incremented and stays ACTIVE (never hidden after one miss);
-        - marked REMOVED only on its second consecutive complete miss, with
-          ``removed_at``/``removed_reason`` set.
-
-        ``REMOVED`` is a claim that a Story went missing *before* its normal
-        expiry — a claim this code cannot make without knowing its age. So a
-        Story with a missing or malformed ``published_at`` is never marked
-        EXPIRED or REMOVED, no matter how many complete misses accumulate:
-        ``sync_miss_count`` still advances as pending/unknown-age evidence,
-        but the row stays ACTIVE. Age is never guessed from first_seen,
-        last_seen, the Story ID, Meta's array order, or the sequence number.
-
-        Admin-deleted rows and rows already EXPIRED/REMOVED are left alone —
-        this never restores an admin tombstone and never re-litigates a
-        terminal lifecycle state. A Story returned by Meta again (including a
-        previously REMOVED one) is reactivated exclusively through
-        ``upsert_instagram_story_sync``, which resets ``sync_miss_count`` and
-        preserves mapping, routes, and admin_deleted untouched.
+        Expired Stories are hard-deleted only when a trustworthy publication
+        timestamp confirms their lifetime has passed. Other absent Stories
+        survive one complete miss and are hard-deleted after the second
+        consecutive complete miss. Failed, partial, rate-limited, malformed,
+        or busy syncs never call this method. Identity is the exact Meta ID.
         """
         ids = [str(value or "").strip() for value in active_story_ids if str(value or "").strip()]
-        now = now or datetime.now(timezone.utc).isoformat()
         expired_before_dt = _parse_trustworthy_datetime(expired_before)
         counts = {"expired": 0, "removed": 0, "miss_pending": 0}
         with self.get_connection() as conn:
             params: List[Any] = []
-            where = "source='META_STORY_SYNC' AND admin_deleted=0 AND story_status='ACTIVE'"
+            where = "COALESCE(story_status, 'ACTIVE')='ACTIVE' AND admin_deleted=0"
             if ids:
                 where += f" AND story_media_id NOT IN ({','.join('?' for _ in ids)})"
                 params.extend(ids)
@@ -1807,25 +1783,14 @@ class Database:
                 published_dt = _parse_trustworthy_datetime(row["published_at"])
                 miss_count = int(row["sync_miss_count"] or 0)
                 if published_dt is not None and expired_before_dt is not None and published_dt <= expired_before_dt:
-                    conn.execute(
-                        "UPDATE instagram_story_sources SET story_status='EXPIRED' WHERE story_media_id=?",
-                        (story_id,),
-                    )
+                    self._delete_instagram_story_source_in_connection(conn, story_id)
                     counts["expired"] += 1
-                elif published_dt is not None and miss_count >= 1:
-                    conn.execute(
-                        """
-                        UPDATE instagram_story_sources
-                        SET story_status='REMOVED', removed_at=?, removed_reason='missing_from_two_complete_meta_syncs'
-                        WHERE story_media_id=?
-                        """,
-                        (now, story_id),
-                    )
+                elif miss_count >= 1:
+                    self._delete_instagram_story_source_in_connection(conn, story_id)
                     counts["removed"] += 1
                 else:
-                    # Either still within its first miss with a trustworthy
-                    # timestamp, or the timestamp is missing/malformed —
-                    # either way, age cannot justify hiding it yet.
+                    # One complete absence is insufficient evidence. Unknown
+                    # timestamps are not used to infer identity or expiry.
                     conn.execute(
                         "UPDATE instagram_story_sources SET sync_miss_count=sync_miss_count+1 WHERE story_media_id=?",
                         (story_id,),
@@ -1833,6 +1798,40 @@ class Database:
                     counts["miss_pending"] += 1
             conn.commit()
         return counts
+
+    @staticmethod
+    def _delete_instagram_story_source_in_connection(conn, story_media_id: str) -> Dict[str, int]:
+        """Delete a Story and only state owned by its exact-ID Story routes."""
+        routes = conn.execute(
+            "SELECT routing_id FROM instagram_source_routes WHERE source_type='story' AND media_id=?",
+            (story_media_id,),
+        ).fetchall()
+        routing_ids = [int(row["routing_id"]) for row in routes]
+        if routing_ids:
+            placeholders = ",".join("?" for _ in routing_ids)
+            conn.execute(
+                f"DELETE FROM instagram_post_pairings WHERE routing_id IN ({placeholders})",
+                routing_ids,
+            )
+            conn.execute(
+                f"DELETE FROM instagram_route_previews WHERE routing_id IN ({placeholders})",
+                routing_ids,
+            )
+            # Do not preserve Story deletion audit content. Other route types
+            # keep their existing generic removal audit behavior.
+            conn.execute(
+                f"DELETE FROM instagram_route_removals WHERE source_type='story' AND routing_id IN ({placeholders})",
+                routing_ids,
+            )
+        conn.execute(
+            "DELETE FROM instagram_source_routes WHERE source_type='story' AND media_id=?",
+            (story_media_id,),
+        )
+        deleted_sources = conn.execute(
+            "DELETE FROM instagram_story_sources WHERE story_media_id=?",
+            (story_media_id,),
+        ).rowcount
+        return {"sources": max(0, deleted_sources), "routes": len(routing_ids)}
 
     def backfill_instagram_story_sequence_numbers(self) -> int:
         """Assign a stable admin-facing sequence number/date to Stories missing one.
@@ -1845,7 +1844,7 @@ class Database:
         current maximum for that date. Rows without a trustworthy
         ``published_at`` are left unassigned rather than guessed. Touches
         only ``story_sequence_number``/``story_sequence_date`` — never
-        mapping, routes, topic, admin tombstone, history, or the Story ID.
+        mapping, routes, topic, or the Story ID.
         """
         with self.get_connection() as conn:
             unassigned = conn.execute(
@@ -1913,25 +1912,17 @@ class Database:
             )
             conn.commit()
 
-    def list_instagram_story_sources(self, include_deleted: bool = False, *, page: int = 1,
+    def list_instagram_story_sources(self, *, page: int = 1,
                                      page_size: Optional[int] = None, search: Optional[str] = None,
                                      mapping_status_filter: Optional[str] = None,
                                      context_active: Optional[bool] = None,
                                      sort: str = "newest", with_total: bool = False):
-        """Return captured Stories with exact mapping status for admin.
-
-        Deleted Stories stay in the database as local tombstones. The normal
-        list hides them; History asks explicitly for ``include_deleted``.
-        """
-        clauses, params = [], []
-        if mapping_status_filter == "HISTORY":
-            clauses.append("(s.admin_deleted=1 OR UPPER(COALESCE(s.story_status,'ACTIVE')) IN ('EXPIRED','REMOVED','DELETED'))")
-        else:
-            operational_filter = mapping_status_filter in {"UNMAPPED", "MAPPED", "DISABLED"}
-            if not include_deleted or operational_filter:
-                clauses.append("s.admin_deleted=0")
-            if (not include_deleted or operational_filter) and mapping_status_filter in {None, "UNMAPPED", "MAPPED", "DISABLED"}:
-                clauses.append("UPPER(COALESCE(s.story_status,'ACTIVE')) NOT IN ('EXPIRED','REMOVED','DELETED')")
+        """Return only current operational Stories and exact-ID mappings."""
+        clauses = [
+            "s.admin_deleted=0",
+            "UPPER(COALESCE(s.story_status,'ACTIVE'))='ACTIVE'",
+        ]
+        params: List[Any] = []
         if search:
             pattern = f"%{search[:200]}%"
             clauses.append("(s.story_media_id LIKE ? OR COALESCE(r.routing_topic,'') LIKE ? OR COALESCE(r.source_description,'') LIKE ?)")
@@ -1942,11 +1933,6 @@ class Database:
             clauses.append("r.routing_id IS NOT NULL AND r.archived_at IS NULL AND r.active=0")
         elif mapping_status_filter == "UNMAPPED":
             clauses.append("(r.routing_id IS NULL OR r.archived_at IS NOT NULL)")
-        elif mapping_status_filter in {"ACTIVE", "EXPIRED", "REMOVED"}:
-            clauses.append("UPPER(COALESCE(s.story_status,'ACTIVE'))=?")
-            params.append(mapping_status_filter)
-        elif mapping_status_filter == "DELETED":
-            clauses.append("s.admin_deleted=1")
         if context_active is not None:
             clauses.append("COALESCE(r.active,0)=?")
             params.append(int(context_active))
@@ -1956,7 +1942,7 @@ class Database:
         with self.get_connection() as conn:
             join = "LEFT JOIN instagram_source_routes r ON r.routing_id=(SELECT rr.routing_id FROM instagram_source_routes rr WHERE rr.source_type='story' AND rr.media_id=s.story_media_id ORDER BY rr.updated_at DESC, rr.routing_id DESC LIMIT 1)"
             total = int(conn.execute(f"SELECT COUNT(*) AS n FROM instagram_story_sources s {join} WHERE {where}", params).fetchone()["n"])
-            sql = f"SELECT s.*, r.routing_id, r.topic_id, r.routing_topic, r.source_description, r.menu_id, r.menu_mode, r.active AS route_active, r.archived_at AS route_archived_at FROM instagram_story_sources s {join} WHERE {where} ORDER BY {sort_column} {direction}, s.story_media_id"
+            sql = f"SELECT s.story_media_id, s.temporary_url, s.story_status, s.first_seen, s.last_seen, s.last_sender_id, s.last_event_metadata, s.media_type, s.permalink, s.published_at, s.source, s.sync_miss_count, s.last_confirmed_active_at, s.story_sequence_number, s.story_sequence_date, r.routing_id, r.topic_id, r.routing_topic, r.source_description, r.menu_id, r.menu_mode, r.active AS route_active, r.archived_at AS route_archived_at FROM instagram_story_sources s {join} WHERE {where} ORDER BY {sort_column} {direction}, s.story_media_id"
             if page_size is not None:
                 sql += " LIMIT ? OFFSET ?"
                 params = [*params, page_size, (page - 1) * page_size]
@@ -1967,9 +1953,7 @@ class Database:
                 route_active = item.pop("route_active")
                 route_archived_at = item.pop("route_archived_at")
                 route = item.get("routing_id")
-                if item.get("admin_deleted"):
-                    mapping_status = "DELETED"
-                elif route and route_archived_at:
+                if route and route_archived_at:
                     mapping_status = "ARCHIVED"
                 elif route and not route_active:
                     mapping_status = "DISABLED"
@@ -2005,75 +1989,30 @@ class Database:
         media_id = str(story_media_id or "").strip()
         if not media_id:
             return None
-        return next(
-            (item for item in self.list_instagram_story_sources(include_deleted=True)
-             if item.get("story_media_id") == media_id),
-            None,
-        )
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM instagram_story_sources WHERE story_media_id=?",
+                (media_id,),
+            ).fetchone()
+        return dict(row) if row else None
 
-    def delete_instagram_story_source(
-        self, story_media_id: str, removed_by: Optional[str] = None,
-    ) -> bool:
-        """Soft-delete one Story from the local Admin registry.
-
-        The captured source row is retained as evidence. Any route for the
-        exact Story ID is archived and disabled in the same transaction, so a
-        later webhook can update evidence but cannot restore visibility or
-        customer-facing routing by itself.
-        """
+    def delete_instagram_story_source(self, story_media_id: str) -> bool:
+        """Permanently delete local Story and exact Story mapping state only."""
         media_id = str(story_media_id or "").strip()
         if not media_id:
             return False
-        now = datetime.utcnow().isoformat()
-        actor = str(removed_by or "admin").strip()[:160] or "admin"
         with self.get_connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             source = conn.execute(
                 "SELECT story_media_id FROM instagram_story_sources WHERE story_media_id = ?",
                 (media_id,),
             ).fetchone()
             if not source:
+                conn.rollback()
                 return False
-            conn.execute(
-                """
-                UPDATE instagram_story_sources
-                SET admin_deleted=1,
-                    deleted_at=COALESCE(deleted_at, ?),
-                    deleted_by=COALESCE(deleted_by, ?)
-                WHERE story_media_id = ?
-                """,
-                (now, actor, media_id),
-            )
-            conn.execute(
-                """
-                UPDATE instagram_source_routes
-                SET active=0, archived_at=COALESCE(archived_at, ?), updated_at=?
-                WHERE source_type='story' AND media_id=?
-                """,
-                (now, now, media_id),
-            )
+            self._delete_instagram_story_source_in_connection(conn, media_id)
             conn.commit()
         return True
-
-    def restore_instagram_story_source(
-        self, story_media_id: str, restored_by: Optional[str] = None,
-    ) -> bool:
-        """Restore local Story visibility without restoring its route."""
-        media_id = str(story_media_id or "").strip()
-        if not media_id:
-            return False
-        now = datetime.utcnow().isoformat()
-        actor = str(restored_by or "admin").strip()[:160] or "admin"
-        with self.get_connection() as conn:
-            cursor = conn.execute(
-                """
-                UPDATE instagram_story_sources
-                SET admin_deleted=0, restored_at=?, restored_by=?
-                WHERE story_media_id=? AND admin_deleted=1
-                """,
-                (now, actor, media_id),
-            )
-            conn.commit()
-        return cursor.rowcount > 0
 
     def set_instagram_source_route_active(self, routing_id: int, active: bool) -> bool:
         with self.get_connection() as conn:
@@ -2138,8 +2077,8 @@ class Database:
         handoffs is touched — none of those are owned by a route, and a
         route referencing one of them is not a reason to remove it.
 
-        A row is written to instagram_route_removals before the delete, so
-        what this route was and who removed it survives the delete itself.
+        Non-Story routes retain the generic removal audit. Story mappings are
+        deliberately excluded from that history and are removed locally.
         """
         with self.get_connection() as conn:
             route = conn.execute(
@@ -2147,15 +2086,22 @@ class Database:
             ).fetchone()
             if not route:
                 return False
-            conn.execute(
-                """
-                INSERT INTO instagram_route_removals
-                    (routing_id, canonical_url, source_type, shortcode, routing_topic, removed_by)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (routing_id, route["canonical_url"], route["source_type"],
-                 route["shortcode"], route["routing_topic"], removed_by),
-            )
+            if route["source_type"] == "story":
+                conn.execute(
+                    "DELETE FROM instagram_route_removals WHERE source_type='story' AND routing_id=?",
+                    (routing_id,),
+                )
+                conn.execute("DELETE FROM instagram_route_previews WHERE routing_id=?", (routing_id,))
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO instagram_route_removals
+                        (routing_id, canonical_url, source_type, shortcode, routing_topic, removed_by)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (routing_id, route["canonical_url"], route["source_type"],
+                     route["shortcode"], route["routing_topic"], removed_by),
+                )
             conn.execute("DELETE FROM instagram_post_pairings WHERE routing_id = ?", (routing_id,))
             conn.execute("DELETE FROM instagram_source_routes WHERE routing_id = ?", (routing_id,))
             conn.commit()

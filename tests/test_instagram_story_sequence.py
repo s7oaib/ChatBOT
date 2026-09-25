@@ -147,7 +147,7 @@ def test_removing_second_story_does_not_renumber_third(sync_db):
     sync_db.reconcile_instagram_story_lifecycle(
         ["s1", "s3"], expired_before="2026-09-16T00:00:00+00:00",
     )
-    assert sync_db.get_instagram_story_source("s2")["story_status"] == "REMOVED"
+    assert sync_db.get_instagram_story_source("s2") is None
     assert sync_db.get_instagram_story_source("s1")["story_sequence_number"] == 1
     assert sync_db.get_instagram_story_source("s3")["story_sequence_number"] == 3
 

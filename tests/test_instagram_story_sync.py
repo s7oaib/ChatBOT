@@ -132,7 +132,7 @@ def test_multiple_stories_are_inventory_only_and_unmapped(sync_db, monkeypatch):
     assert sync_db.list_instagram_source_routes() == []
 
 
-def test_missing_old_synced_story_is_expired_but_retained(sync_db, monkeypatch):
+def test_missing_old_synced_story_is_hard_deleted(sync_db, monkeypatch):
     _install_meta(monkeypatch, [
         _page(), _stories([_story(timestamp="2020-01-01T00:00:00+00:00")]),
         _page(), _stories([]),
@@ -142,9 +142,7 @@ def test_missing_old_synced_story_is_expired_but_retained(sync_db, monkeypatch):
     result = sync_module.sync_instagram_stories(sync_db)
 
     assert result["expired"] == 1
-    saved = sync_db.get_instagram_story_source(STORY_ID)
-    assert saved["story_status"] == "EXPIRED"
-    assert saved["admin_deleted"] == 0
+    assert sync_db.get_instagram_story_source(STORY_ID) is None
 
 
 def test_transient_meta_failure_does_not_expire_inventory(sync_db, monkeypatch):
@@ -159,6 +157,29 @@ def test_transient_meta_failure_does_not_expire_inventory(sync_db, monkeypatch):
     assert result["status"] == "failed"
     assert result["failure"]["category"] == "meta_server_error"
     assert sync_db.get_instagram_story_source(STORY_ID)["story_status"] == "ACTIVE"
+
+
+def test_page_cap_marks_sync_partial_without_reconciling_absent_stories(sync_db, monkeypatch):
+    sync_db.upsert_instagram_story_sync(
+        STORY_ID,
+        media_type="IMAGE",
+        temporary_url=None,
+        permalink=None,
+        published_at="2020-01-01T00:00:00+00:00",
+        event_metadata={},
+    )
+    page = {
+        "data": [_story(f"page-story-{index}") for index in range(1000)],
+        "paging": {"next": "https://graph.facebook.com/v25.0/account/stories?after=next"},
+    }
+    _install_meta(monkeypatch, [_page(), FakeResponse(200, page)])
+
+    result = sync_module.sync_instagram_stories(sync_db)
+
+    assert result["status"] == "partial"
+    assert result["failure"]["category"] == "story_page_limit_reached"
+    assert result["fetched"] == 1000
+    assert sync_db.get_instagram_story_source(STORY_ID)["sync_miss_count"] == 0
 
 
 @pytest.mark.parametrize("payload", [{"data": {}}, {"unexpected": []}, []])

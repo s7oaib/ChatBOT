@@ -174,6 +174,8 @@ def sync_instagram_stories(database=None) -> Dict[str, Any]:
                 # never append or log a second token when following it.
                 params = None
 
+            pagination_incomplete = bool(next_url)
+
         active_ids = []
         malformed_item = False
         result = {**base_result, "status": "success", "account_id": account_id}
@@ -196,12 +198,14 @@ def sync_instagram_stories(database=None) -> Dict[str, Any]:
             changed = any(existing.get(key) != ("ACTIVE" if key == "story_status" else SYNC_SOURCE if key == "source" else story.get(key)) for key in comparable)
             result["updated" if changed else "unchanged"] += 1
 
-        if malformed_item:
+        if malformed_item or pagination_incomplete:
             # A partial/malformed page must not be treated as a complete
             # active set, or it could incorrectly expire/remove unrelated
             # Stories, and must never count as evidence of absence.
             result["status"] = "partial"
-            result["failure"] = {"category": "malformed_story_item"}
+            result["failure"] = {
+                "category": "malformed_story_item" if malformed_item else "story_page_limit_reached",
+            }
         else:
             cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
             lifecycle_counts = database.reconcile_instagram_story_lifecycle(
