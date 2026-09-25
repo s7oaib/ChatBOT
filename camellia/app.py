@@ -215,6 +215,25 @@ async def lifespan(app: FastAPI):
     _prune_expired_weekly_menus()
 
     db.init_db()
+    story_cleanup = db.cleanup_legacy_instagram_story_history()
+    log.info(
+        "story_cleanup_history_rows_found=%s "
+        "story_cleanup_history_rows_deleted=%s "
+        "story_cleanup_routes_deleted=%s "
+        "story_cleanup_story_audit_rows_deleted=%s "
+        "story_cleanup_stale_matches=%s "
+        "story_cleanup_stale_deleted=%s "
+        "story_cleanup_stale_mapping_deleted=%s "
+        "story_cleanup_noncurrent_remaining=%s",
+        story_cleanup["history_rows_found"],
+        story_cleanup["history_rows_deleted"],
+        story_cleanup["routes_deleted"],
+        story_cleanup["story_audit_rows_deleted"],
+        story_cleanup["stale_matches"],
+        story_cleanup["stale_deleted"],
+        story_cleanup["stale_mapping_deleted"],
+        story_cleanup["noncurrent_remaining"],
+    )
     try:
         delivered_notifications = await asyncio.to_thread(
             escalator.process_pending_notifications, limit=20,

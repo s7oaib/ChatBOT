@@ -1833,6 +1833,64 @@ class Database:
         ).rowcount
         return {"sources": max(0, deleted_sources), "routes": len(routing_ids)}
 
+    def cleanup_legacy_instagram_story_history(self) -> Dict[str, int]:
+        """Remove legacy Story history once the normal schema is initialized.
+
+        The Admin card displays ``published_at || last_seen``. Match the
+        operator-identified card against that exact fallback expression, only
+        among current rows, and leave an ambiguous match untouched. The whole
+        cleanup is one transaction and is safe to repeat on every startup.
+        """
+        stale_timestamp = "2026-09-22T08:25:36.439647+00:00"
+        legacy_where = "story_status IN ('EXPIRED', 'REMOVED') OR admin_deleted=1"
+        counts = {
+            "history_rows_found": 0,
+            "history_rows_deleted": 0,
+            "routes_deleted": 0,
+            "story_audit_rows_deleted": 0,
+            "stale_matches": 0,
+            "stale_deleted": 0,
+            "stale_mapping_deleted": 0,
+            "noncurrent_remaining": 0,
+        }
+        with self.get_connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            history_rows = conn.execute(
+                f"SELECT story_media_id FROM instagram_story_sources WHERE {legacy_where}"
+            ).fetchall()
+            stale_rows = conn.execute(
+                "SELECT story_media_id FROM instagram_story_sources "
+                "WHERE COALESCE(story_status, 'ACTIVE')='ACTIVE' AND admin_deleted=0 "
+                "AND COALESCE(NULLIF(published_at, ''), last_seen)=?",
+                (stale_timestamp,),
+            ).fetchall()
+            counts["history_rows_found"] = len(history_rows)
+            counts["stale_matches"] = len(stale_rows)
+
+            # The generic removal audit has no Story source row to preserve.
+            # Retain all Post/Reel/Ad audit records by filtering its type.
+            counts["story_audit_rows_deleted"] = conn.execute(
+                "DELETE FROM instagram_route_removals WHERE source_type='story'"
+            ).rowcount
+            for row in history_rows:
+                deleted = self._delete_instagram_story_source_in_connection(
+                    conn, row["story_media_id"],
+                )
+                counts["history_rows_deleted"] += deleted["sources"]
+                counts["routes_deleted"] += deleted["routes"]
+            if len(stale_rows) == 1:
+                deleted = self._delete_instagram_story_source_in_connection(
+                    conn, stale_rows[0]["story_media_id"],
+                )
+                counts["stale_deleted"] = deleted["sources"]
+                counts["stale_mapping_deleted"] = deleted["routes"]
+                counts["routes_deleted"] += deleted["routes"]
+            counts["noncurrent_remaining"] = conn.execute(
+                f"SELECT COUNT(*) FROM instagram_story_sources WHERE {legacy_where}"
+            ).fetchone()[0]
+            conn.commit()
+        return counts
+
     def backfill_instagram_story_sequence_numbers(self) -> int:
         """Assign a stable admin-facing sequence number/date to Stories missing one.
 
