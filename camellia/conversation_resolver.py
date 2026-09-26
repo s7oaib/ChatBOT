@@ -73,6 +73,10 @@ def _explicit_asset(value: str, state: Dict[str, Any]) -> Optional[str]:
         return "HOME_TABLE_MENU"
     if re.search(r"\b(?:bento|bento\s+images?)\b", value, re.I):
         return "BENTO_IMAGES"
+    if (_MENU_WORDS.search(value)
+            and re.search(r"\b(?:savoury|savory)\b", value, re.I)
+            and re.search(r"\b(?:weekly|current|this\s+week(?:'s)?|today(?:'s)?)\b", value, re.I)):
+        return "WEEKLY_MENU"
     if re.search(r"\b(?:weekly|current|today(?:'s)?|this\s+week)\b", value, re.I) and _MENU_WORDS.search(value):
         # Generic menu openers such as "today's menu" and "share weekly
         # menu" retain their established overview/client-QA routes. They

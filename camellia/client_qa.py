@@ -206,6 +206,11 @@ REGISTRY_BY_ID: Dict[str, ApprovedQA] = {entry.qa_id: entry for entry in REGISTR
 
 
 def _has_home_table_context(facts: Dict[str, Any]) -> bool:
+    # An explicit current Home Table answer supersedes an older source route,
+    # but remains the active subject for the customer's next short question.
+    if (facts.get("home_table_context")
+            and str(facts.get("last_topic") or "").casefold() == "bengali_home_table"):
+        return True
     if facts.get("source_context_superseded"):
         return False
     if facts.get("home_table_context"):
@@ -250,7 +255,7 @@ def match(message: str, facts: Optional[Dict[str, Any]] = None) -> Optional[Appr
     # an explicit Home Table phrase authoritative when it is present in the
     # current message itself.
     if (
-        re.search(r"\b(?:jolbhora|kanchagolla|sondesh|mishti|mithai|nolen\s+gur|aamar|signature|bento)\b", text, re.I)
+        re.search(r"\b(?:jolbhora|kanchagolla|sondesh|mishti|mithai|nolen\s+gur|aamar|signature|bento|subscription|meal\s+plan|weekly\s+savoury|chicken\s+kosha)\b", text, re.I)
         and not re.search(r"\b(?:bengali|kolkata)\s+home\s+(?:table|lunch)|home\s+table\b", text, re.I)
     ):
         home = False

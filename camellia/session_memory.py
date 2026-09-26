@@ -42,6 +42,7 @@ class SessionMemoryManager:
                 "image_card_sent": False,
                 "awaiting_subscription_booking": False,
                 "subscription_context": False,
+                "home_table_context": False,
                 "savoury_crosssell_sent": False,
                 "alacarte_sondesh_addon_sent": False,
                 "alacarte_sondesh_addon_declined": False,
@@ -140,6 +141,7 @@ class SessionMemoryManager:
         facts = session.setdefault("facts", {})
         transient = {
             "image_card_sent", "awaiting_subscription_booking", "subscription_context",
+            "home_table_context",
             "last_greeting_index", "savoury_crosssell_sent",
             "alacarte_sondesh_addon_sent", "alacarte_sondesh_addon_declined",
             "sondesh_crosssell_sent",
