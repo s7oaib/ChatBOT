@@ -3195,6 +3195,8 @@ def get_active_menu(x_admin_key: Optional[str] = Header(None), x_admin_pin: Opti
     try:
         with open(config.MENU_JSON_PATH, "r", encoding="utf-8") as f:
             data = json.load(f)
+        from camellia.menu_review import canonical_menu
+        data = canonical_menu()
         # Surfaced so the dashboard can show staff which week is actually
         # live, since the flyer photo and the dish text are now two separate
         # things that both have to agree with what was last uploaded.
@@ -3824,57 +3826,13 @@ async def upload_menu_image(
     if not image_bytes:
         raise HTTPException(status_code=400, detail="No image file or base64 data provided.")
 
-    result = menu_parser.parse_image_and_update_menu(image_bytes, mime_type)
-
-    # The parser writes the extracted text into menu.json but discards the
-    # photo itself, so the photo is saved here — "show me the menu" sends this
-    # actual upload instead of one of the two fixed images in the repo.
-    #
-    # Saved whether or not extraction succeeded. The vision model fails on
-    # perfectly good flyers (a malformed-JSON completion is enough), and
-    # gating the photo on that meant one bad model run made the whole upload
-    # do nothing at all: the operator posted this week's menu, got a "failed"
-    # toast, and customers kept seeing last week's. The photo is the thing
-    # customers actually read; the extracted text is what powers dish prices
-    # and ordering. Losing the second is a degraded menu, losing the first is
-    # no menu, so they are no longer tied together.
-    #
-    # week_of only comes along when extraction produced one. An unreadable
-    # date means a generic caption rather than a wrong one, and an undated
-    # flyer never expires — deliberately, since hiding a good menu is worse
-    # than showing one a few days longer (see camellia/menu_dates.py).
-    flyer_saved = False
-    try:
-        weekly_flyer.save(
-            image_bytes, mime_type,
-            week_of=result.get("week_of"),
-            service_window=result.get("service_window"),
-        )
-        # A new flyer is an explicit instruction to make this week's menu
-        # visible again, including when OCR could not read the dish rows.
-        with open(config.MENU_JSON_PATH, "r", encoding="utf-8") as f:
-            menu_data = json.load(f)
-        if menu_data.get("weekly_menus"):
-            menu_data["weekly_menus"][-1]["is_published"] = True
-            with open(config.MENU_JSON_PATH, "w", encoding="utf-8") as f:
-                json.dump(menu_data, f, indent=2, ensure_ascii=False)
-            responder.reload_data()
-        flyer_saved = True
-    except Exception as e:
-        log.warning("Could not save the uploaded flyer photo: %s", e)
-
-    # The operator has to be able to tell the two halves apart, or a "failed"
-    # result reads as "nothing happened" when the photo did in fact go live.
-    result["flyer_saved"] = flyer_saved
-    if flyer_saved and result.get("status") != "success":
-        result["flyer_notice"] = (
-            "The menu photo is live and customers will now be sent it. "
-            "The dish text could not be read off this image, so item prices "
-            "still come from the previous menu — re-upload a clearer photo, "
-            "or edit the dishes by hand, to update those too."
-        )
-
-    return result
+    from camellia.admin_menu_review import call, reviewer
+    from camellia import menu_review
+    from starlette.concurrency import run_in_threadpool
+    draft = await run_in_threadpool(call, menu_review.extract, "weekly_vegetarian",
+        reviewer(x_admin_key, x_admin_pin), data=image_bytes, mime=mime_type,
+        filename=file.filename if file else "")
+    return {"status": "draft", "draft": draft, "published": False}
 
 
 @app.post("/admin/menu/unpublish-current")
@@ -3947,6 +3905,7 @@ async def replace_archived_flyer(flyer_id: str, file: UploadFile = File(...), x_
 def reset_menu_defaults(x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
     """Resets weekly menu dishes to default Bengal-rooted culinary baseline and reloads."""
     require_admin(x_admin_key, x_admin_pin)
+    raise HTTPException(status_code=409, detail="Use Review Menu → Approve & Publish to change the customer menu.")
     # A photo uploaded earlier must not survive a reset that claims to restore
     # the baseline — otherwise the dish text resets while the card still shows
     # last week's flyer, and "Reset to Baseline" would not mean what it says.
@@ -5838,6 +5797,7 @@ def reject_candidate_template(
 def sync_menu(request: Request, csv_url: Optional[str] = None, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
     """Triggers live menu reload from Google Sheet CSV or local files."""
     require_admin(x_admin_key, x_admin_pin)
+    raise HTTPException(status_code=409, detail="Menu changes must go through Review Menu → Approve & Publish.")
     if csv_url:
         result = sheet_sync.sync_from_csv_url(csv_url)
     elif config.GOOGLE_SHEET_CSV_URL:
@@ -5854,6 +5814,7 @@ def sync_menu(request: Request, csv_url: Optional[str] = None, x_admin_key: Opti
 async def update_menu(request: Request, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
     """Dynamically updates the latest weekly menu rotation block in menu.json and hot-reloads the responder."""
     require_admin(x_admin_key, x_admin_pin)
+    raise HTTPException(status_code=409, detail="Use Menu Manager → Review Menu → Approve & Publish.")
     try:
         body = await request.json()
     except Exception:
@@ -6041,11 +6002,13 @@ async def create_menu_catalogue_entry(
     except MenuCatalogueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     try:
-        menu_images.save_draft(entry["menu_id"], image_bytes, file.content_type or "", x_admin_key or "admin")
-        published = menu_images.publish(entry["menu_id"])
+        from camellia.menu_review import extract
+        from camellia.admin_menu_review import reviewer
+        draft = extract(entry["menu_id"], reviewer(x_admin_key, x_admin_pin), data=image_bytes,
+                        mime=file.content_type or "", filename=file.filename or "")
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    return {"status": "success", "menu": entry, "image": published}
+    return {"status": "success", "menu": entry, "draft": draft, "published": False}
 
 
 @app.patch("/admin/menu-catalogue/{menu_id}")
@@ -6250,6 +6213,12 @@ def preview_instagram_route_response(
 # /admin/menu/* route).
 # --------------------------------------------------------------------------
 
+from camellia.admin_menu_review import router as menu_review_router
+
+for review_route in menu_review_router.routes:
+    app.add_api_route(review_route.path, review_route.endpoint, methods=list(review_route.methods))
+
+
 @app.get("/admin/menu-manager/menus")
 def list_manageable_menus(x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
     require_admin(x_admin_key, x_admin_pin)
@@ -6309,6 +6278,7 @@ def preview_menu(menu_key: str, x_admin_key: Optional[str] = Header(None), x_adm
 @app.post("/admin/menu-manager/menus/{menu_key}/publish")
 async def publish_menu(menu_key: str, request: Request, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
     require_admin(x_admin_key, x_admin_pin)
+    raise HTTPException(status_code=409, detail="Use Review Menu → Approve & Publish.")
     admin_identity = x_admin_key or "admin"
     raw_items = None
     try:
@@ -6338,14 +6308,7 @@ def list_menu_versions(menu_key: str, x_admin_key: Optional[str] = Header(None),
 @app.post("/admin/menu-manager/menus/{menu_key}/versions/{version_id}/restore")
 def restore_menu_version(menu_key: str, version_id: int, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
     require_admin(x_admin_key, x_admin_pin)
-    admin_identity = x_admin_key or "admin"
-    try:
-        result = menu_manager.restore_version(menu_key, version_id, changed_by=admin_identity)
-    except KeyError:
-        raise HTTPException(status_code=404, detail=f"No manageable menu '{menu_key}' or version '{version_id}'")
-    except menu_manager.MenuValidationError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    return {"status": "success", **result}
+    raise HTTPException(status_code=409, detail="Restore versions to a review draft, then Approve & Publish.")
 
 
 # Visual image workflow.  Structured item editing above remains available as
@@ -6359,12 +6322,11 @@ async def save_menu_image_draft(menu_key: str, file: Optional[UploadFile] = File
     data = await file.read()
     if len(data) > MAX_UPLOAD_SIZE:
         raise HTTPException(status_code=413, detail="File too large (maximum 10MB allowed).")
-    try:
-        return {"status": "success", "draft": menu_images.save_draft(menu_key, data, file.content_type or "", x_admin_key or "admin")}
-    except KeyError:
-        raise HTTPException(status_code=404, detail=f"No manageable menu '{menu_key}'")
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+    from camellia.admin_menu_review import call, reviewer
+    from camellia import menu_review
+    return {"status": "draft", "published": False,
+            "draft": call(menu_review.extract, menu_key, reviewer(x_admin_key, x_admin_pin),
+                          data=data, mime=file.content_type or "", filename=file.filename or "")}
 
 
 @app.get("/admin/menu-manager/menus/{menu_key}/image/preview")
@@ -6379,12 +6341,7 @@ def preview_menu_image(menu_key: str, x_admin_key: Optional[str] = Header(None),
 @app.post("/admin/menu-manager/menus/{menu_key}/image/publish")
 def publish_menu_image(menu_key: str, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
     require_admin(x_admin_key, x_admin_pin)
-    try:
-        return {"status": "success", "image": menu_images.publish(menu_key)}
-    except KeyError:
-        raise HTTPException(status_code=404, detail=f"No manageable menu '{menu_key}'")
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+    raise HTTPException(status_code=409, detail="Approve menu facts and flyer together in Review Menu.")
 
 
 @app.get("/admin/menu-manager/menus/{menu_key}/image/history")
@@ -6408,13 +6365,7 @@ def archive_menu_image(menu_key: str, x_admin_key: Optional[str] = Header(None),
 @app.post("/admin/menu-manager/menus/{menu_key}/image/restore/{version_id}")
 def restore_menu_image(menu_key: str, version_id: int, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
     require_admin(x_admin_key, x_admin_pin)
-    try:
-        restored = menu_images.restore(menu_key, version_id)
-    except KeyError:
-        raise HTTPException(status_code=404, detail=f"No manageable menu '{menu_key}'")
-    if not restored:
-        raise HTTPException(status_code=404, detail="Image version not found")
-    return {"status": "success", "image": restored}
+    raise HTTPException(status_code=409, detail="Restore the menu version to a review draft, then Approve & Publish.")
 
 
 @app.post("/admin/parse-menu-card")
@@ -6433,8 +6384,10 @@ async def parse_menu_card(request: Request, x_admin_key: Optional[str] = Header(
     if not raw_text or not raw_text.strip():
         raise HTTPException(status_code=400, detail="raw_text cannot be empty")
 
-    result = menu_parser.parse_and_update_menu(raw_text)
-    return result
+    from camellia.admin_menu_review import call, reviewer
+    from camellia import menu_review
+    return {"status": "draft", "published": False, "draft": call(menu_review.extract,
+        body.get("menu_key") or "weekly_vegetarian", reviewer(x_admin_key, x_admin_pin), text=raw_text)}
 
 
 @app.post("/admin/menu/preview-text")
@@ -6457,21 +6410,11 @@ async def preview_menu_text(request: Request, x_admin_key: Optional[str] = Heade
     if not raw_text or not raw_text.strip():
         raise HTTPException(status_code=400, detail="raw_text cannot be empty")
 
-    parsed = menu_parser.parse_menu_text(raw_text)
-    veg = parsed.get("vegetarian", []) or []
-    nonveg = parsed.get("non_vegetarian", []) or []
-    if not veg and not nonveg:
-        return {
-            "status": "failed",
-            "reason": "Could not find any dish with a price in that text.",
-            "parsed": parsed,
-        }
-    return {
-        "status": "success",
-        "parsed": {"vegetarian": veg, "non_vegetarian": nonveg},
-        "vegetarian_count": len(veg),
-        "non_vegetarian_count": len(nonveg),
-    }
+    from camellia.admin_menu_review import call, reviewer
+    from camellia import menu_review
+    draft = call(menu_review.extract, body.get("menu_key") or "weekly_vegetarian",
+                 reviewer(x_admin_key, x_admin_pin), text=raw_text)
+    return {"status": "draft", "draft": draft, "published": False}
 
 
 def _reviewed_menu_items(raw: Any, field: str) -> List[Dict[str, Any]]:
@@ -12521,6 +12464,11 @@ Non-Veg:
     # failed deploy: the server has the new page, the kitchen's phone does not.
     # It is rendered per request anyway, so there is nothing to gain by caching
     # it and a support call to lose.
+    from camellia.admin_menu_review import REVIEW_HTML, REVIEW_SCRIPT
+    html_content = html_content.replace('<div id="tab-image" class="panel-card" data-group="menu">',
+        '<div id="tab-image" class="panel-card" data-group="menu">' + REVIEW_HTML + '<div hidden>')
+    html_content = html_content.replace('<div id="tab-ad-routing"', '</div><div id="tab-ad-routing"', 1)
+    html_content = html_content.replace('</body>', REVIEW_SCRIPT + '</body>', 1)
     return HTMLResponse(
         content=html_content,
         headers={

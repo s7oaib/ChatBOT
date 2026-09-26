@@ -182,8 +182,8 @@ def list_menus() -> List[Dict[str, Any]]:
 
 
 def _read_menu_json() -> Dict[str, Any]:
-    with open(config.MENU_JSON_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)
+    from camellia.menu_review import canonical_menu
+    return canonical_menu()
 
 
 def _write_menu_json(data: Dict[str, Any]) -> None:
@@ -391,6 +391,9 @@ def publish(menu_key: str, raw_items: Any = None, changed_by: Optional[str] = No
     responder, records a version, and clears the draft. `raw_items` lets a
     caller publish an explicit body directly (used by restore); omitted, the
     current draft is published."""
+    from camellia.menu_review import has_current, get_draft
+    if has_current(menu_key) or get_draft(menu_key):
+        raise MenuValidationError("Use Review Menu → Approve & Publish for this menu.")
     entry = _menu_entry(menu_key)
     if raw_items is None:
         raw_items = get_draft_items(menu_key)

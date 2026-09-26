@@ -111,7 +111,7 @@ def test_pillow_being_absent_falls_back_to_the_original():
     assert mime == "image/jpeg"
 
 
-def test_the_photo_customers_are_sent_is_the_full_size_original(tmp_path):
+def test_upload_keeps_a_full_resolution_private_review_source(tmp_path, monkeypatch):
     """
     The shrunk copy exists for the model. Saving it as the customer-facing
     card would quietly degrade the thing people actually look at.
@@ -122,6 +122,7 @@ def test_the_photo_customers_are_sent_is_the_full_size_original(tmp_path):
     from fastapi.testclient import TestClient
     from camellia.config import config
     from camellia import weekly_flyer
+    import camellia.database as db_module
     from camellia.menu_parser import menu_parser
     import camellia.database as db_module
     from camellia.app import app
@@ -137,6 +138,8 @@ def test_the_photo_customers_are_sent_is_the_full_size_original(tmp_path):
     with open(original_menu, "r", encoding="utf-8") as f:
         (tmp_path / "menu.json").write_text(f.read(), encoding="utf-8")
     config.MENU_JSON_PATH = str(tmp_path / "menu.json")
+    monkeypatch.setattr(db_module.db, "db_path", str(tmp_path / "review.db"))
+    db_module.db.init_db()
     app.state.limiter.enabled = False
     original = _jpeg(2400, 3200)
     try:
@@ -149,12 +152,13 @@ def test_the_photo_customers_are_sent_is_the_full_size_original(tmp_path):
                 headers={"x-admin-key": "test-api-key-downscale-long-enough"},
             )
         assert resp.status_code == 200
-
-        state = weekly_flyer.get()
-        saved_path = weekly_flyer.uploads_dir() + "/" + state["url"].split("/")[-1]
-        with open(saved_path, "rb") as f:
-            saved = f.read()
-        assert saved == original, "the customer-facing flyer was the shrunk copy"
+        assert resp.json()["published"] is False
+        draft = resp.json()["draft"]
+        from camellia import menu_review
+        saved_path = menu_review.source_file("weekly_vegetarian", draft["draft_id"])
+        with Image.open(saved_path) as saved:
+            assert saved.size == (2400, 3200), "private review source must retain full resolution"
+        assert weekly_flyer.get() is None, "unapproved source must not be customer-facing"
     finally:
         weekly_flyer.clear()
         app.state.limiter.enabled = True

@@ -20,7 +20,9 @@ def isolated():
     "Please share vegetarian menu? Can you deliver to Delhi?",
 ])
 def test_both_requests_use_live_menu_and_approved_delivery(message):
-    result = responder.match_and_respond(message, "holdout", "whatsapp")
+    from datetime import date
+    with patch("camellia.menu_dates.today_ist", return_value=date(2026, 6, 21)):
+        result = responder.match_and_respond(message, "holdout", "whatsapp")
     assert result and result[2] == "delivery_area"
     assert "Delhi NCR" in result[0]
     assert "menu" in result[0].lower()

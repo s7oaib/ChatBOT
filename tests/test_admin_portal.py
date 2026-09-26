@@ -65,7 +65,8 @@ config.ADMIN_API_KEY = TEST_ADMIN_API_KEY
 ADMIN_HEADERS = {"x-admin-key": TEST_ADMIN_API_KEY}
 
 @pytest.fixture(autouse=True)
-def ensure_db():
+def ensure_db(tmp_path, monkeypatch):
+    monkeypatch.setattr(db_module.db, "db_path", str(tmp_path / "admin-portal.db"))
     db_module.db.init_db()
     config.ADMIN_API_KEY = TEST_ADMIN_API_KEY
 
@@ -163,25 +164,16 @@ def test_ad_route_rejects_unknown_products_and_requires_admin():
     assert "Sondesh" in response.json()["detail"]
 
 def test_parse_menu_card_text():
-    """Tests raw text parsing and hot-reloading through the admin API."""
-    with open(config.MENU_JSON_PATH, "r", encoding="utf-8") as f:
-        original_menu = f.read()
-
-    try:
-        test_text = """
-        Weekend Special:
-        * Ilish Machher Jhol - ₹520 (350g)
-        * Lau Ghonto with Bori - ₹260 (250g)
-        """
-        resp = client.post("/admin/parse-menu-card", json={"raw_text": test_text}, headers=ADMIN_HEADERS)
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data.get("status") == "success"
-        assert data.get("updated_items_count", 0) >= 2
-    finally:
-        with open(config.MENU_JSON_PATH, "w", encoding="utf-8") as f:
-            f.write(original_menu)
-        responder.reload_templates()
+    before = open(config.MENU_JSON_PATH, encoding="utf-8").read()
+    resp = client.post("/admin/parse-menu-card",
+        json={"raw_text": "Veg:\nIlish Machher Jhol ₹520 (350g)\nLau Ghonto ₹260"},
+        headers=ADMIN_HEADERS)
+    assert resp.status_code == 200
+    draft = resp.json()["draft"]
+    assert draft["status"] == "NEEDS_REVIEW"
+    assert resp.json()["published"] is False
+    assert len(draft["rows"]) >= 2
+    assert open(config.MENU_JSON_PATH, encoding="utf-8").read() == before
 
 def test_reset_menu_defaults():
     """Tests resetting menu items back to default Bengal cuisine baseline."""
@@ -190,20 +182,7 @@ def test_reset_menu_defaults():
 
     try:
         resp = client.post("/admin/menu/reset-defaults", headers=ADMIN_HEADERS)
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data.get("status") == "success"
-
-        # Verify active menu shows defaults
-        resp_active = client.get("/admin/menu/active", headers=ADMIN_HEADERS)
-        assert resp_active.status_code == 200
-        menu = resp_active.json().get("menu", {})
-        last_week = menu.get("weekly_menus", [])[-1]
-        veg_names = [item["item"] for item in last_week.get("vegetarian", [])]
-        nonveg_names = [item["item"] for item in last_week.get("non_vegetarian", [])]
-
-        assert "Chholar Daal" in veg_names
-        assert "Mangsho (Mutton Kosha)" in nonveg_names
+        assert resp.status_code == 409
     finally:
         with open(config.MENU_JSON_PATH, "w", encoding="utf-8") as f:
             f.write(original_menu)
@@ -838,72 +817,30 @@ def test_no_vision_key_names_groq_first_in_its_guidance():
     assert "GROQ_API_KEY" in result["message"]
 
 
-def test_uploaded_flyer_photo_becomes_the_weekly_menu_card():
-    """
-    "show me the menu" must send the photo that was actually uploaded, not
-    the fixed Till Thursday / From Friday image baked into the repo.
-
-    The vision OCR path extracted text into menu.json but discarded the photo
-    itself, so a customer asking "show me the menu" the day after a flyer
-    upload still saw last month's picture with this week's dish list in the
-    caption below it — a menu that agreed with itself in text but not image.
-    """
-    from camellia import weekly_flyer
-
-    class _GroqResp:
-        status_code = 200
-        def json(self):
-            return {"choices": [{"message": {"content": json.dumps({
-                "vegetarian": [{"item": "Shukto", "description": "", "price_inr": 280, "quantity": "250g"}],
-                "non_vegetarian": [],
-            })}}]}
-
-    class _Client:
-        def __enter__(self): return self
-        def __exit__(self, *a): return False
-        def post(self, url, headers=None, json=None):
-            return _GroqResp()
-
-    from camellia import menu_parser as mp_module
-    with open(config.MENU_JSON_PATH, "r", encoding="utf-8") as f:
-        original = f.read()
+def test_uploaded_flyer_stays_private_until_review_approval():
+    from io import BytesIO
+    from PIL import Image
+    from camellia import menu_parser, menu_review, menu_images
+    original = open(config.MENU_JSON_PATH, encoding="utf-8").read()
+    img = BytesIO()
+    Image.new("RGB", (12, 12), "white").save(img, format="JPEG")
+    payload = {"vegetarian": [{"item":"Shukto","quantity":"250g","price_inr":280}]}
     try:
-        with mock.patch.object(config, "GROQ_API_KEY", "gsk-test"), \
-             mock.patch.object(config, "GROQ_ENABLED", True), \
-             mock.patch.object(mp_module.httpx, "Client", lambda *a, **k: _Client()):
-            resp = client.post(
-                "/admin/menu/upload-image",
-                files={"file": ("flyer.jpg", b"\xff\xd8\xff-fake-jpeg", "image/jpeg")},
-                headers=ADMIN_HEADERS,
-            )
-        assert resp.status_code == 200
-        assert resp.json().get("status") == "success"
-
-        # The photo itself, not just the extracted text, must be recorded.
-        state = weekly_flyer.get()
-        assert state is not None, "the uploaded photo was not saved"
-        assert state["url"].startswith("/uploads/")
-
-        # And it must be servable — an operator cannot tell from the JSON
-        # response alone whether the mount actually works.
-        served = client.get(state["url"])
-        assert served.status_code == 200
-        assert served.content == b"\xff\xd8\xff-fake-jpeg"
-
-        # "show me the menu" must use it in place of the fixed weekly image.
-        reply = client.post(
-            "/api/test-chat",
-            json={"message": "show me the menu", "user_id": "flyer_test_user", "channel": "instagram_ad"},
-        )
-        images = reply.json().get("image_url") or []
-        urls = [i["url"] if isinstance(i, dict) else i for i in images]
-        assert state["url"] in urls
-        assert "Till%20Thursday" not in urls and "From%20Friday" not in " ".join(urls)
+        with mock.patch.object(menu_parser.menu_parser, "parse_image_and_update_menu",
+            return_value={"status":"success","parsed":payload}):
+            resp = client.post("/admin/menu/upload-image",
+                files={"file":("flyer.jpg",img.getvalue(),"image/jpeg")}, headers=ADMIN_HEADERS)
+        assert resp.status_code == 200, resp.text
+        draft = resp.json()["draft"]
+        assert draft["status"] == "NEEDS_REVIEW"
+        assert db_module.db.get_menu_image_current("weekly_vegetarian") is None
+        assert menu_review.current_versions() == []
+        assert open(config.MENU_JSON_PATH, encoding="utf-8").read() == original
+        assert menu_review.source_file("weekly_vegetarian",draft["draft_id"]).exists()
     finally:
-        weekly_flyer.clear()
-        with open(config.MENU_JSON_PATH, "w", encoding="utf-8") as f:
-            f.write(original)
-        responder.reload_templates()
+        current = menu_review.get_draft("weekly_vegetarian")
+        if current and current["status"] not in ("PUBLISHED","REJECTED"):
+            menu_review.reject("weekly_vegetarian",current["draft_id"],current["revision"],"test")
 
 
 def test_uploaded_flyer_caption_names_no_prices_or_dishes():
@@ -925,230 +862,99 @@ def test_uploaded_flyer_caption_names_no_prices_or_dishes():
     weekly_flyer.clear()
 
 
-def test_reset_to_baseline_also_clears_the_uploaded_flyer():
+def test_retired_reset_route_cannot_bypass_menu_review():
     """
-    Reset to Baseline resets the dish text; it must reset the photo too, or
-    the button lies about what it does — dishes back to default, card still
-    showing whatever was last uploaded.
+    Legacy reset endpoint must not bypass the reviewed publication lifecycle.
     """
     from camellia import weekly_flyer
 
     weekly_flyer.save(b"fake-photo-bytes", "image/jpeg")
     assert weekly_flyer.get() is not None
 
-    with open(config.MENU_JSON_PATH, "r", encoding="utf-8") as f:
-        original = f.read()
-    try:
-        resp = client.post("/admin/menu/reset-defaults", headers=ADMIN_HEADERS)
-        assert resp.status_code == 200
-        assert weekly_flyer.get() is None, "reset must clear the uploaded flyer, not just the dish list"
-    finally:
-        with open(config.MENU_JSON_PATH, "w", encoding="utf-8") as f:
-            f.write(original)
-        responder.reload_templates()
+    resp = client.post("/admin/menu/reset-defaults", headers=ADMIN_HEADERS)
+    assert resp.status_code == 409
+    assert weekly_flyer.get() is not None
+    weekly_flyer.clear()
 
 
 def test_no_upload_falls_back_to_the_baked_in_weekly_image():
     """A deployment where nothing has ever been uploaded keeps working."""
     from camellia import weekly_flyer
 
+    from datetime import date
     weekly_flyer.clear()
-    reply = client.post(
-        "/api/test-chat",
-        json={"message": "show me the menu", "user_id": "no_flyer_user", "channel": "instagram_ad"},
-    )
+    with mock.patch("camellia.menu_dates.today_ist", return_value=date(2026, 6, 21)):
+        reply = client.post(
+            "/api/test-chat",
+            json={"message": "show me the menu", "user_id": "no_flyer_user", "channel": "instagram_ad"},
+        )
     images = reply.json().get("image_url") or []
     urls = [i["url"] if isinstance(i, dict) else i for i in images]
     assert any("Till%20Thursday" in u or "From%20Friday" in u for u in urls)
 
 
-def test_photo_and_text_agree_on_the_date_after_an_upload():
-    """
-    Core regression. Uploading a flyer used to update the dish text but never
-    the printed date, so a customer could see this week's dishes in text next
-    to last week's date on the photo caption. The date read off the flyer must
-    now land on both surfaces from the same upload.
-    """
-    from camellia import weekly_flyer
-
-    week = _current_week()
-
-    class _GroqResp:
-        status_code = 200
-        def json(self):
-            return {"choices": [{"message": {"content": json.dumps({
-                "vegetarian": [{"item": "Shukto", "description": "", "price_inr": 280, "quantity": "250g"}],
-                "non_vegetarian": [],
-                "week_of": week,
-                "service_window": "Friday Lunch - Thursday Dinner",
-            })}}]}
-
-    class _Client:
-        def __enter__(self): return self
-        def __exit__(self, *a): return False
-        def post(self, url, headers=None, json=None):
-            return _GroqResp()
-
-    from camellia import menu_parser as mp_module
-    with open(config.MENU_JSON_PATH, "r", encoding="utf-8") as f:
-        original = f.read()
+def test_image_extraction_keeps_unapproved_printed_date_in_draft():
+    from io import BytesIO
+    from PIL import Image
+    from camellia import menu_parser, menu_review
+    img=BytesIO(); Image.new("RGB",(12,12),"white").save(img,format="PNG")
+    week=_current_week()
     try:
-        with mock.patch.object(config, "GROQ_API_KEY", "gsk-test"), \
-             mock.patch.object(config, "GROQ_ENABLED", True), \
-             mock.patch.object(mp_module.httpx, "Client", lambda *a, **k: _Client()):
-            resp = client.post(
-                "/admin/menu/upload-image",
-                files={"file": ("flyer.jpg", b"\xff\xd8\xff-fake-jpeg", "image/jpeg")},
-                headers=ADMIN_HEADERS,
-            )
-        assert resp.status_code == 200
-        assert resp.json().get("week_of") == week
-
-        # Surface 1: the flyer photo's own caption.
-        state = weekly_flyer.get()
-        assert week in state["caption"]
-
-        # Surface 2: the customer-facing weekly menu text, driven from
-        # menu.json — must show the same date the photo now claims.
-        reply = client.post(
-            "/api/test-chat",
-            json={"message": "veg menu", "user_id": "date_regress_user", "channel": "instagram_ad"},
-        )
-        assert week in reply.json().get("response", "")
+        with mock.patch.object(menu_parser.menu_parser,"parse_image_and_update_menu",
+            return_value={"status":"success","week_of":week,"service_window":"Friday to Thursday",
+                "parsed":{"vegetarian":[{"item":"Shukto","quantity":"250g","price_inr":280}]}}):
+            resp=client.post("/admin/menu/upload-image",
+                files={"file":("flyer.png",img.getvalue(),"image/png")},headers=ADMIN_HEADERS)
+        draft=resp.json()["draft"]
+        assert draft["menu_metadata"]["week_of"] == week
+        assert draft["status"] == "NEEDS_REVIEW"
+        assert db_module.db.get_menu_image_current("weekly_vegetarian") is None
     finally:
-        weekly_flyer.clear()
-        with open(config.MENU_JSON_PATH, "w", encoding="utf-8") as f:
-            f.write(original)
-        responder.reload_templates()
+        draft=menu_review.get_draft("weekly_vegetarian")
+        if draft and draft["status"] not in ("PUBLISHED","REJECTED"):
+            menu_review.reject("weekly_vegetarian",draft["draft_id"],draft["revision"],"test")
 
 
-def test_a_bad_ocr_pass_never_blanks_out_a_correct_date():
-    """
-    Extraction returning no date must not erase a date a previous upload got
-    right — no date shown beats a wrong one, but losing a right one to a
-    misread is worse than either.
-    """
-    from camellia import weekly_flyer
-
-    def _groq_response(week_of):
-        class _Resp:
-            status_code = 200
-            def json(self):
-                return {"choices": [{"message": {"content": json.dumps({
-                    "vegetarian": [{"item": "Shukto", "description": "", "price_inr": 280, "quantity": "250g"}],
-                    "non_vegetarian": [],
-                    "week_of": week_of,
-                })}}]}
-        return _Resp()
-
-    from camellia import menu_parser as mp_module
-    with open(config.MENU_JSON_PATH, "r", encoding="utf-8") as f:
-        original = f.read()
+def test_failed_ocr_preserves_live_week_and_returns_reviewable_error():
+    from io import BytesIO
+    from PIL import Image
+    from camellia import menu_parser, menu_review
+    img=BytesIO(); Image.new("RGB",(12,12),"white").save(img,format="PNG")
+    before=open(config.MENU_JSON_PATH,encoding="utf-8").read()
     try:
-        with mock.patch.object(config, "GROQ_API_KEY", "gsk-test"), \
-             mock.patch.object(config, "GROQ_ENABLED", True):
-
-            class _ClientWithDate:
-                def __enter__(self): return self
-                def __exit__(self, *a): return False
-                def post(self, url, headers=None, json=None):
-                    return _groq_response("28th August - 3rd September, 2026")
-
-            with mock.patch.object(mp_module.httpx, "Client", lambda *a, **k: _ClientWithDate()):
-                first = client.post(
-                    "/admin/menu/upload-image",
-                    files={"file": ("flyer.jpg", b"\xff\xd8\xff-1", "image/jpeg")},
-                    headers=ADMIN_HEADERS,
-                )
-            assert first.json().get("week_of") == "28th August - 3rd September, 2026"
-
-            class _ClientNoDate:
-                def __enter__(self): return self
-                def __exit__(self, *a): return False
-                def post(self, url, headers=None, json=None):
-                    return _groq_response(None)
-
-            with mock.patch.object(mp_module.httpx, "Client", lambda *a, **k: _ClientNoDate()):
-                second = client.post(
-                    "/admin/menu/upload-image",
-                    files={"file": ("flyer.jpg", b"\xff\xd8\xff-2", "image/jpeg")},
-                    headers=ADMIN_HEADERS,
-                )
-            # The previous date must survive a second upload that could not read one.
-            assert second.json().get("week_of") == "28th August - 3rd September, 2026"
-            state = weekly_flyer.get()
-            assert state["caption"] != "" and "None" not in state["caption"]
+        with mock.patch.object(menu_parser.menu_parser,"parse_image_and_update_menu",
+            return_value={"status":"failed","reason":"provider detail"}):
+            resp=client.post("/admin/menu/upload-image",
+                files={"file":("menu.png",img.getvalue(),"image/png")},headers=ADMIN_HEADERS)
+        draft=resp.json()["draft"]
+        assert draft["status"] == "FAILED"
+        assert "provider detail" not in str(draft)
+        assert open(config.MENU_JSON_PATH,encoding="utf-8").read()==before
+        assert db_module.db.get_menu_image_current("weekly_vegetarian") is None
     finally:
-        weekly_flyer.clear()
-        with open(config.MENU_JSON_PATH, "w", encoding="utf-8") as f:
-            f.write(original)
-        responder.reload_templates()
+        draft=menu_review.get_draft("weekly_vegetarian")
+        if draft and draft["status"] not in ("PUBLISHED","REJECTED"):
+            menu_review.reject("weekly_vegetarian",draft["draft_id"],draft["revision"],"test")
 
 
-def test_a_second_upload_with_a_new_date_replaces_the_old_one_everywhere():
-    """A week later, a fresh upload must fully replace the previous date, not merge with it."""
-    from camellia import weekly_flyer
-
-    old_week, new_week = _current_week(), _next_week()
-    # The day-and-month prefix of the superseded week, to assert it is gone.
-    old_prefix = old_week.split(" - ")[0]
-
-    def _groq_response(week_of):
-        class _Resp:
-            status_code = 200
-            def json(self):
-                return {"choices": [{"message": {"content": json.dumps({
-                    "vegetarian": [{"item": "Shukto", "description": "", "price_inr": 280, "quantity": "250g"}],
-                    "non_vegetarian": [],
-                    "week_of": week_of,
-                })}}]}
-        return _Resp()
-
-    from camellia import menu_parser as mp_module
-    with open(config.MENU_JSON_PATH, "r", encoding="utf-8") as f:
-        original = f.read()
+def test_upload_does_not_replace_an_unreviewed_menu_draft():
+    from io import BytesIO
+    from PIL import Image
+    from camellia import menu_parser, menu_review
+    img=BytesIO(); Image.new("RGB",(12,12),"white").save(img,format="PNG")
     try:
-        with mock.patch.object(config, "GROQ_API_KEY", "gsk-test"), \
-             mock.patch.object(config, "GROQ_ENABLED", True):
-            for week_of in (old_week, new_week):
-                class _Client:
-                    def __enter__(self): return self
-                    def __exit__(self, *a): return False
-                    def post(self, url, headers=None, json=None, _w=week_of):
-                        return _groq_response(_w)
-                with mock.patch.object(mp_module.httpx, "Client", lambda *a, **k: _Client()):
-                    client.post(
-                        "/admin/menu/upload-image",
-                        files={"file": ("flyer.jpg", b"\xff\xd8\xff", "image/jpeg")},
-                        headers=ADMIN_HEADERS,
-                    )
-
-        state = weekly_flyer.get()
-        assert new_week in state["caption"]
-        assert old_prefix not in state["caption"]
-
-        reply = client.post(
-            "/api/test-chat",
-            json={"message": "veg menu", "user_id": "date_replace_user", "channel": "instagram_ad"},
-        )
-        text = reply.json().get("response", "")
-        assert new_week in text
-        assert old_prefix not in text
+        with mock.patch.object(menu_parser.menu_parser,"parse_image_and_update_menu",
+            return_value={"status":"success","parsed":{"vegetarian":[{"item":"Shukto","price_inr":280}]}}):
+            first=client.post("/admin/menu/upload-image",files={"file":("first.png",img.getvalue(),"image/png")},headers=ADMIN_HEADERS)
+            second=client.post("/admin/menu/upload-image",files={"file":("second.png",img.getvalue(),"image/png")},headers=ADMIN_HEADERS)
+        assert first.status_code==200
+        assert second.status_code==409
+        assert menu_review.current_versions()==[]
+        assert db_module.db.get_menu_image_current("weekly_vegetarian") is None
     finally:
-        weekly_flyer.clear()
-        with open(config.MENU_JSON_PATH, "w", encoding="utf-8") as f:
-            f.write(original)
-        responder.reload_templates()
-
-
-# ---------------------------------------------------------------------------
-# Weekly menu expiry
-#
-# The client's flyers print the week they cover. Once that week has passed the
-# dishes and prices on them are last week's, and a customer would order against
-# them — so an expired menu must not reach anyone, and the slot it occupied
-# must be free for the next upload.
-# ---------------------------------------------------------------------------
+        draft=menu_review.get_draft("weekly_vegetarian")
+        if draft and draft["status"] not in ("PUBLISHED","REJECTED"):
+            menu_review.reject("weekly_vegetarian",draft["draft_id"],draft["revision"],"test")
 
 def _set_current_week(week_of):
     """Rewrites the live week's printed date and hot-reloads the responder."""
@@ -1288,63 +1094,31 @@ def test_expired_weekly_menu_does_not_hide_the_sondesh_collections():
         responder.reload_templates()
 
 
-def test_a_new_upload_takes_over_the_expired_menu_slot():
-    """
-    Uploading this week's flyer must bring the menu straight back to life in
-    the same slot — expiry frees the place, the upload fills it.
-    """
-    from camellia import weekly_flyer
-
-    class _Resp:
-        status_code = 200
-        def json(self):
-            return {"choices": [{"message": {"content": json.dumps({
-                "vegetarian": [{"item": "Shukto", "description": "", "price_inr": 300, "quantity": "250g"}],
-                "non_vegetarian": [],
-                "week_of": _current_week(),
-            })}}]}
-
-    class _Client:
-        def __enter__(self): return self
-        def __exit__(self, *a): return False
-        def post(self, url, headers=None, json=None): return _Resp()
-
-    from camellia import menu_parser as mp_module
-    with open(config.MENU_JSON_PATH, "r", encoding="utf-8") as f:
-        original = f.read()
+def test_new_upload_does_not_republish_an_expired_week_by_itself():
+    from io import BytesIO
+    from PIL import Image
+    from camellia import menu_parser, menu_review
+    img=BytesIO(); Image.new("RGB",(12,12),"white").save(img,format="PNG")
+    original_menu = open(config.MENU_JSON_PATH, encoding="utf-8").read()
+    _set_current_week("19, 20, 21 JUNE")
+    before=open(config.MENU_JSON_PATH,encoding="utf-8").read()
     try:
-        _set_current_week("19, 20, 21 JUNE")
-        stale = client.post(
-            "/api/test-chat",
-            json={"message": "veg menu", "user_id": "slot_user_a", "channel": "instagram_ad"},
-        ).json()
-        assert "finalising this week" in stale.get("response", "")
-
-        with mock.patch.object(config, "GROQ_API_KEY", "gsk-test"), \
-             mock.patch.object(config, "GROQ_ENABLED", True), \
-             mock.patch.object(mp_module.httpx, "Client", lambda *a, **k: _Client()):
-            up = client.post(
-                "/admin/menu/upload-image",
-                files={"file": ("flyer.jpg", b"\xff\xd8\xff-fake", "image/jpeg")},
-                headers=ADMIN_HEADERS,
-            )
-        assert up.status_code == 200
-
-        # Same slot, now live again with the new week's dishes and date.
-        with open(config.MENU_JSON_PATH, "r", encoding="utf-8") as f:
-            assert len(json.load(f)["weekly_menus"]) == 1, "uploads must reuse the slot, not append"
-
-        fresh = client.post(
-            "/api/test-chat",
-            json={"message": "veg menu", "user_id": "slot_user_b", "channel": "instagram_ad"},
-        ).json()
-        assert _current_week() in fresh.get("response", "")
-        assert "finalising this week" not in fresh.get("response", "")
+        with mock.patch.object(menu_parser.menu_parser,"parse_image_and_update_menu",
+            return_value={"status":"success","week_of":_current_week(),
+                          "parsed":{"vegetarian":[{"item":"Shukto","price_inr":300}]}}):
+            resp=client.post("/admin/menu/upload-image",
+                files={"file":("flyer.png",img.getvalue(),"image/png")},headers=ADMIN_HEADERS)
+        assert resp.status_code==200
+        assert resp.json()["draft"]["status"]=="NEEDS_REVIEW"
+        assert open(config.MENU_JSON_PATH,encoding="utf-8").read()==before
+        assert db_module.db.get_menu_image_current("weekly_vegetarian") is None
     finally:
-        weekly_flyer.clear()
-        with open(config.MENU_JSON_PATH, "w", encoding="utf-8") as f:
-            f.write(original)
-        responder.reload_templates()
+        draft=menu_review.get_draft("weekly_vegetarian")
+        if draft and draft["status"] not in ("PUBLISHED","REJECTED"):
+            menu_review.reject("weekly_vegetarian",draft["draft_id"],draft["revision"],"test")
+        with open(config.MENU_JSON_PATH, "w", encoding="utf-8") as stream:
+            stream.write(original_menu)
+        responder.reload_data()
 
 
 def test_expired_weeks_are_pruned_but_the_newest_always_survives():

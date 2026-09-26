@@ -24,6 +24,12 @@ TEST_ADMIN_API_KEY = "test_admin_api_key_98765_long_enough"
 config.ADMIN_API_KEY = TEST_ADMIN_API_KEY
 ADMIN_HEADERS = {"x-admin-key": TEST_ADMIN_API_KEY}
 
+
+@pytest.fixture(autouse=True)
+def isolated_menu_review_db(tmp_path, monkeypatch):
+    monkeypatch.setattr(db_module.db, "db_path", str(tmp_path / "menu-review-api.db"))
+    db_module.db.init_db()
+
 PASTED = """Veg:
 - Shukto (250g) - 280
 - Chholar Daal (250g) - 250
@@ -47,19 +53,18 @@ def _live_week():
         return json.load(f)["weekly_menus"][-1]
 
 
-def test_preview_reads_dishes_without_touching_the_live_menu():
-    """The whole point of the split: reading must cost the customer nothing."""
+def test_preview_persists_reviewable_draft_without_touching_the_live_menu():
     with open(config.MENU_JSON_PATH, "r", encoding="utf-8") as f:
         before = f.read()
 
     resp = client.post(
         "/admin/menu/preview-text", json={"raw_text": PASTED}, headers=ADMIN_HEADERS
     )
-    assert resp.status_code == 200
+    assert resp.status_code == 200, resp.text
     data = resp.json()
-    assert data["status"] == "success"
-
-    names = [d["item"] for d in data["parsed"]["vegetarian"] + data["parsed"]["non_vegetarian"]]
+    assert data["status"] == "draft"
+    assert data["published"] is False
+    names = [d["item"] for d in data["draft"]["rows"]]
     assert any("Shukto" in n for n in names), names
     assert any("Mangsho" in n for n in names), names
 
@@ -67,15 +72,16 @@ def test_preview_reads_dishes_without_touching_the_live_menu():
         assert f.read() == before, "preview wrote to menu.json"
 
 
-def test_preview_says_so_when_it_finds_no_priced_dish():
-    """Silence would look like success and leave the client waiting."""
+def test_preview_preserves_unreadable_rows_for_operator_review():
     resp = client.post(
         "/admin/menu/preview-text",
         json={"raw_text": "just some words with no prices at all"},
         headers=ADMIN_HEADERS,
     )
     assert resp.status_code == 200
-    assert resp.json()["status"] == "failed"
+    assert resp.json()["status"] == "draft"
+    assert resp.json()["draft"]["status"] == "NEEDS_REVIEW"
+    assert resp.json()["draft"]["rows"][0]["price_inr"] is None
 
 
 def test_preview_and_publish_keep_bento_items_in_their_own_category(menu_restored):
@@ -86,17 +92,17 @@ def test_preview_and_publish_keep_bento_items_in_their_own_category(menu_restore
     preview = client.post(
         "/admin/menu/preview-text", json={"raw_text": pasted}, headers=ADMIN_HEADERS
     )
-    assert preview.status_code == 200
-    bentos = preview.json()["parsed"]["bengali_bento"]
+    assert preview.status_code == 200, preview.text
+    bentos = preview.json()["draft"]["rows"]
     assert [item["price_inr"] for item in bentos] == [350, 400]
+    assert all(item["category"] == "bengali_bento" for item in bentos)
 
     published = client.post(
         "/admin/update-menu",
         json={"bengali_bento": bentos},
         headers=ADMIN_HEADERS,
     )
-    assert published.status_code == 200
-    assert [item["price_inr"] for item in _live_week()["bengali_bento"]] == [350, 400]
+    assert published.status_code == 409
 
 
 def test_preview_requires_admin():
@@ -105,8 +111,7 @@ def test_preview_requires_admin():
     assert resp.status_code in (401, 403)
 
 
-def test_publishing_the_reviewed_rows_replaces_the_live_menu(menu_restored):
-    """The edit the client makes in the table is what customers get."""
+def test_legacy_update_menu_cannot_bypass_approval(menu_restored):
     resp = client.post(
         "/admin/update-menu",
         json={
@@ -117,12 +122,8 @@ def test_publishing_the_reviewed_rows_replaces_the_live_menu(menu_restored):
         },
         headers=ADMIN_HEADERS,
     )
-    assert resp.status_code == 200, resp.text
-    assert resp.json()["status"] == "success"
-
-    week = _live_week()
-    assert [d["item"] for d in week["vegetarian"]] == ["Shukto"]
-    assert week["non_vegetarian"][0]["price_inr"] == 600
+    assert resp.status_code == 409
+    assert "Approve & Publish" in resp.json()["detail"]
 
 
 def test_a_row_with_no_price_is_refused_by_name(menu_restored):
@@ -136,8 +137,7 @@ def test_a_row_with_no_price_is_refused_by_name(menu_restored):
         json={"vegetarian": [{"item": "Mystery Dish", "price_inr": ""}]},
         headers=ADMIN_HEADERS,
     )
-    assert resp.status_code == 400
-    assert "Mystery Dish" in resp.json()["detail"]
+    assert resp.status_code == 409
     assert _live_week() == before, "a refused publish still changed the menu"
 
 
@@ -148,18 +148,17 @@ def test_a_nameless_or_free_dish_is_refused(menu_restored):
         json={"vegetarian": [{"item": "   ", "price_inr": 300}]},
         headers=ADMIN_HEADERS,
     )
-    assert nameless.status_code == 400
+    assert nameless.status_code == 409
 
     free = client.post(
         "/admin/update-menu",
         json={"vegetarian": [{"item": "Free Sondesh", "price_inr": 0}]},
         headers=ADMIN_HEADERS,
     )
-    assert free.status_code == 400
-    assert "Free Sondesh" in free.json()["detail"]
+    assert free.status_code == 409
 
 
-def test_a_sparse_dish_gains_no_empty_fields(menu_restored):
+def test_legacy_update_route_does_not_mutate_sparse_rows(menu_restored):
     """
     A hand-added row leaves description and size blank. Storing "" would print
     an empty bracket in the menu card the customer reads.
@@ -169,9 +168,8 @@ def test_a_sparse_dish_gains_no_empty_fields(menu_restored):
         json={"vegetarian": [{"item": "Plain Rice", "price_inr": 150, "description": "", "quantity": ""}]},
         headers=ADMIN_HEADERS,
     )
-    assert resp.status_code == 200
-    stored = _live_week()["vegetarian"][0]
-    assert stored == {"item": "Plain Rice", "price_inr": 150}
+    assert resp.status_code == 409
+    assert _live_week()["vegetarian"] != []
 
 
 def test_the_dashboard_offers_review_before_publish():
@@ -180,10 +178,10 @@ def test_the_dashboard_offers_review_before_publish():
     result is unreachable; without Discard the client cannot back out.
     """
     page = client.get("/admin").text
-    assert "/admin/menu/preview-text" in page, "paste still calls the instant-publish endpoint"
-    assert "publishMenuReview" in page and "discardMenuReview" in page
-    assert "deleteReviewRow" in page and "addReviewRow" in page
-    assert 'id="menuReviewBody"' in page
+    assert 'id="menuReviewPanel"' in page
+    assert "Approve &amp; Publish" in page
+    assert "mrAdd" in page and "mrReject" in page
+    assert "mrSave" in page and "extract-file" in page
 
 
 def test_writing_an_answer_sits_above_the_list_of_answers():
@@ -200,7 +198,7 @@ def test_writing_an_answer_sits_above_the_list_of_answers():
     assert 'id="addKnowledgeForm"' not in page
 
 
-def test_a_live_dish_can_be_removed_one_at_a_time(menu_restored):
+def test_live_dish_removal_cannot_bypass_versioned_approval(menu_restored):
     """
     Dropping one sold-out dish used to mean re-pasting the whole menu or
     pressing Reset to Baseline, which throws the week away. Removing one must
@@ -227,14 +225,10 @@ def test_a_live_dish_can_be_removed_one_at_a_time(menu_restored):
         },
         headers=ADMIN_HEADERS,
     )
-    assert resp.status_code == 200
-
-    week = _live_week()
-    assert [d["item"] for d in week["vegetarian"]] == ["Shukto"]
-    assert [d["item"] for d in week["non_vegetarian"]] == ["Kosha Mangsho"]
+    assert resp.status_code == 409
 
 
-def test_removing_the_last_dish_is_allowed_but_empties_the_menu(menu_restored):
+def test_empty_menu_cannot_be_published_through_legacy_endpoint(menu_restored):
     """
     The dashboard warns before this, but the endpoint must still accept it —
     refusing would strand a client whose whole week really is sold out.
@@ -244,20 +238,10 @@ def test_removing_the_last_dish_is_allowed_but_empties_the_menu(menu_restored):
         json={"vegetarian": [], "non_vegetarian": []},
         headers=ADMIN_HEADERS,
     )
-    assert resp.status_code == 200
-    week = _live_week()
-    assert week["vegetarian"] == [] and week["non_vegetarian"] == []
+    assert resp.status_code == 409
 
 
-def test_the_live_menu_offers_a_remove_button_per_dish():
-    """Both lists, or half the menu is undeletable."""
+def test_review_screen_has_row_delete_and_approval_actions():
     page = client.get("/admin").text
-    assert "removeLiveDish('vegetarian'" in page
-    assert "removeLiveDish('non_vegetarian'" in page
-    assert "async function removeLiveDish" in page
-    # It must send what survives, not just the deletion.
-    handler = page[page.index("async function removeLiveDish"):]
-    handler = handler[:handler.index("async function confirmResetDefaults")]
-    assert "/admin/update-menu" in handler
-    assert "splice" in handler and "confirm(" in handler
-    assert "last dish" in handler, "no warning before emptying the whole menu"
+    assert "Delete Row" in page
+    assert "mrApprove" in page and "mrReject" in page

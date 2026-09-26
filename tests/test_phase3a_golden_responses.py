@@ -1,6 +1,7 @@
 """Phase 3A Golden Response routing and media guards."""
 
 import uuid
+from unittest.mock import patch
 
 import pytest
 
@@ -300,17 +301,20 @@ def test_unsupported_new_request_overrides_stale_home_table_context_on_instagram
 
 
 def test_explicit_bento_switch_preserves_bento_context_for_bare_price():
+    from datetime import date
     user_id = _user("bento_switch")
     session_memory.clear_session(user_id, "whatsapp")
-    _text, matched, template_id, _images = responder.match_and_respond(
+    with patch("camellia.menu_dates.today_ist", return_value=date(2026, 6, 21)):
+        _text, matched, template_id, _images = responder.match_and_respond(
         "Actually I want Bengali Bento", user_id=user_id, channel="whatsapp"
-    )
+        )
     assert matched is True
     assert template_id == "bento_details"
 
-    text, matched, template_id, images = responder.match_and_respond(
-        "price?", user_id=user_id, channel="whatsapp"
-    )
+    with patch("camellia.menu_dates.today_ist", return_value=date(2026, 6, 21)):
+        text, matched, template_id, images = responder.match_and_respond(
+            "price?", user_id=user_id, channel="whatsapp"
+        )
     assert matched is True
     assert template_id == "bento_details"
     assert "₹350" in text

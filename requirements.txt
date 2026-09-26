@@ -8,3 +8,5 @@ python-multipart>=0.0.9
 # Downscales uploaded menu flyers before they go to the vision model:
 # a phone photo is ~5000 of the 8000 tokens/minute the free tier allows.
 Pillow>=10.0.0
+# Bounded PDF text extraction and page rendering; reuses Pillow/Groq for vision.
+pypdfium2>=4.30,<6

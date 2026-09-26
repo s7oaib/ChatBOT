@@ -143,8 +143,8 @@ def weekly_meal_entries() -> Dict[str, Dict[str, Any]]:
 
     table: Dict[str, Dict[str, Any]] = {}
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            weeks = json.load(f).get("weekly_menus") or []
+        from camellia.menu_review import canonical_menu
+        weeks = canonical_menu(path).get("weekly_menus") or []
         if weeks:
             current = weeks[-1]
             if not menu_dates.is_expired(current.get("week_of")):

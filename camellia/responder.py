@@ -1084,6 +1084,9 @@ class DeterministicResponder:
 
     def _load_json(self, path: str) -> Dict[str, Any]:
         try:
+            if path == self.menu_path:
+                from camellia.menu_review import canonical_menu
+                return canonical_menu(path)
             with open(path, "r", encoding="utf-8") as f:
                 return json.load(f)
         except Exception as e:
@@ -2890,6 +2893,18 @@ class DeterministicResponder:
                 })
                 session_memory.add_turn(user_id, channel, user_message, source_description)
                 return source_description, True, "source_description", None
+
+        if channel == "instagram":
+            menu_result = rag_fallback_engine.retrieve_approved_menu(user_message)
+            if menu_result.proposed_intent == "approved_menu":
+                response_text = menu_result.auto_response or self._generic_fallback()
+                facts.update({"last_route_source": "APPROVED_MENU" if menu_result.auto_response else "HUMAN_HANDOFF",
+                    "last_knowledge_ids": menu_result.source_refs,
+                    "last_grounding": "approved_menu_exact_facts" if menu_result.auto_response else "unsupported_menu_claim",
+                    "knowledge_sufficient": bool(menu_result.auto_response), "last_llm_called": False,
+                    "source_context_superseded": True, "source_context_used": False})
+                session_memory.add_turn(user_id, channel, user_message, response_text)
+                return response_text, bool(menu_result.auto_response), "approved_menu" if menu_result.auto_response else None, None
 
         # A mapped source's configured Topic description is the answer to a
         # genuine, vague source-details request. Resolve this before the broad
@@ -5497,6 +5512,19 @@ class DeterministicResponder:
         )
         if not template:
             return {}
+        collection_keys = {"aamar_mishti_collection": "aamar_mishti",
+                           "signature_collection": "signature"}
+        if template_id in collection_keys:
+            from camellia.menu_review import current_versions
+            reviewed = next((v for v in current_versions()
+                if v["menu_key"] == collection_keys[template_id]), None)
+            if reviewed:
+                approval = json.loads(reviewed["approval_json"])
+                approved = [f"• {r['item']}{(' ' + r['quantity']) if r['quantity'] else ''} — ₹{r['price_inr']}"
+                            for r in approval["rows"]]
+                template = dict(template)
+                template["response"] = "Current approved menu:\n" + "\n".join(approved)
+                template.pop("responses", None)
         try:
             override = db.get_response_template_override(template_id)
         except Exception as exc:

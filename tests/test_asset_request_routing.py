@@ -13,7 +13,9 @@ from camellia.session_memory import session_memory
 
 @pytest.fixture(autouse=True)
 def deterministic_runtime():
+    from datetime import date
     with patch.object(session_memory, "_sessions", type(session_memory._sessions)()), \
+         patch("camellia.menu_dates.today_ist", return_value=date(2026, 6, 21)), \
          patch.object(config, "STRUCTURED_NLU_ENABLED", False), \
          patch.object(config, "SEMANTIC_ROUTER_ENABLED", False), \
          patch.object(config, "CONVERSATION_IMPROVEMENTS_ENABLED", True), \

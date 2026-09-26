@@ -67,6 +67,9 @@ class RAGFallbackEngine:
 
     def _load_json(self, path: str) -> Dict[str, Any]:
         try:
+            if path == self.menu_path:
+                from camellia.menu_review import canonical_menu
+                return canonical_menu(path)
             with open(path, "r", encoding="utf-8") as f:
                 return json.load(f)
         except Exception as e:
@@ -281,6 +284,91 @@ class RAGFallbackEngine:
     ) -> bool:
         return self.grounding_report(answer, context_chunks, strict=strict)[0]
 
+    def menu_grounding_report(self, answer: str, approved_sentences: List[str]) -> Tuple[bool, str]:
+        """Conservative menu gate: preserve the product/quantity/price binding.
+
+        A bag-of-numbers check alone permits swapping two products' prices.
+        Menu answers need no creative generation: exact approved statements
+        are the deterministic fallback as well as the generation allowlist.
+        """
+        normalize = lambda value: re.sub(r"\s+", " ", value.strip().rstrip(".!"))
+        allowed = {normalize(s) for s in approved_sentences}
+        valid = normalize(answer) in allowed
+        return valid, "approved_menu_exact_facts" if valid else "unsupported_menu_claim"
+
+    def retrieve_approved_menu(self, user_message: str) -> RAGResult:
+        from camellia.menu_review import current_versions
+        result = RAGResult()
+        message = user_message.casefold().strip()
+        matches = []
+        for version in current_versions():
+            approval = json.loads(version["approval_json"])
+            for row in approval["rows"]:
+                name = row["item"].casefold()
+                if re.search(r"(?<!\w)" + re.escape(name) + r"(?!\w)", message):
+                    matches.append((version, row))
+        if not matches:
+            return result
+        # Never choose an arbitrary menu/pack when the identity is ambiguous.
+        quantities = re.findall(r"\b\d+(?:\.\d+)?\s*(?:kg|g|pcs|pieces|box|pack)\b", message)
+        if quantities:
+            matches = [(v, r) for v, r in matches if re.sub(r"\s", "", r["quantity"].lower()) in
+                       {re.sub(r"\s", "", q) for q in quantities}]
+        result.proposed_intent = "approved_menu"
+        result.approval_status = "APPROVED_MENU"
+        if not matches and re.search(r"\b(?:aamar mishti|signature collection)\b", message):
+            menu_id = "aamar_mishti" if "aamar mishti" in message else "signature"
+            if re.search(r"\b(?:menu|price|prices|cost|flavours?|items?)\b", message):
+                rows = [r for v in current_versions() if v["menu_key"] == menu_id
+                        for r in json.loads(v["approval_json"])["rows"]]
+                if rows:
+                    sentences = [f"{r['item']}{(' ' + r['quantity']) if r['quantity'] else ''} is ₹{r['price_inr']}." for r in rows]
+                    result.source_chunks = sentences
+                    result.source_refs = result.retrieved_sources = [f"approved_menu:{menu_id}:version:{v['id']}"
+                        for v in current_versions() if v["menu_key"] == menu_id]
+                    result.proposed_response = result.auto_response = "Current approved menu:\n" + "\n".join(sentences)
+                    result.confidence_score = result.similarity_score = 1.0
+                    return result
+                return result
+        if not matches:
+            result.proposed_intent = "unknown_intent"
+            return result
+        if len(matches) > 1 and len({version["menu_key"] for version, _ in matches}) == 1 and not quantities:
+            menu_key = matches[0][0]["menu_key"]
+            rows = [row for version, row in matches if version["menu_key"] == menu_key]
+            version_ids = sorted({version["id"] for version, _ in matches})
+            sentences = [f"{row['item']}{(' ' + row['quantity']) if row['quantity'] else ''} is ₹{row['price_inr']}." for row in rows]
+            result.source_chunks = sentences
+            result.source_refs = result.retrieved_sources = [f"approved_menu:{menu_key}:version:{item_id}" for item_id in version_ids]
+            words = set(re.findall(r"\w+", re.sub(re.escape(matches[0][1]["item"].casefold()), "", message)))
+            allowed = {"how", "much", "is", "the", "what", "does", "cost", "price", "for", "please", "pls", "of", "tell", "me"}
+            if words <= allowed and words & {"price", "cost", "much"}:
+                result.proposed_response = result.auto_response = "Current approved prices:\n" + "\n".join(sentences)
+                result.confidence_score = result.similarity_score = 1.0
+            return result
+        if len(matches) != 1:
+            result.has_conflict = True
+            return result
+        version, row = matches[0]
+        ref = f"approved_menu:{version['menu_key']}:version:{version['id']}:item:{row['item']}"
+        result.source_refs = result.retrieved_sources = [ref]
+        remaining = re.sub(re.escape(row["item"].casefold()), "", message)
+        if row["quantity"]:
+            remaining = re.sub(re.escape(row["quantity"].casefold()), "", remaining)
+        words = set(re.findall(r"\w+", remaining))
+        allowed = {"how", "much", "is", "the", "what", "does", "cost", "price", "for", "please", "pls", "of", "tell", "me"}
+        if not words <= allowed or not words & {"price", "cost", "much"}:
+            result.contains_unapproved_facts = True
+            return result
+        quantity = f" {row['quantity']}" if row["quantity"] else ""
+        answer = f"{row['item']}{quantity} is ₹{row['price_inr']}."
+        result.source_chunks = [answer]
+        result.proposed_response = answer
+        if self.menu_grounding_report(answer, result.source_chunks)[0]:
+            result.auto_response = answer
+            result.confidence_score = result.similarity_score = 1.0
+        return result
+
     def retrieve(self, user_message: str, *, persist_candidate: bool = True) -> RAGResult:
         """
         Retrieves relevant context chunks strictly from approved source documents,
@@ -288,7 +376,9 @@ class RAGFallbackEngine:
         and (when ``persist_candidate`` is true) creates a candidate template
         with status 'PENDING_APPROVAL'.
         """
-        result = RAGResult()
+        result = self.retrieve_approved_menu(user_message)
+        if result.proposed_intent == "approved_menu":
+            return result
         if not user_message or not user_message.strip():
             return result
 

@@ -1121,6 +1121,20 @@ class Database:
             );
             """)
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_menu_versions_key ON menu_versions(menu_key, id DESC);")
+            # Additive review metadata: existing menus and versions remain untouched.
+            for table, column, declaration in (
+                ("menu_drafts", "review_json", "TEXT"),
+                ("menu_versions", "approval_json", "TEXT"),
+                ("menu_versions", "is_current", "INTEGER NOT NULL DEFAULT 0"),
+            ):
+                columns = {r[1] for r in cursor.execute(f"PRAGMA table_info({table})")}
+                if column not in columns:
+                    cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+            cursor.execute("""CREATE TABLE IF NOT EXISTS menu_review_audit (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, draft_id TEXT NOT NULL,
+                menu_key TEXT NOT NULL, action TEXT NOT NULL, actor TEXT NOT NULL,
+                details_json TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )""")
 
             # Visual Menu Manager: durable image versions per menu_key. Image
             # bytes live on the same durable volume as menu.json; this table

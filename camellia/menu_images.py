@@ -123,8 +123,10 @@ def _fallback(menu_key: str) -> Optional[str]:
     static_default = _BUILTIN_DEFAULT_IMAGES.get(menu_key)
     if static_default:
         return static_default
-    flyer = weekly_flyer.get()
-    return flyer.get("url") if flyer else "/images/From%20Friday.jpeg"
+    if menu_key in WEEKLY_MENU_KEYS:
+        flyer = weekly_flyer.get()
+        return flyer.get("url") if flyer else "/images/From%20Friday.jpeg"
+    return None
 
 
 def _published_sort_key(row: Dict[str, Any]) -> tuple:
@@ -246,7 +248,17 @@ def preview(menu_key: str) -> Dict[str, Any]:
     return {"menu_key": menu_key, "current": current_url_value, "draft": db.get_menu_image_draft(menu_key)}
 
 
+def _requires_review(menu_key: str) -> bool:
+    key = _key(menu_key)
+    draft = db.get_menu_draft(key)
+    with db.get_connection() as conn:
+        current = conn.execute("SELECT 1 FROM menu_versions WHERE menu_key=? AND is_current=1", (key,)).fetchone()
+    return bool(current or (draft and draft.get("review_json")))
+
+
 def publish(menu_key: str) -> Dict[str, Any]:
+    if _requires_review(menu_key):
+        raise ValueError("Use Review Menu → Approve & Publish to publish facts and flyer together.")
     menu_key = _key(menu_key)
     if not _known(menu_key):
         raise KeyError(menu_key)
@@ -277,6 +289,8 @@ def history(menu_key: str) -> list[Dict[str, Any]]:
 
 
 def restore(menu_key: str, version_id: int) -> Optional[Dict[str, Any]]:
+    if _requires_review(menu_key):
+        raise ValueError("Restore the approved menu version through Review Menu.")
     menu_key = _key(menu_key)
     if not _known(menu_key):
         raise KeyError(menu_key)

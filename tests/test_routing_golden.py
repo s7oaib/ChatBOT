@@ -16,6 +16,9 @@ CASES = json.loads(
 @pytest.mark.parametrize("case", CASES, ids=[case["id"] for case in CASES])
 def test_client_approved_routing_golden(case, monkeypatch):
     monkeypatch.setattr(config, "BYPASS_AD_GATE", True)
+    if case["id"] == "weekly_veg_menu":
+        from datetime import date
+        monkeypatch.setattr("camellia.menu_dates.today_ist", lambda: date(2026, 6, 21))
     user_id = "golden_" + case["id"]
     session_memory.clear_session(user_id, "instagram")
 

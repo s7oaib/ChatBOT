@@ -46,6 +46,11 @@ class Test25AgentStressScenarios(unittest.TestCase):
         db.init_db()
         self.responder = DeterministicResponder()
         session_memory._sessions.clear()
+        from datetime import date
+        from unittest.mock import patch
+        self.menu_clock = patch("camellia.menu_dates.today_ist", return_value=date(2026, 6, 21))
+        self.menu_clock.start()
+        self.addCleanup(self.menu_clock.stop)
 
     def test_agent_01_bengali_native_speaker(self):
         """Agent 1: Speaks in Bengali script and Banglish asking for Nolen Gur Sondesh."""

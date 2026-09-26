@@ -40,6 +40,12 @@ class TestCamelliaBot(unittest.TestCase):
         from camellia.session_memory import session_memory
         session_memory._sessions.clear()
         responder.qa_data = responder._load_json(responder.qa_path)
+        # menu.json is a historical June fixture. Exercise its live-menu
+        # response contract at a deterministic date in that printed week.
+        from datetime import date
+        menu_clock = patch("camellia.menu_dates.today_ist", return_value=date(2026, 6, 21))
+        menu_clock.start()
+        self.addCleanup(menu_clock.stop)
         # Clear tables between tests
         with db.get_connection() as conn:
             cursor = conn.cursor()
@@ -792,7 +798,7 @@ class TestCamelliaBot(unittest.TestCase):
         self.assertNotIn("ORDER DRAFT RECEIPT", resp2)
 
     def test_parse_raw_menu_text(self):
-        """Test MenuParser regex extraction of items, quantities, prices, and categories from unstructured text."""
+        """Only explicit menu headings classify parsed facts; ambiguous stays reviewable."""
         from camellia.menu_parser import menu_parser
         raw = """
         Bengal Sweet Special:
@@ -804,11 +810,10 @@ class TestCamelliaBot(unittest.TestCase):
         • Chicken Cutlet 2pcs - ₹350
         """
         parsed = menu_parser.parse_menu_text(raw)
-        self.assertTrue(len(parsed["vegetarian"]) >= 2)
+        self.assertTrue(parsed["vegetarian"] == [])
         self.assertTrue(len(parsed["non_vegetarian"]) >= 2)
         
-        veg_names = [item["item"] for item in parsed["vegetarian"]]
-        self.assertTrue(any("Rose" in name for name in veg_names))
+        self.assertTrue(any("Rose" in row["item"] for row in parsed["unclassified"]))
         
         nonveg_names = [item["item"] for item in parsed["non_vegetarian"]]
         self.assertTrue(any("Mutton" in name for name in nonveg_names))
@@ -824,8 +829,9 @@ class TestCamelliaBot(unittest.TestCase):
             response = self.client.post("/admin/parse-menu-card", json={"raw_text": raw_text}, headers=headers)
             self.assertEqual(response.status_code, 200)
             data = response.json()
-            self.assertEqual(data["status"], "success")
-            self.assertTrue(data["updated_items_count"] >= 2)
+            self.assertEqual(data["status"], "draft")
+            self.assertFalse(data["published"])
+            self.assertGreaterEqual(len(data["draft"]["rows"]), 2)
         finally:
             with open(config.MENU_JSON_PATH, "w", encoding="utf-8") as f:
                 f.write(original_menu)
@@ -1445,8 +1451,7 @@ class TestCamelliaBot(unittest.TestCase):
                     "vegetarian": [{"item": "Test Sondesh Special", "price_inr": 499}]
                 }
             )
-            self.assertEqual(res.status_code, 200)
-            self.assertEqual(res.json()["status"], "success")
+            self.assertEqual(res.status_code, 409)
         finally:
             with open(config.MENU_JSON_PATH, "w", encoding="utf-8") as f:
                 f.write(original_menu)
@@ -2518,16 +2523,18 @@ class TestInteractiveMenuFlow(unittest.TestCase):
 
     def test_one_word_veg_and_nonveg_answers_resolve(self):
         """The bot asks "Veg or Non-Veg?", so a one-word reply has to work."""
+        from datetime import date
         from camellia.session_memory import session_memory
-        for answer, expected in (("veg", "weekly_menu_veg"), ("non veg", "weekly_menu_nonveg")):
-            uid = f"choice_{answer}"
-            session_memory.clear_session(uid, "whatsapp")
-            self._reply(uid, "🍱 Meals")
-            self._reply(uid, "how much?")
-            text, matched, tmpl, _ = self._reply(uid, answer)
-            self.assertTrue(matched, f"One-word '{answer}' dead-ended")
-            self.assertEqual(tmpl, expected, f"'{answer}' routed to {tmpl}")
-            self.assertIn("₹", text, f"'{answer}' menu came back without prices")
+        with patch("camellia.menu_dates.today_ist", return_value=date(2026, 6, 21)):
+            for answer, expected in (("veg", "weekly_menu_veg"), ("non veg", "weekly_menu_nonveg")):
+                uid = f"choice_{answer}"
+                session_memory.clear_session(uid, "whatsapp")
+                self._reply(uid, "🍱 Meals")
+                self._reply(uid, "how much?")
+                text, matched, tmpl, _ = self._reply(uid, answer)
+                self.assertTrue(matched, f"One-word '{answer}' dead-ended")
+                self.assertEqual(tmpl, expected, f"'{answer}' routed to {tmpl}")
+                self.assertIn("₹", text, f"'{answer}' menu came back without prices")
 
     def test_bento_pricing_quotes_the_confirmed_tiers(self):
         """The meals flow must quote the client-confirmed tiers, and only those."""
@@ -2993,8 +3000,8 @@ class TestGoogleSheetMenuSync(unittest.TestCase):
             mock_remote.return_value = {"status": "success", "updated_items_count": 3}
             resp = client.post("/admin/sync-menu", headers={"X-Admin-Key": "test-api-key-long-enough"})
 
-        self.assertEqual(resp.status_code, 200)
-        mock_remote.assert_called_once()
+        self.assertEqual(resp.status_code, 409)
+        mock_remote.assert_not_called()
         mock_local.assert_not_called()
 
     def test_only_google_hosted_sheets_are_fetched(self):

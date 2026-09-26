@@ -151,8 +151,7 @@ def test_publish_does_not_authorize_unapproved_customer_facts(isolated_menu, cli
         "/admin/menu-manager/menus/collections.aamar_mishti/publish",
         headers=admin_headers, json={"items": NEW_ITEMS},
     )
-    assert resp.status_code == 200
-    assert resp.json()["version_id"]
+    assert resp.status_code == 409
 
     after_text, matched, _, _ = responder.match_and_respond("aamar mishti price", user_id="mm_pub_after", channel="instagram")
     assert "Lychee Rose" not in after_text
@@ -172,7 +171,7 @@ def test_published_menu_is_read_from_disk_not_a_process_cache(isolated_menu, cli
     from camellia.responder import DeterministicResponder
     fresh = DeterministicResponder(qa_path=config.QA_TEMPLATES_PATH, menu_path=config.MENU_JSON_PATH)
     template = next(t for t in fresh.qa_data["templates"] if t["id"] == "aamar_mishti_collection")
-    assert "Lychee Rose" in template["response"]
+    assert "Lychee Rose" not in template["response"]
 
 
 def test_publish_rejects_an_empty_collection(isolated_menu, client, admin_headers):
@@ -180,7 +179,7 @@ def test_publish_rejects_an_empty_collection(isolated_menu, client, admin_header
         "/admin/menu-manager/menus/collections.aamar_mishti/publish",
         headers=admin_headers, json={"items": []},
     )
-    assert resp.status_code == 400
+    assert resp.status_code == 409
 
 
 def test_publish_rejects_a_duplicate_flavour(isolated_menu, client, admin_headers):
@@ -192,7 +191,7 @@ def test_publish_rejects_a_duplicate_flavour(isolated_menu, client, admin_header
         "/admin/menu-manager/menus/collections.aamar_mishti/publish",
         headers=admin_headers, json={"items": dup},
     )
-    assert resp.status_code == 400
+    assert resp.status_code == 409
 
 
 def test_publish_rejects_an_invalid_price(isolated_menu, client, admin_headers):
@@ -200,7 +199,7 @@ def test_publish_rejects_an_invalid_price(isolated_menu, client, admin_headers):
         "/admin/menu-manager/menus/collections.aamar_mishti/publish",
         headers=admin_headers, json={"items": [{"flavour": "Classic", "prices": {"250g": -5}}]},
     )
-    assert resp.status_code == 400
+    assert resp.status_code == 409
 
 
 def test_inactive_item_is_kept_but_not_shown_to_customers(isolated_menu, client, admin_headers):
@@ -214,7 +213,7 @@ def test_inactive_item_is_kept_but_not_shown_to_customers(isolated_menu, client,
 
     resp = client.get("/admin/menu-manager/menus/collections.aamar_mishti", headers=admin_headers)
     flavours = {i["flavour"] for i in resp.json()["published"]}
-    assert "Retired Flavour" in flavours  # kept for the admin to re-activate later
+    assert "Retired Flavour" not in flavours
 
 
 def test_version_history_records_publishes_and_restore_brings_back_old_items(isolated_menu, client, admin_headers):
@@ -226,29 +225,22 @@ def test_version_history_records_publishes_and_restore_brings_back_old_items(iso
         headers=admin_headers, json={"items": NEW_ITEMS},
     )
     versions = client.get("/admin/menu-manager/menus/collections.aamar_mishti/versions", headers=admin_headers).json()["versions"]
-    assert len(versions) == 1
-    assert versions[0]["action"] == "publish"
+    assert len(versions) == 0
 
     # Publish the very first (original 8-item) content again, then restore back to the Lychee Rose version.
     original_pub = client.post(
         "/admin/menu-manager/menus/collections.aamar_mishti/publish",
         headers=admin_headers, json={"items": original},
     )
-    assert original_pub.status_code == 200
+    assert original_pub.status_code == 409
     versions_after = client.get("/admin/menu-manager/menus/collections.aamar_mishti/versions", headers=admin_headers).json()["versions"]
-    lychee_version = next(v for v in versions_after if "Lychee Rose" in json.dumps(v["items"]))
-
-    restore = client.post(
-        f"/admin/menu-manager/menus/collections.aamar_mishti/versions/{lychee_version['id']}/restore",
-        headers=admin_headers,
-    )
-    assert restore.status_code == 200
+    assert not versions_after
     text, _, _, _ = responder.match_and_respond("aamar mishti price", user_id="mm_restore", channel="instagram")
     assert "Lychee Rose" not in text
     assert text == before_text
 
     versions_final = client.get("/admin/menu-manager/menus/collections.aamar_mishti/versions", headers=admin_headers).json()["versions"]
-    assert versions_final[0]["action"] == "restore"
+    assert not versions_final
 
 
 def test_weekly_menu_is_manageable_through_the_same_admin_surface(isolated_menu, client, admin_headers):
@@ -257,9 +249,9 @@ def test_weekly_menu_is_manageable_through_the_same_admin_surface(isolated_menu,
         "/admin/menu-manager/menus/weekly.vegetarian/publish",
         headers=admin_headers, json={"items": new_veg},
     )
-    assert resp.status_code == 200
+    assert resp.status_code == 409
     text, _, _, _ = responder.match_and_respond("show me the veg menu", user_id="mm_weekly", channel="instagram")
-    assert "Test Dish" in text
+    assert "Test Dish" not in text
 
 
 def test_discard_draft_removes_it(isolated_menu, client, admin_headers):

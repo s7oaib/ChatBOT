@@ -7,7 +7,6 @@ import httpx
 from typing import Dict, Any, List, Optional, Tuple
 from camellia.config import config
 from camellia.monitoring import get_logger
-from camellia.sheet_sync import sheet_sync
 
 log = get_logger("camellia.menu_parser")
 
@@ -207,41 +206,6 @@ DESCRIPTION_SECTIONS = (
 )
 
 
-def _known_descriptions(menu_data: Dict[str, Any]) -> Dict[str, str]:
-    """Every dish description already on file, keyed by lowercased dish name."""
-    known: Dict[str, str] = {}
-    for week in menu_data.get("weekly_menus", []) or []:
-        for section in DESCRIPTION_SECTIONS:
-            for dish in week.get(section, []) or []:
-                name = str(dish.get("item", "")).strip().lower()
-                text = str(dish.get("description", "")).strip()
-                if name and text:
-                    known.setdefault(name, text)
-    return known
-
-
-def _fill_descriptions(items: List[Dict[str, Any]], known: Dict[str, str]) -> List[Dict[str, Any]]:
-    """
-    Gives every extracted dish a description.
-
-    The vision model is not asked for one - see the prompt in
-    _parse_image_with_groq - because descriptions are what pushed the reply
-    past the model's output quota and broke every upload. The menu repeats
-    dishes week to week, so the wording already written for a dish is reused
-    whenever the name comes back, and anything genuinely new gets the same
-    neutral line the text parser uses. The kitchen can edit either in /admin.
-    """
-    for dish in items:
-        if str(dish.get("description", "")).strip():
-            continue
-        name = str(dish.get("item", "")).strip().lower()
-        quantity = str(dish.get("quantity", "")).strip()
-        dish["description"] = known.get(name) or (
-            f"Freshly handcrafted ({quantity})" if quantity else "Freshly handcrafted"
-        )
-    return items
-
-
 class MenuParser:
     """
     Auto-extracts structured menu data (Items, Descriptions, Quantities, Prices, Categories)
@@ -264,114 +228,37 @@ class MenuParser:
 
 
     def _parse_with_regex(self, raw_text: str) -> Dict[str, Any]:
-        """Regex and heuristic parser for extracting items, prices, and quantities from text lines."""
-        lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
-        veg_items = []
-        nonveg_items = []
-        bento_items = []
-
-        current_category = "vegetarian"
-
-        for line in lines:
-            line_lower = line.lower()
-            price_match = re.search(r'(?:₹|rs\.?|inr)?\s*(\d{2,5})\s*(?:/-)?', line_lower)
-
-            # Pure Category headers (no price digits present in header line)
-            if not price_match:
-                if "bento" in line_lower or "meal box" in line_lower or "combo" in line_lower:
-                    current_category = "bengali_bento"
-                elif "non-veg" in line_lower or "non veg" in line_lower or "non vegetarian" in line_lower:
-                    current_category = "non_vegetarian"
-                elif "veg" in line_lower or "vegetarian" in line_lower or "sweets" in line_lower:
-                    current_category = "vegetarian"
+        """Extract only printed facts. Ambiguous lines remain reviewable."""
+        result = {key: [] for key in ("vegetarian", "non_vegetarian", "bengali_bento", "norom_pak_sondesh", "unclassified")}
+        section = "unclassified"
+        headings = {"vegetarian": "vegetarian", "veg": "vegetarian",
+                    "non-veg": "non_vegetarian", "non vegetarian": "non_vegetarian",
+                    "non-vegetarian": "non_vegetarian", "bento": "bengali_bento", "bento menu": "bengali_bento",
+                    "sweets": "norom_pak_sondesh", "sondesh": "norom_pak_sondesh"}
+        for line in raw_text.splitlines():
+            line = re.sub(r"^\s*[•*\-]\s*", "", line).strip()
+            if not line:
                 continue
-            
-            price_val = int(price_match.group(1))
-
-            # Extract quantity / weight
-            qty_match = re.search(r'(\d+\s*(?:g|kg|pcs|pieces|box|pack))', line_lower)
-            quantity_val = qty_match.group(1) if qty_match else "150g"
-
-            # Extract clean item name (strip price and bullet points)
-            clean_name = line
-            clean_name = re.sub(r'[•\-*\d+\.]+\s*', '', clean_name)
-            clean_name = re.sub(r'(?:₹|rs\.?|inr)?\s*\d{2,5}\s*(?:/-)?', '', clean_name, flags=re.IGNORECASE)
-            clean_name = re.sub(r'\(\d+\s*(?:g|kg|pcs|box)\)', '', clean_name, flags=re.IGNORECASE)
-            clean_name = clean_name.strip(" |:-,")
-
-            if not clean_name:
-                clean_name = "Artisanal Specialty"
-
-            # Determine category
-            # A named item can contain the word "bento" while still belonging
-            # to an explicit Veg/Non-Veg section. Only a Bento/Meal Box/Combo
-            # section changes the stored category.
-            is_bento = current_category == "bengali_bento"
-            is_nonveg = any(kw in clean_name.lower() for kw in NON_VEG_KEYWORDS) or current_category == "non_vegetarian"
-            
-            item_dict = {
-                "item": clean_name.title(),
-                "description": f"Freshly handcrafted ({quantity_val})",
-                "price_inr": price_val,
-                "quantity": quantity_val
-            }
-
-            if is_bento:
-                bento_items.append(item_dict)
-            elif is_nonveg:
-                nonveg_items.append(item_dict)
-            else:
-                veg_items.append(item_dict)
-
-        return {"vegetarian": veg_items, "non_vegetarian": nonveg_items, "bengali_bento": bento_items}
+            heading = re.sub(r"\s+items?$", "", line.lower().rstrip(":").strip())
+            if heading in headings:
+                section = headings[heading]
+                continue
+            # A quantity is never a price. Bare trailing numbers are ambiguous.
+            price = re.search(r"(?:₹|rs\.?|inr)\s*(-?\d[\d,]*(?:\.\d{1,2})?)|(-?\d[\d,]*(?:\.\d{1,2})?)\s*/-|(?:\s+-\s+)(-?\d[\d,]*(?:\.\d{1,2})?)\s*$", line, re.I)
+            qty = re.search(r"\b\d+(?:\.\d+)?\s*(?:kg|g|pcs|pieces|box|pack)\b", line, re.I)
+            name = line
+            for match in sorted([m for m in (price, qty) if m], key=lambda m: m.start(), reverse=True):
+                name = name[:match.start()] + name[match.end():]
+            amount = next((value for value in price.groups() if value is not None), None) if price else None
+            amount = amount.replace(",", "") if amount else None
+            result[section].append({"item": name.strip(" ()|:-,"),
+                "description": "", "quantity": qty.group(0) if qty else "",
+                "price_inr": float(amount) if amount else None})
+        return result
 
     def parse_and_update_menu(self, raw_text: str) -> Dict[str, Any]:
-        """Parses raw text, updates menu.json, and hot-reloads the bot."""
-        parsed = self.parse_menu_text(raw_text)
-        veg_items = parsed.get("vegetarian", [])
-        nonveg_items = parsed.get("non_vegetarian", [])
-        bento_items = parsed.get("bengali_bento", [])
-
-        total_extracted = len(veg_items) + len(nonveg_items) + len(bento_items)
-        if total_extracted == 0:
-            return {
-                "status": "failed",
-                "reason": "Could not extract any valid items with prices from the text.",
-                "parsed": parsed
-            }
-
-        menu_path = config.MENU_JSON_PATH
-        try:
-            with open(menu_path, "r", encoding="utf-8") as f:
-                menu_data = json.load(f)
-
-            if "weekly_menus" in menu_data and menu_data["weekly_menus"]:
-                current_week = menu_data["weekly_menus"][-1]
-                if veg_items:
-                    current_week["vegetarian"] = veg_items
-                if nonveg_items:
-                    current_week["non_vegetarian"] = nonveg_items
-                if bento_items:
-                    current_week["bengali_bento"] = bento_items
-
-                with open(menu_path, "w", encoding="utf-8") as f:
-                    json.dump(menu_data, f, indent=2, ensure_ascii=False)
-
-                sheet_sync.sync_local_reload()
-                return {
-                    "status": "success",
-                    "updated_items_count": total_extracted,
-                    "vegetarian_count": len(veg_items),
-                    "non_vegetarian_count": len(nonveg_items),
-                    "bengali_bento_count": len(bento_items),
-                    "parsed": parsed,
-                    "message": f"Successfully extracted {total_extracted} items and updated menu.json."
-                }
-            else:
-                return {"status": "failed", "reason": "No weekly_menus section found in menu.json"}
-        except Exception as e:
-            log.error("Failed to write to menu.json: %s", e)
-            return {"status": "error", "error": str(e)}
+        """Compatibility extraction name; never writes or publishes."""
+        return self._apply_extracted_data_to_menu(self.parse_menu_text(raw_text))
 
     def parse_image_and_update_menu(self, image_bytes: bytes, mime_type: str = "image/jpeg") -> Dict[str, Any]:
         """
@@ -431,7 +318,7 @@ class MenuParser:
             '  "bengali_bento"      - list of bento/combo boxes, or [].\n'
             '  "norom_pak_sondesh"  - list of sweets/sondesh, or [].\n\n'
             'Every dish is {"item": str, "price_inr": int, "quantity": str}.\n'
-            "price_inr must be a plain number with no currency symbol.\n"
+            "Copy only visible text. Never infer or fill missing facts. Use null for missing price and blank for missing quantity/item.\n"
             # No description is asked for, and that is deliberate. The whole
             # reply has to land inside _VISION_MAX_TOKENS, which sits under
             # the model's 1000 output-tokens-per-minute ceiling. Descriptions
@@ -509,8 +396,8 @@ class MenuParser:
                     # token quota just needs a minute, and the photo they
                     # uploaded is already live either way.
                     last_reason = (
-                        "The vision model's per-minute quota is spent. The menu photo is "
-                        "live; try the dish extraction again in a minute."
+                        "The vision model's per-minute quota is spent. Your published menu is "
+                        "unchanged; try extraction again in a minute."
                         if resp.status_code == 429
                         else f"Vision model HTTP {resp.status_code}."
                     )
@@ -541,65 +428,23 @@ class MenuParser:
 
 
     def _apply_extracted_data_to_menu(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        """Applies extracted JSON to menu.json and triggers hot reloads."""
-        veg_items = data.get("vegetarian", [])
-        nonveg_items = data.get("non_vegetarian", [])
-        bento_items = data.get("bengali_bento", [])
-        sondesh_items = data.get("norom_pak_sondesh", [])
-        total = len(veg_items) + len(nonveg_items)
+        """Normalize provider output to an UNAPPROVED extraction, never live data."""
+        keys = ("vegetarian", "non_vegetarian", "bengali_bento", "norom_pak_sondesh", "unclassified")
+        parsed = {}
+        for key in keys:
+            entries = data.get(key) or []
+            if not isinstance(entries, list):
+                return {"status": "failed", "reason": "Menu details need manual review."}
+            parsed[key] = [
+                {field: row.get(field, "" if field != "price_inr" else None)
+                 for field in ("item", "description", "quantity", "price_inr")}
+                for row in entries if isinstance(row, dict)
+            ]
+        total = sum(len(rows) for rows in parsed.values())
+        return {"status": "success" if total else "failed", "parsed": parsed,
+                "week_of": data.get("week_of") or "", "service_window": data.get("service_window") or "",
+                "extracted_items_count": total, "published": False,
+                "message": "Review and approve these details before publishing."}
 
-        if total == 0:
-            return {"status": "failed", "reason": "No dishes could be identified from image."}
-
-        menu_path = config.MENU_JSON_PATH
-        with open(menu_path, "r", encoding="utf-8") as f:
-            menu_data = json.load(f)
-
-        known = _known_descriptions(menu_data)
-        for section in (veg_items, nonveg_items, bento_items, sondesh_items):
-            _fill_descriptions(section, known)
-
-        if "weekly_menus" in menu_data and menu_data["weekly_menus"]:
-            current_week = menu_data["weekly_menus"][-1]
-            if veg_items:
-                current_week["vegetarian"] = veg_items
-            if nonveg_items:
-                current_week["non_vegetarian"] = nonveg_items
-            if bento_items:
-                current_week["bengali_bento"] = bento_items
-            if sondesh_items:
-                current_week["norom_pak_sondesh"] = sondesh_items
-
-            # Only overwrite when a date was actually read off the flyer. A
-            # bad OCR pass returning null must never blank out a date that was
-            # correct from a previous upload — no date shown beats a wrong one,
-            # but losing a right one to a misread is worse than either.
-            week_of = (data.get("week_of") or "").strip()
-            if week_of:
-                current_week["week_of"] = week_of
-            service_window = (data.get("service_window") or "").strip()
-            if service_window:
-                current_week["service_window"] = service_window
-
-            with open(menu_path, "w", encoding="utf-8") as f:
-                json.dump(menu_data, f, indent=2, ensure_ascii=False)
-
-            sheet_sync.sync_local_reload()
-            return {
-                "status": "success",
-                "updated_items_count": total,
-                "vegetarian_count": len(veg_items),
-                "non_vegetarian_count": len(nonveg_items),
-                "bengali_bento_count": len(bento_items),
-                "parsed": data,
-                "message": f"Successfully extracted {total} items from menu image ({len(veg_items)} veg, {len(nonveg_items)} non-veg) and updated menu.json.",
-                # Whatever is now in effect for this week, whether this upload
-                # supplied it or it was already there — the caller (the /admin
-                # upload endpoint) needs this to caption the flyer photo, even
-                # on an upload where the model could not read a date itself.
-                "week_of": current_week.get("week_of"),
-                "service_window": current_week.get("service_window"),
-            }
-        return {"status": "failed", "reason": "weekly_menus not found in menu.json"}
 
 menu_parser = MenuParser()

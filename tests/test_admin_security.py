@@ -180,6 +180,13 @@ def test_security_headers_and_admin_endpoint_inventory(security_client):
             continue
         endpoint = getattr(route, "endpoint", None)
         source = inspect.getsource(endpoint) if endpoint else ""
-        if endpoint and "require_admin" not in source and "approve_assisted_resolution" not in source:
+        dependencies = getattr(getattr(route, "dependant", None), "dependencies", [])
+        dependency_auth = any(
+            getattr(dep.call, "__module__", "") == "camellia.admin_menu_review"
+            and getattr(dep.call, "__name__", "") == "reviewer"
+            and "require_admin" in inspect.getsource(dep.call)
+            for dep in dependencies
+        )
+        if endpoint and "require_admin" not in source and "approve_assisted_resolution" not in source and not dependency_auth:
             missing.append(route.path)
     assert missing == []

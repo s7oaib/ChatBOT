@@ -179,6 +179,9 @@ class AIResponder:
 
     def _load_json(self, path: str) -> Dict[str, Any]:
         try:
+            if path == self.menu_path:
+                from camellia.menu_review import canonical_menu
+                return canonical_menu(path)
             with open(path, "r", encoding="utf-8") as f:
                 return json.load(f)
         except Exception as e:

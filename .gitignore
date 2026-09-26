@@ -36,6 +36,7 @@ simulation_results.json
 # locally that resolves under data/, and a photo an operator tests with here
 # does not belong in the repo.
 data/uploads/
+data/menu-review-private/
 
 
 

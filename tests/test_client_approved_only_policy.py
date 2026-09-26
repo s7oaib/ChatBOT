@@ -57,9 +57,10 @@ def test_unapproved_business_question_cannot_reach_rag_or_groq():
 
 
 def test_live_menu_uses_only_the_documented_deterministic_menu_source():
+    from datetime import date
     user_id = "approved-only-live-menu"
     session_memory.clear_session(user_id, "instagram")
-    with patch("camellia.responder.rag_fallback_engine.retrieve") as rag, patch.object(
+    with patch("camellia.menu_dates.today_ist", return_value=date(2026, 6, 21)), patch("camellia.responder.rag_fallback_engine.retrieve") as rag, patch.object(
         ai_responder, "_query_groq", return_value=("", False, "unexpected")
     ) as groq:
         text, matched, template_id, _images = responder.match_and_respond(

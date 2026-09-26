@@ -203,7 +203,7 @@ def test_a_spent_quota_is_reported_as_quota_not_as_an_unreadable_flyer():
 
     assert result["status"] == "failed"
     assert "quota" in result["reason"].lower()
-    assert "photo is live" in result["reason"]
+    assert "published menu is unchanged" in result["reason"]
 
 
 def test_the_model_is_told_not_to_think():
@@ -234,30 +234,22 @@ def test_the_flyer_prompt_does_not_ask_for_descriptions():
     assert "description" not in prompt
 
 
-def test_a_returning_dish_keeps_the_description_already_written_for_it():
-    known = {"shukto": "Bitter-sweet monsoon vegetables, the way Thakuma made it."}
-    items = [{"item": "Shukto", "price_inr": 280, "quantity": "250g"}]
-
-    mp._fill_descriptions(items, known)
-
-    assert items[0]["description"] == known["shukto"]
+def test_description_is_not_copied_from_an_older_menu():
+    lean = {**MENU_JSON, "vegetarian": [{"item": "Shukto", "price_inr": 280, "quantity": "250g"}]}
+    lean["non_vegetarian"] = []
+    result = menu_parser._apply_extracted_data_to_menu(lean)
+    assert result["parsed"]["vegetarian"][0]["description"] == ""
 
 
-def test_a_dish_nobody_has_described_still_gets_a_description():
-    """menu.json consumers read description unconditionally; a missing one is a KeyError."""
-    items = [
-        {"item": "Notun Kichu", "price_inr": 300, "quantity": "250 g"},
-        {"item": "Kichu Aro", "price_inr": 300},
-    ]
-
-    mp._fill_descriptions(items, {})
-
-    assert items[0]["description"] == "Freshly handcrafted (250 g)"
-    assert items[1]["description"] == "Freshly handcrafted"
+def test_missing_extracted_facts_remain_blank():
+    result = menu_parser._apply_extracted_data_to_menu({"vegetarian": [{"item": "Notun Kichu"}]})
+    item = result["parsed"]["vegetarian"][0]
+    assert item["price_inr"] is None
+    assert item["quantity"] == ""
+    assert item["description"] == ""
 
 
-def test_extraction_without_descriptions_still_writes_a_usable_menu():
-    """End to end: the model returns no descriptions, menu.json gets them anyway."""
+def test_image_extraction_without_descriptions_remains_draft_only():
     lean = {
         "week_of": "2nd September - 8th September, 2026",
         "service_window": "Friday Lunch - Thursday Dinner",
@@ -267,11 +259,11 @@ def test_extraction_without_descriptions_still_writes_a_usable_menu():
         "norom_pak_sondesh": [],
     }
 
+    before = open(config.MENU_JSON_PATH, encoding="utf-8").read()
     result, _ = _run([_ok(json.dumps(lean))])
 
     assert result["status"] == "success"
-    with open(config.MENU_JSON_PATH, "r", encoding="utf-8") as f:
-        week = json.load(f)["weekly_menus"][-1]
-    assert week["week_of"] == "2nd September - 8th September, 2026"
-    for dish in week["vegetarian"] + week["non_vegetarian"]:
-        assert dish["description"].strip()
+    assert result["published"] is False
+    assert result["week_of"] == "2nd September - 8th September, 2026"
+    assert all(dish["description"] == "" for dish in result["parsed"]["vegetarian"])
+    assert open(config.MENU_JSON_PATH, encoding="utf-8").read() == before
