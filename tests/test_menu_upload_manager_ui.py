@@ -7,6 +7,7 @@ import subprocess
 import pytest
 
 from camellia.admin_menu_review import REVIEW_HTML, REVIEW_SCRIPT
+from camellia.admin_weekly_savoury import WEEKLY_HTML, WEEKLY_SCRIPT
 
 
 def test_menu_catalogue_and_selected_menu_are_the_only_primary_views():
@@ -25,6 +26,17 @@ def test_menu_catalogue_and_selected_menu_are_the_only_primary_views():
     assert 'id="mrHistory"' in REVIEW_HTML
     assert 'id="mrEmpty"' in REVIEW_HTML
     assert 'mr-mobile-actions' in REVIEW_HTML
+    assert 'id="mrImageDialog"' in REVIEW_HTML
+    assert 'id="mrChooseFile"' in REVIEW_HTML and 'id="mrFileLabel"' in REVIEW_HTML
+    assert 'id="mrFile" class="mr-visually-hidden"' in REVIEW_HTML
+    assert 'aria-labelledby="mrFileLabel"' in REVIEW_HTML
+    assert 'id="wsChooseFile"' in WEEKLY_HTML
+    assert 'id="wsFileLabel"' in WEEKLY_HTML
+    assert 'id="wsFile" class="ws-visually-hidden"' in WEEKLY_HTML
+    assert 'aria-labelledby="wsFileLabel"' in WEEKLY_HTML
+    assert 'mrPreviewMenuImage(menu,trigger)' in REVIEW_SCRIPT
+    assert "mrFileSelected(event.dataTransfer.files[0])" in REVIEW_SCRIPT
+    assert "Extracting '+file.name+' (" in WEEKLY_SCRIPT
     assert 'Scan Flyer & Update Menu' not in REVIEW_HTML
     assert "Upload this week's menu" not in REVIEW_HTML
 
@@ -38,11 +50,11 @@ const elements = {};
 function node(tag='div') {
   return {
     tag, value:'', textContent:'', hidden:false, disabled:false, checked:false, open:false,
-    children:[], dataset:{}, style:{}, files:[],
-    replaceChildren(){this.children=[];this.value='';},
+    children:[], dataset:{}, style:{}, files:[], className:'', isConnected:true, focusCount:0, listeners:{},
+    replaceChildren(...children){this.children=children;this.value='';},
     appendChild(child){this.children.push(child);if(this.tag==='select'&&!this.value)this.value=child.value;},
-    setAttribute(name,value){this[name]=value;},addEventListener(){},
-    showModal(){this.open=true;},close(){this.open=false;},focus(){},reportValidity(){return true;},
+    setAttribute(name,value){this[name]=value;},addEventListener(name,listener){this.listeners[name]=listener;},
+    classList:{add(){},remove(){}},showModal(){this.open=true;},close(){this.open=false;this.listeners.close?.();},focus(){this.focusCount++;},click(){this.clickCount=(this.clickCount||0)+1;},reportValidity(){return true;},
   };
 }
 function element(id){if(!elements[id])elements[id]=node(id==='mrMenu'||id==='mrMenuCategory'?'select':'div');return elements[id];}
@@ -50,7 +62,7 @@ global.document={getElementById:element,createElement:node,querySelectorAll:()=>
 global.getAuthHeaders=()=>({'x-admin-key':'test'});
 global.FormData=class {constructor(){this.fields=[];}append(key,value){this.fields.push([key,value]);}entries(){return this.fields[Symbol.iterator]();}};
 let menus=[
-  {menu_id:'m1',name:'Aamar Mishti Collection',category:'Sweets',description:'Classic sweets',active:1},
+  {menu_id:'m1',name:'Aamar Mishti Collection',category:'Sweets',description:'Classic sweets',active:1,image_url:'/images/aamar.jpg',image_status:'Built-in'},
   {menu_id:'m2',name:'Weekly Menu',category:'Other',description:'Weekly menu',active:1},
 ];
 let blocked=false,requests=[],confirmations=[];
@@ -76,7 +88,13 @@ global.fetch=async(path,options={})=>{
 vm.runInThisContext(SOURCE);
 (async()=>{
   await mrMenus();
-  const initial={catalogue:!element('mrCatalogueView').hidden,selected:element('mrSelectedView').hidden,names:element('mrCatalogueList').children.map(card=>card.children[0].textContent)};
+  const cards=element('mrCatalogueList').children;const media=cards[0].children[0],trigger=media.children[0],image=trigger.children[0];
+  const requestCount=requests.length;trigger.onclick();const preview={open:element('mrImageDialog').open,src:element('mrImagePreview').src,alt:element('mrImagePreview').alt};
+  element('mrImageDialog').close();image.onerror();
+  const visual={preview,fallback:media.children[0].textContent,focusReturned:trigger.focusCount===1,noMutationRequest:requests.length===requestCount,placeholder:cards[1].children[0].children[0].textContent};
+  const initial={catalogue:!element('mrCatalogueView').hidden,selected:element('mrSelectedView').hidden,names:cards.map(card=>card.children.find(child=>child.className==='mr-card-title').textContent)};
+  const uploadFile={name:'weekly-menu.png',type:'image/png',size:2048};element('mrDrop').listeners.drop({preventDefault(){},dataTransfer:{files:[uploadFile]}});
+  const selection={status:element('mrFileStatus').textContent,removeVisible:!element('mrRemoveFile').hidden,extractNotStarted:!requests.some(request=>request[1].endsWith('/extract-file'))};
   await mrOpenMenu('m1');
   const current={selected:element('mrSelectedName').textContent,rows:element('mrCurrentRows').children.map(row=>row.children.map(cell=>cell.textContent)),empty:element('mrCurrentEmpty').hidden};
   mrInputMode('text');const textMode={text:!element('mrTextPane').hidden,file:element('mrFilePane').hidden};
@@ -97,9 +115,9 @@ vm.runInThisContext(SOURCE);
   blocked=true;await mrDeleteMenu('m3');
   const blockedState={message:element('mrMessage').textContent,stillExists:menus.some(m=>m.menu_id==='m3')};
   blocked=false;await mrDeleteMenu('m3');
-  const deleted={catalogue:!element('mrCatalogueView').hidden,names:element('mrCatalogueList').children.map(card=>card.children[0].textContent)};
+  const deleted={catalogue:!element('mrCatalogueView').hidden,names:element('mrCatalogueList').children.map(card=>card.children.find(child=>child.className==='mr-card-title').textContent)};
   menus=[];await mrMenus();const empty={shown:!element('mrEmpty').hidden,catalogue:!element('mrCatalogueView').hidden};
-  console.log(JSON.stringify({initial,current,textMode,fileMode,formCategories,created,prefilling,edited,beforeCancel,afterCancel,blockedState,deleted,empty,confirmations,requests}));
+  console.log(JSON.stringify({visual,initial,selection,current,textMode,fileMode,formCategories,created,prefilling,edited,beforeCancel,afterCancel,blockedState,deleted,empty,confirmations,requests}));
 })().catch(error=>{console.error(error);process.exitCode=1;});
 """
     completed = subprocess.run(
@@ -108,6 +126,8 @@ vm.runInThisContext(SOURCE);
     )
     assert completed.returncode == 0, completed.stderr
     result = json.loads(completed.stdout.strip())
+    assert result["visual"] == {"preview": {"open": True, "src": "/images/aamar.jpg", "alt": "Current menu image for Aamar Mishti Collection"}, "fallback": "Menu image unavailable", "focusReturned": True, "noMutationRequest": True, "placeholder": "No current menu image"}
+    assert result["selection"] == {"status": "Selected: weekly-menu.png (2.0 KB)", "removeVisible": True, "extractNotStarted": True}
     assert result["initial"] == {"catalogue": True, "selected": True, "names": ["Aamar Mishti Collection", "Weekly Menu"]}
     assert result["current"] == {"selected": "Aamar Mishti Collection", "rows": [["Kanchagolla", "250g", "₹650"]], "empty": True}
     assert result["textMode"] == {"text": True, "file": True}
@@ -125,3 +145,51 @@ vm.runInThisContext(SOURCE);
     assert result["empty"] == {"shown": True, "catalogue": True}
     assert len(result["confirmations"]) == 3
     assert all(request[1].endswith("/m3/permanent") for request in result["requests"] if request[0] == "DELETE")
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is needed for the Admin JavaScript test")
+def test_weekly_file_drop_starts_extraction_and_shows_transient_file_status():
+    review_source = REVIEW_SCRIPT.split("<script>", 1)[1].split("</script>", 1)[0]
+    weekly_source = WEEKLY_SCRIPT.split("<script>", 1)[1].split("</script>", 1)[0]
+    scenario = r"""
+const vm = require('vm');
+const elements = {};
+function node(tag='div') {
+  const classes = new Set();
+  return {
+    tag,value:'',textContent:'',hidden:false,disabled:false,open:false,children:[],dataset:{},style:{},files:[],listeners:{},
+    classList:{add(value){classes.add(value);},remove(value){classes.delete(value);},contains(value){return classes.has(value);}},
+    replaceChildren(){this.children=[];},appendChild(child){this.children.push(child);},setAttribute(name,value){this[name]=value;},
+    addEventListener(name,listener){this.listeners[name]=listener;},showModal(){this.open=true;},close(){this.open=false;},focus(){},click(){},
+  };
+}
+function element(id){if(!elements[id])elements[id]=node(id==='mrMenu'||id==='mrMenuCategory'?'select':'div');return elements[id];}
+global.document={getElementById:element,createElement:node,querySelectorAll:()=>[],addEventListener(){}};
+global.getAuthHeaders=()=>({'x-admin-key':'test'});
+global.FormData=class{append(){}};
+let pendingResolve=null,requestPath='';
+global.fetch=(path)=>{requestPath=path;return new Promise(resolve=>{pendingResolve=resolve;});};
+vm.runInThisContext(REVIEW_SOURCE);vm.runInThisContext(WEEKLY_SOURCE);
+(async()=>{
+ const file={name:'weekly-menu.pdf',type:'application/pdf',size:1536};
+ const upload=wsFileSelected(file);
+ const transient={message:element('wsMessage').textContent,path:requestPath};
+ pendingResolve({ok:false,status:422,json:async()=>({detail:'The PDF could not be read. Try another file.'})});
+ await upload;
+ const final={message:element('wsMessage').textContent,cleared:element('wsFile').value===''};
+ const before=requestPath;await wsFileSelected({name:'unsafe.exe',type:'application/x-msdownload',size:5});
+ console.log(JSON.stringify({transient,final,invalid:{message:element('wsMessage').textContent,noRequest:requestPath===before}}));
+})().catch(error=>{console.error(error);process.exitCode=1;});
+"""
+    completed = subprocess.run(
+        [shutil.which("node")], input="const REVIEW_SOURCE=" + json.dumps(review_source) + ";\nconst WEEKLY_SOURCE=" + json.dumps(weekly_source) + ";\n" + scenario,
+        text=True, encoding="utf-8", capture_output=True, timeout=20, check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    result = json.loads(completed.stdout.strip())
+    assert result["transient"] == {
+        "message": "Extracting weekly-menu.pdf (1.5 KB). Your published menu is unchanged.",
+        "path": "/admin/weekly-savoury/extract-file",
+    }
+    assert result["final"] == {"message": "The PDF could not be read. Try another file.", "cleared": True}
+    assert result["invalid"] == {"message": "Choose a JPG, PNG, WEBP, or PDF menu file.", "noRequest": True}

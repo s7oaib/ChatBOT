@@ -5881,8 +5881,19 @@ async def update_menu(request: Request, x_admin_key: Optional[str] = Header(None
 @app.get("/admin/menu-catalogue")
 def list_menu_catalogue_route(x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
     require_admin(x_admin_key, x_admin_pin)
+    menus = []
+    for menu in menu_catalogue.list_menus():
+        # Catalogue imagery is presentation metadata only. Resolve through the
+        # same lifecycle-aware image source used by the existing menu manager;
+        # this read must not create drafts, publish, archive, or alter facts.
+        image = menu_images.card(menu["menu_id"])
+        menus.append({
+            **menu,
+            "image_url": image["image_url"],
+            "image_status": image["image_status"],
+        })
     return {
-        "status": "success", "menus": menu_catalogue.list_menus(),
+        "status": "success", "menus": menus,
         "categories": [category["name"] for category in menu_catalogue.list_categories()],
     }
 

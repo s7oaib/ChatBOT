@@ -75,6 +75,25 @@ def test_builtin_menus_are_seeded_automatically(catalogue_db):
     assert menus == {"aamar_mishti", "signature", "weekly_vegetarian", "weekly_non_vegetarian", "bento"}
 
 
+def test_admin_catalogue_exposes_current_image_metadata_without_mutating_lifecycle(catalogue_db, admin_client):
+    client, headers = admin_client
+    menu_images_module.save_draft("aamar_mishti", _png(), "image/png", "tester")
+    published = menu_images_module.publish("aamar_mishti")
+    history_before = menu_images_module.history("aamar_mishti")
+    draft_before = catalogue_db.get_menu_image_draft("aamar_mishti")
+
+    response = client.get("/admin/menu-catalogue", headers=headers)
+
+    assert response.status_code == 200
+    menus = {menu["menu_id"]: menu for menu in response.json()["menus"]}
+    assert menus["aamar_mishti"]["image_url"] == published["image_path"]
+    assert menus["aamar_mishti"]["image_status"] == "Published"
+    assert menus["signature"]["image_url"] == "/images/Signature%20Sondesh.jpeg"
+    assert menus["signature"]["image_status"] == "Built-in"
+    assert menu_images_module.history("aamar_mishti") == history_before
+    assert catalogue_db.get_menu_image_draft("aamar_mishti") == draft_before
+
+
 def test_create_new_menu_without_any_code_change(catalogue_db):
     entry = menu_catalogue.create_menu(
         "Meal Subscription", "Subscription",

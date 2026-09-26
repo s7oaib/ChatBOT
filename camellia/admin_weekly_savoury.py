@@ -8,9 +8,13 @@ WEEKLY_HTML = r'''
   #weeklySavouryPanel .ws-muted{color:var(--text-muted)}
   #weeklySavouryPanel .ws-status{padding:15px 18px;margin:18px 0;background:#fff;border:1px solid var(--border);border-radius:10px}
   #weeklySavouryPanel .ws-status p{margin:4px 0}
-  #weeklySavouryPanel .ws-drop{display:block;text-align:center;padding:32px 18px;border:2px dashed var(--border);border-radius:12px;background:#fcfaf7;cursor:pointer;min-height:150px}
+  #weeklySavouryPanel .ws-drop{position:relative;display:block;text-align:center;padding:32px 18px;border:2px dashed var(--border);border-radius:12px;background:#fcfaf7;min-height:150px}
   #weeklySavouryPanel .ws-drop:hover,#weeklySavouryPanel .ws-drop:focus-within{border-color:var(--primary)}
-  #weeklySavouryPanel .ws-drop input{display:block;max-width:100%;margin:14px auto 0}
+  #weeklySavouryPanel .ws-drop.is-dragging{border-color:var(--primary);background:#f5eef0}
+  #weeklySavouryPanel .ws-drop:focus-within{outline:3px solid var(--primary);outline-offset:3px}
+  #weeklySavouryPanel .ws-visually-hidden{position:absolute!important;width:1px!important;height:1px!important;padding:0!important;margin:-1px!important;overflow:hidden!important;clip:rect(0,0,0,0)!important;white-space:nowrap!important;border:0!important}
+  #weeklySavouryPanel .ws-drop-actions{display:flex;justify-content:center;margin-top:14px}
+  #weeklySavouryPanel .ws-drop-actions button{min-height:44px}
   #weeklySavouryPanel .ws-actions{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:14px 0}
   #weeklySavouryPanel .ws-actions button{min-height:44px}
   #weeklySavouryPanel .ws-dates{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
@@ -32,9 +36,11 @@ WEEKLY_HTML = r'''
   <p class="ws-muted">Update this week's menu or prepare the next one.</p>
   <div id="wsState" class="ws-status" aria-live="polite">Loading weekly menu…</div>
   <div id="wsReminder" class="ws-warning" hidden></div>
-  <label id="wsDrop" class="ws-drop" for="wsFile"><strong>Drop this week's menu here</strong><br>
-    Drag &amp; Drop, Paste image, or Click<br><span class="ws-muted">JPG, PNG, WEBP or PDF · Maximum 10 MB</span>
-    <input id="wsFile" type="file" accept="image/jpeg,image/png,image/webp,application/pdf" onchange="wsFileSelected()"></label>
+  <div id="wsDrop" class="ws-drop"><strong>Drop this week's menu here</strong><br>
+    Drag &amp; Drop, Paste image, or choose a file<br><span class="ws-muted">JPG, PNG, WEBP or PDF · Maximum 10 MB</span>
+    <div class="ws-drop-actions"><button id="wsChooseFile" type="button" class="btn-secondary" onclick="document.getElementById('wsFile').click()">Choose Menu File</button></div>
+    <label id="wsFileLabel" class="ws-visually-hidden" for="wsFile">Weekly menu file to extract</label>
+    <input id="wsFile" class="ws-visually-hidden" type="file" accept="image/jpeg,image/png,image/webp,application/pdf" aria-labelledby="wsFileLabel" onchange="wsFileSelected()"></div>
   <div class="ws-actions"><button type="button" class="btn-secondary" onclick="wsTogglePaste()">Paste Menu Text</button></div>
   <div id="wsPastePane" hidden><label for="wsText">Paste menu text</label>
     <textarea id="wsText" class="field-control" rows="6" maxlength="50000"></textarea>
@@ -107,8 +113,8 @@ async function wsLoad(){
   }catch(error){wsMessage(error.message);}
 }
 function wsTogglePaste(){const pane=document.getElementById('wsPastePane');pane.hidden=!pane.hidden;if(!pane.hidden)document.getElementById('wsText').focus();}
-async function wsFileSelected(){const file=document.getElementById('wsFile').files[0];if(file)await wsExtractFile(file);}
-async function wsExtractFile(file){if(wsBusy)return;wsBusy=true;try{const form=new FormData();form.append('file',file);wsMessage('Extracting menu details. Your published menu is unchanged.');const data=await mrRequest('/admin/weekly-savoury/extract-file','POST',form);wsDraft=data.draft;wsAnalysis=data.analysis;wsDirty=false;wsRenderReview();}catch(error){wsMessage(error.message);}finally{wsBusy=false;document.getElementById('wsFile').value='';}}
+async function wsFileSelected(file=document.getElementById('wsFile').files?.[0]){if(!file)return;const issue=mrUploadFileError(file);if(issue){wsMessage(issue);document.getElementById('wsFile').value='';return;}await wsExtractFile(file);}
+async function wsExtractFile(file){if(wsBusy)return;const issue=mrUploadFileError(file);if(issue){wsMessage(issue);return;}wsBusy=true;try{const form=new FormData();form.append('file',file);wsMessage('Extracting '+file.name+' ('+mrFormatFileSize(file.size)+'). Your published menu is unchanged.');const data=await mrRequest('/admin/weekly-savoury/extract-file','POST',form);wsDraft=data.draft;wsAnalysis=data.analysis;wsDirty=false;wsRenderReview();}catch(error){wsMessage(error.message||'We could not read that file. Try a JPG, PNG, WEBP, or PDF under 10 MB.');}finally{wsBusy=false;document.getElementById('wsFile').value='';}}
 async function wsExtractText(){if(wsBusy)return;const value=document.getElementById('wsText').value.trim();if(!value){wsMessage('Paste menu text first.');return;}wsBusy=true;try{wsMessage('Extracting menu details. Your published menu is unchanged.');const data=await mrRequest('/admin/weekly-savoury/extract-text','POST',{text:value});wsDraft=data.draft;wsAnalysis=data.analysis;wsDirty=false;wsRenderReview();}catch(error){wsMessage(error.message);}finally{wsBusy=false;}}
 function wsRenderReview(options){
   const failed=!!wsDraft&&wsDraft.status==='FAILED';document.getElementById('wsFailed').hidden=!failed;
@@ -179,8 +185,9 @@ async function wsRestore(version){if(!confirm('Restore previous weekly menu?\n\n
     wsRenderReview();wsMessage('Previous menu restored to a draft. Review and confirm before publishing.');}
   catch(error){wsMessage(error.message);}}
 const wsDrop=document.getElementById('wsDrop');
-wsDrop.addEventListener('dragover',event=>event.preventDefault());
-wsDrop.addEventListener('drop',event=>{event.preventDefault();if(event.dataTransfer?.files?.length)wsExtractFile(event.dataTransfer.files[0]);});
+['dragenter','dragover'].forEach(type=>wsDrop.addEventListener(type,event=>{event.preventDefault();wsDrop.classList.add('is-dragging');}));
+['dragleave','dragend'].forEach(type=>wsDrop.addEventListener(type,event=>{event.preventDefault();wsDrop.classList.remove('is-dragging');}));
+wsDrop.addEventListener('drop',event=>{event.preventDefault();wsDrop.classList.remove('is-dragging');if(event.dataTransfer?.files?.length)wsFileSelected(event.dataTransfer.files[0]);});
 document.addEventListener('paste',event=>{const panel=document.getElementById('tab-image');if(!panel||panel.style.display==='none')return;
   if(event.target?.closest?.('input,textarea,[contenteditable]'))return;
   for(const item of event.clipboardData?.items||[]){if(item.type?.startsWith('image/')){const file=item.getAsFile();if(file){event.preventDefault();wsExtractFile(file);}break;}}

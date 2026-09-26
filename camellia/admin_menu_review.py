@@ -237,10 +237,16 @@ REVIEW_HTML = r'''
   #menuReviewPanel .mr-header h2{margin:0;color:var(--primary)}
   #menuReviewPanel .mr-header p{margin:5px 0 0;color:var(--text-muted)}
   #menuReviewPanel .mr-catalogue-list{display:grid;gap:12px}
-  #menuReviewPanel .mr-card{padding:18px;background:#fff;border:1px solid var(--border);border-radius:12px}
-  #menuReviewPanel .mr-card h3{margin:0 0 5px;color:var(--primary)}
-  #menuReviewPanel .mr-card p{margin:0 0 14px;color:var(--text-muted)}
+  #menuReviewPanel .mr-card{display:grid;grid-template-columns:minmax(0,220px) minmax(0,1fr);grid-template-areas:"image title" "image description" "image status" "image actions";align-items:start;gap:8px 18px;padding:16px;background:#fff;border:1px solid var(--border);border-radius:12px}
+  #menuReviewPanel .mr-card-image{grid-area:image;aspect-ratio:4/3;min-width:0;overflow:hidden;display:grid;place-items:center;background:#f5f1ec;border:1px solid var(--border);border-radius:10px;color:var(--text-muted)}
+  #menuReviewPanel .mr-image-preview{display:block;width:100%;height:100%;padding:0;border:0;background:transparent;cursor:zoom-in}
+  #menuReviewPanel .mr-card-image img{display:block;width:100%;height:100%;object-fit:cover}
+  #menuReviewPanel .mr-image-placeholder{padding:12px;text-align:center;font-size:.9rem}
+  #menuReviewPanel .mr-card h3{grid-area:title;margin:0;color:var(--primary)}
+  #menuReviewPanel .mr-card-description{grid-area:description;margin:0;color:var(--text-muted)}
+  #menuReviewPanel .mr-card-status{grid-area:status}
   #menuReviewPanel .mr-card-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  #menuReviewPanel .mr-card > .mr-card-actions{grid-area:actions}
   #menuReviewPanel .mr-card-actions details{position:relative}
   #menuReviewPanel .mr-card-actions summary{list-style:none;cursor:pointer;min-width:44px;min-height:44px;display:grid;place-items:center;border:1px solid var(--border);border-radius:8px}
   #menuReviewPanel .mr-card-actions summary::-webkit-details-marker{display:none}
@@ -255,7 +261,16 @@ REVIEW_HTML = r'''
   #menuReviewPanel .mr-input-tabs{display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap}
   #menuReviewPanel .mr-input-tabs button{min-height:44px}
   #menuReviewPanel .mr-drop{display:block;padding:22px;border:2px dashed var(--border);border-radius:10px;background:#fcfaf7}
-  #menuReviewPanel .mr-drop input{display:block;margin-top:12px;max-width:100%}
+  #menuReviewPanel .mr-drop{position:relative;text-align:center}
+  #menuReviewPanel .mr-drop.is-dragging{border-color:var(--primary);background:#f5eef0}
+  #menuReviewPanel .mr-drop:focus-within{outline:3px solid var(--primary);outline-offset:3px}
+  #menuReviewPanel .mr-visually-hidden{position:absolute!important;width:1px!important;height:1px!important;padding:0!important;margin:-1px!important;overflow:hidden!important;clip:rect(0,0,0,0)!important;white-space:nowrap!important;border:0!important}
+  #menuReviewPanel .mr-upload-actions{display:flex;justify-content:center;gap:8px;flex-wrap:wrap;margin-top:14px}
+  #menuReviewPanel .mr-file-status{margin:12px 0 0;color:var(--text-muted);overflow-wrap:anywhere}
+  #menuReviewPanel .mr-image-dialog{max-width:min(900px,calc(100vw - 24px));padding:16px}
+  #menuReviewPanel .mr-image-dialog img{display:block;max-width:100%;max-height:75vh;margin:0 auto;object-fit:contain}
+  #menuReviewPanel .mr-image-dialog h3{margin:0 0 12px}
+  #menuReviewPanel .mr-image-dialog-actions{display:flex;justify-content:flex-end;margin-top:12px}
   #menuReviewPanel .mr-review-table{overflow-x:auto}
   #menuReviewPanel .mr-review-table table{width:100%}
   #menuReviewPanel .mr-review-table input,#menuReviewPanel .mr-review-table select{max-width:100%}
@@ -265,7 +280,7 @@ REVIEW_HTML = r'''
   #menuReviewPanel dialog .field-control{width:100%;margin-bottom:12px}
   #menuReviewPanel .mr-dialog-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:18px}
   #menuReviewPanel .mr-mobile-actions{display:none}
-  @media(max-width:600px){#menuReviewPanel .mr-card-actions details{display:none}#menuReviewPanel .mr-mobile-actions{display:flex;gap:8px;flex-wrap:wrap}#menuReviewPanel .mr-mobile-actions button{min-height:44px}#menuReviewPanel .mr-current-row{grid-template-columns:minmax(0,1fr) 65px 65px;font-size:.9rem}#menuReviewPanel .mr-review-table{overflow:visible}#menuReviewPanel .mr-review-table thead{display:none}#menuReviewPanel .mr-review-table tr{display:block;border:1px solid var(--border);border-radius:10px;padding:10px;margin-bottom:12px}#menuReviewPanel .mr-review-table td{display:block;border:0;padding:6px}#menuReviewPanel .mr-review-table td:before{content:attr(data-label);display:block;font-size:.75rem;color:var(--text-muted)}#menuReviewPanel .mr-review-table input,#menuReviewPanel .mr-review-table select{width:100%!important}}
+  @media(max-width:600px){#menuReviewPanel .mr-card{grid-template-columns:minmax(0,1fr);grid-template-areas:"image" "title" "description" "status" "actions";gap:9px}#menuReviewPanel .mr-card-image{width:100%;max-width:360px;aspect-ratio:16/10}#menuReviewPanel .mr-card-actions details{display:none}#menuReviewPanel .mr-mobile-actions{display:flex;gap:8px;flex-wrap:wrap}#menuReviewPanel .mr-mobile-actions button{min-height:44px}#menuReviewPanel .mr-current-row{grid-template-columns:minmax(0,1fr) 65px 65px;font-size:.9rem}#menuReviewPanel .mr-review-table{overflow:visible}#menuReviewPanel .mr-review-table thead{display:none}#menuReviewPanel .mr-review-table tr{display:block;border:1px solid var(--border);border-radius:10px;padding:10px;margin-bottom:12px}#menuReviewPanel .mr-review-table td{display:block;border:0;padding:6px}#menuReviewPanel .mr-review-table td:before{content:attr(data-label);display:block;font-size:.75rem;color:var(--text-muted)}#menuReviewPanel .mr-review-table input,#menuReviewPanel .mr-review-table select{width:100%!important}}
 </style>
 <section id="menuReviewPanel" aria-labelledby="menuReviewHeading">
   <select id="mrMenu" hidden aria-hidden="true"></select>
@@ -292,8 +307,12 @@ REVIEW_HTML = r'''
       <div id="mrUploadInput">
         <div class="mr-input-tabs"><button type="button" class="btn-secondary" id="mrFileTab" onclick="mrInputMode('file')">Upload File</button>
           <button type="button" class="btn-secondary" id="mrTextTab" onclick="mrInputMode('text')">Paste Text</button></div>
-        <div id="mrFilePane"><label id="mrDrop" class="mr-drop" for="mrFile"><strong>Drop your menu here</strong><br>JPG, PNG, WEBP or PDF · Maximum 10 MB
-          <input id="mrFile" type="file" accept="image/jpeg,image/png,image/webp,application/pdf"></label></div>
+        <div id="mrFilePane"><div id="mrDrop" class="mr-drop"><strong>Drop your menu here</strong><br>JPG, PNG, WEBP or PDF · Maximum 10 MB
+          <div class="mr-upload-actions"><button id="mrChooseFile" type="button" class="btn-secondary" onclick="document.getElementById('mrFile').click()">Choose Menu File</button>
+            <button id="mrRemoveFile" type="button" class="btn-secondary" onclick="mrClearFile()" hidden>Remove File</button></div>
+          <label id="mrFileLabel" class="mr-visually-hidden" for="mrFile">Menu file to upload</label>
+          <input id="mrFile" class="mr-visually-hidden" type="file" accept="image/jpeg,image/png,image/webp,application/pdf" aria-labelledby="mrFileLabel" onchange="mrFileSelected()">
+          <p id="mrFileStatus" class="mr-file-status" role="status" aria-live="polite">No file selected.</p></div></div>
         <div id="mrTextPane" hidden><label for="mrText">Paste menu text</label><textarea id="mrText" class="field-control" rows="7" maxlength="50000"></textarea></div>
         <button type="button" class="btn-primary" onclick="mrExtract()" style="margin-top:16px">Continue to Review</button>
       </div>
@@ -328,15 +347,26 @@ REVIEW_HTML = r'''
     </form>
     <p id="mrMenuFormError" role="alert"></p>
   </dialog>
+  <dialog id="mrImageDialog" class="mr-image-dialog" aria-labelledby="mrImageDialogTitle">
+    <h3 id="mrImageDialogTitle"></h3><img id="mrImagePreview" alt="">
+    <p id="mrImagePreviewError" role="status" hidden>This menu image could not be loaded.</p>
+    <div class="mr-image-dialog-actions"><button id="mrImageDialogClose" type="button" class="btn-secondary" onclick="document.getElementById('mrImageDialog').close()">Close preview</button></div>
+  </dialog>
 </section>
 '''
 
 REVIEW_SCRIPT = r'''
 <script>
-let mrDraft=null, mrCategories=[], mrMenuCategories=[], mrCatalogue=[], mrPreviewUrl=null, mrBusy=false, mrEditingId=null, mrInput='file';
+let mrDraft=null, mrCategories=[], mrMenuCategories=[], mrCatalogue=[], mrPreviewUrl=null, mrBusy=false, mrEditingId=null, mrInput='file', mrChosenFile=null, mrPreviewOpener=null;
 function mrBase(){return '/admin/menu-manager/menus/'+encodeURIComponent(document.getElementById('mrMenu').value)+'/review';}
 function mrMessage(value){document.getElementById('mrMessage').textContent=value;}
-async function mrRequest(path,method='GET',body){const options={method,headers:getAuthHeaders()};if(body instanceof FormData){options.body=body;}else if(body!==undefined){options.headers={...options.headers,'Content-Type':'application/json'};options.body=JSON.stringify(body);}const response=await fetch(path,options);const data=await response.json();if(!response.ok){const error=Error(typeof data.detail==='string'?data.detail:'Request could not be completed.');error.status=response.status;throw error;}return data;}
+function mrFormatFileSize(bytes){const size=Number(bytes)||0;if(size<1024)return size+' B';if(size<1024*1024)return (size/1024).toFixed(1)+' KB';return (size/(1024*1024)).toFixed(1)+' MB';}
+function mrUploadFileError(file){if(!file)return 'Choose a menu file first.';if(file.size>10*1024*1024)return 'This file is over 10 MB. Choose a smaller menu file.';const extension=String(file.name||'').split('.').pop().toLowerCase();const allowedTypes=['image/jpeg','image/png','image/webp','application/pdf'];const allowedExtensions=['jpg','jpeg','png','webp','pdf'];if(!allowedTypes.includes(String(file.type||'').toLowerCase())&&!allowedExtensions.includes(extension))return 'Choose a JPG, PNG, WEBP, or PDF menu file.';return '';}
+function mrFileSelected(file=document.getElementById('mrFile').files?.[0]){if(!file)return false;const issue=mrUploadFileError(file);const input=document.getElementById('mrFile');const status=document.getElementById('mrFileStatus');if(issue){mrChosenFile=null;input.value='';status.textContent=issue;document.getElementById('mrRemoveFile').hidden=true;document.getElementById('mrChooseFile').textContent='Choose Menu File';return false;}mrChosenFile=file;status.textContent='Selected: '+file.name+' ('+mrFormatFileSize(file.size)+')';document.getElementById('mrRemoveFile').hidden=false;document.getElementById('mrChooseFile').textContent='Change File';mrMessage('');return true;}
+function mrClearFile(){mrChosenFile=null;document.getElementById('mrFile').value='';document.getElementById('mrFileStatus').textContent='No file selected.';document.getElementById('mrRemoveFile').hidden=true;document.getElementById('mrChooseFile').textContent='Choose Menu File';}
+function mrPreviewMenuImage(menu,opener){if(!menu?.image_url)return;const dialog=document.getElementById('mrImageDialog');const preview=document.getElementById('mrImagePreview');const error=document.getElementById('mrImagePreviewError');document.getElementById('mrImageDialogTitle').textContent=menu.name+' menu image';preview.hidden=false;preview.alt='Current menu image for '+menu.name;error.hidden=true;mrPreviewOpener=opener;preview.onerror=()=>{preview.hidden=true;error.hidden=false;};preview.src=menu.image_url;dialog.showModal();document.getElementById('mrImageDialogClose').focus();}
+document.getElementById('mrImageDialog').addEventListener('close',()=>{const opener=mrPreviewOpener;mrPreviewOpener=null;if(opener?.isConnected)opener.focus();});
+async function mrRequest(path,method='GET',body){const options={method,headers:getAuthHeaders()};if(body instanceof FormData){options.body=body;}else if(body!==undefined){options.headers={...options.headers,'Content-Type':'application/json'};options.body=JSON.stringify(body);}const response=await fetch(path,options);let data={};try{data=await response.json();}catch(_){data={};}if(!response.ok){const error=Error(typeof data.detail==='string'?data.detail:'Request could not be completed. Please try again.');error.status=response.status;throw error;}return data;}
 async function mrMenus(preferredId){
   try{
     const data=await mrRequest('/admin/menu-catalogue');
@@ -346,9 +376,14 @@ async function mrMenus(preferredId){
     mrCatalogue.forEach(menu=>{
       const option=document.createElement('option');option.value=menu.menu_id;option.textContent=menu.name;picker.appendChild(option);
       const card=document.createElement('article');card.className='mr-card';
-      const title=document.createElement('h3');title.textContent=menu.name;card.appendChild(title);
-      const description=document.createElement('p');description.textContent=menu.description||'';card.appendChild(description);
-      if(!menu.active){const badge=document.createElement('span');badge.className='mr-inactive';badge.textContent='Inactive';card.appendChild(badge);}
+      const media=document.createElement('div');media.className='mr-card-image';
+      if(menu.image_url){const trigger=document.createElement('button');trigger.type='button';trigger.className='mr-image-preview';trigger.setAttribute('aria-label','Preview current image for '+menu.name);trigger.onclick=()=>mrPreviewMenuImage(menu,trigger);
+        const image=document.createElement('img');image.src=menu.image_url;image.alt='Current menu image for '+menu.name;image.loading='lazy';image.decoding='async';image.onerror=()=>{const placeholder=document.createElement('span');placeholder.className='mr-image-placeholder';placeholder.textContent='Menu image unavailable';placeholder.setAttribute('role','status');media.replaceChildren(placeholder);};trigger.appendChild(image);media.appendChild(trigger);
+      }else{const placeholder=document.createElement('span');placeholder.className='mr-image-placeholder';placeholder.textContent='No current menu image';media.appendChild(placeholder);}
+      card.appendChild(media);
+      const title=document.createElement('h3');title.className='mr-card-title';title.textContent=menu.name;card.appendChild(title);
+      const description=document.createElement('p');description.className='mr-card-description';description.textContent=menu.description||'';card.appendChild(description);
+      const badge=document.createElement('span');badge.className='mr-card-status mr-inactive';badge.textContent=(menu.image_status||'No image')+(menu.active?'':' · Inactive');card.appendChild(badge);
       const actions=document.createElement('div');actions.className='mr-card-actions';
       const open=document.createElement('button');open.type='button';open.className='btn-primary';open.textContent='Manage Menu';open.onclick=()=>mrOpenMenu(menu.menu_id);actions.appendChild(open);
       const more=document.createElement('details');const summary=document.createElement('summary');summary.textContent='⋯';summary.setAttribute('aria-label','Actions for '+menu.name);more.appendChild(summary);
@@ -384,8 +419,9 @@ async function mrShowPane(pane){
 }
 function mrInputMode(mode){mrInput=mode;document.getElementById('mrFilePane').hidden=mode!=='file';document.getElementById('mrTextPane').hidden=mode!=='text';document.getElementById('mrFileTab').setAttribute('aria-selected',String(mode==='file'));document.getElementById('mrTextTab').setAttribute('aria-selected',String(mode==='text'));}
 const mrDrop=document.getElementById('mrDrop');
-mrDrop.addEventListener('dragover',event=>{event.preventDefault();});
-mrDrop.addEventListener('drop',event=>{event.preventDefault();if(event.dataTransfer?.files?.length){document.getElementById('mrFile').files=event.dataTransfer.files;mrInputMode('file');}});
+['dragenter','dragover'].forEach(type=>mrDrop.addEventListener(type,event=>{event.preventDefault();mrDrop.classList.add('is-dragging');}));
+['dragleave','dragend'].forEach(type=>mrDrop.addEventListener(type,event=>{event.preventDefault();mrDrop.classList.remove('is-dragging');}));
+mrDrop.addEventListener('drop',event=>{event.preventDefault();mrDrop.classList.remove('is-dragging');if(event.dataTransfer?.files?.length){mrInputMode('file');mrFileSelected(event.dataTransfer.files[0]);}});
 async function mrLoadCurrent(){
   const id=document.getElementById('mrMenu').value;if(!id)return;
   try{
@@ -410,7 +446,7 @@ function mrOpenMenuForm(mode,id){const selected=mrCatalogue.find(m=>m.menu_id===
 async function mrSaveMenu(event){event.preventDefault();if(mrBusy)return;const form=document.getElementById('mrMenuForm');if(!form.reportValidity())return;const payload={name:document.getElementById('mrMenuName').value.trim(),category:document.getElementById('mrMenuCategory').value,description:document.getElementById('mrMenuDescription').value.trim(),active:document.getElementById('mrMenuActive').checked};if(!payload.name||!payload.category||!payload.description){document.getElementById('mrMenuFormError').textContent='Complete all required fields.';return;}mrBusy=true;document.getElementById('mrMenuSubmit').disabled=true;try{let result;const editing=!!mrEditingId;if(editing){result=await mrRequest('/admin/menu-catalogue/'+encodeURIComponent(mrEditingId),'PATCH',payload);}else{const body=new FormData();Object.entries(payload).forEach(([key,value])=>body.append(key,String(value)));result=await mrRequest('/admin/menu-catalogue','POST',body);}document.getElementById('mrMenuDialog').close();await mrMenus(result.menu.menu_id);if(!editing)await mrShowPane('upload');mrMessage(editing?'Menu updated.':'Menu added. Upload or paste its content to begin review.');}catch(e){document.getElementById('mrMenuFormError').textContent=e.message;}finally{mrBusy=false;document.getElementById('mrMenuSubmit').disabled=false;}}
 async function mrDeleteMenu(id){const menu=mrCatalogue.find(m=>m.menu_id===(id||document.getElementById('mrMenu').value));if(!menu)return;if(!confirm('Delete “'+menu.name+'”?\n\nThis permanently removes this menu and its local menu assets/history. It cannot be undone.'))return;try{await mrRequest('/admin/menu-catalogue/'+encodeURIComponent(menu.menu_id)+'/permanent','DELETE');await mrMenus();mrMessage('Menu deleted.');}catch(e){mrMessage(e.status===409?'This menu is currently being used. Remove or change the connected Instagram source first, then try again.':e.message);}}
 async function mrWork(task){if(mrBusy)return;mrBusy=true;document.getElementById('mrMenu').disabled=true;try{await task();}catch(e){mrMessage(e.message);}finally{mrBusy=false;document.getElementById('mrMenu').disabled=false;}}
-async function mrExtract(){return mrWork(async()=>{let data;mrMessage('Extracting menu details. The published menu is unchanged.');if(mrInput==='file'){const file=document.getElementById('mrFile').files[0];if(!file)throw Error('Choose a menu file first.');const form=new FormData();form.append('file',file);data=await mrRequest(mrBase()+'/extract-file','POST',form);}else{const value=document.getElementById('mrText').value.trim();if(!value)throw Error('Paste menu text first.');data=await mrRequest(mrBase()+'/extract-text','POST',{text:value});}mrDraft=data.draft;mrRender();});}
+async function mrExtract(){return mrWork(async()=>{let data;mrMessage('Extracting menu details. The published menu is unchanged.');if(mrInput==='file'){const file=mrChosenFile||document.getElementById('mrFile').files?.[0];const issue=mrUploadFileError(file);if(issue)throw Error(issue);const form=new FormData();form.append('file',file);data=await mrRequest(mrBase()+'/extract-file','POST',form);}else{const value=document.getElementById('mrText').value.trim();if(!value)throw Error('Paste menu text first.');data=await mrRequest(mrBase()+'/extract-text','POST',{text:value});}mrDraft=data.draft;mrRender();});}
 function mrRender(){
   const reviewing=!!mrDraft&&!['PUBLISHED','REJECTED'].includes(mrDraft.status);
   document.getElementById('mrReview').hidden=!reviewing;document.getElementById('mrUploadInput').hidden=reviewing;
