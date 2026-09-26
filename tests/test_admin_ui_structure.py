@@ -90,7 +90,10 @@ def test_the_dashboard_has_a_coherent_sidebar_navigation(page):
 def test_menu_manager_sits_between_menu_and_ai_resolution(page):
     assert 'id="tab-image"' in page
     assert 'id="tab-menu-manager"' in page
-    assert "Manage catalogue" in page
+    assert 'id="mrCatalogueView"' in page
+    assert 'id="mrSelectedView" hidden' in page
+    assert "Manage Menu" in page
+    assert "'tab-menu-manager'].includes(tabId)) tabId = 'tab-image'" in page
 
 
 def test_customers_and_answers_are_not_in_normal_client_navigation(page):
@@ -143,9 +146,16 @@ def test_ad_routing_panel_still_present_alongside_menu_manager(page):
     assert 'id="igPriorityProducts"' in page
 
 
-def test_menu_dashboard_explains_how_to_hide_the_current_week(page):
-    assert "Hide this week's menu from customers" in page
-    assert "unpublishCurrentMenu" in page
+def test_menu_primary_view_has_no_weekly_dashboard_or_direct_publish_shortcut(page):
+    menu = page[page.index('id="tab-image"'):page.index('id="tab-ad-routing"')]
+    assert 'id="mrCatalogueView"' in menu
+    assert "Upload this week's menu" not in menu
+    assert 'Scan Flyer &amp; Update Menu' not in menu
+    assert 'CURRENT MENU</' not in menu
+    assert 'ASSETS</' not in menu
+    assert 'PUBLISHING</' not in menu
+    assert 'Continue to Review' in menu
+    assert 'Approve &amp; Publish' in menu
 
 
 def test_every_panel_belongs_to_a_tab(page):
@@ -662,14 +672,15 @@ def test_handoff_notifications_are_global_and_persistent(page):
     assert "Read-only history" in page
 
 
-def test_handoff_identity_and_current_menu_actions_are_wired(page):
+def test_handoff_identity_and_menu_catalogue_actions_are_wired(page):
     assert "${escapeHtml(customer)}" in page
     assert "Instagram ID: ${escapeHtml(item.customer_external_id" in page
     assert "function handoffCustomerIdentity" in page
     assert "function showGroup(group, selectedTabId = null)" in page
     assert "panel.id === selectedTabId" in page
     assert "showGroup(group, group === 'menu' ? tabId : null)" in page
-    assert "onclick=\"switchTab('tab-active', null)\"" in page
+    assert "'current-menu': 'tab-image'" in page
+    assert 'onclick="mrShowCatalogue()"' in page
     assert "fetch('/admin/menu/active'" in page
     assert "No published menu is currently serving customers" in page
     assert "Could not load the current menu" in page

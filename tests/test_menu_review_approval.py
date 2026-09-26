@@ -199,7 +199,7 @@ def test_review_api_auth_and_table_ui(review_env):
     assert response.status_code == 200
     assert response.json()["draft"]["created_by"] == "admin-api"
     html = client.get("/admin").text
-    for label in ("Review Menu", "Approve &amp; Publish", "Save Draft", "Reject Draft", "Add Row", "application/pdf"):
+    for label in ("Review Menu", "Approve &amp; Publish", "Save Draft", "Reject Draft", "Add item", "application/pdf"):
         assert label in html
     assert "row.provenance" in html
 

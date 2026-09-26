@@ -8329,8 +8329,8 @@ THIS WEEK'S BENGAL SPECIALS
         };
 
         const QUERY_TAB_ALIASES = {
-            dashboard: 'tab-dashboard', menu: 'tab-image', 'menu-catalogue': 'tab-menu-manager',
-            'current-menu': 'tab-active', 'content-routing': 'tab-instagram-content',
+            dashboard: 'tab-dashboard', menu: 'tab-image', 'menu-catalogue': 'tab-image',
+            'current-menu': 'tab-image', 'content-routing': 'tab-instagram-content',
             'posts-reels-routing': 'tab-instagram-content', 'ai-resolution': 'tab-ai-resolution',
             legacy: 'tab-ai-resolution',
         };
@@ -8366,6 +8366,7 @@ THIS WEEK'S BENGAL SPECIALS
         }
 
         function switchTab(tabId, el, options = {}) {
+            if (['tab-paste', 'tab-sheets', 'tab-active', 'tab-menu-manager'].includes(tabId)) tabId = 'tab-image';
             const group = TAB_GROUPS[tabId];
             if (!group) return;
             if (el) { document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active')); el.classList.add('active'); }
@@ -10606,6 +10607,7 @@ Non-Veg:
             // document level so Ctrl+V works after the operator copies a full
             // menu screenshot, then reuse the same preview/upload path.
             document.addEventListener('paste', (e) => {
+                if (!document.getElementById('fileInput')) return;
                 const menuPanel = document.getElementById('tab-image');
                 if (!menuPanel || menuPanel.style.display === 'none') return;
                 const items = e.clipboardData && e.clipboardData.items;
@@ -10620,7 +10622,7 @@ Non-Veg:
                     const resBox = document.getElementById('imageResult');
                     resBox.style.display = 'block';
                     resBox.className = 'result-box info';
-                    resBox.innerHTML = '📋 <b>Menu photo pasted.</b> Review the preview, then click “Scan Flyer & Update Menu” to save it and update the bot.';
+                    resBox.innerHTML = '📋 <b>Menu photo pasted.</b> Continue to Review before publishing.';
                     break;
                 }
             });
@@ -12466,9 +12468,15 @@ Non-Veg:
     # It is rendered per request anyway, so there is nothing to gain by caching
     # it and a support call to lose.
     from camellia.admin_menu_review import REVIEW_HTML, REVIEW_SCRIPT
-    html_content = html_content.replace('<div id="tab-image" class="panel-card" data-group="menu">',
-        '<div id="tab-image" class="panel-card" data-group="menu">' + REVIEW_HTML + '<div hidden>')
-    html_content = html_content.replace('<div id="tab-ad-routing"', '</div><div id="tab-ad-routing"', 1)
+    menu_start = html_content.index('<div id="tab-image" class="panel-card" data-group="menu">')
+    menu_end = html_content.index('<div id="tab-ad-routing"', menu_start)
+    html_content = (
+        html_content[:menu_start]
+        + '<div id="tab-image" class="panel-card" data-group="menu">'
+        + REVIEW_HTML
+        + '</div>\n        '
+        + html_content[menu_end:]
+    )
     html_content = html_content.replace('</body>', REVIEW_SCRIPT + '</body>', 1)
     return HTMLResponse(
         content=html_content,
