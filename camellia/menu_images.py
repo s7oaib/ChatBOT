@@ -317,8 +317,6 @@ def restore(menu_key: str, version_id: int) -> Optional[Dict[str, Any]]:
 
 def current_url(menu_key: str, fallback: Optional[str] = None) -> Optional[str]:
     menu_key = _key(menu_key)
-    if not _known(menu_key):
-        return None
     from camellia import weekly_savoury
     if menu_key in weekly_savoury.LEGACY_WEEKLY_KEYS and weekly_savoury.lifecycle_enabled():
         current = current_weekly()
@@ -327,6 +325,8 @@ def current_url(menu_key: str, fallback: Optional[str] = None) -> Optional[str]:
         if weekly_savoury.legacy_baseline_current():
             flyer = weekly_flyer.get()
             return flyer.get("url") if flyer and weekly_flyer.is_current(flyer) else fallback
+        return None
+    if not _known(menu_key):
         return None
     row = db.get_menu_image_current(menu_key)
     if row:

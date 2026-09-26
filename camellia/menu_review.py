@@ -35,6 +35,11 @@ class ReviewConflict(ValueError):
 
 def _key(key):
     key = menu_images._key(key)
+    # Weekly Savoury is an internal, durable timeline. Production may have
+    # deleted the retired Weekly Vegetarian catalogue card (and tombstoned
+    # it), so its review state must not depend on recreating that card.
+    if key == weekly_savoury.WEEKLY_KEY:
+        return key
     if not db.get_menu_catalogue_entry(key):
         raise KeyError(key)
     return key
@@ -217,6 +222,8 @@ def extract(key, actor, *, text=None, data=None, mime=None, filename="", weekly=
     key = _key(key)
     if weekly and key != weekly_savoury.WEEKLY_KEY:
         raise ValueError("Weekly Savoury uses the existing weekly menu identity.")
+    if not weekly and key == weekly_savoury.WEEKLY_KEY and not db.get_menu_catalogue_entry(key):
+        raise KeyError(key)
     if text is not None:
         if not isinstance(text, str) or not text.strip() or len(text) > 50000:
             raise ValueError("Paste 1–50,000 characters of menu text.")
@@ -359,8 +366,7 @@ def current_versions(conn=None):
         return versions
     versions = [v for v in versions if v["menu_key"] not in weekly_savoury.LEGACY_WEEKLY_KEYS]
     weekly = weekly_savoury.current_version(conn=conn)
-    entry = db.get_menu_catalogue_entry(weekly["menu_key"]) if weekly else None
-    if weekly and entry and entry["active"]:
+    if weekly:
         versions.append(weekly)
     return versions
 

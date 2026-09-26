@@ -269,6 +269,28 @@ def test_additive_weekly_migration_is_idempotent(weekly_env):
         assert conn.execute("SELECT COUNT(*) FROM menu_versions").fetchone()[0] == 0
 
 
+def test_tombstoned_legacy_catalogue_key_does_not_break_weekly_timeline(weekly_env, monkeypatch):
+    monkeypatch.setattr(menu_dates, "today_ist", lambda: date(2026, 9, 27))
+    with db.get_connection() as conn:
+        conn.execute("DELETE FROM menu_catalogue WHERE menu_id=?", (weekly_savoury.WEEKLY_KEY,))
+        conn.execute("INSERT INTO menu_deletion_tombstones(menu_id,deleted_by) VALUES(?,?)",
+                     (weekly_savoury.WEEKLY_KEY, "operator"))
+        conn.commit()
+    db.init_db()
+    assert db.get_menu_catalogue_entry(weekly_savoury.WEEKLY_KEY) is None
+    client = TestClient(app)
+    response = client.get("/admin/weekly-savoury", headers={"X-Admin-Key": config.ADMIN_API_KEY})
+    assert response.status_code == 200
+    assert response.json()["current"]["status"] == "CURRENT"
+    draft = _draft("22 Sep - 28 Sep 2026", 850)
+    approved = _publish(draft)
+    assert weekly_savoury.current_version()["id"] == approved["version_id"]
+    assert menu_review.current_versions()[-1]["id"] == approved["version_id"]
+    assert "₹850" in rag_fallback_engine.retrieve_approved_menu(
+        "How much is Chicken Kosha this week?").auto_response
+    assert db.get_menu_catalogue_entry(weekly_savoury.WEEKLY_KEY) is None
+
+
 def test_current_and_scheduled_flyer_stay_bound_to_their_own_facts(weekly_env, monkeypatch):
     monkeypatch.setattr(menu_dates, "today_ist", lambda: date(2026, 9, 27))
     source = {"week_of": "22 Sep - 28 Sep 2026", "price": 650}
