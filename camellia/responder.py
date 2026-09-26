@@ -5631,7 +5631,12 @@ class DeterministicResponder:
         The live weekly menu block — always the last entry, matching every
         write path (photo upload, pasted text, Sheet sync, the dashboard).
         """
-        weekly_menus = self.menu_data.get("weekly_menus", [])
+        from camellia import weekly_savoury
+        if weekly_savoury.lifecycle_enabled():
+            from camellia.menu_review import canonical_menu
+            weekly_menus = canonical_menu().get("weekly_menus", [])
+        else:
+            weekly_menus = self.menu_data.get("weekly_menus", [])
         return weekly_menus[-1] if weekly_menus else {}
 
     def _weekly_menu_expired(self) -> bool:
@@ -5642,6 +5647,9 @@ class DeterministicResponder:
         undated text never expires, so this stays False until a real flyer
         with a readable date range goes stale.
         """
+        from camellia import weekly_savoury
+        if weekly_savoury.lifecycle_enabled():
+            return not (weekly_savoury.current_version() or weekly_savoury.legacy_baseline_current())
         current_week = self._current_week()
         return (
             not current_week.get("is_published", True)
@@ -5946,10 +5954,10 @@ class DeterministicResponder:
             # Once the printed week has passed, the dishes and prices below are
             # last week's. A customer would order against them, so say the menu
             # is being updated instead of sending anything stale.
-            if self._weekly_menu_expired():
+            if template_id != "combo_bento" and self._weekly_menu_expired():
                 return _WEEKLY_MENU_BEING_UPDATED, None
 
-            target_images = current_weekly_img
+            target_images = current_menu_image("bento") if template_id == "combo_bento" else current_weekly_img
             # The last entry is "current" everywhere else that touches this
             # array — every write path (photo upload, pasted text, Sheet sync,
             # the admin dashboard's own JS) treats weekly_menus[-1] as the live

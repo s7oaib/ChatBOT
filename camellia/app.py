@@ -3842,6 +3842,9 @@ def unpublish_current_menu(
 ):
     """Hide the active flyer and dishes until the kitchen publishes a replacement."""
     require_admin(x_admin_key, x_admin_pin)
+    from camellia import weekly_savoury
+    if weekly_savoury.lifecycle_enabled():
+        raise HTTPException(status_code=409, detail="Manage the approved Weekly Savoury version through its review workflow.")
     try:
         with open(config.MENU_JSON_PATH, "r", encoding="utf-8") as f:
             menu_data = json.load(f)
@@ -6213,10 +6216,12 @@ def preview_instagram_route_response(
 # /admin/menu/* route).
 # --------------------------------------------------------------------------
 
-from camellia.admin_menu_review import router as menu_review_router
+from camellia.admin_menu_review import router as menu_review_router, weekly_router
 
 for review_route in menu_review_router.routes:
     app.add_api_route(review_route.path, review_route.endpoint, methods=list(review_route.methods))
+for weekly_route in weekly_router.routes:
+    app.add_api_route(weekly_route.path, weekly_route.endpoint, methods=list(weekly_route.methods))
 
 
 @app.get("/admin/menu-manager/menus")
@@ -6358,6 +6363,8 @@ def archive_menu_image(menu_key: str, x_admin_key: Optional[str] = Header(None),
     require_admin(x_admin_key, x_admin_pin)
     try:
         return {"status": "success", "image": menu_images.archive(menu_key)}
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except KeyError:
         raise HTTPException(status_code=404, detail=f"No manageable menu '{menu_key}'")
 
@@ -12468,16 +12475,18 @@ Non-Veg:
     # It is rendered per request anyway, so there is nothing to gain by caching
     # it and a support call to lose.
     from camellia.admin_menu_review import REVIEW_HTML, REVIEW_SCRIPT
+    from camellia.admin_weekly_savoury import WEEKLY_HTML, WEEKLY_SCRIPT
     menu_start = html_content.index('<div id="tab-image" class="panel-card" data-group="menu">')
     menu_end = html_content.index('<div id="tab-ad-routing"', menu_start)
     html_content = (
         html_content[:menu_start]
         + '<div id="tab-image" class="panel-card" data-group="menu">'
+        + WEEKLY_HTML
         + REVIEW_HTML
         + '</div>\n        '
         + html_content[menu_end:]
     )
-    html_content = html_content.replace('</body>', REVIEW_SCRIPT + '</body>', 1)
+    html_content = html_content.replace('</body>', REVIEW_SCRIPT + WEEKLY_SCRIPT + '</body>', 1)
     return HTMLResponse(
         content=html_content,
         headers={

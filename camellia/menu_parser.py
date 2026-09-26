@@ -6,6 +6,7 @@ import base64
 import httpx
 from typing import Dict, Any, List, Optional, Tuple
 from camellia.config import config
+from camellia.menu_dates import parse_week_date_range
 from camellia.monitoring import get_logger
 
 log = get_logger("camellia.menu_parser")
@@ -239,6 +240,8 @@ class MenuParser:
             line = re.sub(r"^\s*[•*\-]\s*", "", line).strip()
             if not line:
                 continue
+            if parse_week_date_range(line):
+                continue  # A printed date header is not a menu item.
             heading = re.sub(r"\s+items?$", "", line.lower().rstrip(":").strip())
             if heading in headings:
                 section = headings[heading]

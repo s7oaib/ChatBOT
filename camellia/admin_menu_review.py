@@ -1,11 +1,14 @@
 """Authenticated Menu Manager review routes and its small table editor."""
+import json
+import re
+from datetime import date, datetime, time, timedelta
 from typing import Optional
 
 from fastapi import APIRouter, Body, Depends, File, Header, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from starlette.concurrency import run_in_threadpool
 
-from camellia import menu_review
+from camellia import menu_dates, menu_review, weekly_savoury
 
 router = APIRouter(prefix="/admin/menu-manager/menus/{menu_key}/review")
 
@@ -82,6 +85,148 @@ def review_versions(menu_key: str, actor=Depends(reviewer)):
 @router.post("/versions/{version_id}/restore")
 def restore_review(menu_key: str, version_id: int, actor=Depends(reviewer)):
     return {"draft": call(menu_review.restore_as_draft, menu_key, version_id, actor)}
+
+
+weekly_router = APIRouter(prefix="/admin/weekly-savoury")
+
+
+def _weekly_view():
+    versions = weekly_savoury.lifecycle_versions()
+    current = weekly_savoury.current_version()
+    upcoming = [version for version in versions if weekly_savoury.version_status(version) == "UPCOMING"]
+    upcoming.sort(key=lambda version: version["valid_from"])
+    def present(version):
+        if not version:
+            return None
+        approval = json.loads(version["approval_json"])
+        return {"version_id": version["id"], "status": weekly_savoury.version_status(version)
+                if version.get("valid_from") else "CURRENT",
+                "valid_from": version.get("valid_from"), "valid_until": version.get("valid_until"),
+                "dates_expired": bool(version.get("valid_until") and version["valid_until"] < menu_dates.today_ist().isoformat()),
+                "display_date_range": weekly_savoury.display_range(version["valid_from"], version["valid_until"])
+                if version.get("valid_from") else (approval.get("menu_metadata") or {}).get("week_of"),
+                "date_provenance": version.get("date_provenance"),
+                "item_count": len(approval.get("rows") or []),
+                "source_type": approval.get("source_type"), "uploaded_by": version.get("changed_by"),
+                "changed_at": version.get("changed_at")}
+    shown_current = present(current)
+    if not shown_current and weekly_savoury.legacy_baseline_current():
+        from camellia.config import config
+        with open(config.MENU_JSON_PATH, encoding="utf-8") as stream:
+            week = (json.load(stream).get("weekly_menus") or [{}])[-1]
+        dates = menu_dates.parse_week_date_range(week.get("week_of"))
+        shown_current = {"version_id": None, "status": "CURRENT",
+            "valid_from": dates[0].isoformat(), "valid_until": dates[1].isoformat(),
+            "display_date_range": weekly_savoury.display_range(*dates),
+            "item_count": sum(len(week.get(section) or []) for section in menu_review.SECTIONS),
+            "source_type": "existing", "uploaded_by": "Admin", "changed_at": None}
+    reminder = None
+    if shown_current and shown_current.get("valid_until"):
+        end = datetime.combine(date.fromisoformat(shown_current["valid_until"]), time.max,
+                               tzinfo=menu_dates._IST)
+        if timedelta(0) <= end - datetime.now(menu_dates._IST) <= timedelta(hours=24):
+            reminder = "Next menu is already scheduled." if upcoming else "Weekly Savoury expires within 24 hours. Upload next week's menu."
+    return {"today": menu_dates.today_ist().isoformat(),
+            "current": shown_current, "upcoming": [present(version) for version in upcoming],
+            "versions": [present(version) for version in versions], "reminder": reminder,
+            "draft": menu_review.get_draft(weekly_savoury.WEEKLY_KEY)}
+
+
+@weekly_router.get("")
+def weekly_status(actor=Depends(reviewer)):
+    return _weekly_view()
+
+
+@weekly_router.post("/extract-text")
+def weekly_extract_text(body: dict = Body(...), actor=Depends(reviewer)):
+    draft = call(menu_review.extract, weekly_savoury.WEEKLY_KEY, actor, text=body.get("text"), weekly=True)
+    return {"draft": draft, "analysis": call(menu_review.weekly_analysis, draft) if draft["status"] != "FAILED" else None}
+
+
+@weekly_router.post("/extract-file")
+async def weekly_extract_file(file: UploadFile = File(...), actor=Depends(reviewer)):
+    data = await file.read(menu_review.MAX_BYTES + 1)
+    if len(data) > menu_review.MAX_BYTES:
+        raise HTTPException(413, "Menu files must be at most 10MB.")
+    draft = await run_in_threadpool(call, menu_review.extract, weekly_savoury.WEEKLY_KEY, actor,
+                                   data=data, mime=file.content_type, filename=file.filename or "", weekly=True)
+    return {"draft": draft, "analysis": call(menu_review.weekly_analysis, draft) if draft["status"] != "FAILED" else None}
+
+
+@weekly_router.post("/analyse")
+def weekly_analyse(body: dict = Body(...), actor=Depends(reviewer)):
+    draft = call(menu_review.get_draft, weekly_savoury.WEEKLY_KEY)
+    if not draft or draft.get("draft_id") != body.get("draft_id") or draft.get("revision") != body.get("revision"):
+        raise HTTPException(409, "Draft changed. Reload before continuing.")
+    return {"analysis": call(menu_review.weekly_analysis, draft, body)}
+
+
+@weekly_router.put("/draft")
+def weekly_save_draft(body: dict = Body(...), actor=Depends(reviewer)):
+    draft = call(menu_review.edit, weekly_savoury.WEEKLY_KEY, body.get("draft_id"),
+                 body.get("revision"), body.get("rows"), actor)
+    return {"draft": draft, "analysis": call(menu_review.weekly_analysis, draft, body)}
+
+
+@weekly_router.post("/reject")
+def weekly_reject(body: dict = Body(...), actor=Depends(reviewer)):
+    return {"draft": call(menu_review.reject, weekly_savoury.WEEKLY_KEY,
+                          body.get("draft_id"), body.get("revision"), actor)}
+
+
+@weekly_router.post("/publish")
+def weekly_publish(body: dict = Body(...), actor=Depends(reviewer)):
+    draft = call(menu_review.publish_approved_menu, weekly_savoury.WEEKLY_KEY,
+                 body.get("draft_id"), body.get("revision"), actor, weekly_options=body)
+    return {"draft": draft, "weekly": _weekly_view()}
+
+
+@weekly_router.post("/versions/{version_id}/restore")
+def weekly_restore(version_id: int, actor=Depends(reviewer)):
+    version = menu_review.db.get_menu_version(version_id)
+    if not version or version["menu_key"] != weekly_savoury.WEEKLY_KEY or not version.get("valid_from"):
+        raise HTTPException(404, "Weekly version not found.")
+    return {"draft": call(menu_review.restore_as_draft, weekly_savoury.WEEKLY_KEY, version_id, actor)}
+
+
+@weekly_router.post("/preview")
+def weekly_preview(body: dict = Body(...), actor=Depends(reviewer)):
+    """Read-only candidate preview; no conversation, send or outbound audit."""
+    draft = call(menu_review.get_draft, weekly_savoury.WEEKLY_KEY)
+    if not draft or draft.get("draft_id") != body.get("draft_id") or draft.get("revision") != body.get("revision"):
+        raise HTTPException(409, "Draft changed. Reload before previewing.")
+    analysis = call(menu_review.weekly_analysis, draft, body)
+    if any(error for error in analysis["errors"] if not error.startswith(("Unusual price change", "Unusual quantity change"))):
+        raise HTTPException(400, "Correct unclear menu facts before previewing.")
+    rows = analysis["rows"]
+    question = str(body.get("question") or "").strip().casefold()
+    from camellia.rag_fallback import rag_fallback_engine
+    approved_sentences = [f"{row['item']}{(' ' + row['quantity']) if row['quantity'] else ''} is ₹{row['price_inr']}."
+                          for row in rows]
+    if re.search(r"\b(?:available|availability|stock|ingredient|allergen|delivery|discount|payment|"
+                 r"order|shelf.life|customi[sz]|event|invoice)\b", question):
+        answer = "Please message our team to confirm those details."
+        grounded = False
+    elif re.search(r"\b(?:price|cost|how much)\b", question):
+        matched = [row for row in rows if re.search(r"(?<!\w)" + re.escape(row["item"].casefold()) + r"(?!\w)", question)
+                   or any(re.search(r"(?<!\w)" + re.escape(alias.casefold()) + r"(?!\w)", question)
+                          for alias in row.get("aliases", []))]
+        if len(matched) != 1:
+            answer, grounded = "Please ask our team for the current menu price.", False
+        else:
+            row = matched[0]
+            answer = f"{row['item']}{(' ' + row['quantity']) if row['quantity'] else ''} is ₹{row['price_inr']}."
+            grounded = rag_fallback_engine.menu_grounding_report(answer, approved_sentences)[0]
+    elif re.search(r"\b(?:menu|weekly|savoury)\b", question):
+        menu_answer = "Current approved prices:\n" + "\n".join(approved_sentences)
+        answer = menu_answer
+        grounded = rag_fallback_engine.menu_grounding_report(answer, [menu_answer])[0]
+    else:
+        answer, grounded = "Please ask our team for the menu details you need.", False
+    upcoming = analysis["valid_from"] and analysis["valid_from"] > menu_dates.today_ist().isoformat()
+    return {"label": "Preview only — not sent to customers.", "answer": answer,
+            "grounded": grounded, "upcoming": bool(upcoming),
+            "schedule_note": "Not live yet. Scheduled for " + analysis["display_date_range"] if upcoming else None}
 
 
 REVIEW_HTML = r'''
@@ -195,7 +340,7 @@ async function mrRequest(path,method='GET',body){const options={method,headers:g
 async function mrMenus(preferredId){
   try{
     const data=await mrRequest('/admin/menu-catalogue');
-    mrCatalogue=data.menus||[];mrMenuCategories=data.categories||[];
+    mrCatalogue=(data.menus||[]).filter(menu=>!['weekly_vegetarian','weekly_non_vegetarian'].includes(menu.menu_id));mrMenuCategories=data.categories||[];
     const picker=document.getElementById('mrMenu');picker.replaceChildren();
     const list=document.getElementById('mrCatalogueList');list.replaceChildren();
     mrCatalogue.forEach(menu=>{
@@ -218,6 +363,7 @@ async function mrMenus(preferredId){
     document.getElementById('mrEmpty').hidden=!!mrCatalogue.length;
     if(preferredId && mrCatalogue.some(menu=>menu.menu_id===preferredId))await mrOpenMenu(preferredId);
     else mrShowCatalogue();
+    if(typeof wsLoad==='function')await wsLoad();
     return true;
   }catch(e){mrMessage(e.message);return false;}
 }

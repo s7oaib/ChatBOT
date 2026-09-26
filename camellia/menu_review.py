@@ -11,7 +11,7 @@ import json
 import re
 import uuid
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
@@ -19,7 +19,7 @@ from PIL import Image
 
 from camellia.config import config
 from camellia.database import db
-from camellia import menu_images, weekly_flyer
+from camellia import menu_dates, menu_images, weekly_flyer, weekly_savoury
 from camellia.menu_parser import menu_parser
 
 MAX_BYTES = 10 * 1024 * 1024
@@ -81,7 +81,7 @@ def _metadata(values):
     return result
 
 
-def _rows(parsed, page=1):
+def _rows(parsed, page=1, provenance="EXTRACTED"):
     result = []
     for section in (*SECTIONS, "unclassified"):
         for row in parsed.get(section) or []:
@@ -90,7 +90,7 @@ def _rows(parsed, page=1):
             result.append({**{f: row.get(f, "") for f in FIELDS},
                 "row_id": uuid.uuid4().hex, "source_page": page,
                 "category": section if section != "unclassified" else "",
-                "provenance": {f: "EXTRACTED" for f in FIELDS}})
+                "provenance": {f: provenance for f in FIELDS}})
     return result
 
 
@@ -111,10 +111,14 @@ def validate(rows, key, strict=False):
     result = []
     allowed = categories(key)
     for index, source in enumerate(rows):
-        if not isinstance(source, dict) or set(source) - set((*FIELDS, "row_id", "source_page", "warnings", "provenance")):
+        if not isinstance(source, dict) or set(source) - set((*FIELDS, "row_id", "source_page", "warnings", "provenance", "aliases")):
             raise ValueError("Unrecognized menu row schema.")
         row = copy.deepcopy(source)
         warnings = []
+        aliases = row.get("aliases", [])
+        if not isinstance(aliases, list) or len(aliases) > 12 or any(not isinstance(alias, str) or len(alias) > 120 for alias in aliases):
+            raise ValueError("Use at most 12 short menu-item aliases.")
+        row["aliases"] = list(dict.fromkeys(alias.strip() for alias in aliases if alias.strip()))
         for f in FIELDS:
             if f != "price_inr":
                 if not isinstance(row.get(f, ""), (str, type(None))):
@@ -162,7 +166,7 @@ def _safe_image(data, mime):
     return output.getvalue(), extension
 
 
-def _pdf_extract(data):
+def _pdf_extract(data, weekly=False):
     import pypdfium2 as pdfium
     if not data.startswith(b"%PDF-"):
         raise ValueError("Not a valid PDF.")
@@ -184,18 +188,20 @@ def _pdf_extract(data):
                     preview = bitmap.to_pil().convert("RGB")
                 previews.append(preview)
                 parsed = menu_parser.parse_menu_text(text) if text.strip() else {}
+                provenance = "TEXT_PARSED" if weekly else "EXTRACTED"
                 if not any(parsed.values()):
                     buffer = io.BytesIO()
                     preview.save(buffer, format="PNG")
                     result = menu_parser.parse_image_and_update_menu(buffer.getvalue(), "image/png")
                     if result.get("status") == "success":
                         parsed = result["parsed"]
+                        provenance = "OCR_EXTRACTED" if weekly else "EXTRACTED"
                     else:
                         # Keep the private page preview so an operator can
                         # transcribe it; extraction failure must not discard
                         # the source or make it appear publishable.
                         warnings.append(f"Page {index + 1} needs manual review.")
-                rows.extend(_rows(parsed, index + 1))
+                rows.extend(_rows(parsed, index + 1, provenance))
     # A single lossless page strip is compatible with existing image sending.
     canvas = Image.new("RGB", (max(p.width for p in previews), sum(p.height for p in previews)), "white")
     y = 0
@@ -207,8 +213,10 @@ def _pdf_extract(data):
     return rows, "\n\n".join(texts), output.getvalue(), warnings
 
 
-def extract(key, actor, *, text=None, data=None, mime=None, filename=""):
+def extract(key, actor, *, text=None, data=None, mime=None, filename="", weekly=False):
     key = _key(key)
+    if weekly and key != weekly_savoury.WEEKLY_KEY:
+        raise ValueError("Weekly Savoury uses the existing weekly menu identity.")
     if text is not None:
         if not isinstance(text, str) or not text.strip() or len(text) > 50000:
             raise ValueError("Paste 1–50,000 characters of menu text.")
@@ -227,6 +235,7 @@ def extract(key, actor, *, text=None, data=None, mime=None, filename=""):
         "created_at": datetime.now(timezone.utc).isoformat(), "created_by": actor,
         "revision": 1, "status": "EXTRACTING", "rows": [], "warnings": [],
         "source_asset": None, "flyer_asset": None, "raw_text": "", "menu_metadata": _metadata({}),
+        "weekly_mode": bool(weekly), "weekly_dates": None,
         "parser": {"version": 1, "provider": "deterministic" if source_type == "text" else "pdfium/groq",
                    "model": config.GROQ_VISION_MODEL if source_type != "text" else None}}
     with db.get_connection() as conn:
@@ -240,10 +249,11 @@ def extract(key, actor, *, text=None, data=None, mime=None, filename=""):
     try:
         if source_type == "text":
             draft["raw_text"] = text
-            draft["rows"] = _rows(menu_parser.parse_menu_text(text))
+            draft["rows"] = _rows(menu_parser.parse_menu_text(text),
+                                  provenance="TEXT_PARSED" if weekly else "EXTRACTED")
         else:
             if source_type == "pdf":
-                rows, raw, flyer, pdf_warnings = _pdf_extract(source)
+                rows, raw, flyer, pdf_warnings = _pdf_extract(source, weekly=weekly)
                 draft["rows"], draft["raw_text"] = rows, raw
                 draft["warnings"].extend(pdf_warnings)
                 extension = "png"
@@ -259,7 +269,8 @@ def extract(key, actor, *, text=None, data=None, mime=None, filename=""):
                 result = menu_parser.parse_image_and_update_menu(original, mime)
                 if result.get("status") != "success":
                     raise ValueError(FAILURE_MESSAGE)
-                draft["rows"] = _rows(result["parsed"])
+                draft["rows"] = _rows(result["parsed"],
+                                      provenance="OCR_EXTRACTED" if weekly else "EXTRACTED")
                 draft["menu_metadata"] = _metadata(result)
             source_name = draft["draft_id"] + (".pdf" if source_type == "pdf" else "." + extension)
             (_private_dir() / source_name).write_bytes(original)
@@ -267,6 +278,13 @@ def extract(key, actor, *, text=None, data=None, mime=None, filename=""):
             (_private_dir() / flyer_name).write_bytes(flyer)
             draft["source_asset"], draft["flyer_asset"] = source_name, flyer_name
         draft["rows"], draft["warnings"] = validate(draft["rows"], key)
+        if weekly:
+            printed = draft["menu_metadata"].get("week_of") or draft["raw_text"]
+            parsed_dates = menu_dates.parse_week_date_range(printed)
+            if parsed_dates:
+                draft["weekly_dates"] = {"valid_from": parsed_dates[0].isoformat(),
+                    "valid_until": parsed_dates[1].isoformat(),
+                    "date_source": "OCR_EXTRACTED" if source_type == "image" else "TEXT_PARSED"}
         draft["status"] = "NEEDS_REVIEW"
     except Exception:
         # Raw provider errors may contain private content; never return them.
@@ -334,9 +352,17 @@ def current_versions(conn=None):
     if conn is None:
         with db.get_connection() as connection:
             return current_versions(connection)
-    return [dict(r) for r in conn.execute("""SELECT v.* FROM menu_versions v
+    versions = [dict(r) for r in conn.execute("""SELECT v.* FROM menu_versions v
         JOIN menu_catalogue c ON c.menu_id=v.menu_key
         WHERE v.is_current=1 AND v.approval_json IS NOT NULL AND c.active=1""")]
+    if not weekly_savoury.lifecycle_enabled(conn):
+        return versions
+    versions = [v for v in versions if v["menu_key"] not in weekly_savoury.LEGACY_WEEKLY_KEYS]
+    weekly = weekly_savoury.current_version(conn=conn)
+    entry = db.get_menu_catalogue_entry(weekly["menu_key"]) if weekly else None
+    if weekly and entry and entry["active"]:
+        versions.append(weekly)
+    return versions
 
 
 def has_current(key):
@@ -346,18 +372,33 @@ def has_current(key):
 def canonical_menu(path=None):
     with open(path or config.MENU_JSON_PATH, encoding="utf-8") as stream:
         menu = json.load(stream)
-    for version in current_versions():
+    visible_versions = current_versions()
+    visible_versions.sort(key=lambda version: version["menu_key"] in weekly_savoury.LEGACY_WEEKLY_KEYS)
+    for version in visible_versions:
         approval = json.loads(version["approval_json"])
         rows = approval["rows"]
         key = version["menu_key"]
-        if key in ("weekly_vegetarian", "weekly_non_vegetarian", "bento"):
+        if key == "bento" and weekly_savoury.lifecycle_enabled():
+            weekly = menu.setdefault("weekly_menus", [])
+            if not weekly:
+                weekly.append({})
+            weekly[-1]["bengali_bento"] = [{f: r[f] for f in ("item", "quantity", "price_inr", "description")}
+                                           for r in rows if r["category"] == "bengali_bento"]
+        elif key in ("weekly_vegetarian", "weekly_non_vegetarian", "bento"):
             weekly = menu.setdefault("weekly_menus", [])
             if not weekly:
                 weekly.append({})
             for field in SECTIONS:
+                if field == "bengali_bento" and key in weekly_savoury.LEGACY_WEEKLY_KEYS and approval.get("weekly_mode"):
+                    # Bengali Bento is its own permanent catalogue menu.
+                    continue
                 weekly[-1][field] = [{f: r[f] for f in ("item", "quantity", "price_inr", "description")}
                                      for r in rows if r["category"] == field]
             weekly[-1].update(approval.get("menu_metadata") or _metadata({}))
+            if key in weekly_savoury.LEGACY_WEEKLY_KEYS and approval.get("weekly_dates"):
+                # The confirmed range, including an operator correction, is
+                # the only date the responder may use for this version.
+                weekly[-1]["week_of"] = approval["weekly_dates"]["display_date_range"]
             weekly[-1]["is_published"] = True
         else:
             collection_key = "signature_collection" if key == "signature" else key
@@ -366,10 +407,87 @@ def canonical_menu(path=None):
                 products.append({"flavour": row["item"], "active": True,
                                  "prices": {row["quantity"]: row["price_inr"]}, "note": row["description"]})
             menu.setdefault("collections", {}).setdefault(collection_key, {})["products"] = products
+    if weekly_savoury.lifecycle_enabled() and not any(
+            version["menu_key"] in weekly_savoury.LEGACY_WEEKLY_KEYS for version in visible_versions) \
+            and not weekly_savoury.legacy_baseline_current():
+        # An expired or not-yet-started reviewed week must not expose the
+        # older JSON rotation as a current fallback through any consumer.
+        weekly = menu.setdefault("weekly_menus", [])
+        if weekly:
+            for section in ("vegetarian", "non_vegetarian", "norom_pak_sondesh"):
+                weekly[-1][section] = []
+            weekly[-1]["is_published"] = False
     return menu
 
 
-def publish_approved_menu(key, draft_id, revision, actor):
+def weekly_analysis(draft, options=None, conn=None):
+    """Validate one proposed Weekly Savoury publication without changing data."""
+    options = options or {}
+    if not draft or not draft.get("weekly_mode") or draft.get("menu_key") != weekly_savoury.WEEKLY_KEY:
+        raise ValueError("This is not a Weekly Savoury draft.")
+    if conn is None:
+        with db.get_connection() as connection:
+            return weekly_analysis(draft, options, connection)
+    rows, errors = validate(draft["rows"], weekly_savoury.WEEKLY_KEY)
+    if any(row["category"] == "bengali_bento" for row in rows):
+        errors.append("Bengali Bento belongs in Menu Catalogue, not Weekly Savoury.")
+    canonical_names = {}
+    for index, row in enumerate(rows):
+        canonical_names.setdefault(weekly_savoury._name(row.get("item")), set()).add(index)
+    alias_owners = {}
+    for index, row in enumerate(rows):
+        for name in row.get("aliases") or []:
+            normalized = weekly_savoury._name(name)
+            if normalized and (canonical_names.get(normalized, {index}) != {index}
+                               or alias_owners.setdefault(normalized, index) != index):
+                errors.append("An item alias matches more than one menu row.")
+    original = draft.get("weekly_dates") or {}
+    raw_start = options.get("valid_from", original.get("valid_from"))
+    raw_end = options.get("valid_until", original.get("valid_until"))
+    accepted_undated = options.get("accept_undated") is True
+    now = datetime.now(timezone.utc)
+    fallback_until = None
+    if raw_start or raw_end:
+        try:
+            start, end = date.fromisoformat(raw_start), date.fromisoformat(raw_end)
+        except (TypeError, ValueError):
+            raise ValueError("Enter both valid dates as YYYY-MM-DD.") from None
+        if not timedelta(0) <= end - start <= timedelta(days=14):
+            raise ValueError("Weekly menu dates must be a valid range of at most 15 inclusive days.")
+        provenance = ("OPERATOR_EDITED" if (raw_start, raw_end) !=
+                      (original.get("valid_from"), original.get("valid_until"))
+                      else original.get("date_source") or "TEXT_PARSED")
+    elif accepted_undated:
+        start = menu_dates.today_ist()
+        fallback_until = now + timedelta(days=7)
+        end = fallback_until.astimezone(menu_dates._IST).date()
+        provenance = "UNDATED_FALLBACK"
+    else:
+        start = end = None
+        provenance = "UNDETECTED"
+    if end and end < menu_dates.today_ist():
+        errors.append("These menu dates have already expired. Confirm new valid dates before publishing.")
+    previous = weekly_savoury.previous_rows(conn)
+    changes = weekly_savoury.compare_rows(rows, previous)
+    if changes["suspicious_quantity"]:
+        errors.append("Unusual quantity change — review and confirm the printed quantity.")
+    if changes["suspicious_price"]:
+        errors.append("Unusual price change — review and confirm the printed price.")
+    if not start:
+        errors.append("Date unclear — confirm dates or deliberately accept the 7-day fallback.")
+    overlaps = weekly_savoury.overlap_versions(start, end, conn) if start and end else []
+    return {"rows": rows, "errors": list(dict.fromkeys(errors)), "changes": changes,
+            "valid_from": start.isoformat() if start else None,
+            "valid_until": end.isoformat() if end else None,
+            "display_date_range": weekly_savoury.display_range(start, end) if start and end else None,
+            "date_provenance": provenance,
+            "fallback_until_at": fallback_until.isoformat() if fallback_until else None,
+            "overlaps": [{"id": version["id"], "date_range": weekly_savoury.display_range(
+                version["valid_from"], version["valid_until"])} for version in overlaps],
+            "needs_review": bool(errors or overlaps or draft.get("warnings"))}
+
+
+def publish_approved_menu(key, draft_id, revision, actor, weekly_options=None):
     key = _key(key)
     with db.get_connection() as conn:
         conn.execute("BEGIN IMMEDIATE")
@@ -377,6 +495,31 @@ def publish_approved_menu(key, draft_id, revision, actor):
         if draft and draft["draft_id"] == draft_id and draft["status"] == "PUBLISHED":
             return draft  # Idempotent retry of the same approval.
         _check(draft, draft_id, revision)
+        weekly_mode = bool(draft.get("weekly_mode"))
+        if weekly_mode:
+            if weekly_options is None:
+                raise ValueError("Confirm the Weekly Savoury dates and changes before publishing.")
+            analysis = weekly_analysis(draft, weekly_options, conn)
+            errors = analysis["errors"]
+            if weekly_options.get("confirm_suspicious") is True:
+                errors = [error for error in errors if not error.startswith((
+                    "Unusual price change", "Unusual quantity change"))]
+            if draft.get("warnings"):
+                errors.extend(draft["warnings"])
+            if errors:
+                raise ValueError("; ".join(dict.fromkeys(errors)))
+            overlaps = analysis["overlaps"]
+            replace_id = weekly_options.get("replace_version_id")
+            if overlaps and (len(overlaps) != 1 or replace_id != overlaps[0]["id"]):
+                raise ReviewConflict("These menu dates overlap an existing weekly menu. Confirm which version to replace.")
+            if replace_id and not overlaps:
+                raise ReviewConflict("The overlapping weekly version changed. Reload before publishing.")
+            live_week = weekly_savoury.current_version(conn=conn)
+            if (overlaps and live_week and analysis["valid_from"] > menu_dates.today_ist().isoformat()
+                    and any(version["id"] == live_week["id"] for version in overlaps)):
+                raise ReviewConflict("A future replacement cannot retire the current weekly menu early.")
+        elif weekly_options is not None:
+            raise ValueError("Weekly publication options are not valid for catalogue menus.")
         rows, _ = validate(draft["rows"], key, strict=True)
         asset_url = None
         if draft["flyer_asset"]:
@@ -393,18 +536,49 @@ def publish_approved_menu(key, draft_id, revision, actor):
             asset_url = "/uploads/menu-images/" + name
         # Text-only publication explicitly removes the old flyer. Keeping it
         # would pair newly approved prices with the previous image's prices.
-        keys = ("weekly_vegetarian", "weekly_non_vegetarian", "bento") if key in ("weekly_vegetarian", "weekly_non_vegetarian", "bento") else (key,)
+        if weekly_mode:
+            keys = weekly_savoury.LEGACY_WEEKLY_KEYS
+        elif key in (*weekly_savoury.LEGACY_WEEKLY_KEYS, "bento") and not weekly_savoury.lifecycle_enabled(conn):
+            keys = (*weekly_savoury.LEGACY_WEEKLY_KEYS, "bento")
+        else:
+            keys = (key,)
         placeholders = ",".join("?" for _ in keys)
-        conn.execute(f"UPDATE menu_image_versions SET status='archived',archived_at=CURRENT_TIMESTAMP WHERE menu_key IN ({placeholders}) AND status='current'", keys)
+        is_live_now = weekly_mode and analysis["valid_from"] <= menu_dates.today_ist().isoformat()
+        if not weekly_mode or is_live_now:
+            conn.execute(f"UPDATE menu_image_versions SET status='archived',archived_at=CURRENT_TIMESTAMP WHERE menu_key IN ({placeholders}) AND status='current'", keys)
+        if weekly_mode and analysis["overlaps"]:
+            old_id = analysis["overlaps"][0]["id"]
+            conn.execute("UPDATE menu_versions SET weekly_state='SUPERSEDED',is_current=0 WHERE id=?", (old_id,))
+            conn.execute("UPDATE menu_image_versions SET status='archived',archived_at=CURRENT_TIMESTAMP WHERE review_version_id=?", (old_id,))
         image_version = conn.execute("SELECT COALESCE(MAX(version),0)+1 FROM menu_image_versions WHERE menu_key=?", (key,)).fetchone()[0]
+        image_status = "scheduled" if weekly_mode and not is_live_now else "current"
         conn.execute("""INSERT INTO menu_image_versions(menu_key,image_path,status,version,uploaded_by,published_at)
-            VALUES(?,?,'current',?,?,CURRENT_TIMESTAMP)""", (key, asset_url or "", image_version, actor))
-        conn.execute(f"UPDATE menu_versions SET is_current=0 WHERE menu_key IN ({placeholders})", keys)
+            VALUES(?,?,?,?,?,CURRENT_TIMESTAMP)""", (key, asset_url or "", image_status, image_version, actor))
+        if not weekly_mode or is_live_now:
+            conn.execute(f"UPDATE menu_versions SET is_current=0 WHERE menu_key IN ({placeholders})", keys)
         approval = {**draft, "rows": rows, "approved_by": actor, "image_path": asset_url,
                     "approved_at": datetime.now(timezone.utc).isoformat()}
-        cursor = conn.execute("""INSERT INTO menu_versions(menu_key,snapshot_json,action,changed_by,approval_json,is_current)
-            VALUES(?,?,'approve_publish',?,?,1)""", (key, _dump(rows), actor, _dump(approval)))
+        if weekly_mode:
+            approval["weekly_dates"] = {"valid_from": analysis["valid_from"],
+                "valid_until": analysis["valid_until"], "date_source": analysis["date_provenance"],
+                "display_date_range": analysis["display_date_range"]}
+            cursor = conn.execute("""INSERT INTO menu_versions
+                (menu_key,snapshot_json,action,changed_by,approval_json,is_current,
+                 valid_from,valid_until,date_provenance,weekly_state,fallback_until_at)
+                VALUES(?,?,'weekly_publish',?,?,?,?,?,?,NULL,?)""",
+                (key, _dump(rows), actor, _dump(approval), 0,
+                 analysis["valid_from"], analysis["valid_until"], analysis["date_provenance"],
+                 analysis["fallback_until_at"]))
+            conn.execute("UPDATE menu_image_versions SET review_version_id=? WHERE menu_key=? AND version=?",
+                         (cursor.lastrowid, key, image_version))
+            approval["version_id"] = cursor.lastrowid
+            conn.execute("UPDATE menu_versions SET approval_json=? WHERE id=?", (_dump(approval), cursor.lastrowid))
+        else:
+            cursor = conn.execute("""INSERT INTO menu_versions(menu_key,snapshot_json,action,changed_by,approval_json,is_current)
+                VALUES(?,?,'approve_publish',?,?,1)""", (key, _dump(rows), actor, _dump(approval)))
         draft.update(status="PUBLISHED", version_id=cursor.lastrowid, revision=revision + 1)
+        if weekly_mode:
+            draft["weekly_dates"] = approval["weekly_dates"]
         _store(conn, draft, actor)
         _audit(conn, draft, "draft_approved", actor, {"version_id": draft["version_id"]})
         _audit(conn, draft, "menu_published", actor, {"version_id": draft["version_id"]})

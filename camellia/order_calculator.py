@@ -138,7 +138,13 @@ def weekly_meal_entries() -> Dict[str, Dict[str, Any]]:
         mtime = os.path.getmtime(path)
     except OSError:
         return {}
-    if _weekly_cache["mtime"] == mtime:
+    from camellia import weekly_savoury
+    live_version = weekly_savoury.current_version() if weekly_savoury.lifecycle_enabled() else None
+    # A scheduled version can become current (or expire) without menu.json
+    # changing. Include the business date and authoritative version in the
+    # cache key so order pricing crosses the same boundary as RAG.
+    cache_key = (mtime, menu_dates.today_ist(), live_version["id"] if live_version else None)
+    if _weekly_cache["mtime"] == cache_key:
         return _weekly_cache["table"]
 
     table: Dict[str, Dict[str, Any]] = {}
@@ -147,7 +153,7 @@ def weekly_meal_entries() -> Dict[str, Dict[str, Any]]:
         weeks = canonical_menu(path).get("weekly_menus") or []
         if weeks:
             current = weeks[-1]
-            if not menu_dates.is_expired(current.get("week_of")):
+            if current.get("is_published", True) and not menu_dates.is_expired(current.get("week_of")):
                 for section in ("vegetarian", "non_vegetarian"):
                     for item in current.get(section) or []:
                         name = (item.get("item") or "").strip()
@@ -172,7 +178,7 @@ def weekly_meal_entries() -> Dict[str, Dict[str, Any]]:
         log.warning("Could not read weekly dishes for ordering: %s", e)
         table = {}
 
-    _weekly_cache["mtime"] = mtime
+    _weekly_cache["mtime"] = cache_key
     _weekly_cache["table"] = table
     return table
 

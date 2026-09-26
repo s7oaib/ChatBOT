@@ -132,6 +132,70 @@ def parse_week_end_date(week_of: Optional[str], today: Optional[date] = None) ->
     return _nearest_year(month_num, day, today or today_ist())
 
 
+_ORDINAL = r"(?:st|nd|rd|th)?"
+_MONTH_TOKEN = r"(?:" + "|".join(sorted(_MONTHS, key=len, reverse=True)) + r")"
+_RANGE_SEPARATOR = r"\s*(?:-|–|—|to)\s*"
+_DAY_FIRST_RANGE = re.compile(
+    rf"\b(?P<start_day>\d{{1,2}}){_ORDINAL}\s+(?P<start_month>{_MONTH_TOKEN})"
+    rf"(?:,?\s+(?P<start_year>20\d{{2}}))?{_RANGE_SEPARATOR}"
+    rf"(?P<end_day>\d{{1,2}}){_ORDINAL}\s+(?P<end_month>{_MONTH_TOKEN})"
+    rf"(?:,?\s+(?P<end_year>20\d{{2}}))?\b", re.IGNORECASE,
+)
+_MONTH_FIRST_RANGE = re.compile(
+    rf"\b(?P<start_month>{_MONTH_TOKEN})\s+(?P<start_day>\d{{1,2}}){_ORDINAL}"
+    rf"{_RANGE_SEPARATOR}(?:(?P<end_month>{_MONTH_TOKEN})\s+)?"
+    rf"(?P<end_day>\d{{1,2}}){_ORDINAL}(?:,?\s+(?P<end_year>20\d{{2}}))?\b",
+    re.IGNORECASE,
+)
+_NUMERIC_RANGE = re.compile(
+    r"\b(?P<start_day>\d{1,2})/(?P<start_month>\d{1,2})(?:/(?P<start_year>20\d{2}))?"
+    + _RANGE_SEPARATOR +
+    r"(?P<end_day>\d{1,2})/(?P<end_month>\d{1,2})(?:/(?P<end_year>20\d{2}))?\b",
+    re.IGNORECASE,
+)
+
+
+def parse_week_date_range(week_of: Optional[str], today: Optional[date] = None) -> Optional[Tuple[date, date]]:
+    """Parse the complete printed range, or fail closed when either end is unclear.
+
+    The existing end-only parser remains unchanged for legacy callers. Yearless
+    ranges use the same bounded year choice, including December-to-January.
+    A single explicit year belongs to the final date unless printed twice.
+    """
+    if not isinstance(week_of, str) or not week_of.strip():
+        return None
+    text = week_of.strip()
+    match = next((found for pattern in (_NUMERIC_RANGE, _DAY_FIRST_RANGE, _MONTH_FIRST_RANGE)
+                  if (found := pattern.search(text))), None)
+    if not match:
+        return None
+    parts = match.groupdict()
+    try:
+        start_month = (int(parts["start_month"]) if parts["start_month"].isdigit()
+                       else _MONTHS[parts["start_month"].lower()])
+        end_token = parts.get("end_month") or parts["start_month"]
+        end_month = int(end_token) if end_token.isdigit() else _MONTHS[end_token.lower()]
+        start_day, end_day = int(parts["start_day"]), int(parts["end_day"])
+        explicit_start = parts.get("start_year")
+        explicit_end = parts.get("end_year")
+        if explicit_end:
+            end_year = int(explicit_end)
+        elif explicit_start:
+            end_year = int(explicit_start) + int((end_month, end_day) < (start_month, start_day))
+        else:
+            inferred = _nearest_year(end_month, end_day, today or today_ist())
+            if inferred is None:
+                return None
+            end_year = inferred.year
+        start_year = int(explicit_start) if explicit_start else end_year - int((start_month, start_day) > (end_month, end_day))
+        start, end = date(start_year, start_month, start_day), date(end_year, end_month, end_day)
+    except (KeyError, TypeError, ValueError):
+        return None
+    # A weekly flyer must describe a short, inclusive range. Anything longer
+    # is more likely an OCR error than an authorisation to serve stale prices.
+    return (start, end) if timedelta(days=0) <= end - start <= timedelta(days=14) else None
+
+
 def is_expired(week_of: Optional[str], today: Optional[date] = None) -> bool:
     """
     True only when the menu's final day is definitively in the past.

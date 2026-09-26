@@ -298,15 +298,31 @@ class RAGFallbackEngine:
 
     def retrieve_approved_menu(self, user_message: str) -> RAGResult:
         from camellia.menu_review import current_versions
+        from camellia import weekly_savoury
         result = RAGResult()
         message = user_message.casefold().strip()
+        weekly_request = bool(re.search(r"\b(?:this week|weekly|savoury)\b", message)) and not bool(
+            re.search(r"\b(?:aamar mishti|signature collection|bento)\b", message))
+        weekly_fact_request = weekly_request or bool(re.search(r"\b(?:menu|price|cost|much)\b", message)
+                                                  and weekly_savoury.historical_item_match(message))
+        if weekly_fact_request and re.search(r"\b(?:menu|price|cost|much|week)\b", message) and weekly_savoury.lifecycle_enabled() and not weekly_savoury.current_version():
+            result.proposed_intent = "approved_menu"
+            result.contains_unapproved_facts = True
+            return result
         matches = []
         for version in current_versions():
             approval = json.loads(version["approval_json"])
             for row in approval["rows"]:
-                name = row["item"].casefold()
-                if re.search(r"(?<!\w)" + re.escape(name) + r"(?!\w)", message):
+                names = [row["item"], *(row.get("aliases") or [])]
+                if any(re.search(r"(?<!\w)" + re.escape(name.casefold()) + r"(?!\w)", message)
+                       for name in names if name):
                     matches.append((version, row))
+        if weekly_request and any(v["menu_key"] in weekly_savoury.LEGACY_WEEKLY_KEYS for v, _ in matches):
+            matches = [(v, r) for v, r in matches if v["menu_key"] in weekly_savoury.LEGACY_WEEKLY_KEYS]
+        if not matches and weekly_savoury.lifecycle_enabled() and re.search(r"\b(?:price|cost|much|menu)\b", message) and weekly_savoury.historical_item_match(message):
+            result.proposed_intent = "approved_menu"
+            result.contains_unapproved_facts = True
+            return result
         if not matches:
             return result
         # Never choose an arbitrary menu/pack when the identity is ambiguous.
@@ -342,6 +358,8 @@ class RAGFallbackEngine:
             result.source_refs = result.retrieved_sources = [f"approved_menu:{menu_key}:version:{item_id}" for item_id in version_ids]
             words = set(re.findall(r"\w+", re.sub(re.escape(matches[0][1]["item"].casefold()), "", message)))
             allowed = {"how", "much", "is", "the", "what", "does", "cost", "price", "for", "please", "pls", "of", "tell", "me"}
+            if weekly_request:
+                allowed |= {"this", "week", "weekly", "savoury", "menu", "current"}
             if words <= allowed and words & {"price", "cost", "much"}:
                 result.proposed_response = result.auto_response = "Current approved prices:\n" + "\n".join(sentences)
                 result.confidence_score = result.similarity_score = 1.0
@@ -352,11 +370,15 @@ class RAGFallbackEngine:
         version, row = matches[0]
         ref = f"approved_menu:{version['menu_key']}:version:{version['id']}:item:{row['item']}"
         result.source_refs = result.retrieved_sources = [ref]
-        remaining = re.sub(re.escape(row["item"].casefold()), "", message)
+        remaining = message
+        for name in [row["item"], *(row.get("aliases") or [])]:
+            remaining = re.sub(r"(?<!\w)" + re.escape(name.casefold()) + r"(?!\w)", "", remaining)
         if row["quantity"]:
             remaining = re.sub(re.escape(row["quantity"].casefold()), "", remaining)
         words = set(re.findall(r"\w+", remaining))
         allowed = {"how", "much", "is", "the", "what", "does", "cost", "price", "for", "please", "pls", "of", "tell", "me"}
+        if weekly_request and version["menu_key"] in weekly_savoury.LEGACY_WEEKLY_KEYS:
+            allowed |= {"this", "week", "weekly", "savoury", "menu", "current"}
         if not words <= allowed or not words & {"price", "cost", "much"}:
             result.contains_unapproved_facts = True
             return result

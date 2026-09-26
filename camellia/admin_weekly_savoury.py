@@ -1,0 +1,189 @@
+"""Small client-facing Weekly Savoury panel over the existing review timeline."""
+
+WEEKLY_HTML = r'''
+<style>
+  #weeklySavouryPanel{max-width:850px;margin:0 auto 34px;padding:0 0 30px;border-bottom:1px solid var(--border)}
+  #weeklySavouryPanel [hidden]{display:none!important}
+  #weeklySavouryPanel h2{margin:0;color:var(--primary)}
+  #weeklySavouryPanel .ws-muted{color:var(--text-muted)}
+  #weeklySavouryPanel .ws-status{padding:15px 18px;margin:18px 0;background:#fff;border:1px solid var(--border);border-radius:10px}
+  #weeklySavouryPanel .ws-status p{margin:4px 0}
+  #weeklySavouryPanel .ws-drop{display:block;text-align:center;padding:32px 18px;border:2px dashed var(--border);border-radius:12px;background:#fcfaf7;cursor:pointer;min-height:150px}
+  #weeklySavouryPanel .ws-drop:hover,#weeklySavouryPanel .ws-drop:focus-within{border-color:var(--primary)}
+  #weeklySavouryPanel .ws-drop input{display:block;max-width:100%;margin:14px auto 0}
+  #weeklySavouryPanel .ws-actions{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:14px 0}
+  #weeklySavouryPanel .ws-actions button{min-height:44px}
+  #weeklySavouryPanel .ws-dates{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+  #weeklySavouryPanel .ws-dates input{width:100%}
+  #weeklySavouryPanel .ws-changes{background:#fff;border:1px solid var(--border);border-radius:10px;padding:15px;margin:16px 0}
+  #weeklySavouryPanel .ws-changes p{margin:5px 0}
+  #weeklySavouryPanel .ws-item{padding:7px 0;border-bottom:1px solid var(--border)}
+  #weeklySavouryPanel .ws-warning{color:#7b3f00;background:#fff3e3;padding:12px;border-radius:8px}
+  #weeklySavouryPanel .ws-review-table{overflow-x:auto}
+  #weeklySavouryPanel .ws-review-table table{width:100%}
+  #weeklySavouryPanel .ws-review-table input,#weeklySavouryPanel .ws-review-table select{max-width:100%;min-width:85px}
+  #weeklySavouryPanel .ws-version{padding:10px 0;border-bottom:1px solid var(--border)}
+  #weeklySavouryPanel .ws-version button{min-height:44px}
+  #weeklySavouryPanel .ws-preview{padding:14px;background:#fff;border:1px solid var(--border);border-radius:8px;white-space:pre-wrap}
+  @media(max-width:600px){#weeklySavouryPanel .ws-dates{grid-template-columns:1fr}#weeklySavouryPanel .ws-review-table{overflow:visible}#weeklySavouryPanel .ws-review-table thead{display:none}#weeklySavouryPanel .ws-review-table tr{display:block;border:1px solid var(--border);border-radius:10px;padding:10px;margin-bottom:10px}#weeklySavouryPanel .ws-review-table td{display:block;border:0;padding:6px}#weeklySavouryPanel .ws-review-table td:before{content:attr(data-label);display:block;font-size:.75rem;color:var(--text-muted)}#weeklySavouryPanel .ws-review-table input,#weeklySavouryPanel .ws-review-table select{width:100%}}
+</style>
+<section id="weeklySavouryPanel" aria-labelledby="wsHeading">
+  <h2 id="wsHeading">Weekly Savoury Menu</h2>
+  <p class="ws-muted">Update this week's menu or prepare the next one.</p>
+  <div id="wsState" class="ws-status" aria-live="polite">Loading weekly menu…</div>
+  <div id="wsReminder" class="ws-warning" hidden></div>
+  <label id="wsDrop" class="ws-drop" for="wsFile"><strong>Drop this week's menu here</strong><br>
+    Drag &amp; Drop, Paste image, or Click<br><span class="ws-muted">JPG, PNG, WEBP or PDF · Maximum 10 MB</span>
+    <input id="wsFile" type="file" accept="image/jpeg,image/png,image/webp,application/pdf" onchange="wsFileSelected()"></label>
+  <div class="ws-actions"><button type="button" class="btn-secondary" onclick="wsTogglePaste()">Paste Menu Text</button></div>
+  <div id="wsPastePane" hidden><label for="wsText">Paste menu text</label>
+    <textarea id="wsText" class="field-control" rows="6" maxlength="50000"></textarea>
+    <button type="button" class="btn-primary" onclick="wsExtractText()">Extract pasted menu</button></div>
+  <div id="wsReview" hidden>
+    <h3 id="wsReviewHeading">Confirm Weekly Menu</h3>
+    <p id="wsReviewCount"></p>
+    <img id="wsSource" alt="Uploaded weekly menu preview" style="max-width:100%" hidden>
+    <h4>Menu dates</h4>
+    <div class="ws-dates"><label>Valid from<input id="wsFrom" class="field-control" type="date" onchange="wsRefreshAnalysis()"></label>
+      <label>Valid until<input id="wsUntil" class="field-control" type="date" onchange="wsRefreshAnalysis()"></label></div>
+    <p id="wsNoDate" class="ws-warning" hidden>No date detected. This menu will remain current for 7 days unless you set an end date.</p>
+    <label><input id="wsUndated" type="checkbox" onchange="wsRefreshAnalysis()"> Use 7-day fallback without printed dates</label>
+    <div id="wsChanges" class="ws-changes"></div>
+    <h4>Extracted items</h4><p class="ws-muted">Check names, quantities and prices against the source before confirming.</p>
+    <div id="wsExtractedRows"></div>
+    <div id="wsWarnings" class="ws-warning" hidden></div>
+    <div id="wsNeedsReview" hidden><h4>Needs Review</h4><p>Correct unclear details before publishing. Leave facts blank if not stated.</p>
+      <div class="ws-review-table"><table><thead><tr><th>Item</th><th>Category</th><th>Quantity</th><th>Price (₹)</th><th>Description</th><th>Aliases</th><th>Action</th></tr></thead><tbody id="wsRows"></tbody></table></div>
+      <div class="ws-actions"><button type="button" class="btn-secondary" onclick="wsAddRow()">Add item</button>
+        <button type="button" class="btn-secondary" onclick="wsSaveCorrections()">Save corrections</button></div></div>
+    <h4>Preview customer response</h4><p class="ws-muted">Preview only — not sent to customers.</p>
+    <input id="wsQuestion" class="field-control" value="What's on the Savoury menu this week?" aria-label="Preview question">
+    <div class="ws-actions"><button type="button" class="btn-secondary" onclick="wsPreview()">Preview response</button></div>
+    <div id="wsPreviewResult" class="ws-preview" hidden></div>
+    <div id="wsSafetyChecks">
+      <label id="wsSuspiciousLabel" hidden><input id="wsConfirmSuspicious" type="checkbox"> I checked the unusual price or quantity against the source.</label>
+      <label id="wsOverlapLabel" hidden><input id="wsConfirmOverlap" type="checkbox"> Replace the overlapping weekly menu shown above.</label>
+    </div>
+    <div class="ws-actions"><button id="wsPublishButton" type="button" class="btn-primary" onclick="wsPublish()">Update Weekly Menu</button>
+      <button type="button" class="btn-secondary" onclick="wsReject()">Discard draft</button></div>
+  </div>
+  <div id="wsFailed" class="ws-warning" hidden>We couldn't read this menu reliably. The published menu is unchanged.
+    <button type="button" class="btn-secondary" onclick="wsReject()">Discard failed draft</button></div>
+  <div id="wsMessage" role="status" aria-live="polite"></div>
+  <div id="wsHistory"><h3>Previous weekly menus</h3><div id="wsVersions"></div></div>
+</section>
+'''
+
+WEEKLY_SCRIPT = r'''
+<script>
+let wsDraft=null,wsAnalysis=null,wsToday='',wsBusy=false,wsDirty=false,wsPreviewUrl=null;
+function wsMessage(message){document.getElementById('wsMessage').textContent=message;}
+function wsOptions(){return {draft_id:wsDraft?.draft_id,revision:wsDraft?.revision,
+  valid_from:document.getElementById('wsFrom').value,valid_until:document.getElementById('wsUntil').value,
+  accept_undated:document.getElementById('wsUndated').checked,
+  confirm_suspicious:document.getElementById('wsConfirmSuspicious').checked,
+  replace_version_id:document.getElementById('wsConfirmOverlap').checked?wsAnalysis?.overlaps?.[0]?.id:null};}
+async function wsLoad(){
+  try{const data=await mrRequest('/admin/weekly-savoury');wsToday=data.today;
+    const state=document.getElementById('wsState');state.replaceChildren();
+    const addLine=(value)=>{const p=document.createElement('p');p.textContent=value;state.appendChild(p);};
+    addLine(data.current?'Current · '+(data.current.display_date_range||'Current menu')+' · '+data.current.item_count+' items':'No current Weekly Savoury menu');
+    if(data.upcoming.length)addLine('Upcoming · '+data.upcoming.map(item=>item.display_date_range).join(', '));
+    else if(!data.current)addLine('Upload this week’s menu to begin.');
+    const reminder=document.getElementById('wsReminder');reminder.hidden=!data.reminder;reminder.textContent=data.reminder||'';
+    const history=document.getElementById('wsVersions');history.replaceChildren();
+    for(const version of data.versions){
+      const line=document.createElement('div');line.className='ws-version';
+      const label=document.createElement('p');label.textContent=(version.display_date_range||'Undated')+' · '+version.status+' · '+version.item_count+' items';line.appendChild(label);
+      const detail=document.createElement('small');detail.textContent='Uploaded by '+(version.uploaded_by||'Admin')+' · '+version.changed_at+' · '+(version.source_type==='text'?'Pasted text':'Menu flyer');line.appendChild(detail);
+      if(version.status!=='CURRENT'){const restore=document.createElement('button');restore.type='button';restore.className='btn-secondary';restore.textContent='Restore previous weekly menu';restore.onclick=()=>wsRestore(version);line.appendChild(restore);}
+      history.appendChild(line);
+    }
+    if(!data.versions.length)history.textContent='No previous weekly menus.';
+    if(data.draft&&!['PUBLISHED','REJECTED'].includes(data.draft.status)){
+      wsDraft=data.draft;wsAnalysis=data.draft.status==='FAILED'?null:(await mrRequest('/admin/weekly-savoury/analyse','POST',
+        {draft_id:wsDraft.draft_id,revision:wsDraft.revision,...(wsDraft.weekly_dates||{})})).analysis;wsRenderReview();
+    }else{wsDraft=null;wsAnalysis=null;document.getElementById('wsReview').hidden=true;document.getElementById('wsFailed').hidden=true;}
+  }catch(error){wsMessage(error.message);}
+}
+function wsTogglePaste(){const pane=document.getElementById('wsPastePane');pane.hidden=!pane.hidden;if(!pane.hidden)document.getElementById('wsText').focus();}
+async function wsFileSelected(){const file=document.getElementById('wsFile').files[0];if(file)await wsExtractFile(file);}
+async function wsExtractFile(file){if(wsBusy)return;wsBusy=true;try{const form=new FormData();form.append('file',file);wsMessage('Extracting menu details. Your published menu is unchanged.');const data=await mrRequest('/admin/weekly-savoury/extract-file','POST',form);wsDraft=data.draft;wsAnalysis=data.analysis;wsDirty=false;wsRenderReview();}catch(error){wsMessage(error.message);}finally{wsBusy=false;document.getElementById('wsFile').value='';}}
+async function wsExtractText(){if(wsBusy)return;const value=document.getElementById('wsText').value.trim();if(!value){wsMessage('Paste menu text first.');return;}wsBusy=true;try{wsMessage('Extracting menu details. Your published menu is unchanged.');const data=await mrRequest('/admin/weekly-savoury/extract-text','POST',{text:value});wsDraft=data.draft;wsAnalysis=data.analysis;wsDirty=false;wsRenderReview();}catch(error){wsMessage(error.message);}finally{wsBusy=false;}}
+function wsRenderReview(options){
+  const failed=!!wsDraft&&wsDraft.status==='FAILED';document.getElementById('wsFailed').hidden=!failed;
+  const review=!!wsDraft&&!failed;document.getElementById('wsReview').hidden=!review;if(!review)return;
+  document.getElementById('wsReviewCount').textContent='We found '+wsDraft.rows.length+' items.';
+  document.getElementById('wsFrom').value=options?.valid_from??wsDraft.weekly_dates?.valid_from??'';
+  document.getElementById('wsUntil').value=options?.valid_until??wsDraft.weekly_dates?.valid_until??'';
+  document.getElementById('wsUndated').checked=!!options?.accept_undated;
+  document.getElementById('wsNoDate').hidden=!!(document.getElementById('wsFrom').value&&document.getElementById('wsUntil').value);
+  const preview=document.getElementById('wsSource');preview.hidden=true;
+  if(wsPreviewUrl){URL.revokeObjectURL(wsPreviewUrl);wsPreviewUrl=null;}
+  if(wsDraft.source_asset){const id=wsDraft.draft_id;fetch('/admin/menu-manager/menus/weekly_vegetarian/review/source/'+id,
+    {headers:getAuthHeaders()}).then(response=>{if(!response.ok)throw Error('Flyer preview unavailable.');return response.blob();})
+    .then(blob=>{if(wsDraft?.draft_id!==id)return;wsPreviewUrl=URL.createObjectURL(blob);preview.src=wsPreviewUrl;preview.hidden=false;}).catch(error=>wsMessage(error.message));}
+  wsRenderAnalysis();
+}
+function wsRenderAnalysis(){
+  if(!wsAnalysis)return;
+  const changes=wsAnalysis.changes;const box=document.getElementById('wsChanges');box.replaceChildren();
+  const heading=document.createElement('strong');heading.textContent="What's changed?";box.appendChild(heading);
+  const summary=document.createElement('p');summary.textContent=[['unchanged','unchanged'],['new','new'],['removed','removed'],['price_changed','price changes'],['quantity_changed','quantity changes']]
+    .map(([key,label])=>changes[key].length+' '+label).join(' · ');box.appendChild(summary);
+  for(const [key,label] of [['new','NEW'],['removed','REMOVED'],['price_changed','PRICE CHANGED'],['quantity_changed','QUANTITY CHANGED']]){
+    for(const item of changes[key]){const line=document.createElement('p');line.textContent=label+' · '+(item.after?.item||item.item)+' · '+
+      (item.before?'₹'+item.before.price_inr+' → ₹'+item.after.price_inr:'₹'+item.price_inr);box.appendChild(line);}
+  }
+  const warnings=document.getElementById('wsWarnings');warnings.hidden=!wsAnalysis.errors.length;warnings.textContent=wsAnalysis.errors.join(' ');
+  const extracted=document.getElementById('wsExtractedRows');extracted.replaceChildren();
+  for(const row of wsAnalysis.rows){const line=document.createElement('div');line.className='ws-item';line.textContent=(row.item||'Item unclear')+' · '+(row.quantity||'Quantity not stated')+' · '+
+    (row.price_inr===null||row.price_inr===undefined||row.price_inr===''?'Price unclear':'₹'+row.price_inr);extracted.appendChild(line);}
+  const detailed=!!wsAnalysis.needs_review;document.getElementById('wsNeedsReview').hidden=!detailed;
+  document.getElementById('wsReviewHeading').textContent=detailed?'Needs Review':'Confirm Weekly Menu';
+  document.getElementById('wsSuspiciousLabel').hidden=!(changes.suspicious_price.length||changes.suspicious_quantity.length);
+  document.getElementById('wsOverlapLabel').hidden=!wsAnalysis.overlaps.length;
+  if(wsAnalysis.overlaps.length)document.getElementById('wsOverlapLabel').lastChild.textContent=' Replace existing schedule: '+wsAnalysis.overlaps.map(item=>item.date_range).join(', ');
+  document.getElementById('wsPublishButton').textContent=wsAnalysis.valid_from&&wsAnalysis.valid_from>wsToday?'Schedule Weekly Menu':'Update Weekly Menu';
+  wsRenderRows();
+}
+function wsRenderRows(){const body=document.getElementById('wsRows');body.replaceChildren();if(!wsDraft)return;
+  wsDraft.rows.forEach((row,index)=>{const tr=document.createElement('tr');
+    for(const field of ['item','category','quantity','price_inr','description','aliases']){
+      const td=document.createElement('td');td.dataset.label=field==='price_inr'?'Price (₹)':field;
+      const control=document.createElement(field==='category'?'select':'input');control.setAttribute('aria-label',field+' row '+(index+1));
+      if(field==='category')for(const category of ['vegetarian','non_vegetarian','norom_pak_sondesh']){
+        const option=document.createElement('option');option.value=category;option.textContent=category.replaceAll('_',' ');control.appendChild(option);}
+      control.value=field==='aliases'?(row.aliases||[]).join(', '):row[field]??'';
+      control.oninput=()=>{row[field]=field==='aliases'?control.value.split(',').map(item=>item.trim()).filter(Boolean):control.value;wsDirty=true;};
+      td.appendChild(control);tr.appendChild(td);
+    }
+    const action=document.createElement('td');action.dataset.label='Action';const remove=document.createElement('button');remove.type='button';remove.className='btn-secondary';remove.textContent='Delete item';remove.onclick=()=>{wsDraft.rows.splice(index,1);wsDirty=true;wsRenderRows();};action.appendChild(remove);tr.appendChild(action);body.appendChild(tr);
+  });
+}
+function wsAddRow(){if(!wsDraft)return;wsDraft.rows.push({item:'',category:'vegetarian',quantity:'',price_inr:'',description:'',aliases:[]});wsDirty=true;wsRenderRows();}
+async function wsRefreshAnalysis(){if(!wsDraft||wsBusy)return;try{const result=await mrRequest('/admin/weekly-savoury/analyse','POST',wsOptions());wsAnalysis=result.analysis;document.getElementById('wsNoDate').hidden=!!(wsOptions().valid_from&&wsOptions().valid_until);wsRenderAnalysis();}catch(error){wsMessage(error.message);}}
+async function wsSaveCorrections(){if(!wsDraft||wsBusy)return;wsBusy=true;const options=wsOptions();try{const result=await mrRequest('/admin/weekly-savoury/draft','PUT',{...options,rows:wsDraft.rows});wsDraft=result.draft;wsAnalysis=result.analysis;wsDirty=false;wsRenderReview(options);wsMessage('Corrections saved. Published menu unchanged.');}catch(error){wsMessage(error.message);}finally{wsBusy=false;}}
+async function wsPreview(){if(!wsDraft||wsBusy)return;if(wsDirty){wsMessage('Save corrections before previewing.');return;}try{const result=await mrRequest('/admin/weekly-savoury/preview','POST',{...wsOptions(),question:document.getElementById('wsQuestion').value});const box=document.getElementById('wsPreviewResult');box.textContent=result.label+(result.schedule_note?'\n'+result.schedule_note:'')+'\n\n'+result.answer;box.hidden=false;}catch(error){wsMessage(error.message);}}
+async function wsPublish(){if(!wsDraft||wsBusy)return;if(wsDirty){wsMessage('Save corrections before publishing.');return;}const options=wsOptions();
+  if(wsAnalysis?.overlaps?.length&&!options.replace_version_id){wsMessage('Confirm the overlapping menu replacement first.');return;}
+  if((wsAnalysis?.changes?.suspicious_price?.length||wsAnalysis?.changes?.suspicious_quantity?.length)&&!options.confirm_suspicious){wsMessage('Confirm the unusual change against the source first.');return;}
+  const action=options.valid_from&&options.valid_from>wsToday?'Schedule':'Update';
+  if(!confirm(action+' Weekly Savoury Menu?\n\n'+wsDraft.rows.length+' items · '+(wsAnalysis?.display_date_range||'7-day undated fallback')+'\nThe flyer and facts will use the same approved version.'))return;
+  wsBusy=true;try{await mrRequest('/admin/weekly-savoury/publish','POST',options);wsMessage(action==='Schedule'?'Weekly menu scheduled. It will become current automatically.':'Weekly menu updated.');await wsLoad();}catch(error){wsMessage(error.message);}finally{wsBusy=false;}}
+async function wsReject(){if(!wsDraft||!confirm('Discard this draft? The published menu will not change.'))return;try{await mrRequest('/admin/weekly-savoury/reject','POST',{draft_id:wsDraft.draft_id,revision:wsDraft.revision});wsDraft=null;wsAnalysis=null;await wsLoad();wsMessage('Draft discarded.');}catch(error){wsMessage(error.message);}}
+async function wsRestore(version){if(!confirm('Restore previous weekly menu?\n\n'+(version.display_date_range||'Undated')+'\nIt will become a review draft, not live immediately.'))return;
+  if(version.dates_expired&&!confirm('This menu has already expired. Confirm new valid dates before publishing it again. Continue to review?'))return;
+  try{const result=await mrRequest('/admin/weekly-savoury/versions/'+version.version_id+'/restore','POST');wsDraft=result.draft;
+    wsAnalysis=(await mrRequest('/admin/weekly-savoury/analyse','POST',{draft_id:wsDraft.draft_id,revision:wsDraft.revision})).analysis;
+    wsRenderReview();wsMessage('Previous menu restored to a draft. Review and confirm before publishing.');}
+  catch(error){wsMessage(error.message);}}
+const wsDrop=document.getElementById('wsDrop');
+wsDrop.addEventListener('dragover',event=>event.preventDefault());
+wsDrop.addEventListener('drop',event=>{event.preventDefault();if(event.dataTransfer?.files?.length)wsExtractFile(event.dataTransfer.files[0]);});
+document.addEventListener('paste',event=>{const panel=document.getElementById('tab-image');if(!panel||panel.style.display==='none')return;
+  if(event.target?.closest?.('input,textarea,[contenteditable]'))return;
+  for(const item of event.clipboardData?.items||[]){if(item.type?.startsWith('image/')){const file=item.getAsFile();if(file){event.preventDefault();wsExtractFile(file);}break;}}
+});
+</script>
+'''

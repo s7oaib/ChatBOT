@@ -1126,10 +1126,17 @@ class Database:
                 ("menu_drafts", "review_json", "TEXT"),
                 ("menu_versions", "approval_json", "TEXT"),
                 ("menu_versions", "is_current", "INTEGER NOT NULL DEFAULT 0"),
+                ("menu_versions", "valid_from", "TEXT"),
+                ("menu_versions", "valid_until", "TEXT"),
+                ("menu_versions", "date_provenance", "TEXT"),
+                ("menu_versions", "weekly_state", "TEXT"),
+                ("menu_versions", "fallback_until_at", "TEXT"),
             ):
                 columns = {r[1] for r in cursor.execute(f"PRAGMA table_info({table})")}
                 if column not in columns:
                     cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_menu_versions_weekly_range "
+                           "ON menu_versions(menu_key, valid_from, valid_until)")
             cursor.execute("""CREATE TABLE IF NOT EXISTS menu_review_audit (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, draft_id TEXT NOT NULL,
                 menu_key TEXT NOT NULL, action TEXT NOT NULL, actor TEXT NOT NULL,
@@ -1153,6 +1160,7 @@ class Database:
             );
             """)
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_menu_image_versions_key ON menu_image_versions(menu_key, version DESC)")
+            self._ensure_column(cursor, "menu_image_versions", "review_version_id", "INTEGER")
 
             # Seed counters if empty
             cursor.execute("INSERT OR IGNORE INTO analytics (key, value) VALUES ('total_messages', 0);")
