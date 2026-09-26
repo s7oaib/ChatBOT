@@ -5978,29 +5978,29 @@ async def create_menu_catalogue_entry(
     category: str = Form("Other"),
     description: str = Form(...),
     active: bool = Form(True),
-    file: UploadFile = File(...),
+    file: Optional[UploadFile] = File(None),
     x_admin_key: Optional[str] = Header(None),
     x_admin_pin: Optional[str] = Header(None),
 ):
     """
-    Creates a new menu and immediately publishes its image — the single
-    "Create Menu" action the client sees corresponds to one catalogue row
-    plus one published image version, not a separate draft-then-publish
-    step, since a brand-new menu has nothing else to preview against yet.
+    Creates a catalogue entry. An optional file starts a review draft;
+    metadata-only creation lets the operator select the new menu before
+    uploading or pasting content. Neither path publishes menu knowledge.
 
-    No OCR, no fact extraction: the uploaded image is stored exactly as
-    uploaded. Only the name/category/description typed here are recorded as
-    customer-facing text; nothing about price, availability, ingredients or
-    allergens is inferred from the image or created by this endpoint.
+    A supplied file is extracted into a draft for operator review. No
+    extracted price, availability, ingredient or allergen is published by
+    creating the catalogue entry.
     """
     require_admin(x_admin_key, x_admin_pin)
-    image_bytes = await file.read()
-    if len(image_bytes) > MAX_UPLOAD_SIZE:
+    image_bytes = await file.read() if file is not None else None
+    if image_bytes is not None and len(image_bytes) > MAX_UPLOAD_SIZE:
         raise HTTPException(status_code=413, detail="File too large (maximum 10MB allowed).")
     try:
         entry = menu_catalogue.create_menu(name, category, description, active=active)
     except MenuCatalogueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    if file is None:
+        return {"status": "success", "menu": entry, "draft": None, "published": False}
     try:
         from camellia.menu_review import extract
         from camellia.admin_menu_review import reviewer
@@ -8151,7 +8151,7 @@ THIS WEEK'S BENGAL SPECIALS
                 if (requestGeneration !== authRequestGeneration) return;
                 adminAuthenticated = true;
                 hideAuthOverlay();
-                loadActiveMenu(); loadAdRoutes(); loadAnalytics(); refreshCandidateBadge(); loadDashboardOverview(); loadHandoffs(); loadInstagramContentGallery();
+                loadActiveMenu(); loadAdRoutes(); mrMenus(); loadAnalytics(); refreshCandidateBadge(); loadDashboardOverview(); loadHandoffs(); loadInstagramContentGallery();
             } catch (e) {
                 if (requestGeneration !== authRequestGeneration) return;
                 adminAuthenticated = false;
@@ -8259,6 +8259,7 @@ THIS WEEK'S BENGAL SPECIALS
                     hideAuthOverlay();
                     loadActiveMenu();
                     loadAdRoutes();
+                    mrMenus();
                     loadAnalytics();
                     refreshCandidateBadge();
                     loadDashboardOverview(); loadHandoffs(); loadInstagramContentGallery();
@@ -8374,7 +8375,7 @@ THIS WEEK'S BENGAL SPECIALS
 
             // Everything in the group is on screen at once, so everything in it
             // needs its data.
-            if (group === 'menu') { loadActiveMenu(); loadAdRoutes(); }
+            if (group === 'menu') { loadActiveMenu(); loadAdRoutes(); if (adminAuthenticated) mrMenus(); }
             if (group === 'menu_manager') { mmLoadMenuList(); }
             if (group === 'customers') { loadAnalytics(); loadConversations(); }
             if (group === 'answers') { loadCandidates(); loadKnowledge(); }

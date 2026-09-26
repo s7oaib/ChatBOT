@@ -132,6 +132,51 @@ def test_menu_metadata_edit_rejects_blank_description(catalogue_db):
         menu_catalogue.update_menu(entry["menu_id"], description="   ")
 
 
+def test_admin_can_create_menu_without_file_then_edit_same_menu_id(admin_client):
+    client, headers = admin_client
+    created = client.post("/admin/menu-catalogue", headers=headers, files={
+        "name": (None, "Durga Puja Specials"), "category": (None, "Other"),
+        "description": (None, "Festive Bengali sweets collection"), "active": (None, "true"),
+    })
+    assert created.status_code == 200, created.text
+    payload = created.json()
+    menu_id = payload["menu"]["menu_id"]
+    assert payload["published"] is False and payload["draft"] is None
+    assert any(m["menu_id"] == menu_id for m in client.get("/admin/menu-catalogue", headers=headers).json()["menus"])
+
+    edited = client.patch(f"/admin/menu-catalogue/{menu_id}", headers=headers, json={
+        "name": "Durga Puja Collection", "category": "Other",
+        "description": "Updated festive menu", "active": False,
+    })
+    assert edited.status_code == 200, edited.text
+    assert edited.json()["menu"]["menu_id"] == menu_id
+    assert edited.json()["menu"]["name"] == "Durga Puja Collection"
+    assert edited.json()["menu"]["active"] == 0
+
+
+def test_admin_delete_keeps_active_route_and_permits_unused_menu(admin_client):
+    client, headers = admin_client
+    menu_id = client.post("/admin/menu-catalogue", headers=headers, data={
+        "name": "Temporary Routed Menu", "category": "Other",
+        "description": "Temporary collection", "active": "true",
+    }).json()["menu"]["menu_id"]
+    route = menu_catalogue.db.save_instagram_source_route({
+        "source_type": "post", "media_id": "temporary-routed-menu", "menu_id": menu_id,
+        "menu_mode": "SELECTED", "active": True,
+    })
+    blocked = client.delete(f"/admin/menu-catalogue/{menu_id}/permanent", headers=headers)
+    assert blocked.status_code == 409
+    assert menu_catalogue.get_menu(menu_id) is not None
+
+    menu_catalogue.db.save_instagram_source_route({
+        "routing_id": route["routing_id"], "source_type": "post", "media_id": "temporary-routed-menu",
+        "menu_id": menu_id, "menu_mode": "SELECTED", "active": False,
+    })
+    deleted = client.delete(f"/admin/menu-catalogue/{menu_id}/permanent", headers=headers)
+    assert deleted.status_code == 200, deleted.text
+    assert menu_catalogue.get_menu(menu_id) is None
+
+
 # --- Menu image lifecycle on a dynamic menu -----------------------------
 
 def test_upload_replace_archive_restore_on_a_new_menu(catalogue_db, monkeypatch):

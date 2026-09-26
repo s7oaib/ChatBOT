@@ -182,6 +182,8 @@ def test_the_dashboard_offers_review_before_publish():
     assert "Approve &amp; Publish" in page
     assert "mrAdd" in page and "mrReject" in page
     assert "mrSave" in page and "extract-file" in page
+    assert "loadActiveMenu(); loadAdRoutes(); mrMenus();" in page
+    assert "if (adminAuthenticated) mrMenus();" in page
 
 
 def test_writing_an_answer_sits_above_the_list_of_answers():
