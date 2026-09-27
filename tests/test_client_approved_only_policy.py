@@ -16,7 +16,7 @@ UNSUPPORTED_REPLY = (
 )
 
 
-def test_approved_sondesh_price_paraphrase_uses_verbatim_client_answer():
+def test_approved_sondesh_price_paraphrase_uses_verbatim_client_answer(eligible_weekly_asset):
     user_id = "approved-only-price"
     session_memory.clear_session(user_id, "instagram")
     text, matched, template_id, _images = responder.match_and_respond(
@@ -56,7 +56,7 @@ def test_unapproved_business_question_cannot_reach_rag_or_groq():
     assert facts["last_llm_called"] is False
 
 
-def test_live_menu_uses_only_the_documented_deterministic_menu_source():
+def test_live_menu_uses_only_the_documented_deterministic_menu_source(eligible_weekly_asset):
     from datetime import date
     user_id = "approved-only-live-menu"
     session_memory.clear_session(user_id, "instagram")
@@ -128,7 +128,7 @@ def test_priority_product_cannot_answer_unsupported_source_references(question):
     assert not any(call.args[0] == "jolbhora" for call in template.call_args_list)
 
 
-def test_explicit_sondesh_price_beats_mapped_priority_product():
+def test_explicit_sondesh_price_beats_mapped_priority_product(eligible_weekly_asset):
     user_id = "priority-explicit-sondesh-price"
     _set_jolbhora_source(user_id)
     with patch("camellia.responder.rag_fallback_engine.retrieve") as rag, patch.object(

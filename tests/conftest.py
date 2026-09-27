@@ -131,6 +131,8 @@ def isolate_process_session_cache(monkeypatch, request):
     app_module._ig_token_state["result"] = None
     delivery_monitor._consecutive_failures.clear()
     delivery_monitor._alerted.clear()
+
+
     # A unittest module removes its temporary SQLite file at class teardown,
     # while later pytest modules still share the long-lived Database object.
     # Recreate the ordinary test schema only when that replacement left the
@@ -153,3 +155,15 @@ def isolate_process_session_cache(monkeypatch, request):
     app_module._ig_token_state["result"] = None
     delivery_monitor._consecutive_failures.clear()
     delivery_monitor._alerted.clear()
+
+
+@pytest.fixture
+def eligible_weekly_asset(monkeypatch):
+    """Give non-expiry routing tests an explicit reviewed current flyer."""
+    from camellia import menu_images
+    from camellia.responder import DeterministicResponder
+
+    url = "/uploads/test-reviewed-current-weekly.jpeg"
+    monkeypatch.setattr(menu_images, "current_weekly", lambda: {"image_path": url})
+    monkeypatch.setattr(DeterministicResponder, "_weekly_menu_expired", lambda self: False)
+    return url

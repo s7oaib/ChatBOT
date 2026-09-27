@@ -25,7 +25,7 @@ def _resolved(question, user_id):
     ("sondesh_details_client", "Tell me more about Sondesh"),
     ("sondesh_price_client", "What's the price of Sondesh?"),
 ])
-def test_sondesh_text_and_menus_follow_canonical_position(qa_id, question):
+def test_sondesh_text_and_menus_follow_canonical_position(qa_id, question, eligible_weekly_asset):
     text, blocks = _resolved(question, f"ordered-{qa_id}")
     assert text == client_qa.REGISTRY_BY_ID[qa_id].answer
     timeline = [(block["kind"], block.get("asset_key"), block.get("text", "")) for block in blocks]
@@ -51,7 +51,7 @@ def test_subscription_chart_precedes_manager_next_steps(qa_id, question):
     assert "Manager of Kitchens" in blocks[chart + 1]["text"]
 
 
-def test_share_weekly_menu_marker_remains_positional():
+def test_share_weekly_menu_marker_remains_positional(eligible_weekly_asset):
     _text, blocks = _resolved("What is the price of Chicken Kosha?", "ordered-chicken-kosha")
     assert blocks[-1]["asset_key"] == "weekly_menu"
     assert "rest of the menu" in blocks[-2]["text"]
@@ -109,7 +109,7 @@ def test_unmapped_source_only_event_does_not_reply_or_handoff(monkeypatch):
     assert app_module.db.get_active_handoff("instagram", user_id) is None
 
 
-def test_explicit_sondesh_after_subscription_source_description_never_replays_it():
+def test_explicit_sondesh_after_subscription_source_description_never_replays_it(eligible_weekly_asset):
     user_id = "source-then-explicit-sondesh"
     session_memory.clear_session(user_id, "instagram")
     facts = session_memory.get_facts(user_id, "instagram")

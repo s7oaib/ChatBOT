@@ -81,7 +81,7 @@ def test_gallery_mapping_requires_source_description(mapping_db, description):
     ("reel", "What's this reel about?"),
     ("story", "What is this story about?"),
 ])
-def test_exact_source_description_and_approved_topic_switch(source_type, question):
+def test_exact_source_description_and_approved_topic_switch(source_type, question, eligible_weekly_asset):
     user_id = f"mapping-{source_type}"
     session_memory.clear_session(user_id, "instagram")
     facts = session_memory.get_facts(user_id, "instagram")
@@ -122,7 +122,7 @@ def test_natural_source_references_use_admin_description(question):
     assert matched and answer == "This reel introduces our subscription."
 
 
-def test_explicit_subscription_price_keeps_approved_copy_and_relevant_mapped_asset(monkeypatch):
+def test_explicit_subscription_price_keeps_approved_copy_and_relevant_mapped_asset(monkeypatch, eligible_weekly_asset):
     user_id = "subscription-mapped-chart"
     session_memory.clear_session(user_id, "instagram")
     facts = session_memory.get_facts(user_id, "instagram")
@@ -159,7 +159,7 @@ def test_greeting_does_not_use_source_description():
     ("Bengali Bento", "tell me more", "bento_details_client"),
     ("Bengali Bento", "price?", "bento_price_client"),
 ])
-def test_short_followup_uses_source_description_or_explicit_topic_qa(topic, question, approved_id):
+def test_short_followup_uses_source_description_or_explicit_topic_qa(topic, question, approved_id, eligible_weekly_asset):
     user_id = f"short-{topic}-{question}"
     session_memory.clear_session(user_id, "instagram")
     facts = session_memory.get_facts(user_id, "instagram")
@@ -178,7 +178,7 @@ def test_short_followup_uses_source_description_or_explicit_topic_qa(topic, ques
     assert facts["decision_lane"] == "EXACT_APPROVED"
 
 
-def test_bento_source_explicit_sondesh_switch_then_price():
+def test_bento_source_explicit_sondesh_switch_then_price(eligible_weekly_asset):
     user_id = "bento-switch-sondesh"
     session_memory.clear_session(user_id, "instagram")
     facts = session_memory.get_facts(user_id, "instagram")

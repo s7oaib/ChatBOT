@@ -78,7 +78,7 @@ def test_subscription_chart_paraphrases_share_the_same_asset(message):
         ("Bengali Bento images", "send it again", "asset_request_bento_images", "BENTO_IMAGES"),
     ],
 )
-def test_asset_requests_work_across_supported_asset_types(opening, followup, expected_route, expected_asset):
+def test_asset_requests_work_across_supported_asset_types(opening, followup, expected_route, expected_asset, eligible_weekly_asset):
     user_id = "asset-generic-" + expected_asset.lower()
     first = ask(user_id, opening)
     assert first[1] is True

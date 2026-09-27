@@ -24,7 +24,7 @@ def ask(user_id, text, channel="whatsapp"):
 
 
 @pytest.mark.parametrize("selection", ["Bengali meal", "second one", "option 2", "the Bengali one", "meals please"])
-def test_price_clarification_selection_continues_original_intent(selection):
+def test_price_clarification_selection_continues_original_intent(selection, eligible_weekly_asset):
     user_id = "routing-price-selection"
     first = ask(user_id, "What's the pricing?")
     assert first[2] == "price_clarify_product"

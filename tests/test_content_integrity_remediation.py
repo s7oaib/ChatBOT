@@ -102,7 +102,7 @@ def test_unsupported_health_copy_is_replaced_even_if_previously_overridden(tmp_p
     assert "glycemic" not in database.get_response_template_override("sugar_free_options")["response"].lower()
 
 
-def test_dynamic_bento_renderer_uses_managed_copy(tmp_path, monkeypatch):
+def test_dynamic_bento_renderer_uses_managed_copy(tmp_path, monkeypatch, eligible_weekly_asset):
     database, menu, templates = _fixtures(tmp_path)
     apply_safe_content_remediations(database, menu, templates)
     responder = DeterministicResponder()

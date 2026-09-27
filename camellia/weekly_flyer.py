@@ -239,8 +239,11 @@ def is_current(state: Optional[Dict[str, Any]], now: Optional[float] = None) -> 
     if not state:
         return False
     week_of = state.get("week_of")
+    printed_range = menu_dates.parse_week_date_range(week_of)
+    if printed_range is not None:
+        return printed_range[0] <= menu_dates.today_ist() <= printed_range[1]
     if menu_dates.parse_week_end_date(week_of) is not None:
-        return not menu_dates.is_expired(week_of)
+        return False
     now = time.time() if now is None else now
     uploaded_at = float(state.get("uploaded_at") or 0)
     return (now - uploaded_at) <= UNDATED_FLYER_LIFETIME_DAYS * 86400

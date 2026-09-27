@@ -81,7 +81,7 @@ def test_a_dish_from_this_weeks_upload_can_be_ordered():
     assert "Shukto" in item["flavour"]
 
 
-def test_the_price_quoted_is_the_price_charged():
+def test_the_price_quoted_is_the_price_charged(eligible_weekly_asset):
     """
     The bento bug in another costume: the menu text is built from menu.json
     while ordering used a separate hardcoded table, so the two could disagree.

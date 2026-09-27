@@ -28,7 +28,7 @@ def _escalated(text):
     return "manager of kitchens" in (text or "").lower()
 
 
-def test_the_confirmed_substitution_is_answered():
+def test_the_confirmed_substitution_is_answered(eligible_weekly_asset):
     for phrasing in ("can I get chholar dal instead of aloo dom in the veg bento",):
         text, matched, tmpl = _ask(phrasing)
         assert matched, f"{phrasing!r} dead-ended into a handover"

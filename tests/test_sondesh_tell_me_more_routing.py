@@ -11,7 +11,7 @@ from camellia.session_memory import session_memory
 EXPECTED_ASSETS = [
     "/images/AAMAR%20MISHTI.jpeg",
     "/images/Signature%20Sondesh.jpeg",
-    "/images/From%20Friday.jpeg",
+    "/uploads/test-reviewed-current-weekly.jpeg",
 ]
 
 
@@ -24,7 +24,7 @@ EXPECTED_ASSETS = [
         "More details about Sondesh please",
     ],
 )
-def test_explicit_sondesh_overview_uses_frozen_canonical_route(message, monkeypatch):
+def test_explicit_sondesh_overview_uses_frozen_canonical_route(message, monkeypatch, eligible_weekly_asset):
     monkeypatch.setattr(config, "BYPASS_AD_GATE", True)
     user_id = "sondesh-tell-more-clean-" + str(abs(hash(message)))
     session_memory.clear_session(user_id, "instagram")
@@ -73,7 +73,7 @@ def test_explicit_sondesh_overview_uses_frozen_canonical_route(message, monkeypa
     ],
     ids=["pending_product_choice", "previous_meals_topic", "unrelated_story_route"],
 )
-def test_explicit_sondesh_overview_clears_stale_state(state, monkeypatch):
+def test_explicit_sondesh_overview_clears_stale_state(state, monkeypatch, eligible_weekly_asset):
     monkeypatch.setattr(config, "BYPASS_AD_GATE", True)
     user_id = "sondesh-tell-more-stale-" + str(abs(hash(repr(state))))
     session_memory.clear_session(user_id, "instagram")

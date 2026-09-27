@@ -186,7 +186,7 @@ def test_unknown_attachment_marks_context_unmapped_and_ambiguous_followup_clarif
     assert db.get_active_handoff("instagram", sender) is None
 
 
-def test_mapped_exact_post_identity_persists_topic_and_answers_followups(monkeypatch):
+def test_mapped_exact_post_identity_persists_topic_and_answers_followups(monkeypatch, eligible_weekly_asset):
     monkeypatch.setattr(config, "BYPASS_AD_GATE", True)
     cases = [
         ("Sondesh", "Tell me about Sondesh", "sondesh_details_client", "price?", "sondesh_price_client"),
@@ -227,7 +227,7 @@ def test_mapped_exact_post_identity_persists_topic_and_answers_followups(monkeyp
             assert db.get_active_handoff("instagram", sender) is None
 
 
-def test_explicit_product_question_remains_routable_after_unmapped_share(monkeypatch):
+def test_explicit_product_question_remains_routable_after_unmapped_share(monkeypatch, eligible_weekly_asset):
     sender = "explicit-source-" + uuid.uuid4().hex
     session_memory.clear_session(sender, "instagram")
     with patch.object(app_module, "_reply_to_unreadable_attachment"):

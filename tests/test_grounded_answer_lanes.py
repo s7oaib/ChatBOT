@@ -38,7 +38,7 @@ def test_system_conversation_never_handoffs(message):
     ("How much is Sondesh?", "sondesh_price_client"),
     ("Tell me about Bengali Bento", "bento_details_client"),
 ])
-def test_paraphrase_returns_unchanged_client_answer(message, source_id):
+def test_paraphrase_returns_unchanged_client_answer(message, source_id, eligible_weekly_asset):
     (answer, matched, _template, _images), facts = route(message)
     assert matched and answer == client_qa.REGISTRY_BY_ID[source_id].answer
     assert facts["decision_lane"] == "EXACT_APPROVED"
@@ -99,7 +99,7 @@ def test_rejected_groq_draft_handoffs(answer, sources):
     assert facts["decision_lane"] == "HUMAN_HANDOFF"
 
 
-def test_greeting_then_exact_answer():
+def test_greeting_then_exact_answer(eligible_weekly_asset):
     user_id = "greeting-then-price"
     session_memory.clear_session(user_id, "instagram")
     responder.match_and_respond("Hi", user_id=user_id, channel="instagram")
@@ -117,7 +117,7 @@ def test_sondesh_gluten_statement_is_quoted_only_from_approved_source():
     assert facts["last_knowledge_ids"] == ["client_qa:general_details"]
 
 
-def test_bento_context_supports_single_option_selection():
+def test_bento_context_supports_single_option_selection(eligible_weekly_asset):
     user_id = "bento-option-selection"
     session_memory.clear_session(user_id, "instagram")
     responder.match_and_respond("Tell me about Bengali Bento", user_id=user_id, channel="instagram")

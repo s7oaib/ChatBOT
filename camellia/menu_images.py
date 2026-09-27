@@ -124,8 +124,7 @@ def _fallback(menu_key: str) -> Optional[str]:
     if static_default:
         return static_default
     if menu_key in WEEKLY_MENU_KEYS:
-        flyer = weekly_flyer.get()
-        return flyer.get("url") if flyer else "/images/From%20Friday.jpeg"
+        return current_weekly_url()
     return None
 
 
@@ -191,13 +190,14 @@ def has_weekly_archive() -> bool:
 
 
 def current_weekly_url(fallback: Optional[str] = None) -> Optional[str]:
-    """Resolve the customer-facing weekly image from the shared lifecycle."""
+    """Resolve only an eligible current weekly image; never a static fallback."""
     row = current_weekly()
     if row:
         return row.get("image_path")
     if has_weekly_archive():
         return None
-    return fallback
+    flyer = weekly_flyer.get()
+    return flyer.get("url") if flyer and weekly_flyer.is_current(flyer) else None
 
 
 def list_menus() -> list[Dict[str, Any]]:
@@ -317,15 +317,8 @@ def restore(menu_key: str, version_id: int) -> Optional[Dict[str, Any]]:
 
 def current_url(menu_key: str, fallback: Optional[str] = None) -> Optional[str]:
     menu_key = _key(menu_key)
-    from camellia import weekly_savoury
-    if menu_key in weekly_savoury.LEGACY_WEEKLY_KEYS and weekly_savoury.lifecycle_enabled():
-        current = current_weekly()
-        if current:
-            return current.get("image_path")
-        if weekly_savoury.legacy_baseline_current():
-            flyer = weekly_flyer.get()
-            return flyer.get("url") if flyer and weekly_flyer.is_current(flyer) else fallback
-        return None
+    if menu_key in WEEKLY_MENU_KEYS:
+        return current_weekly_url()
     if not _known(menu_key):
         return None
     row = db.get_menu_image_current(menu_key)

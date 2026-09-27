@@ -14,6 +14,7 @@ import sys
 import os
 import json
 import unittest
+import pytest
 from camellia.responder import responder, DeterministicResponder
 from camellia.session_memory import session_memory
 from camellia.order_calculator import order_calculator
@@ -269,6 +270,7 @@ class Test25AgentStressScenarios(unittest.TestCase):
         self.assertIn("₹750", resp2.text)
         self.assertIn("₹900", resp2.text)
 
+    @pytest.mark.usefixtures("eligible_weekly_asset")
     def test_agent_16_weekly_rotation_dishes(self):
         """Agent 16: Reads only this week's approved Instagram menu data."""
         user_id = "user_foodie_16"
@@ -328,6 +330,7 @@ class Test25AgentStressScenarios(unittest.TestCase):
         self.assertIn("ORDER DRAFT RECEIPT", res["formatted_receipt"])
         self.assertIn("₹2,350", res["formatted_receipt"])
 
+    @pytest.mark.usefixtures("eligible_weekly_asset")
     def test_agent_21_bengali_bento_combo(self):
         """Agent 21: Inquiring about Bengali Bento meals."""
         user_id = "user_bento_21"
@@ -384,6 +387,7 @@ class Test25AgentStressScenarios(unittest.TestCase):
         self.assertIn("Aamar Mishti", resp2.text)
         self.assertIn("Signature", resp2.text)
 
+    @pytest.mark.usefixtures("eligible_weekly_asset")
     def test_agent_26_savoury_lunch_dinner_to_bento(self):
         """Agent 26 (Phase D): Savoury food inquiry followed by Bengali Bento specific inquiry (bento_details answers with confirmed tiers)."""
         user_id = "user_savoury_26"
@@ -443,6 +447,7 @@ class Test25AgentStressScenarios(unittest.TestCase):
         self.assertEqual(resp2.template_id, "savoury_food_intro")
         self.assertNotIn("If this is your first Camellia meal and the menu feels unfamiliar, I'll be happy to help you choose!", resp2.text)
 
+    @pytest.mark.usefixtures("eligible_weekly_asset")
     def test_agent_29_returning_customer_after_24h_gap_flow(self):
         """Agent 29 (Phase D): Full agent flow simulating >24h gap with name retention & order draft reset."""
         import time

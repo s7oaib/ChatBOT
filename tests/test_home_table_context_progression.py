@@ -51,7 +51,9 @@ def test_details_then_generic_price_then_payment(monkeypatch, provider_unavailab
         payment = _reply(user_id, "How do I pay?")
     assert details["template_id"] == "bengali_home_table_details", details
     assert pricing["template_id"] == "bengali_home_table_pricing", pricing
-    assert pricing["text"] == client_qa.REGISTRY_BY_ID["home_table_price"].answer
+    canonical = client_qa.REGISTRY_BY_ID["home_table_price"].answer
+    details_text = client_qa.REGISTRY_BY_ID["home_table_details"].answer
+    assert pricing["text"] == canonical[len(details_text):].lstrip()
     assert pricing["route_source"] == "EXACT_APPROVED", pricing
     assert pricing["decision_lane"] == "EXACT_APPROVED", pricing
     assert pricing["home_table_context"] is True, pricing

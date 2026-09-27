@@ -155,7 +155,7 @@ def test_story_context_never_overrides_protected_guards(story_db, text, expected
     assert session_memory.get_facts(uid, "instagram")["last_route_source"] == "HUMAN_HANDOFF"
 
 
-def test_explicit_product_beats_mapped_story_and_switches_followup(story_db):
+def test_explicit_product_beats_mapped_story_and_switches_followup(story_db, eligible_weekly_asset):
     uid = "story-switch-" + uuid.uuid4().hex[:8]
     facts = _with_story_context(uid)
     _response, matched, template_id, _ = _reply(uid, "tell me more")

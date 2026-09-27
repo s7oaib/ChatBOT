@@ -300,7 +300,7 @@ def test_unsupported_new_request_overrides_stale_home_table_context_on_instagram
     assert template_id != "bengali_home_table_pricing"
 
 
-def test_explicit_bento_switch_preserves_bento_context_for_bare_price():
+def test_explicit_bento_switch_preserves_bento_context_for_bare_price(eligible_weekly_asset):
     from datetime import date
     user_id = _user("bento_switch")
     session_memory.clear_session(user_id, "whatsapp")

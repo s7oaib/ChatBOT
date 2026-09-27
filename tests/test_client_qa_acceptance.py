@@ -47,7 +47,7 @@ def test_sondesh_overview_uses_available_menu_assets():
     assert images
 
 
-def test_general_can_you_tell_me_more_uses_food_overview_after_stale_instagram_route(monkeypatch):
+def test_general_can_you_tell_me_more_uses_food_overview_after_stale_instagram_route(monkeypatch, eligible_weekly_asset):
     monkeypatch.setattr("camellia.config.config.BYPASS_AD_GATE", True)
     user_id = "client-qa-general-details"
     session_memory.clear_session(user_id, "instagram")
@@ -131,7 +131,7 @@ def test_payment_and_finalized_order_remain_distinct_from_order_process(monkeypa
     assert template_id == expected_template
 
 
-def test_instagram_bengali_bento_details_beats_stale_story_context(monkeypatch):
+def test_instagram_bengali_bento_details_beats_stale_story_context(monkeypatch, eligible_weekly_asset):
     monkeypatch.setattr("camellia.config.config.BYPASS_AD_GATE", True)
     user_id = "client-qa-bento-stale-story"
     session_memory.clear_session(user_id, "instagram")

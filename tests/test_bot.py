@@ -6,6 +6,7 @@ import inspect
 import sqlite3
 import time
 import unittest
+import pytest
 from unittest.mock import patch, MagicMock
 from fastapi.testclient import TestClient
 
@@ -158,6 +159,7 @@ class TestCamelliaBot(unittest.TestCase):
         self.assertIn("₹450", response)
         self.assertIsNotNone(img_url)
 
+    @pytest.mark.usefixtures("eligible_weekly_asset")
     def test_responder_dynamic_weekly_menu(self):
         """Test menu query returns menu photo card URL."""
         response, was_matched, tmpl_id, img_url = responder.match_and_respond("Show me the veg menu this week")
@@ -211,6 +213,7 @@ class TestCamelliaBot(unittest.TestCase):
             self.assertIsNone(tmpl_id)
             self.assertIn("Manager of Kitchens", response)
 
+    @pytest.mark.usefixtures("eligible_weekly_asset")
     def test_product_overview_queries(self):
         """Product inquiries must match product_overview and return 3 menu cards."""
         test_queries = [
@@ -1888,6 +1891,7 @@ class TestCamelliaBot(unittest.TestCase):
         self.assertIn("Manager of Kitchens", resp5)
         self.assertNotIn("87965 51990", resp5)
 
+    @pytest.mark.usefixtures("eligible_weekly_asset")
     def test_phase_b_savoury_food_intro_and_image(self):
         """Phase B: Test savoury_food_intro returns 3 ways to order, No minimum order, and attaches weekly menu image."""
         from camellia.session_memory import session_memory
@@ -1906,7 +1910,7 @@ class TestCamelliaBot(unittest.TestCase):
         # Image attachment must be weekly menu card
         self.assertIsNotNone(imgs)
         image_urls = [i.get("url") if isinstance(i, dict) else i for i in imgs]
-        self.assertTrue(any("Thursday" in i or "Friday" in i for i in image_urls))
+        self.assertIn("/uploads/test-reviewed-current-weekly.jpeg", image_urls)
         # The new client-approved add-on is limited to meal/menu interest and
         # uses the three uploaded Sondesh assets in stable order.
         self.assertIn("handcrafted Norom Pak Sondesh", resp)
@@ -1915,6 +1919,7 @@ class TestCamelliaBot(unittest.TestCase):
         self.assertTrue(any("sondesh_addon_03" in i for i in image_urls))
         self.assertTrue(isinstance(imgs[0], dict) and imgs[0].get("text_first"))
 
+    @pytest.mark.usefixtures("eligible_weekly_asset")
     def test_phase_b_bento_details_answers_with_confirmed_tiers(self):
         """bento_details is client-confirmed (2026-09-03): it answers with the three tiers instead of escalating."""
         from camellia.session_memory import session_memory
@@ -2008,6 +2013,7 @@ class TestCamelliaBot(unittest.TestCase):
         self.assertIn("pure desi A2 cow milk", resp)
         self.assertIsNotNone(imgs)
 
+    @pytest.mark.usefixtures("eligible_weekly_asset")
     def test_phase_b_savoury_crosssell_nudge_fires_once_per_session(self):
         """Phase B: Test savoury cross-sell nudge fires on first savoury query and not on subsequent queries."""
         from camellia.session_memory import session_memory
@@ -2041,6 +2047,7 @@ class TestCamelliaBot(unittest.TestCase):
         # response attaches the live menu assets from the current catalogue.
         self.assertTrue(imgs3)
 
+    @pytest.mark.usefixtures("eligible_weekly_asset")
     def test_phase_e_sondesh_crosssell_savoury_nudge_and_template(self):
         """Phase E: Test sondesh -> savoury cross-sell nudge, once-per-session cap, and menu image attachment."""
         from camellia.session_memory import session_memory
@@ -2521,6 +2528,7 @@ class TestInteractiveMenuFlow(unittest.TestCase):
         self.assertNotIn("notified our team", text.lower())
         self.assertRegex(text, r"(?i)veg")
 
+    @pytest.mark.usefixtures("eligible_weekly_asset")
     def test_one_word_veg_and_nonveg_answers_resolve(self):
         """The bot asks "Veg or Non-Veg?", so a one-word reply has to work."""
         from datetime import date
@@ -2536,6 +2544,7 @@ class TestInteractiveMenuFlow(unittest.TestCase):
                 self.assertEqual(tmpl, expected, f"'{answer}' routed to {tmpl}")
                 self.assertIn("₹", text, f"'{answer}' menu came back without prices")
 
+    @pytest.mark.usefixtures("eligible_weekly_asset")
     def test_bento_pricing_quotes_the_confirmed_tiers(self):
         """The meals flow must quote the client-confirmed tiers, and only those."""
         from camellia.session_memory import session_memory

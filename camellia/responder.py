@@ -139,6 +139,23 @@ _WEEKLY_MENU_BEING_UPDATED = (
     "collections."
 )
 
+
+def _normalize_approved_transport_text(value: str) -> str:
+    value = value.replace("\r\n", "\n").replace("\r", "\n")
+    value = re.sub(r"\n[ \t]*\n(?:[ \t]*\n)+", "\n\n", value)
+    return value.strip()
+
+
+def _approved_continuation(answer: str, previous: str) -> str:
+    """Drop only a proven leading copy of the approved previous answer."""
+    expected = _normalize_approved_transport_text(previous)
+    if not expected or not _normalize_approved_transport_text(answer).startswith(expected):
+        return answer
+    for end in range(len(answer) + 1):
+        if _normalize_approved_transport_text(answer[:end]) == expected:
+            return answer[end:].lstrip()
+    return answer
+
 _DUPLICATE_REPLY_NOTICE = (
     "Got it — thanks! I've shared those details just above.\n\n"
     "Anything else I can help with — *Sondesh* prices, this week's *Meals* menu, "
@@ -1421,6 +1438,9 @@ class DeterministicResponder:
                     facts["pending_clarification"] = None
                     facts["last_intents"] = ["ASSET_REQUEST"]
                     return spec["ack"], True, spec["route_id"], None
+                if asset_id == "WEEKLY_MENU":
+                    facts["last_route_source"] = "deterministic_asset_request"
+                    return _WEEKLY_MENU_BEING_UPDATED, True, spec["route_id"], None
                 return None
             facts.update({
                 "active_topic": spec["topic"],
@@ -3065,7 +3085,10 @@ class DeterministicResponder:
             # client-approved Subscription QA record, never the source label
             # or a legacy response template.
             source_context_blocks_client_qa = False
-        price_followup = bool(re.fullmatch(r"\s*(?:price|cost|rate|how much)\s*[?.!]*\s*", user_message, re.I))
+        price_followup = bool(re.fullmatch(
+            r"\s*(?:(?:what(?:'s| is)|whats)\s+the\s+)?(?:price|cost|rate)|how\s+much\s*",
+            user_message.strip(" ?.!").lower(), re.I,
+        ))
         details_followup = bool(re.fullmatch(r"\s*(?:tell me more|more details|tell me about it)\s*[?.!]*\s*", user_message, re.I))
         context_topic = str(facts.get("last_topic") or "").casefold()
         source_topic = str(source_route.get("routing_topic") or "").casefold() if source_route_active else ""
@@ -3173,8 +3196,15 @@ class DeterministicResponder:
                 ],
                 "aamar_menu": ["/images/AAMAR%20MISHTI.jpeg"],
                 "signature_menu": ["/images/Signature%20Sondesh.jpeg"],
-                "weekly_menu": [current_weekly_url("/images/From%20Friday.jpeg")],
+                "weekly_menu": [current_weekly_url()],
             }
+            weekly_missing = "weekly_menu" in entry.asset_keys and not asset_map["weekly_menu"][0]
+            if weekly_missing and entry.qa_id not in {"sondesh_details_client", "sondesh_price_client"}:
+                response_text = _WEEKLY_MENU_BEING_UPDATED
+                facts.update({"ordered_response_blocks": [], "last_route_source": "EXACT_APPROVED",
+                              "client_qa_id": entry.qa_id, "last_llm_called": False})
+                session_memory.add_turn(user_id, channel, user_message, response_text)
+                return response_text, True, _CLIENT_QA_TEMPLATE_IDS.get(entry.qa_id), None
             mapped_image = None
             if (
                 source_route_active and source_route
@@ -3185,6 +3215,21 @@ class DeterministicResponder:
             ):
                 mapped_image = current_menu_image(str(source_route["menu_id"]))
             for block in entry.blocks:
+                if weekly_missing and block.value == "weekly_menu":
+                    continue
+                if (
+                    weekly_missing
+                    and block.kind == "TEXT"
+                    and entry.qa_id in {"sondesh_details_client", "sondesh_price_client"}
+                ):
+                    weekly_attachment_sentence = (
+                        "I\u2019ve attached this week\u2019s menu in case you\u2019d like to have a look."
+                    )
+                    if weekly_attachment_sentence in entry.answer and weekly_attachment_sentence in block.value:
+                        block_text = block.value.replace(weekly_attachment_sentence + " ", "", 1)
+                        if block_text:
+                            ordered_response_blocks.append({"kind": "TEXT", "text": block_text})
+                        continue
                 if block.kind == "TEXT":
                     ordered_response_blocks.append({"kind": "TEXT", "text": block.value})
                     continue
@@ -3272,6 +3317,20 @@ class DeterministicResponder:
                 return handoff, False, "client_approved_asset_missing", None
             template_id = _CLIENT_QA_TEMPLATE_IDS.get(entry.qa_id)
             response_text = entry.answer
+            if weekly_missing:
+                response_text = "\n\n".join(block["text"] for block in ordered_response_blocks if block["kind"] == "TEXT")
+            if entry.qa_id == "home_table_price" and facts.get("last_answer_id") == "bengali_home_table_details":
+                previous = session_memory.get_session(user_id, channel)["turns"][-1:]
+                details = client_qa.REGISTRY_BY_ID["home_table_details"].answer
+                previous_text = previous[0].get("content") if previous else None
+                if (
+                    previous and previous[0].get("role") == "assistant"
+                    and isinstance(previous_text, str)
+                    and _normalize_approved_transport_text(previous_text)
+                    == _normalize_approved_transport_text(details)
+                ):
+                    response_text = _approved_continuation(response_text, details)
+                    ordered_response_blocks[:] = [{"kind": "TEXT", "text": response_text}]
             session_memory.add_turn(user_id, channel, user_message, response_text)
             return (
                 response_text,
@@ -5657,47 +5716,10 @@ class DeterministicResponder:
         )
 
     def _current_weekly_image(self, today_weekday: int) -> Tuple[Optional[str], Optional[str]]:
-        """
-        The weekly menu card to send, and a caption override when it is the
-        operator's own upload rather than one of the two fixed images shipped
-        with the repo.
-
-        An uploaded flyer takes priority over the day-of-week Till Thursday /
-        From Friday rotation, because it is more current by definition — the
-        operator posted it precisely to reflect what changed. The rotation is
-        the fallback for a deployment where nothing has been uploaded yet.
-
-        Returns no card at all once the menu's printed dates have passed. The
-        static fallback is not a substitute there: it is a picture of a menu
-        too, and sending any dish photo for a week that has ended is the exact
-        thing expiry exists to prevent.
-        """
-        # An uploaded flyer is judged on its own printed date (or, when that
-        # could not be read, on when it was uploaded). menu.json's week no
-        # longer gets a veto here: since the photo is saved even when text
-        # extraction fails, the two can legitimately disagree, and letting a
-        # stale text date suppress this week's photo is exactly the "upload
-        # did nothing" failure the split exists to prevent.
-        # A deliberately published Menu Manager image wins immediately and is
-        # read from durable metadata on every request; no process restart is
-        # needed. An explicitly archived image returns no card.
-        managed = current_weekly()
-        if managed:
-            return managed["image_path"], None
-        if has_weekly_archive():
-            return None, None
-
-        uploaded = weekly_flyer.get()
-        if uploaded:
-            if not weekly_flyer.is_current(uploaded):
-                return None, None
-            return uploaded["url"], uploaded.get("caption")
-        if self._weekly_menu_expired():
-            return None, None
-        img_till_thursday = "/images/Till%20Thursday.jpeg"
-        img_from_friday = "/images/From%20Friday.jpeg"
-        fallback = img_from_friday if today_weekday in [4, 5, 6] else img_till_thursday
-        return fallback, None
+        """Use the same current-week eligibility as approved QA assets."""
+        url = current_weekly_url()
+        flyer = weekly_flyer.get()
+        return url, flyer.get("caption") if flyer and url == flyer.get("url") else None
 
     def _detect_relevant_images(self, user_message: str) -> Optional[Any]:
         """Attaches relevant menu photo cards when user inquires about products or menus in AI-First mode."""
@@ -5939,6 +5961,8 @@ class DeterministicResponder:
 
         # Savoury food intro, Sondesh->Savoury cross-sell & Bento details — attach current weekly menu image card alongside text
         elif template_id in ["savoury_food_intro", "sondesh_crosssell_savoury", "bento_details"]:
+            if not current_weekly_img:
+                return _WEEKLY_MENU_BEING_UPDATED, None
             target_images = current_weekly_img
             formatted_text = default_response
 
@@ -5954,7 +5978,7 @@ class DeterministicResponder:
             # Once the printed week has passed, the dishes and prices below are
             # last week's. A customer would order against them, so say the menu
             # is being updated instead of sending anything stale.
-            if template_id != "combo_bento" and self._weekly_menu_expired():
+            if template_id != "combo_bento" and (self._weekly_menu_expired() or not current_weekly_img):
                 return _WEEKLY_MENU_BEING_UPDATED, None
 
             target_images = current_menu_image("bento") if template_id == "combo_bento" else current_weekly_img

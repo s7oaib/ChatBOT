@@ -318,7 +318,7 @@ def test_bare_price_question_with_no_topic_asks_which_product_instead_of_guessin
     assert "sondesh_price_detailed" != reply[2]
 
 
-def test_instagram_bare_price_after_source_route_uses_client_food_overview(monkeypatch):
+def test_instagram_bare_price_after_source_route_uses_client_food_overview(monkeypatch, eligible_weekly_asset):
     monkeypatch.setattr(config, "BYPASS_AD_GATE", True)
     user_id = "client_instagram_general_price"
     session_memory.clear_session(user_id, "instagram")

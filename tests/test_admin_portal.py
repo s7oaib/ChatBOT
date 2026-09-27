@@ -877,8 +877,8 @@ def test_retired_reset_route_cannot_bypass_menu_review():
     weekly_flyer.clear()
 
 
-def test_no_upload_falls_back_to_the_baked_in_weekly_image():
-    """A deployment where nothing has ever been uploaded keeps working."""
+def test_no_upload_never_sends_baked_in_historical_weekly_image():
+    """Without an eligible flyer, never send a baked-in historical week."""
     from camellia import weekly_flyer
 
     from datetime import date
@@ -890,7 +890,7 @@ def test_no_upload_falls_back_to_the_baked_in_weekly_image():
         )
     images = reply.json().get("image_url") or []
     urls = [i["url"] if isinstance(i, dict) else i for i in images]
-    assert any("Till%20Thursday" in u or "From%20Friday" in u for u in urls)
+    assert not any("Till%20Thursday" in u or "From%20Friday" in u for u in urls)
 
 
 def test_image_extraction_keeps_unapproved_printed_date_in_draft():
