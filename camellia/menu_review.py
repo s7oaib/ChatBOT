@@ -15,12 +15,12 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
-from PIL import Image
+from PIL import Image, ImageOps
 
 from camellia.config import config
 from camellia.database import db
 from camellia import menu_dates, menu_images, weekly_flyer, weekly_savoury
-from camellia.menu_parser import menu_parser
+from camellia.menu_parser import OCR_DIAGNOSTIC_CODES, menu_parser
 
 MAX_BYTES = 10 * 1024 * 1024
 MAX_ROWS = 150
@@ -73,7 +73,17 @@ def get_draft(key, conn=None):
         with db.get_connection() as connection:
             return get_draft(key, connection)
     row = conn.execute("SELECT review_json FROM menu_drafts WHERE menu_key=?", (_key(key),)).fetchone()
-    return json.loads(row[0]) if row and row[0] else None
+    if not row or not row[0]:
+        return None
+    draft = json.loads(row[0])
+    draft.setdefault("diagnostic_codes", [])
+    return draft
+
+
+def _safe_diagnostics(result):
+    """Persist only known symbolic codes, never provider content or exceptions."""
+    return list(dict.fromkeys(code for code in result.get("diagnostic_codes", [])
+                              if isinstance(code, str) and code in OCR_DIAGNOSTIC_CODES))
 
 
 def _metadata(values):
@@ -162,12 +172,16 @@ def validate(rows, key, strict=False):
 def _safe_image(data, mime):
     extension = menu_images.validate_image(data, mime)
     with Image.open(io.BytesIO(data)) as image:
-        if Image.MIME.get(image.format) != mime or image.width * image.height > 25000000:
+        original_format = image.format
+        original_mime = Image.MIME.get(original_format)
+        if original_mime != mime or image.width * image.height > 25000000:
             raise ValueError("Image type or dimensions are not supported.")
-        # Lossless re-encoding strips metadata/trailing payload; no downscaling.
-        image.load()
+        # Apply the original EXIF rotation before metadata-stripping re-encoding.
+        oriented = ImageOps.exif_transpose(image)
+        oriented.load()
         output = io.BytesIO()
-        image.save(output, format=image.format, **({"quality": 100, "subsampling": 0} if image.format == "JPEG" else {}))
+        oriented.save(output, format=original_format,
+                      **({"quality": 100, "subsampling": 0} if original_format == "JPEG" else {}))
     return output.getvalue(), extension
 
 
@@ -175,7 +189,7 @@ def _pdf_extract(data, weekly=False):
     import pypdfium2 as pdfium
     if not data.startswith(b"%PDF-"):
         raise ValueError("Not a valid PDF.")
-    rows, texts, previews, warnings = [], [], [], []
+    rows, texts, previews, warnings, diagnostics = [], [], [], [], []
     with pdfium.PdfDocument(data) as document:
         if not 1 <= len(document) <= 8:
             raise ValueError("PDF must contain 1–8 pages.")
@@ -198,6 +212,7 @@ def _pdf_extract(data, weekly=False):
                     buffer = io.BytesIO()
                     preview.save(buffer, format="PNG")
                     result = menu_parser.parse_image_and_update_menu(buffer.getvalue(), "image/png")
+                    diagnostics.extend(_safe_diagnostics(result))
                     if result.get("status") == "success":
                         parsed = result["parsed"]
                         provenance = "OCR_EXTRACTED" if weekly else "EXTRACTED"
@@ -215,7 +230,7 @@ def _pdf_extract(data, weekly=False):
         y += preview.height
     output = io.BytesIO()
     canvas.save(output, format="PNG")
-    return rows, "\n\n".join(texts), output.getvalue(), warnings
+    return rows, "\n\n".join(texts), output.getvalue(), warnings, list(dict.fromkeys(diagnostics))
 
 
 def extract(key, actor, *, text=None, data=None, mime=None, filename="", weekly=False):
@@ -241,6 +256,7 @@ def extract(key, actor, *, text=None, data=None, mime=None, filename="", weekly=
         "original_filename": str(filename).replace("\\", "/").rsplit("/", 1)[-1][:160],
         "created_at": datetime.now(timezone.utc).isoformat(), "created_by": actor,
         "revision": 1, "status": "EXTRACTING", "rows": [], "warnings": [],
+        "diagnostic_codes": [],
         "source_asset": None, "flyer_asset": None, "raw_text": "", "menu_metadata": _metadata({}),
         "weekly_mode": bool(weekly), "weekly_dates": None,
         "parser": {"version": 1, "provider": "deterministic" if source_type == "text" else "pdfium/groq",
@@ -260,9 +276,10 @@ def extract(key, actor, *, text=None, data=None, mime=None, filename="", weekly=
                                   provenance="TEXT_PARSED" if weekly else "EXTRACTED")
         else:
             if source_type == "pdf":
-                rows, raw, flyer, pdf_warnings = _pdf_extract(source, weekly=weekly)
+                rows, raw, flyer, pdf_warnings, pdf_diagnostics = _pdf_extract(source, weekly=weekly)
                 draft["rows"], draft["raw_text"] = rows, raw
                 draft["warnings"].extend(pdf_warnings)
+                draft["diagnostic_codes"] = pdf_diagnostics
                 extension = "png"
                 original = source
             else:
@@ -274,6 +291,7 @@ def extract(key, actor, *, text=None, data=None, mime=None, filename="", weekly=
                 draft["source_asset"] = source_name
                 draft["flyer_asset"] = source_name
                 result = menu_parser.parse_image_and_update_menu(original, mime)
+                draft["diagnostic_codes"] = _safe_diagnostics(result)
                 if result.get("status") != "success":
                     raise ValueError(FAILURE_MESSAGE)
                 draft["rows"] = _rows(result["parsed"],
@@ -284,7 +302,8 @@ def extract(key, actor, *, text=None, data=None, mime=None, filename="", weekly=
             flyer_name = draft["draft_id"] + "-flyer." + extension
             (_private_dir() / flyer_name).write_bytes(flyer)
             draft["source_asset"], draft["flyer_asset"] = source_name, flyer_name
-        draft["rows"], draft["warnings"] = validate(draft["rows"], key)
+        draft["rows"], validation_warnings = validate(draft["rows"], key)
+        draft["warnings"] = list(dict.fromkeys([*draft["warnings"], *validation_warnings]))
         if weekly:
             printed = draft["menu_metadata"].get("week_of") or draft["raw_text"]
             parsed_dates = menu_dates.parse_week_date_range(printed)

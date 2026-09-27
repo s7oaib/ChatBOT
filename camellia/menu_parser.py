@@ -62,6 +62,19 @@ _VISION_MAX_BACKOFF_SECONDS = 20.0
 # Retrying a bad key or a model the account cannot serve changes nothing.
 _VISION_FATAL_STATUSES = (401, 403, 404)
 
+OCR_DIAGNOSTIC_CODES = frozenset({
+    "SCHEMA_INCOMPLETE", "SECTION_UNRECOGNIZED", "SCHEMA_UNEXPECTED_KEY",
+    "NO_ITEMS_FOUND", "PROVIDER_AUTH_FAILURE", "PROVIDER_ACCESS_DENIED",
+    "PROVIDER_MODEL_UNAVAILABLE", "PROVIDER_CLIENT_ERROR", "PROVIDER_QUOTA",
+    "PROVIDER_TIMEOUT", "PROVIDER_SERVER_ERROR", "INVALID_JSON",
+    "PROVIDER_UNEXPECTED_ERROR",
+})
+
+PROVIDER_REQUIRED_KEYS = (
+    "week_of", "service_window", "vegetarian", "non_vegetarian",
+    "bengali_bento", "norom_pak_sondesh",
+)
+
 
 def _is_retryable_vision_failure(status_code: int, body: str) -> bool:
     """
@@ -311,17 +324,18 @@ class MenuParser:
         # rest, including a date printed in large type across the header.
         prompt = (
             "You are an OCR data extraction AI reading a printed food menu flyer.\n\n"
-            "Return ONE JSON object containing ALL SIX of these keys, every time:\n"
+            "Return ONE JSON object containing exactly these SIX TOP-LEVEL keys, every time:\n"
             '  "week_of"            - the date range printed near the top of the flyer, copied verbatim\n'
             '                         (e.g. "28th August - 3rd September, 2026" or "19, 20, 21 June").\n'
             "                         Use null ONLY if no date is printed anywhere. Never invent one.\n"
-            '  "service_window"     - e.g. "Friday Lunch - Thursday Dinner", or null if not printed.\n'
+            '  "service_window"     - e.g. "Friday Lunch - Thursday Dinner", or null if not printed/readable.\n'
             '  "vegetarian"         - list of vegetarian dishes.\n'
             '  "non_vegetarian"     - list of non-vegetarian dishes.\n'
             '  "bengali_bento"      - list of bento/combo boxes, or [].\n'
             '  "norom_pak_sondesh"  - list of sweets/sondesh, or [].\n\n'
-            'Every dish is {"item": str, "price_inr": int, "quantity": str}.\n'
-            "Copy only visible text. Never infer or fill missing facts. Use null for missing price and blank for missing quantity/item.\n"
+            'Each dish object has exactly THREE fields: {"item": string, "price_inr": integer or null, "quantity": string}.\n'
+            "Copy only visible printed facts. Never invent or infer ingredients, category, price or quantity. "
+            "Use null for missing/unreadable price_inr, and empty strings for missing/unreadable quantity or item.\n"
             # No description is asked for, and that is deliberate. The whole
             # reply has to land inside _VISION_MAX_TOKENS, which sits under
             # the model's 1000 output-tokens-per-minute ceiling. Descriptions
@@ -330,7 +344,8 @@ class MenuParser:
             # upload died on json_validate_failed and burned the minute. Names
             # and prices alone come in around half that. Descriptions are
             # filled in afterwards by _apply_extracted_data_to_menu.
-            "Add no keys beyond those three. Output compact JSON with no line breaks\n"
+            "Add no dish fields beyond those three; add no TOP-LEVEL keys beyond the six listed above. "
+            "Output compact JSON with no line breaks\n"
             "and no indentation.\n\n"
             "Read the flyer header FIRST and fill in week_of before extracting any dishes.\n"
             "Return strict JSON with all six keys present."
@@ -361,6 +376,7 @@ class MenuParser:
         payload["max_tokens"] = _VISION_MAX_TOKENS
 
         last_reason = "Groq vision parsing did not return items."
+        last_code = "PROVIDER_UNEXPECTED_ERROR"
         for attempt in range(1, _VISION_MAX_ATTEMPTS + 1):
             # The final attempt drops strict JSON mode and parses the object
             # out of whatever comes back. When the model keeps tripping the
@@ -375,10 +391,14 @@ class MenuParser:
                     resp = client.post(url, headers=headers, json=payload)
 
                 if resp.status_code == 200:
-                    content = resp.json()["choices"][0]["message"]["content"]
-                    data = _extract_json_object(content)
+                    try:
+                        content = resp.json()["choices"][0]["message"]["content"]
+                        data = _extract_json_object(content)
+                    except (ValueError, KeyError, IndexError, TypeError):
+                        data = None
                     if data is None:
                         last_reason = "Vision model returned no readable JSON."
+                        last_code = "INVALID_JSON"
                         backoff = _VISION_RETRY_BACKOFF_SECONDS
                         log.warning(
                             "Groq vision attempt %d/%d returned unparseable content.",
@@ -391,7 +411,7 @@ class MenuParser:
                                 attempt, _VISION_MAX_ATTEMPTS,
                                 " (without strict JSON mode)" if lenient else "",
                             )
-                        return self._apply_extracted_data_to_menu(data)
+                        return self._apply_extracted_data_to_menu(data, provider_contract=True)
                 else:
                     body = resp.text or ""
                     # Say which of the two it was. "Could not read the flyer"
@@ -404,21 +424,27 @@ class MenuParser:
                         if resp.status_code == 429
                         else f"Vision model HTTP {resp.status_code}."
                     )
+                    last_code = self._provider_http_diagnostic(resp)
                     log.warning(
                         "Groq vision HTTP %s on attempt %d/%d (model %r)",
                         resp.status_code, attempt, _VISION_MAX_ATTEMPTS,
                         config.GROQ_VISION_MODEL,
                     )
                     if not _is_retryable_vision_failure(resp.status_code, body):
-                        return {"status": "failed", "reason": last_reason}
+                        return {"status": "failed", "reason": last_reason,
+                                "diagnostic_codes": [last_code]}
                     backoff = _vision_backoff_seconds(resp, resp.status_code)
-            except Exception as e:
-                last_reason = str(e)
+            except httpx.TimeoutException:
+                last_reason = "Vision model request timed out."
+                last_code = "PROVIDER_TIMEOUT"
                 backoff = _VISION_RETRY_BACKOFF_SECONDS
-                log.warning(
-                    "Groq vision attempt %d/%d failed: %s",
-                    attempt, _VISION_MAX_ATTEMPTS, e,
-                )
+                log.warning("Groq vision attempt %d/%d timed out.", attempt, _VISION_MAX_ATTEMPTS)
+            except Exception as e:
+                last_reason = "Vision model request failed."
+                last_code = "PROVIDER_UNEXPECTED_ERROR"
+                backoff = _VISION_RETRY_BACKOFF_SECONDS
+                log.warning("Groq vision attempt %d/%d failed (%s).",
+                            attempt, _VISION_MAX_ATTEMPTS, type(e).__name__)
 
             if attempt < _VISION_MAX_ATTEMPTS:
                 time.sleep(backoff)
@@ -427,26 +453,80 @@ class MenuParser:
             "Groq vision gave up after %d attempts: %s",
             _VISION_MAX_ATTEMPTS, last_reason,
         )
-        return {"status": "failed", "reason": last_reason}
+        return {"status": "failed", "reason": last_reason,
+                "diagnostic_codes": [last_code]}
+
+    @staticmethod
+    def _provider_http_diagnostic(resp: Any) -> str:
+        status = resp.status_code
+        if status == 401:
+            return "PROVIDER_AUTH_FAILURE"
+        if status == 403:
+            return "PROVIDER_ACCESS_DENIED"
+        if status == 404:
+            try:
+                error = resp.json().get("error", {})
+                if isinstance(error, dict) and error.get("code") == "model_not_found":
+                    return "PROVIDER_MODEL_UNAVAILABLE"
+            except (AttributeError, TypeError, ValueError):
+                pass
+            return "PROVIDER_CLIENT_ERROR"
+        if status == 429:
+            return "PROVIDER_QUOTA"
+        if status in (500, 502, 503, 520, 522, 524):
+            return "PROVIDER_SERVER_ERROR"
+        if status == 400 and "json_validate_failed" in (resp.text or ""):
+            return "INVALID_JSON"
+        return "PROVIDER_CLIENT_ERROR"
 
 
-    def _apply_extracted_data_to_menu(self, data: Dict[str, Any]) -> Dict[str, Any]:
+    def _apply_extracted_data_to_menu(self, data: Dict[str, Any], *, provider_contract=False) -> Dict[str, Any]:
         """Normalize provider output to an UNAPPROVED extraction, never live data."""
-        keys = ("vegetarian", "non_vegetarian", "bengali_bento", "norom_pak_sondesh", "unclassified")
+        keys = ("vegetarian", "non_vegetarian", "bengali_bento", "norom_pak_sondesh")
+        diagnostics = []
+        if provider_contract:
+            if not isinstance(data, dict):
+                return {"status": "failed", "reason": "Menu details need manual review.",
+                        "diagnostic_codes": ["SCHEMA_INCOMPLETE"]}
+            if any(key not in data or not isinstance(data[key], (str, type(None)))
+                   for key in PROVIDER_REQUIRED_KEYS[:2]) or any(
+                   key not in data or not isinstance(data[key], list)
+                   for key in PROVIDER_REQUIRED_KEYS[2:]):
+                diagnostics.append("SCHEMA_INCOMPLETE")
+            for key, value in data.items():
+                if key in PROVIDER_REQUIRED_KEYS:
+                    continue
+                is_section = isinstance(value, list) and any(
+                    isinstance(row, dict) and set(row) & {"item", "price_inr", "quantity"}
+                    for row in value)
+                code = "SECTION_UNRECOGNIZED" if is_section else "SCHEMA_UNEXPECTED_KEY"
+                if code not in diagnostics:
+                    diagnostics.append(code)
+        else:
+            keys += ("unclassified",)
         parsed = {}
         for key in keys:
             entries = data.get(key) or []
             if not isinstance(entries, list):
-                return {"status": "failed", "reason": "Menu details need manual review."}
+                if "SCHEMA_INCOMPLETE" not in diagnostics:
+                    diagnostics.append("SCHEMA_INCOMPLETE")
+                entries = []
+            if any(not isinstance(row, dict) for row in entries):
+                if "SCHEMA_INCOMPLETE" not in diagnostics:
+                    diagnostics.append("SCHEMA_INCOMPLETE")
             parsed[key] = [
                 {field: row.get(field, "" if field != "price_inr" else None)
                  for field in ("item", "description", "quantity", "price_inr")}
                 for row in entries if isinstance(row, dict)
             ]
         total = sum(len(rows) for rows in parsed.values())
+        if not total:
+            diagnostics.append("NO_ITEMS_FOUND")
         return {"status": "success" if total else "failed", "parsed": parsed,
-                "week_of": data.get("week_of") or "", "service_window": data.get("service_window") or "",
+                "week_of": data.get("week_of") if isinstance(data.get("week_of"), str) else "",
+                "service_window": data.get("service_window") if isinstance(data.get("service_window"), str) else "",
                 "extracted_items_count": total, "published": False,
+                "diagnostic_codes": diagnostics,
                 "message": "Review and approve these details before publishing."}
 
 

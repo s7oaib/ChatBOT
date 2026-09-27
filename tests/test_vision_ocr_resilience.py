@@ -267,3 +267,80 @@ def test_image_extraction_without_descriptions_remains_draft_only():
     assert result["week_of"] == "2nd September - 8th September, 2026"
     assert all(dish["description"] == "" for dish in result["parsed"]["vegetarian"])
     assert open(config.MENU_JSON_PATH, encoding="utf-8").read() == before
+
+
+def test_provider_prompt_has_distinct_header_and_dish_contracts():
+    _, posts = _run([_ok(json.dumps(MENU_JSON))])
+    prompt = posts.call_args_list[0].kwargs["json"]["messages"][0]["content"][0]["text"]
+    for key in ("week_of", "service_window", "vegetarian", "non_vegetarian",
+                "bengali_bento", "norom_pak_sondesh"):
+        assert f'"{key}"' in prompt
+    assert "top-level" in prompt.lower()
+    assert all(field in prompt for field in ('"item"', '"price_inr"', '"quantity"'))
+    assert "dish" in prompt.lower() and "three" in prompt.lower()
+    assert "price_inr" in prompt and "null" in prompt
+    assert "week_of" in prompt and "null" in prompt
+    assert "service_window" in prompt and "null" in prompt
+    assert "description" not in prompt.lower()
+    assert "never invent" in prompt.lower()
+    assert "Add no keys beyond those three" not in prompt
+
+
+@pytest.mark.parametrize("change,expected", [
+    ({"week_of": None, "service_window": None, "vegetarian": []}, []),
+    ({"vegetarian": None}, ["SCHEMA_INCOMPLETE"]),
+    ({"vegetarian": "Shukto"}, ["SCHEMA_INCOMPLETE"]),
+])
+def test_provider_required_key_types_are_diagnosed(change, expected):
+    result, _ = _run([_ok(json.dumps({**MENU_JSON, **change}))])
+    assert result["diagnostic_codes"] == expected
+
+
+def test_provider_missing_key_keeps_recognized_rows_for_review():
+    incomplete = {key: value for key, value in MENU_JSON.items() if key != "vegetarian"}
+    result, _ = _run([_ok(json.dumps(incomplete))])
+    assert result["status"] == "success"
+    assert result["diagnostic_codes"] == ["SCHEMA_INCOMPLETE"]
+    assert result["parsed"]["non_vegetarian"][0]["item"] == "Contai Dhaba Chicken"
+    assert result["published"] is False
+
+
+def test_unknown_provider_section_is_not_merged_or_silently_lost():
+    extra = {**MENU_JSON, "accompaniments": [{"item": "Aamra Chatni", "price_inr": 100}]}
+    result, _ = _run([_ok(json.dumps(extra))])
+    assert result["diagnostic_codes"] == ["SECTION_UNRECOGNIZED"]
+    assert "accompaniments" not in result["parsed"]
+    assert all(row["item"] != "Aamra Chatni" for rows in result["parsed"].values() for row in rows)
+    only_unknown = {**extra, "vegetarian": [], "non_vegetarian": []}
+    result, _ = _run([_ok(json.dumps(only_unknown))])
+    assert result["status"] == "failed"
+    assert result["diagnostic_codes"] == ["SECTION_UNRECOGNIZED", "NO_ITEMS_FOUND"]
+
+
+def test_unexpected_metadata_is_not_called_a_menu_section():
+    result, _ = _run([_ok(json.dumps({**MENU_JSON, "confidence": 0.7}))])
+    assert result["diagnostic_codes"] == ["SCHEMA_UNEXPECTED_KEY"]
+
+
+@pytest.mark.parametrize("response,code", [
+    (_Resp(401, text="private token"), "PROVIDER_AUTH_FAILURE"),
+    (_Resp(403, text="private token"), "PROVIDER_ACCESS_DENIED"),
+    (_Resp(404, text="not found"), "PROVIDER_CLIENT_ERROR"),
+    (_Resp(404, payload={"error": {"code": "model_not_found"}}, text="private"), "PROVIDER_MODEL_UNAVAILABLE"),
+    (_Resp(429, text="private quota"), "PROVIDER_QUOTA"),
+    (_Resp(500, text="private error"), "PROVIDER_SERVER_ERROR"),
+])
+def test_provider_http_failures_have_safe_codes(response, code):
+    result, _ = _run([response] * 3)
+    assert result["diagnostic_codes"] == [code]
+    assert "private" not in json.dumps(result)
+
+
+def test_provider_timeout_and_invalid_json_are_distinct():
+    import httpx
+    timed_out, _ = _run([httpx.ReadTimeout("private timeout")] * 3)
+    invalid, _ = _run([_ok("private prose without JSON")] * 3)
+    assert timed_out["diagnostic_codes"] == ["PROVIDER_TIMEOUT"]
+    assert invalid["diagnostic_codes"] == ["INVALID_JSON"]
+    assert "private" not in json.dumps(timed_out)
+    assert "private" not in json.dumps(invalid)

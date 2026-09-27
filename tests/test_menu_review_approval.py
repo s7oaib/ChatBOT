@@ -6,7 +6,7 @@ import shutil
 
 import pytest
 from fastapi.testclient import TestClient
-from PIL import Image
+from PIL import Image, ImageOps
 
 from camellia import app as app_module, menu_review, menu_images
 from camellia.config import config
@@ -214,3 +214,139 @@ def test_invalid_upload_never_live(review_env, mime, data):
         pass
     assert not menu_review.current_versions()
     assert db.get_menu_image_current("aamar_mishti") is None
+
+
+def test_oriented_jpeg_stays_upright_through_private_source_and_ocr(review_env, monkeypatch):
+    original = Image.new("RGB", (160, 100), "white")
+    original.putpixel((0, 0), (255, 0, 0))
+    exif = Image.Exif()
+    exif[274] = 6
+    uploaded = io.BytesIO()
+    original.save(uploaded, format="JPEG", exif=exif)
+    captured = []
+
+    def vision(data, mime):
+        captured.append((data, mime))
+        return {"status": "success", "parsed": {"norom_pak_sondesh": [
+            {"item": "Kanchagolla", "quantity": "250g", "price_inr": 650}]}}
+
+    monkeypatch.setattr(menu_review.menu_parser, "parse_image_and_update_menu", vision)
+    baseline = review_env.read_bytes()
+    draft = menu_review.extract("aamar_mishti", "operator", data=uploaded.getvalue(), mime="image/jpeg")
+    private = menu_review.source_file("aamar_mishti", draft["draft_id"]).read_bytes()
+    assert captured and captured[0] == (private, "image/jpeg")
+    with Image.open(io.BytesIO(private)) as image:
+        assert image.format == "JPEG"
+        assert image.size == (100, 160)
+        assert image.getexif().get(274) is None
+        assert ImageOps.exif_transpose(image).size == image.size
+    assert draft["status"] == "NEEDS_REVIEW"
+    assert not menu_review.current_versions()
+    assert db.get_menu_image_current("aamar_mishti") is None
+    assert review_env.read_bytes() == baseline
+
+
+def test_image_diagnostics_persist_without_exposing_provider_body(review_env, monkeypatch):
+    secret = "private-provider-body-and-key"
+    monkeypatch.setattr(menu_review.menu_parser, "parse_image_and_update_menu", lambda *args: {
+        "status": "success", "diagnostic_codes": ["SCHEMA_INCOMPLETE", "SECTION_UNRECOGNIZED"],
+        "parsed": {"norom_pak_sondesh": [{"item": "Kanchagolla", "quantity": "250g", "price_inr": 650}]},
+        "reason": secret})
+    draft = menu_review.extract("aamar_mishti", "operator", data=image_bytes(), mime="image/png")
+    assert draft["status"] == "NEEDS_REVIEW"
+    assert draft["diagnostic_codes"] == ["SCHEMA_INCOMPLETE", "SECTION_UNRECOGNIZED"]
+    assert menu_review.get_draft("aamar_mishti")["diagnostic_codes"] == draft["diagnostic_codes"]
+    assert secret not in json.dumps(draft)
+    assert not menu_review.current_versions()
+
+
+def test_unknown_only_provider_section_stays_failed_and_private(review_env, monkeypatch):
+    provider_data = {"week_of": None, "service_window": None, "vegetarian": [],
+        "non_vegetarian": [], "bengali_bento": [], "norom_pak_sondesh": [],
+        "accompaniments": [{"item": "Aamra Chatni", "price_inr": 100}]}
+    monkeypatch.setattr(menu_review.menu_parser, "parse_image_and_update_menu", lambda *args:
+        menu_review.menu_parser._apply_extracted_data_to_menu(provider_data, provider_contract=True))
+    draft = menu_review.extract("aamar_mishti", "operator", data=image_bytes(), mime="image/png")
+    assert draft["status"] == "FAILED"
+    assert draft["rows"] == []
+    assert draft["diagnostic_codes"] == ["SECTION_UNRECOGNIZED", "NO_ITEMS_FOUND"]
+    assert menu_review.source_file("aamar_mishti", draft["draft_id"]).exists()
+    assert db.get_menu_image_current("aamar_mishti") is None
+    assert not menu_review.current_versions()
+
+
+def test_provider_failure_code_persists_with_private_source(review_env, monkeypatch):
+    monkeypatch.setattr(menu_review.menu_parser, "parse_image_and_update_menu", lambda *args: {
+        "status": "failed", "diagnostic_codes": ["PROVIDER_QUOTA"], "reason": "private key"})
+    draft = menu_review.extract("aamar_mishti", "operator", data=image_bytes(), mime="image/png")
+    assert draft["status"] == "FAILED"
+    assert draft["diagnostic_codes"] == ["PROVIDER_QUOTA"]
+    assert menu_review.source_file("aamar_mishti", draft["draft_id"]).exists()
+    assert "private key" not in json.dumps(draft)
+    assert not menu_review.current_versions()
+
+
+def test_legacy_draft_without_diagnostic_codes_loads_as_empty(review_env):
+    draft = create_draft()
+    with db.get_connection() as conn:
+        old = json.loads(conn.execute("SELECT review_json FROM menu_drafts WHERE menu_key=?",
+                                     ("aamar_mishti",)).fetchone()[0])
+        old.pop("diagnostic_codes", None)
+        conn.execute("UPDATE menu_drafts SET review_json=? WHERE menu_key=?",
+                     (json.dumps(old), "aamar_mishti"))
+        conn.commit()
+    loaded = menu_review.get_draft("aamar_mishti")
+    assert loaded["diagnostic_codes"] == []
+    assert loaded["status"] == draft["status"]
+    assert loaded["rows"] == draft["rows"]
+
+
+def test_pdf_page_warning_precedes_validation_warning(review_env, monkeypatch):
+    import pypdfium2 as pdfium
+    output = io.BytesIO()
+    Image.new("RGB", (200, 300), "white").save(output, format="PDF", save_all=True,
+        append_images=[Image.new("RGB", (200, 300), "white")])
+    calls = []
+
+    def page_text(self):
+        calls.append(1)
+        return "Kanchagolla Rs650" if len(calls) == 1 else ""
+
+    monkeypatch.setattr(pdfium.PdfTextPage, "get_text_range", page_text)
+    monkeypatch.setattr(menu_review.menu_parser, "parse_image_and_update_menu",
+                        lambda *args: {"status": "failed", "diagnostic_codes": ["INVALID_JSON"]})
+    baseline = review_env.read_bytes()
+    draft = menu_review.extract("aamar_mishti", "operator", data=output.getvalue(), mime="application/pdf")
+    assert draft["status"] == "NEEDS_REVIEW"
+    assert len(draft["rows"]) == 1 and draft["rows"][0]["source_page"] == 1
+    assert draft["warnings"][0] == "Page 2 needs manual review."
+    assert draft["diagnostic_codes"] == ["INVALID_JSON"]
+    assert any("Unknown category" in warning for warning in draft["warnings"][1:])
+    assert len(draft["warnings"]) == len(set(draft["warnings"]))
+    assert not menu_review.current_versions()
+    assert review_env.read_bytes() == baseline
+
+
+@pytest.mark.parametrize("diagnostic", ["SCHEMA_INCOMPLETE", "SECTION_UNRECOGNIZED"])
+def test_pdf_scanned_vision_success_retains_provider_diagnostics(review_env, monkeypatch, diagnostic):
+    import pypdfium2 as pdfium
+    output = io.BytesIO()
+    Image.new("RGB", (200, 300), "white").save(output, format="PDF")
+    monkeypatch.setattr(pdfium.PdfTextPage, "get_text_range", lambda self: "")
+    monkeypatch.setattr(menu_review.menu_parser, "parse_image_and_update_menu", lambda *args: {
+        "status": "success",
+        "parsed": {
+            "vegetarian": [{"item": "Test Dish", "description": "", "quantity": "", "price_inr": 100}],
+            "non_vegetarian": [], "bengali_bento": [], "norom_pak_sondesh": [],
+        },
+        "diagnostic_codes": [diagnostic],
+        "week_of": "", "service_window": "", "published": False,
+    })
+    baseline = review_env.read_bytes()
+    draft = menu_review.extract("aamar_mishti", "operator", data=output.getvalue(), mime="application/pdf")
+    assert draft["status"] == "NEEDS_REVIEW"
+    assert any(row["item"] == "Test Dish" for row in draft["rows"])
+    assert draft["diagnostic_codes"] == [diagnostic]
+    assert not menu_review.current_versions()
+    assert db.get_menu_image_current("aamar_mishti") is None
+    assert review_env.read_bytes() == baseline
