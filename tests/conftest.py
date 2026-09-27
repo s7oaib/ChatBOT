@@ -148,6 +148,10 @@ def isolate_process_session_cache(monkeypatch, request):
     # current handoff outside that bound or make the test appear deduplicated.
     with db_module.db.get_connection() as conn:
         conn.execute("DELETE FROM cross_channel_handoffs")
+        # Review drafts are per-test fixtures, not shared customer knowledge.
+        # An unapproved upload left by an earlier test must not turn unrelated
+        # responder cases into pending-menu handoffs.
+        conn.execute("DELETE FROM menu_drafts")
         conn.commit()
     yield
     session_memory._sessions.clear()

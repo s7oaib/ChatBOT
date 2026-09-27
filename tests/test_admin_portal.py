@@ -927,7 +927,7 @@ def test_failed_ocr_preserves_live_week_and_returns_reviewable_error():
             resp=client.post("/admin/menu/upload-image",
                 files={"file":("menu.png",img.getvalue(),"image/png")},headers=ADMIN_HEADERS)
         draft=resp.json()["draft"]
-        assert draft["status"] == "FAILED"
+        assert draft["status"] == "NEEDS_REVIEW"
         assert "provider detail" not in str(draft)
         assert open(config.MENU_JSON_PATH,encoding="utf-8").read()==before
         assert db_module.db.get_menu_image_current("weekly_vegetarian") is None

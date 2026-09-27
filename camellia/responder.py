@@ -23,8 +23,10 @@ from camellia.triage import triage_classifier
 from camellia.database import db
 from camellia.trigger_index import trigger_index
 from camellia import weekly_flyer
+from camellia import weekly_savoury
 from camellia import menu_dates
 from camellia import client_qa
+from camellia import menu_review
 from camellia import order_intake
 from camellia import grounded_answers
 from camellia.menu_images import (
@@ -54,6 +56,172 @@ from camellia.content_integrity import (
 )
 
 log = get_logger("camellia.responder")
+
+_VOLATILE_MENU_QUESTION_RE = re.compile(
+    r"\b(?:price|prices|pricing|cost|rate|rates|how much|available|availability|"
+    r"in stock|sold out|portion|quantity|pack size|this week|current menu|"
+    r"on (?:the|your) menu)\b",
+    re.I,
+)
+_CURRENT_WEEKLY_MENU_REQUEST_RE = re.compile(
+    r"\b(?:weekly\s+(?:savoury\s+)?menu|weekly\s+offering|"
+    r"(?:serving|on the menu)\s+this week|this week(?:'s)?\s+menu|"
+    r"(?:today(?:'s)?|current)\s+(?:weekly\s+)?menu)\b",
+    re.I,
+)
+_HISTORICAL_MENU_REQUEST_RE = re.compile(
+    r"\b(?:historical|historic|archive|last week|previous week|last month|"
+    r"previous month|old menu|menu from)\b",
+    re.I,
+)
+
+
+def _normalized_question_contains_name(message: str, value: Any) -> bool:
+    lowered = re.sub(r"[^a-z0-9]+", " ", (message or "").lower()).strip()
+    name = re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
+    if not lowered or not name:
+        return False
+    candidates = [name]
+    # Some legacy menu rows include a parenthetical alternate name. Match each
+    # printed name, but do not use fuzzy or partial-word matching.
+    candidates.extend(re.sub(r"[()]", "", part).strip() for part in re.findall(r"\(([^)]+)\)", name))
+    return any(re.search(rf"\b{re.escape(candidate)}\b", lowered) for candidate in candidates if candidate)
+
+
+def _approved_menu_keys_for_question(message: str) -> set[str]:
+    """Resolve explicit item names only against current approved menu data."""
+    if not re.search(r"[a-z]{3,}", message or "", re.I):
+        return set()
+
+    menu = menu_review.canonical_menu()
+    matches: set[str] = set()
+    for collection_key, collection in (menu.get("collections") or {}).items():
+        key = "signature" if collection_key == "signature_collection" else collection_key
+        for product in collection.get("products", []):
+            values = [product.get("flavour"), product.get("item")]
+            values.extend(flavour.get("flavour") for flavour in product.get("flavours", [])
+                          if isinstance(flavour, dict))
+            if any(_normalized_question_contains_name(message, value) for value in values):
+                matches.add(key)
+    weekly_key_by_section = {
+        "vegetarian": set(weekly_savoury.LEGACY_WEEKLY_KEYS),
+        "non_vegetarian": set(weekly_savoury.LEGACY_WEEKLY_KEYS),
+        "bengali_bento": {"bento"},
+        "norom_pak_sondesh": {"aamar_mishti", "signature"},
+    }
+    for week in menu.get("weekly_menus", []):
+        for section, keys in weekly_key_by_section.items():
+            for row in week.get(section, []):
+                item = row.get("item") if isinstance(row, dict) else row
+                if _normalized_question_contains_name(message, item):
+                    matches.update(keys)
+    return matches
+
+
+def _pending_draft_item_keys(message: str, pending: set[str]) -> set[str]:
+    """Use pending row labels only to route volatile questions to a reviewer."""
+    matches = set()
+    section_labels = {"vegetarian", "non vegetarian", "bengali bento", "norom pak sondesh", "unclassified"}
+    for key in pending:
+        draft = menu_review.get_draft(key)
+        for row in (draft or {}).get("rows", []):
+            item = str(row.get("item") or "")
+            for candidate in re.split(r"[\r\n,;/]+", item):
+                candidate = candidate.strip()
+                normalized = re.sub(r"[^a-z0-9]+", " ", candidate.lower()).strip()
+                if normalized and normalized not in section_labels \
+                        and _normalized_question_contains_name(message, candidate):
+                    matches.add(key)
+                    break
+    return matches
+
+
+def _pending_menu_affects_question(message: str, facts: Dict[str, Any]) -> bool:
+    """Fail closed only when the pending menu can supersede the asked fact."""
+    pending = menu_review.pending_review_keys()
+    if not pending:
+        return False
+    lowered = (message or "").lower()
+    weekly_pending = pending & set(weekly_savoury.LEGACY_WEEKLY_KEYS)
+    if _HISTORICAL_MENU_REQUEST_RE.search(lowered):
+        return False
+    if weekly_pending and _CURRENT_WEEKLY_MENU_REQUEST_RE.search(lowered):
+        return True
+    if not _VOLATILE_MENU_QUESTION_RE.search(lowered):
+        return False
+
+    item_keys = _pending_draft_item_keys(message, pending)
+    if not item_keys:
+        item_keys = _approved_menu_keys_for_question(message)
+    if item_keys:
+        return bool(pending & item_keys)
+
+    # These are stable business/service questions, not facts a menu upload can
+    # supersede. Unknown subscription prices remain subject to their own gate.
+    if re.search(r"\b(?:delivery|deliver|pickup|pick\s*up|subscription)\b", lowered) \
+            and not re.search(r"\b(?:menu|this week|current|on the menu)\b", lowered):
+        return False
+
+    explicit = (
+        {"aamar_mishti", "signature"} if re.search(r"\b(?:sondesh|sandesh|mishti|kanchagolla|jolbhora)\b", lowered)
+        else {"bento"} if re.search(r"\bbento\b", lowered)
+        else {"weekly_vegetarian", "weekly_non_vegetarian"} if re.search(r"\b(?:weekly|savoury|vegetarian|non.?veg|meals?)\b", lowered)
+        else set()
+    )
+    if explicit:
+        return bool(pending & explicit)
+    if re.search(r"\bhome\s+table\b", lowered):
+        return False
+    if re.fullmatch(r"\s*(?:(?:what(?:'s| is)|whats)\s+the\s+)?(?:price|cost|rate)|how\s+much\s*[?.!]*", lowered.strip(" ?.!")):
+        topic = str(facts.get("last_topic") or facts.get("active_topic") or "").lower()
+        if topic == "bengali_home_table":
+            return False
+        if topic.startswith("sondesh") or topic in {"aamar_mishti", "signature"}:
+            return bool(pending & {"aamar_mishti", "signature"})
+        if topic == "bento":
+            return "bento" in pending
+        if topic == "savoury":
+            return bool(pending & {"weekly_vegetarian", "weekly_non_vegetarian"})
+    # A volatile word alone is not evidence that any menu draft is relevant.
+    return False
+
+
+def _unknown_named_price(message: str) -> bool:
+    """Do not let a broad legacy trigger answer a named, unapproved product."""
+    subject = None
+    for pattern in (
+        r"\b(?:price|cost|rate)\s+of\s+(.+?)[?.!]*$",
+        r"\bhow\s+much\s+(?:is|does|for)\s+(.+?)(?:\s+cost)?[?.!]*$",
+        r"\bwhat\s+does\s+(.+?)\s+cost[?.!]*$",
+        r"^(.+?)\s+(?:price|cost|rate)[?.!]*$",
+    ):
+        match = re.search(pattern, message or "", re.I)
+        if match:
+            subject = match.group(1).strip().lower()
+            break
+    if not subject or subject in {
+        "this", "that", "it", "these", "those", "the", "your",
+        "what's the", "whats the", "what is the",
+    }:
+        return False
+    matched_qa = client_qa.match(message, {})
+    if (matched_qa and matched_qa.entry.qa_id not in {"general_price", "general_details"}) \
+            or explicit_entity(subject) or EXPLICIT_SUBJECT_RE.search(subject) \
+            or HOME_TABLE_RE.search(subject):
+        return False
+    menu = menu_review.canonical_menu()
+    names = [
+        product.get("flavour", "")
+        for collection in menu.get("collections", {}).values()
+        for product in collection.get("products", [])
+    ]
+    names += [
+        row.get("item", "")
+        for week in menu.get("weekly_menus", [])
+        for section in ("vegetarian", "non_vegetarian", "bengali_bento", "norom_pak_sondesh")
+        for row in week.get(section, [])
+    ]
+    return not any(name and str(name).lower() in subject for name in names)
 
 
 def _safe_message_hash(message: str) -> str:
@@ -2577,6 +2745,23 @@ class DeterministicResponder:
         # turn's decision is reset here.
         facts["source_context_used"] = False
         facts["source_referential_intent"] = None
+
+        pending_menu = channel == "instagram" and _pending_menu_affects_question(user_message, facts)
+        unknown_price = (channel == "instagram" and not pending_menu
+                         and not facts.get("source_route") and _unknown_named_price(user_message))
+        if pending_menu or unknown_price:
+            reply = "I want to make sure I give you the current menu details. Let me have the team confirm that for you."
+            facts.update({
+                "last_route_source": "HUMAN_HANDOFF",
+                "last_intents": [Intent.ESCALATION.value],
+                "last_actions": [BusinessAction.ESCALATE_TO_TEAM.value],
+                "last_grounding": "newer_menu_pending_review" if pending_menu else "unknown_menu_price",
+                "knowledge_sufficient": False,
+                "last_llm_called": False,
+                "last_fallback_used": True,
+            })
+            session_memory.add_turn(user_id, channel, user_message, reply)
+            return reply, False, "pending_menu_handoff" if pending_menu else "unknown_price_handoff", None
 
         # The client-approved fail-closed lane can return before the legacy
         # session extraction point. Preserve only a customer's explicit

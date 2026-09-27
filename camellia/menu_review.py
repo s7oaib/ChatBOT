@@ -80,6 +80,33 @@ def get_draft(key, conn=None):
     return draft
 
 
+def pending_review_keys(conn=None):
+    """Menu identities with a newer, unapproved upload than their live version."""
+    if conn is None:
+        with db.get_connection() as connection:
+            return pending_review_keys(connection)
+    pending = set()
+    for row in conn.execute("SELECT menu_key, review_json FROM menu_drafts WHERE review_json IS NOT NULL"):
+        draft = json.loads(row["review_json"])
+        if draft.get("status") in {"PUBLISHED", "REJECTED"}:
+            continue
+        key = row["menu_key"]
+        if key != weekly_savoury.WEEKLY_KEY:
+            catalogue = conn.execute(
+                "SELECT active FROM menu_catalogue WHERE menu_id=?", (key,)
+            ).fetchone()
+            if not catalogue or not catalogue[0]:
+                continue
+        live = conn.execute(
+            "SELECT approval_json FROM menu_versions WHERE menu_key=? AND is_current=1 "
+            "AND approval_json IS NOT NULL ORDER BY id DESC LIMIT 1", (key,)
+        ).fetchone()
+        approved_at = json.loads(live[0]).get("approved_at") if live else None
+        if not approved_at or str(draft.get("created_at") or "") > approved_at:
+            pending.add(key)
+    return pending
+
+
 def _safe_diagnostics(result):
     """Persist only known symbolic codes, never provider content or exceptions."""
     return list(dict.fromkeys(code for code in result.get("diagnostic_codes", [])
@@ -293,10 +320,13 @@ def extract(key, actor, *, text=None, data=None, mime=None, filename="", weekly=
                 result = menu_parser.parse_image_and_update_menu(original, mime)
                 draft["diagnostic_codes"] = _safe_diagnostics(result)
                 if result.get("status") != "success":
-                    raise ValueError(FAILURE_MESSAGE)
-                draft["rows"] = _rows(result["parsed"],
-                                      provenance="OCR_EXTRACTED" if weekly else "EXTRACTED")
-                draft["menu_metadata"] = _metadata(result)
+                    # A provider failure is an incomplete draft, not a reason
+                    # to fall back to the older menu or lose the private source.
+                    draft["warnings"].append(FAILURE_MESSAGE)
+                else:
+                    draft["rows"] = _rows(result["parsed"],
+                                          provenance="OCR_EXTRACTED" if weekly else "EXTRACTED")
+                    draft["menu_metadata"] = _metadata(result)
             source_name = draft["draft_id"] + (".pdf" if source_type == "pdf" else "." + extension)
             (_private_dir() / source_name).write_bytes(original)
             flyer_name = draft["draft_id"] + "-flyer." + extension
@@ -312,10 +342,18 @@ def extract(key, actor, *, text=None, data=None, mime=None, filename="", weekly=
                     "valid_until": parsed_dates[1].isoformat(),
                     "date_source": "OCR_EXTRACTED" if source_type == "image" else "TEXT_PARSED"}
         draft["status"] = "NEEDS_REVIEW"
-    except Exception:
+    except Exception as exc:
         # Raw provider errors may contain private content; never return them.
-        draft["status"], draft["warnings"] = "FAILED", [FAILURE_MESSAGE]
+        # The already-persisted review draft remains visible and actionable;
+        # approval still requires the operator to review its empty/partial rows.
+        draft["status"], draft["warnings"] = "NEEDS_REVIEW", [FAILURE_MESSAGE]
         draft["rows"] = []
+        draft["diagnostic_codes"] = list(dict.fromkeys([
+            *draft.get("diagnostic_codes", []), "EXTRACTION_EXCEPTION",
+        ]))
+        exception_type = type(exc).__name__
+        if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,63}", exception_type):
+            draft["diagnostic_details"] = {"exception_type": exception_type}
     with db.get_connection() as conn:
         conn.execute("BEGIN IMMEDIATE")
         current = get_draft(key, conn)

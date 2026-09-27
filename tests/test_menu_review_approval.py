@@ -209,7 +209,7 @@ def test_review_api_auth_and_table_ui(review_env):
 def test_invalid_upload_never_live(review_env, mime, data):
     try:
         draft = menu_review.extract("aamar_mishti", "operator", data=data, mime=mime, filename="../../bad.exe")
-        assert draft["status"] == "FAILED"
+        assert draft["status"] == "NEEDS_REVIEW"
     except ValueError:
         pass
     assert not menu_review.current_versions()
@@ -260,14 +260,14 @@ def test_image_diagnostics_persist_without_exposing_provider_body(review_env, mo
     assert not menu_review.current_versions()
 
 
-def test_unknown_only_provider_section_stays_failed_and_private(review_env, monkeypatch):
+def test_unknown_only_provider_section_stays_reviewable_and_private(review_env, monkeypatch):
     provider_data = {"week_of": None, "service_window": None, "vegetarian": [],
         "non_vegetarian": [], "bengali_bento": [], "norom_pak_sondesh": [],
         "accompaniments": [{"item": "Aamra Chatni", "price_inr": 100}]}
     monkeypatch.setattr(menu_review.menu_parser, "parse_image_and_update_menu", lambda *args:
         menu_review.menu_parser._apply_extracted_data_to_menu(provider_data, provider_contract=True))
     draft = menu_review.extract("aamar_mishti", "operator", data=image_bytes(), mime="image/png")
-    assert draft["status"] == "FAILED"
+    assert draft["status"] == "NEEDS_REVIEW"
     assert draft["rows"] == []
     assert draft["diagnostic_codes"] == ["SECTION_UNRECOGNIZED", "NO_ITEMS_FOUND"]
     assert menu_review.source_file("aamar_mishti", draft["draft_id"]).exists()
@@ -279,7 +279,7 @@ def test_provider_failure_code_persists_with_private_source(review_env, monkeypa
     monkeypatch.setattr(menu_review.menu_parser, "parse_image_and_update_menu", lambda *args: {
         "status": "failed", "diagnostic_codes": ["PROVIDER_QUOTA"], "reason": "private key"})
     draft = menu_review.extract("aamar_mishti", "operator", data=image_bytes(), mime="image/png")
-    assert draft["status"] == "FAILED"
+    assert draft["status"] == "NEEDS_REVIEW"
     assert draft["diagnostic_codes"] == ["PROVIDER_QUOTA"]
     assert menu_review.source_file("aamar_mishti", draft["draft_id"]).exists()
     assert "private key" not in json.dumps(draft)

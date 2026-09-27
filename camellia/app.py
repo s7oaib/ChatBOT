@@ -934,7 +934,7 @@ def _process_instagram_event(
         protected_flow = bool(
             facts.get("cart") or facts.get("order_draft") or facts.get("order_intake_draft")
         ) or template_id in ("order_draft_receipt", "order_next_steps", "order_intake_draft")
-        if (config.LLM_ASSISTED_RESOLUTION_ENABLED or config.LLM_AUTO_RESOLVE_SIMULATION_ENABLED) and not was_matched and not protected_flow and not source_route:
+        if (config.LLM_ASSISTED_RESOLUTION_ENABLED or config.LLM_AUTO_RESOLVE_SIMULATION_ENABLED) and not was_matched and not protected_flow and not source_route and template_id not in {"pending_menu_handoff", "unknown_price_handoff"}:
             assisted_suggestion = create_suggestion(
                 user_id=sender_id, channel="instagram", customer_message=customer_message,
                 deterministic_resolved=False, active_protected_flow=protected_flow,
@@ -1008,7 +1008,7 @@ def _process_instagram_event(
             # an approved order workflow may offer the WhatsApp continuation.
             contact_mode = (
                 "support_callback"
-                if not was_matched and template_id is None
+                if not was_matched and template_id in (None, "pending_menu_handoff", "unknown_price_handoff")
                 else handoff_contact_mode(customer_message, template_id=template_id)
             )
             reason = (
@@ -1059,7 +1059,7 @@ def _process_instagram_event(
                     },
                 )
             order_summary = handoff.get("verified_order")
-            if template_id in ("order_draft_receipt", "client_approved_order_ready_handoff") or facts.get("client_qa_handoff_exact"):
+            if template_id in ("order_draft_receipt", "client_approved_order_ready_handoff", "pending_menu_handoff", "unknown_price_handoff") or facts.get("client_qa_handoff_exact"):
                 response_text = response_text.rstrip()
             else:
                 response_text = customer_facing_notice(

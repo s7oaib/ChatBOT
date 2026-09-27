@@ -89,7 +89,7 @@ def test_failed_reader_keeps_private_draft_and_never_publishes_photo_or_facts():
 
     assert resp.status_code == 200
     body = resp.json()
-    assert body["draft"]["status"] == "FAILED"
+    assert body["draft"]["status"] == "NEEDS_REVIEW"
     assert body["draft"]["source_asset"]
     assert weekly_flyer.get() is None
     from camellia import menu_review
@@ -130,7 +130,7 @@ def test_the_operator_is_told_upload_is_not_live_until_approval():
     body = _upload({"status": "failed", "error": "json_validate_failed"}).json()
 
     assert body["published"] is False
-    assert body["draft"]["status"] == "FAILED"
+    assert body["draft"]["status"] == "NEEDS_REVIEW"
     assert weekly_flyer.get() is None
 
 

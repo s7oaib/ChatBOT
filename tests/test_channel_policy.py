@@ -20,6 +20,13 @@ INSTAGRAM_HUMAN_INTENT_PROBE_MESSAGES = [
 ]
 
 
+@pytest.fixture(autouse=True)
+def isolated_channel_policy_db(tmp_path, monkeypatch):
+    """Channel policy cases start without another test's unreviewed menu."""
+    monkeypatch.setattr(db, "db_path", str(tmp_path / "channel-policy.db"))
+    db.init_db()
+
+
 @pytest.mark.parametrize("message", INSTAGRAM_HUMAN_INTENT_PROBE_MESSAGES)
 def test_instagram_direct_human_request_triggers_support_handoff_without_whatsapp(message):
     """These exact bare/short human-intent phrases must all reach the
