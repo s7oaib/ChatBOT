@@ -3951,7 +3951,10 @@ def get_admin_handoffs(
     """
     require_admin(x_admin_key, x_admin_pin)
     requested_status = str(status or "").strip().upper() or None
-    rows = db.get_handoffs(limit=max(1, min(int(limit or 50), 200)), status=requested_status)
+    overview = db.get_admin_handoff_overview(
+        limit=max(1, min(int(limit or 50), 200)), include_history=include_resumed, status=requested_status,
+    )
+    rows = overview["rows"]
     refs = [str(row.get("handoff_ref") or "") for row in rows]
     seen_refs = db.get_admin_handoff_seen_refs(refs)
     handoffs = []
@@ -3969,11 +3972,6 @@ def get_admin_handoffs(
         # CREATED is included because the accepted flow promotes it to
         # WAITING_FOR_HUMAN after notification delivery; neither state should
         # make the operator miss a fresh CAM.
-        visible_statuses = {"CREATED", "WAITING_FOR_HUMAN"}
-        if include_resumed:
-            visible_statuses.add("RESUMED")
-        if requested_status is None and row_status not in visible_statuses:
-            continue
         handoff_ref = str(row.get("handoff_ref") or "")
         resolved_username = (
             normalize_instagram_username(row.get("customer_username"))
@@ -3992,16 +3990,15 @@ def get_admin_handoffs(
             "summary": row.get("summary") or "",
             "unresolved_topic": row.get("unresolved_topic"),
             "status": row_status,
+            "actionable": bool(row.get("actionable")),
             "created_at": row.get("created_at"),
             "updated_at": row.get("updated_at"),
             "expires_at": row.get("expires_at"),
             "seen": handoff_ref in seen_refs,
         })
-    unread_count = sum(
-        1 for item in handoffs
-        if item["status"] in {"CREATED", "WAITING_FOR_HUMAN"} and not item["seen"]
-    )
-    return {"count": len(handoffs), "unread_count": unread_count, "handoffs": handoffs}
+    return {"count": len(handoffs), "unread_count": overview["unread_count"],
+            "actionable_count": overview["actionable_count"],
+            "historical_count": overview["historical_count"], "handoffs": handoffs}
 
 
 @app.post("/admin/handoffs/{handoff_ref}/seen")
@@ -7028,7 +7025,7 @@ def get_admin_dashboard():
         <div id="tab-dashboard" class="panel-card" data-group="dashboard">
             <div class="admin-page-heading"><div><h2>Good morning, Camellia team</h2><p>A calm overview of the work that needs attention today. Open a primary workspace from the sidebar to manage details.</p></div><button class="btn-secondary" type="button" onclick="loadDashboardOverview()">↻ Refresh</button></div>
             <div class="admin-kpi-grid">
-                <div class="admin-kpi"><div class="admin-kpi-label">Unresolved handoffs</div><div class="admin-kpi-value" id="dashHandoffs">—</div><div class="admin-kpi-note">Waiting for human support</div></div>
+                <button class="admin-kpi" type="button" onclick="document.getElementById('handoffHistory').checked=false; switchTab('tab-handoffs', null);"><div class="admin-kpi-label">Needs attention</div><div class="admin-kpi-value" id="dashHandoffs">—</div><div class="admin-kpi-note">Open, non-expired handoffs · seen is not resolved</div></button>
                 <div class="admin-kpi"><div class="admin-kpi-label">Current menu</div><div class="admin-kpi-value" id="dashMenuStatus">—</div><div class="admin-kpi-note">Live customer view</div></div>
                 <div class="admin-kpi"><div class="admin-kpi-label">Active Stories</div><div class="admin-kpi-value" id="dashStories">—</div><div class="admin-kpi-note">Exact-ID sources</div></div>
                 <div class="admin-kpi"><div class="admin-kpi-label">Unmapped content</div><div class="admin-kpi-value" id="dashUnmapped">—</div><div class="admin-kpi-note">Stories, Posts &amp; Reels</div></div>
@@ -7054,8 +7051,9 @@ def get_admin_dashboard():
         </div>
 
         <div id="tab-handoffs" class="panel-card" data-group="handoffs" style="display:none;">
-            <div class="admin-page-heading"><div><h2>Handoffs</h2><p>Owner notifications for conversations waiting on a human. Opening an item marks only the notification as seen; CAM lifecycle remains unchanged.</p></div><button class="btn-secondary" type="button" onclick="loadHandoffs()">↻ Refresh</button></div>
+            <div class="admin-page-heading"><div><h2>Handoffs</h2><p>Needs attention means open and non-expired, whether read or unread. Viewing is read-only. Resume AI is a separate explicit action.</p></div><button class="btn-secondary" type="button" onclick="loadHandoffs()">↻ Refresh</button></div>
             <input class="field-control" id="handoffSearch" type="search" placeholder="Search username, CAM reference, or Instagram ID" oninput="renderHandoffs()" style="margin-bottom:12px;">
+            <label><input id="handoffHistory" type="checkbox" onchange="loadHandoffs()"> Include read-only history</label>
             <div id="handoffPageSummary" class="result-box" role="status"></div>
             <div id="handoffList" class="handoff-list"><span class="ig-media-muted">Loading handoffs…</span></div>
         </div>
@@ -7451,7 +7449,7 @@ THIS WEEK'S BENGAL SPECIALS
                 </div>
             </div>
 
-            <h3 style="font-size: 1.05rem; color: var(--primary); margin-bottom: 10px;">Recent Escalations (Needs Kitchen Follow-up)</h3>
+            <h3 style="font-size: 1.05rem; color: var(--primary); margin-bottom: 10px;">Latest Escalations — History</h3>
             <div style="overflow-x: auto;">
                 <table class="data-table">
                     <thead>
@@ -7519,6 +7517,8 @@ THIS WEEK'S BENGAL SPECIALS
                 </div>
             </div>
 
+            <label>Candidate state <select id="candidateStatusFilter" onchange="loadCandidates()"><option value="PENDING_APPROVAL">Pending approval — not live</option><option value="APPROVED">Approved history</option><option value="REJECTED">Rejected history</option></select></label>
+            <div id="candidateActionFeedback" role="status" aria-live="polite"></div>
             <div style="overflow-x: auto;">
                 <table class="data-table">
                     <thead>
@@ -8416,7 +8416,7 @@ THIS WEEK'S BENGAL SPECIALS
                 ]);
                 const [handoffResp, menuResp, storyResp, routeResp, analyticsResp, healthResp] = responses;
                 const [handoffData, menuData, storyData, routeData, analyticsData, healthData] = await Promise.all(responses.map(response => response.json().catch(() => ({}))));
-                if (handoffResp.ok) setDashboardValue('dashHandoffs', handoffData.unread_count ?? handoffData.count ?? 0);
+                if (handoffResp.ok) setDashboardValue('dashHandoffs', handoffData.actionable_count ?? '—');
                 if (menuResp.ok) {
                     const weeks = Array.isArray(menuData.menu?.weekly_menus) ? menuData.menu.weekly_menus : [];
                     const week = weeks.length ? weeks[weeks.length - 1] : null;
@@ -8445,9 +8445,10 @@ THIS WEEK'S BENGAL SPECIALS
         }
 
         function formatAdminTimestamp(value) {
-            if (!value) return 'Time unavailable';
-            const parsed = new Date(String(value).replace(' ', 'T') + (String(value).includes('Z') ? '' : 'Z'));
-            return Number.isNaN(parsed.getTime()) ? String(value) : parsed.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
+            if (!value) return 'Timestamp unavailable';
+            const text = String(value).trim().replace(' ', 'T');
+            const parsed = new Date(text + (/Z$|[+-][0-9]{2}:[0-9]{2}$/.test(text) ? '' : 'Z'));
+            return Number.isNaN(parsed.getTime()) ? 'Timestamp unavailable' : parsed.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
         }
 
         function renderHandoffCard(item, compact = false) {
@@ -8458,7 +8459,7 @@ THIS WEEK'S BENGAL SPECIALS
             return `<article class="handoff-card${unseenClass}" tabindex="0" data-handoff-ref="${escapeHtml(item.handoff_ref || '')}">
                 <div class="handoff-card-top"><div><div class="handoff-name">${escapeHtml(customer)}</div><div class="handoff-ref">Instagram ID: ${escapeHtml(item.customer_external_id || 'Unavailable')}</div><div class="handoff-ref">${escapeHtml(item.handoff_ref || 'CAM')}</div></div><span class="ig-media-status${statusClass}">${escapeHtml(status)}</span></div>
                 <div class="handoff-summary">${escapeHtml(item.reason || 'Human support requested')}${item.summary && !compact ? `\n${escapeHtml(item.summary)}` : ''}</div>
-                <div class="handoff-meta">${escapeHtml(formatAdminTimestamp(item.created_at))}${item.unresolved_topic ? ` · ${escapeHtml(item.unresolved_topic)}` : ''}</div>
+                <div class="handoff-meta">${item.actionable ? 'Needs attention · AI paused' : 'Read-only history · not actionable'}<br>Created: ${escapeHtml(formatAdminTimestamp(item.created_at))}<br>Last activity: ${escapeHtml(formatAdminTimestamp(item.updated_at))}${item.unresolved_topic ? ` · ${escapeHtml(item.unresolved_topic)}` : ''}</div>
                 <button class="btn-secondary" type="button" data-handoff-open="${escapeHtml(item.handoff_ref || '')}" style="justify-self:start;padding:7px 10px;font-size:.74rem;">Open handoff</button>
             </article>`;
         }
@@ -8498,7 +8499,7 @@ THIS WEEK'S BENGAL SPECIALS
         async function loadHandoffs() {
             if (!adminAuthenticated) return;
             try {
-                const response = await fetch('/admin/handoffs?limit=100&include_resumed=true', { headers: getAuthHeaders() });
+                const response = await fetch('/admin/handoffs?limit=100&include_resumed=' + !!document.getElementById('handoffHistory')?.checked, { headers: getAuthHeaders() });
                 const data = await response.json().catch(() => ({}));
                 if (!response.ok) throw new Error(data.detail || 'Could not load handoffs.');
                 const previousRefs = new Set(adminHandoffs.filter(item => !item.seen).map(item => item.handoff_ref));
@@ -8508,11 +8509,11 @@ THIS WEEK'S BENGAL SPECIALS
                 updateHandoffBadges(Number(data.unread_count || 0));
                 renderHandoffs();
                 const summary = document.getElementById('handoffPageSummary');
-                if (summary) { summary.style.display = 'block'; summary.className = 'result-box info'; summary.innerText = `${Number(data.unread_count || 0)} unread · ${adminHandoffs.length} active handoff(s)`; }
+                if (summary) { summary.style.display = 'block'; summary.className = 'result-box info'; summary.innerText = `${Number(data.actionable_count || 0)} needs attention · ${Number(data.unread_count || 0)} unread notifications · ${Number(data.historical_count || 0)} historical · showing ${adminHandoffs.length}`; }
                 newItems.slice(0, 2).forEach(item => showHandoffToast(item));
             } catch (error) {
                 const summary = document.getElementById('handoffPageSummary');
-                if (summary) { summary.style.display = 'block'; summary.className = 'result-box error'; summary.innerText = error.message || 'Could not load handoffs.'; }
+                if (summary) { summary.style.display = 'block'; summary.className = 'result-box error'; summary.innerText = 'Could not load handoffs. Try again.'; }
             }
             if (!handoffPollTimer) handoffPollTimer = setInterval(() => { if (adminAuthenticated && document.visibilityState !== 'hidden') loadHandoffs(); }, 20000);
         }
@@ -8534,16 +8535,21 @@ THIS WEEK'S BENGAL SPECIALS
             if (open) loadHandoffs();
         }
 
+        const adminSeenBusy = new Set();
         async function markHandoffSeen(ref) {
-            if (!ref) return;
-            try { await fetch(`/admin/handoffs/${encodeURIComponent(ref)}/seen`, { method: 'POST', headers: getAuthHeaders() }); } catch (error) { /* next refresh can retry */ }
-            const item = adminHandoffs.find(entry => entry.handoff_ref === ref); if (item) item.seen = true;
-            updateHandoffBadges(adminHandoffs.filter(entry => !entry.seen).length); renderHandoffs();
+            if (!ref || adminSeenBusy.has(ref)) return;
+            adminSeenBusy.add(ref);
+            try {
+                const response = await fetch(`/admin/handoffs/${encodeURIComponent(ref)}/seen`, { method: 'POST', headers: getAuthHeaders() });
+                if (!response.ok) throw Error('Notification update failed');
+                const item = adminHandoffs.find(entry => entry.handoff_ref === ref); if (item) item.seen = true;
+                await loadHandoffs();
+            } catch (_) { alert('Could not mark the notification as read. Refresh before retrying.'); }
+            finally { adminSeenBusy.delete(ref); }
         }
 
         function openHandoffDetails(ref) {
             const item = adminHandoffs.find(entry => entry.handoff_ref === ref); if (!item) return;
-            markHandoffSeen(ref);
             const drawer = document.getElementById('contentDetailsDrawer'); const backdrop = document.getElementById('contentDetailsBackdrop');
             const status = String(item.status || 'WAITING_FOR_HUMAN').toUpperCase();
             document.getElementById('contentDetailsType').innerText = 'Customer handoff';
@@ -8551,21 +8557,29 @@ THIS WEEK'S BENGAL SPECIALS
             const avatar = String(item.customer_profile_pic || '');
             document.getElementById('contentDetailsPreview').innerHTML = avatar.startsWith('https:' + '/' + '/') ? `<img src="${escapeHtml(avatar)}" alt="Instagram customer profile" style="width:64px;height:64px;border-radius:50%;object-fit:cover;">` : '<div style="font-size:3rem;color:#8b97a8;">↗</div>';
             document.getElementById('contentDetailsFacts').innerHTML = [['Customer', handoffCustomerIdentity(item)], ...(!item.customer_username ? [['Identity', 'Username unavailable from Meta']] : []), ['Instagram ID', item.customer_external_id || 'Unavailable'], ['CAM reference', item.handoff_ref], ['Status', status], ['Reason', item.reason], ['Summary', item.summary || '—'], ['Created', formatAdminTimestamp(item.created_at)], ['Updated', formatAdminTimestamp(item.updated_at || item.created_at)]].map(([label, value]) => `<div class="drawer-fact"><span class="drawer-fact-label">${escapeHtml(label)}</span><span class="drawer-fact-value">${escapeHtml(value)}</span></div>`).join('');
-            const resumeAction = status === 'WAITING_FOR_HUMAN' || status === 'CREATED'
-                ? `<button class="btn-secondary" type="button" onclick="resumeAdminHandoff('${escapeHtml(item.handoff_ref)}')">Resume CAM</button>`
-                : '<span class="ig-media-muted">Read-only history — this CAM is already resumed.</span>';
+            const resumeAction = item.actionable
+                ? `<p>AI is paused. Resume AI allows automated Instagram replies again.</p><button class="btn-secondary" type="button" onclick="resumeAdminHandoff('${escapeHtml(item.handoff_ref)}')">Resume AI</button>`
+                : '<span class="ig-media-muted">Read-only history — no resume action is available.</span>';
             const username = String(item.customer_username || '');
             const profileUrl = 'https:' + '/' + '/' + 'www.instagram.com/' + encodeURIComponent(username) + '/';
             const profileAction = /^[A-Za-z0-9._-]+$/.test(username) ? `<a class="btn-secondary" href="${escapeHtml(profileUrl)}" target="_blank" rel="noopener noreferrer">Open Instagram Profile</a>` : '';
-            document.getElementById('contentDetailsActions').innerHTML = `${resumeAction}${profileAction}<button class="btn-secondary" type="button" onclick="switchTab('tab-handoffs', null); closeContentDetails();">Open Handoffs</button>`;
+            document.getElementById('contentDetailsActions').innerHTML = `${resumeAction}${!item.seen ? `<button class="btn-secondary" type="button" onclick="markHandoffSeen('${escapeHtml(item.handoff_ref)}'); closeContentDetails();">Mark notification as read</button>` : ''}${profileAction}<button class="btn-secondary" type="button" onclick="switchTab('tab-handoffs', null); closeContentDetails();">Open Handoffs</button>`;
             drawer.classList.add('open'); backdrop.classList.add('open'); drawer.setAttribute('aria-hidden', 'false'); backdrop.setAttribute('aria-hidden', 'false'); document.getElementById('contentDetailsClose').focus();
         }
 
+        let adminResumeBusy = false;
         async function resumeAdminHandoff(ref) {
-            if (!confirm('Resume this handoff and release the human-support gate?')) return;
-            const response = await fetch(`/admin/handoffs/${encodeURIComponent(ref)}/resume`, { method: 'POST', headers: getAuthHeaders() });
-            if (!response.ok) { alert('Could not resume this handoff.'); return; }
-            closeContentDetails(); loadHandoffs(); loadDashboardOverview();
+            if (adminResumeBusy || !confirm(`Resume AI for ${ref}? Automated Instagram replies will be allowed again.`)) return;
+            adminResumeBusy = true;
+            const buttons = [...document.querySelectorAll('#contentDetailsActions button')];
+            buttons.forEach(button => button.disabled = true);
+            try {
+                const response = await fetch(`/admin/handoffs/${encodeURIComponent(ref)}/resume`, { method: 'POST', headers: getAuthHeaders() });
+                if (!response.ok) throw Error('Resume failed');
+                closeContentDetails(); await loadHandoffs(); await loadDashboardOverview();
+                alert('AI resumed for this conversation.');
+            } catch (_) { alert('Could not resume this conversation. Refresh its status before retrying.'); }
+            finally { adminResumeBusy = false; buttons.forEach(button => button.disabled = false); }
         }
 
         function closeContentDetails() {
@@ -11021,7 +11035,7 @@ Non-Veg:
 
                             rows += `
                             <tr>
-                                <td style="white-space: nowrap;">${escapeHtml(e.timestamp || 'Recent')}</td>
+                                <td style="white-space: nowrap;">${escapeHtml(formatAdminTimestamp(e.created_at || e.timestamp))}</td>
                                 <td><b>${escapeHtml(e.channel)}</b></td>
                                 <td><code>${escapeHtml(e.user_id)}</code></td>
                                 <td>${escapeHtml(e.user_message)}</td>
@@ -11055,7 +11069,7 @@ Non-Veg:
                         data.conversations.forEach(c => {
                             rows += `
                             <tr>
-                                <td style="white-space: nowrap;">${escapeHtml(c.timestamp || 'Recent')}</td>
+                                <td style="white-space: nowrap;">${escapeHtml(formatAdminTimestamp(c.timestamp))}</td>
                                 <td><b>${escapeHtml(c.channel)}</b></td>
                                 <td><code>${escapeHtml(c.user_id)}</code></td>
                                 <td>${escapeHtml(c.user_message)}</td>
@@ -11117,14 +11131,15 @@ Non-Veg:
             tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: #888;">Loading suggested answers...</td></tr>';
 
             try {
-                const resp = await fetch('/admin/candidates', { headers: getAuthHeaders() });
+                const status = document.getElementById('candidateStatusFilter')?.value || 'PENDING_APPROVAL';
+                const resp = await fetch('/admin/candidates?status=' + encodeURIComponent(status), { headers: getAuthHeaders() });
                 if (!resp.ok) {
                     tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: red;">Could not load suggested answers.</td></tr>';
                     return;
                 }
                 const data = await resp.json();
                 const items = data.candidates || [];
-                updateCandidateBadge(items.length);
+                if (status === 'PENDING_APPROVAL') updateCandidateBadge(items.length);
 
                 if (!items.length) {
                     tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: #888;">Nothing waiting. Drafts appear here when a customer asks something the bot cannot yet answer.</td></tr>';
@@ -11137,20 +11152,23 @@ Non-Veg:
                     const confColour = confidence >= 85 ? 'var(--success, #2e7d32)' : (confidence >= 60 ? '#b26a00' : 'var(--danger)');
                     rows += `
                     <tr>
-                        <td style="max-width: 200px;"><b>${escapeHtml(c.user_message || '—')}</b></td>
+                        <td style="max-width: 200px;"><b>${escapeHtml(c.user_message || '—')}</b><br><span>${escapeHtml(c.status || status)}</span><br>${escapeHtml(formatAdminTimestamp(c.created_at))}</td>
                         <td style="max-width: 340px; font-size: 0.82rem;">
                             <div id="candidateText-${c.id}" style="white-space:pre-wrap;">${escapeHtml(c.response)}</div>
+                            ${/price|₹|availability|shelf.life|portion/i.test(c.response || '') ? '<p class="result-box info" style="display:block">Check price, availability, portion and shelf-life facts against current approved knowledge before approval.</p>' : ''}
                             <textarea id="candidateEdit-${c.id}" style="display:none;width:100%;min-height:110px;">${escapeHtml(c.response)}</textarea>
                             ${c.edited ? `<small>Edited by ${escapeHtml(c.edited_by || 'admin')} · ${escapeHtml(c.edited_at || '')}</small>` : ''}
                         </td>
                         <td style="color: ${confColour}; font-weight: 600;">${confidence}%</td>
                         <td><span class="badge badge-veg">${escapeHtml(c.created_by || 'bot')}</span></td>
-                        <td style="white-space: nowrap;">
+                        <td style="white-space: nowrap;" data-candidate-actions="${c.id}">
+                            ${status === 'PENDING_APPROVAL' ? `
                             <button class="btn-primary" style="padding: 4px 10px; font-size: 0.75rem;" onclick="approveCandidate(${c.id})">✅ Approve</button>
                             <button class="btn-secondary" style="padding:4px 10px;font-size:0.75rem;" id="candidateEditButton-${c.id}" onclick="beginCandidateEdit(${c.id})">✏️ Edit</button>
                             <button class="btn-primary" style="display:none;padding:4px 10px;font-size:0.75rem;" id="candidateSaveButton-${c.id}" onclick="saveCandidateEdit(${c.id})">Save draft</button>
                             <button class="btn-secondary" style="display:none;padding:4px 10px;font-size:0.75rem;" id="candidateCancelButton-${c.id}" onclick="cancelCandidateEdit(${c.id})">Cancel</button>
                             <button class="btn-secondary" style="padding: 4px 10px; font-size: 0.75rem; color: var(--danger);" onclick="rejectCandidate(${c.id})">✕ Reject</button>
+                            ` : '<span>Read-only decision history</span>'}
                         </td>
                     </tr>`;
                 });
@@ -11183,8 +11201,16 @@ Non-Veg:
             } catch (err) { /* badge is a nicety; never block the dashboard on it */ }
         }
 
+        const candidateActionsBusy = new Set();
+        function setCandidateBusy(id, busy) {
+            if (busy) candidateActionsBusy.add(id); else candidateActionsBusy.delete(id);
+            document.querySelectorAll(`[data-candidate-actions="${id}"] button`).forEach(button => button.disabled = busy);
+            document.getElementById('candidateActionFeedback').innerText = busy ? 'Saving decision…' : '';
+        }
+        function candidateQuestion(id) { return document.getElementById(`candidateText-${id}`)?.closest('tr')?.querySelector('td b')?.innerText || 'selected question'; }
         async function approveCandidate(id) {
-            if (!confirm('Approve this answer?\n\nIt will be added to the bot\'s verified knowledge and sent to customers who ask this from now on.')) return;
+            if (candidateActionsBusy.has(id) || !confirm(`Approve the answer for “${candidateQuestion(id)}”? It becomes verified knowledge for future customers. Check all business facts first.`)) return;
+            setCandidateBusy(id, true);
             try {
                 const resp = await fetch(`/admin/candidates/${id}/approve`, {
                     method: 'POST',
@@ -11192,14 +11218,14 @@ Non-Veg:
                     body: JSON.stringify({ approved_by: 'admin_dashboard' })
                 });
                 if (resp.ok) {
-                    loadCandidates();
+                    await loadCandidates();
+                    alert('Answer approved.');
                 } else {
-                    const err = await resp.json().catch(() => ({}));
-                    alert('Could not approve: ' + (err.detail || resp.status));
+                    alert('Could not approve the answer. Refresh its status before retrying.');
                 }
             } catch (err) {
-                alert('Could not approve: ' + err);
-            }
+                alert('Could not approve the answer. Refresh its status before retrying.');
+            } finally { setCandidateBusy(id, false); }
         }
 
         function beginCandidateEdit(id) {
@@ -11213,33 +11239,40 @@ Non-Veg:
         function cancelCandidateEdit(id) { loadCandidates(); }
 
         async function saveCandidateEdit(id) {
+            if (candidateActionsBusy.has(id)) return;
             const response = document.getElementById(`candidateEdit-${id}`).value.trim();
             if (!response) return alert('Draft answer cannot be empty.');
+            setCandidateBusy(id, true);
+            try {
             const resp = await fetch(`/admin/candidates/${id}`, {
                 method: 'PATCH', headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
                 body: JSON.stringify({ response, edited_by: 'admin_dashboard' })
             });
             const data = await resp.json().catch(() => ({}));
-            if (!resp.ok) return alert('Could not save draft: ' + (data.detail || resp.status));
-            loadCandidates();
+            if (!resp.ok) return alert('Could not save the draft. Refresh its status before retrying.');
+            await loadCandidates();
+            alert('Draft saved. It has not been approved.');
+            } catch (_) { alert('Could not save the draft. Refresh its status before retrying.'); }
+            finally { setCandidateBusy(id, false); }
         }
 
         async function rejectCandidate(id) {
-            if (!confirm('Reject this draft? It will not be shown to customers and will be removed from this list.')) return;
+            if (candidateActionsBusy.has(id) || !confirm(`Reject the draft for “${candidateQuestion(id)}”? It remains in rejected history and is not published.`)) return;
+            setCandidateBusy(id, true);
             try {
                 const resp = await fetch(`/admin/candidates/${id}/reject`, {
                     method: 'POST',
                     headers: getAuthHeaders()
                 });
                 if (resp.ok) {
-                    loadCandidates();
+                    await loadCandidates();
+                    alert('Draft rejected.');
                 } else {
-                    const err = await resp.json().catch(() => ({}));
-                    alert('Could not reject: ' + (err.detail || resp.status));
+                    alert('Could not reject the draft. Refresh its status before retrying.');
                 }
             } catch (err) {
-                alert('Could not reject: ' + err);
-            }
+                alert('Could not reject the draft. Refresh its status before retrying.');
+            } finally { setCandidateBusy(id, false); }
         }
 
         function clearKnowledgeForm() {

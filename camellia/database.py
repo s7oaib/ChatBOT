@@ -3783,6 +3783,31 @@ class Database:
                 ).fetchall()
             return [dict(row) for row in rows]
 
+    def get_admin_handoff_overview(self, limit: int, include_history: bool, status: Optional[str] = None) -> Dict[str, Any]:
+        """Read-only operator workload; unread notifications are not resolution.
+
+        Match the existing active-handoff expiry boundary without changing any
+        stored lifecycle. Filter before pagination and count the complete set.
+        """
+        actionable = "(status IN ('CREATED', 'WAITING_FOR_HUMAN') AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP))"
+        with self.get_connection() as conn:
+            counts = conn.execute(
+                f"SELECT SUM(CASE WHEN {actionable} THEN 1 ELSE 0 END) AS actionable_count, "
+                f"SUM(CASE WHEN {actionable} THEN 0 ELSE 1 END) AS historical_count "
+                "FROM cross_channel_handoffs"
+            ).fetchone()
+            where, params = ("status = ?", [status]) if status else ("1=1" if include_history else actionable, [])
+            rows = conn.execute(
+                f"SELECT *, {actionable} AS actionable FROM cross_channel_handoffs WHERE {where} ORDER BY id DESC LIMIT ?",
+                (*params, limit),
+            ).fetchall()
+            unread = conn.execute(
+                f"SELECT COUNT(*) FROM cross_channel_handoffs h WHERE {actionable} "
+                "AND NOT EXISTS (SELECT 1 FROM admin_handoff_views s WHERE s.handoff_ref = h.handoff_ref)"
+            ).fetchone()[0]
+            return {"rows": [dict(row) for row in rows], "actionable_count": counts["actionable_count"] or 0,
+                    "historical_count": counts["historical_count"] or 0, "unread_count": unread}
+
     def get_admin_handoff_seen_refs(self, handoff_refs: Optional[List[str]] = None) -> set[str]:
         """Return durable operator-seen state without exposing source IDs."""
         with self.get_connection() as conn:
