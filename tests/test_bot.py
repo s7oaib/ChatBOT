@@ -2949,14 +2949,11 @@ class TestStorageDurabilityReporting(unittest.TestCase):
 
 class TestGoogleSheetMenuSync(unittest.TestCase):
     """
-    The Google Sheet is the menu's durable source of truth.
-
-    The container filesystem does not persist, so a menu edited through /admin
-    lasts only until the next deploy. Re-pulling the sheet at boot is what makes
-    a price the client typed survive a restart.
+    Startup never imports external business facts. Reviewed menu versions are
+    the durable authority; the retired Sheet helper retains SSRF protection.
     """
 
-    def test_menu_is_pulled_from_the_sheet_on_startup(self):
+    def test_configured_sheet_is_not_pulled_on_startup(self):
         from camellia.app import app as fastapi_app
 
         with patch.object(config, "GOOGLE_SHEET_CSV_URL", "https://docs.google.com/x/pub?output=csv"), \
@@ -2966,7 +2963,7 @@ class TestGoogleSheetMenuSync(unittest.TestCase):
             with TestClient(fastapi_app):
                 pass
 
-        mock_sync.assert_called_once()
+        mock_sync.assert_not_called()
 
     def test_startup_survives_an_unreachable_sheet(self):
         """

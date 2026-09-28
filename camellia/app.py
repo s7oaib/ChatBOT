@@ -92,7 +92,6 @@ from camellia.knowledge import SOURCE_MAP
 from camellia.candidate_safety import candidate_eligibility, detect_business_commitment_warnings, validate_candidate_answer
 from camellia.assisted_resolution import create_suggestion
 from camellia.auto_resolve import simulate_auto_resolve
-from camellia.content_integrity import apply_confirmed_menu_facts, apply_safe_content_remediations
 from camellia.instagram_story_sync import sync_instagram_stories, story_sync_loop
 from camellia.instagram_media import sync_instagram_media
 from camellia.instagram_oauth import (
@@ -212,7 +211,9 @@ async def lifespan(app: FastAPI):
     for action in STARTUP_ACTIONS:
         log.info("Storage bootstrap: %s", action)
 
-    _prune_expired_weekly_menus()
+    # Startup is read-only for menu/business facts. Date eligibility is enforced
+    # by the reviewed-menu authority at read time; historical baseline rows stay
+    # stored until an explicit operator workflow changes them.
 
     db.init_db()
     story_cleanup = db.cleanup_legacy_instagram_story_history()
@@ -242,25 +243,9 @@ async def lifespan(app: FastAPI):
             log.info("Delivered %s durable human notification event(s) on startup.", delivered_notifications)
     except Exception:
         log.exception("Could not process durable human notification events on startup.")
-    # Apply only the audited, canonical copy corrections through the existing
-    # versioned Response Library store.  This is idempotent and deliberately
-    # preserves any distinct client-authored override.
-    # Production uses the durable /app/var database.  Keep local/unit-test
-    # databases opt-in so a test that deliberately exercises legacy seed copy
-    # is not mutated merely by constructing a TestClient.
-    db_path = str(getattr(config, "DB_PATH", "")).replace("\\", "/")
-    if db_path.startswith("/app/var/") or os.getenv("CONTENT_INTEGRITY_REMEDIATION") == "true":
-        try:
-            if apply_confirmed_menu_facts(config.MENU_JSON_PATH, log):
-                responder.reload_data()
-            apply_safe_content_remediations(
-                db, responder.menu_data, responder.qa_data.get("templates", []), log
-            )
-        except Exception:
-            # Copy remediation must never make the service fail to start; the
-            # protected seed/runtime remains available if the durable volume
-            # is temporarily unavailable.
-            log.exception("Could not apply content-integrity copy remediations.")
+    # Legacy content-integrity migrations remain available for explicit manual
+    # compatibility, never automatic startup. Read-time deterministic claim
+    # quarantine remains in the responder; no QA override is rewritten here.
     # Built-in menu catalogue rows are seeded inside init_db() itself (every
     # Database instance gets them, test fixtures included); only the
     # Topic-backfill migration needs a separate call here.
@@ -300,31 +285,8 @@ async def lifespan(app: FastAPI):
     except Exception:
         log.exception("Retention purge failed on startup.")
 
-    # The container filesystem does not persist, so a menu edited through /admin
-    # survives only until the next deploy, when menu.json reverts to the copy
-    # baked into the image. Re-pulling at boot makes the Google Sheet the
-    # durable source of truth: whatever the client last put in the sheet is what
-    # customers are quoted, no matter how often the service restarts.
-    #
-    # Deliberately non-fatal. An unreachable or malformed sheet must leave the
-    # bot answering from the seed menu rather than refusing to start.
-    if config.GOOGLE_SHEET_CSV_URL:
-        try:
-            result = await asyncio.to_thread(sheet_sync.sync_from_csv_url)
-            if result.get("status") == "success":
-                log.info(
-                    "Menu synced from Google Sheet on startup (%s rows).",
-                    result.get("updated_items_count"),
-                )
-            else:
-                log.warning(
-                    "Startup menu sync did not apply, serving the menu baked into "
-                    "the image instead: %s", result,
-                )
-        except Exception:
-            log.exception(
-                "Startup menu sync failed; serving the menu baked into the image."
-            )
+    # External sources may feed an operator-controlled review workflow, but
+    # restart must never pull new business facts or replace approved knowledge.
 
     story_sync_task = None
     story_sync_stop = None
