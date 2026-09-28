@@ -7011,8 +7011,8 @@ def get_admin_dashboard():
             <div class="admin-sidebar-label">Workspace</div>
             <nav class="tabs-nav" aria-label="Primary">
                 <button class="tab-btn active" onclick="switchTab('tab-dashboard', this)">⌂ <span class="nav-label">Dashboard</span></button>
-                <button class="tab-btn" onclick="switchTab('tab-image', this)">🍱 <span class="nav-label">Menu</span><span id="menuSidebarBadge" class="admin-nav-badge" hidden aria-label="Menus needing review"></span></button>
                 <button class="tab-btn" onclick="switchTab('tab-instagram-stories', this)">▣ <span class="nav-label">Instagram Stories</span></button>
+                <button class="tab-btn" onclick="switchTab('tab-image', this)">🍱 <span class="nav-label">Menu</span><span id="menuSidebarBadge" class="admin-nav-badge" hidden aria-label="Menus needing review"></span></button>
                 <button class="tab-btn" onclick="switchTab('tab-instagram-content', this)">◉ <span class="nav-label">Posts &amp; Reels</span></button>
                 <button class="tab-btn" onclick="switchTab('tab-handoffs', this)">↗ <span class="nav-label">Handoffs</span><span id="handoffSidebarBadge" class="admin-nav-badge" style="display:none;">0</span></button>
             </nav>
@@ -12459,10 +12459,11 @@ Non-Veg:
     html_content = (
         html_content[:menu_start]
         + '<div id="tab-image" class="panel-card" data-group="menu">'
-        + REVIEW_HTML
-        + '<div id="mrWeeklyView" hidden><button type="button" class="btn-secondary" onclick="mrShowCatalogue()">← Menu Catalogue</button>'
+        + '<div id="mrWeeklyView">'
         + WEEKLY_HTML
         + '</div>'
+        + '<hr style="margin:28px 0;border:0;border-top:1px solid var(--border)">'
+        + REVIEW_HTML
         + '</div>\n        '
         + html_content[menu_end:]
     )

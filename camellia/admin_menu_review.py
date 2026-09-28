@@ -258,18 +258,18 @@ def weekly_preview(body: dict = Body(...), actor=Depends(reviewer)):
 
 REVIEW_HTML = r'''
 <style>
-  #menuReviewPanel{max-width:1100px;min-width:0;margin:0 auto}
+  #menuReviewPanel{max-width:850px;min-width:0;margin:0 auto}
   #menuReviewPanel [hidden]{display:none!important}
   #menuReviewPanel .mr-header{display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:20px}
   #menuReviewPanel .mr-header h2{margin:0;color:var(--primary)}
   #menuReviewPanel .mr-header p{margin:5px 0 0;color:var(--text-muted)}
-  #menuReviewPanel .mr-catalogue-wrap{max-width:100%;overflow-x:auto;border:1px solid var(--border);border-radius:12px;background:#fff}
-  #menuReviewPanel .mr-catalogue-table{width:100%;border-collapse:collapse;text-align:left}
-  #menuReviewPanel .mr-catalogue-table th{font-size:.8rem;color:var(--text-muted);background:#fcfaf7}
-  #menuReviewPanel .mr-catalogue-table td,#menuReviewPanel .mr-catalogue-table th{padding:14px 12px;border-bottom:1px solid var(--border);vertical-align:top}
-  #menuReviewPanel .mr-catalogue-table tr:last-child td{border-bottom:0}
-  #menuReviewPanel .mr-catalogue-table td:first-child{min-width:180px;max-width:310px;overflow-wrap:anywhere}
-  #menuReviewPanel .mr-card-image{width:56px;height:44px;float:left;margin:0 10px 8px 0;overflow:hidden;display:grid;place-items:center;background:#f5f1ec;border:1px solid var(--border);border-radius:6px;color:var(--text-muted)}
+  #menuReviewPanel .mr-catalogue-list{display:grid;gap:12px}
+  #menuReviewPanel .mr-card{display:grid;grid-template-columns:minmax(0,220px) minmax(0,1fr);align-items:start;gap:12px 18px;padding:16px;background:#fff;border:1px solid var(--border);border-radius:12px;min-width:0;overflow-wrap:anywhere}
+  #menuReviewPanel .mr-card-info{min-width:0}
+  #menuReviewPanel .mr-card-image{aspect-ratio:4/3;min-width:0;overflow:hidden;display:grid;place-items:center;background:#f5f1ec;border:1px solid var(--border);border-radius:10px;color:var(--text-muted)}
+  #menuReviewPanel .mr-card-badges{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}
+  #menuReviewPanel .mr-badge{font-size:.8rem;border:1px solid var(--border);border-radius:100px;padding:2px 9px;color:var(--text-muted)}
+  #menuReviewPanel .mr-category-link{padding:4px 0;border:0;background:transparent;color:var(--text-muted);font-size:.85rem;cursor:pointer}
   #menuReviewPanel .mr-image-preview{display:block;width:100%;height:100%;padding:0;border:0;background:transparent;cursor:zoom-in}
   #menuReviewPanel .mr-card-image img{display:block;width:100%;height:100%;object-fit:cover}
   #menuReviewPanel .mr-image-placeholder{padding:12px;text-align:center;font-size:.9rem}
@@ -305,18 +305,20 @@ REVIEW_HTML = r'''
   #menuReviewPanel .mr-review-table table{width:100%}
   #menuReviewPanel .mr-review-table input,#menuReviewPanel .mr-review-table select{max-width:100%}
   #menuReviewPanel .mr-version{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;padding:12px 0;border-bottom:1px solid var(--border)}
-  #menuReviewPanel dialog{max-width:min(520px,calc(100vw - 32px));width:100%;border:1px solid #888;border-radius:8px;padding:24px}
+  #menuReviewPanel dialog{max-width:min(520px,calc(100vw - 32px));max-height:calc(100vh - 32px);overflow-y:auto;margin:auto;width:100%;border:1px solid #888;border-radius:8px;padding:24px}
   #menuReviewPanel dialog::backdrop{background:#0008}
   #menuReviewPanel dialog .field-control{width:100%;margin-bottom:12px}
   #menuReviewPanel .mr-dialog-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:18px}
-  @media(max-width:600px){#menuReviewPanel .mr-catalogue-wrap{border:0;background:transparent}#menuReviewPanel .mr-catalogue-table thead{display:none}#menuReviewPanel .mr-catalogue-table,#menuReviewPanel .mr-catalogue-table tbody{display:block;width:100%}#menuReviewPanel .mr-catalogue-table tr{display:block;background:#fff;border:1px solid var(--border);border-radius:10px;padding:10px;margin-bottom:12px}#menuReviewPanel .mr-catalogue-table td{display:block;border:0;padding:6px;max-width:none;min-width:0;overflow-wrap:anywhere}#menuReviewPanel .mr-catalogue-table td:before{content:attr(data-label);display:block;font-size:.75rem;color:var(--text-muted);margin-bottom:4px}#menuReviewPanel .mr-current-row{grid-template-columns:minmax(0,1fr) 65px 65px;font-size:.9rem}#menuReviewPanel .mr-review-table{overflow:visible}#menuReviewPanel .mr-review-table thead{display:none}#menuReviewPanel .mr-review-table tr{display:block;border:1px solid var(--border);border-radius:10px;padding:10px;margin-bottom:12px}#menuReviewPanel .mr-review-table td{display:block;border:0;padding:6px}#menuReviewPanel .mr-review-table td:before{content:attr(data-label);display:block;font-size:.75rem;color:var(--text-muted)}#menuReviewPanel .mr-review-table input,#menuReviewPanel .mr-review-table select{width:100%!important}}
+  @media(max-width:600px){#menuReviewPanel .mr-current-row{grid-template-columns:minmax(0,1fr) 65px 65px;font-size:.9rem}#menuReviewPanel .mr-review-table{overflow:visible}#menuReviewPanel .mr-review-table thead{display:none}#menuReviewPanel .mr-review-table tr{display:block;border:1px solid var(--border);border-radius:10px;padding:10px;margin-bottom:12px}#menuReviewPanel .mr-review-table td{display:block;border:0;padding:6px}#menuReviewPanel .mr-review-table td:before{content:attr(data-label);display:block;font-size:.75rem;color:var(--text-muted)}#menuReviewPanel .mr-review-table input,#menuReviewPanel .mr-review-table select{width:100%!important}}
+  @media(max-width:600px){#menuReviewPanel .mr-card{grid-template-columns:minmax(0,1fr);gap:9px}#menuReviewPanel .mr-card-image{width:100%;max-width:360px;aspect-ratio:16/10}#menuReviewPanel .mr-card-actions{gap:8px}#menuReviewPanel .mr-menu-actions{max-width:100%}}
 </style>
 <section id="menuReviewPanel" aria-labelledby="menuReviewHeading">
   <select id="mrMenu" hidden aria-hidden="true"></select>
   <div id="mrCatalogueView">
     <div class="mr-header"><div><h2 id="menuReviewHeading">Menu Catalogue</h2><p>Manage your menus.</p></div>
-      <div class="mr-card-actions"><button type="button" class="btn-secondary" onclick="mrManageCategories()">Manage categories</button><button type="button" class="btn-primary" onclick="mrOpenMenuForm('add')">+ Add Menu</button></div></div>
-    <div class="mr-catalogue-wrap"><table id="mrCatalogueTable" class="mr-catalogue-table" aria-label="Menu Catalogue"><thead><tr><th scope="col">Menu</th><th scope="col">Category</th><th scope="col">Status</th><th scope="col">Validity</th><th scope="col">Review</th><th scope="col">Actions</th></tr></thead><tbody id="mrCatalogueList"></tbody></table></div>
+      <button type="button" class="btn-primary" onclick="mrOpenMenuForm('add')">+ Add Menu</button></div>
+    <div id="mrCatalogueList" class="mr-catalogue-list"></div>
+    <button type="button" class="mr-category-link" onclick="mrManageCategories()">Manage categories</button>
     <div id="mrEmpty" hidden><p>No menus yet. Create your first menu to get started.</p>
       <button type="button" class="btn-primary" onclick="mrOpenMenuForm('add')">+ Add Menu</button></div>
   </div>
@@ -414,19 +416,20 @@ async function mrMenus(preferredId){
     mrCatalogue.forEach(menu=>{
       const option=document.createElement('option');option.value=menu.menu_id;option.textContent=menu.name;picker.appendChild(option);
     });
-    mrWorkspaceRows.forEach(menu=>{
-      const card=document.createElement('tr');
-      const nameCell=document.createElement('td');nameCell.dataset.label='Menu';
+    mrWorkspaceRows.filter(menu=>menu.workspace!=='weekly').forEach(menu=>{
+      const card=document.createElement('article');card.className='mr-card';
+      const nameCell=document.createElement('div');nameCell.className='mr-card-info';
       const media=document.createElement('div');media.className='mr-card-image';
       if(menu.image_url){const trigger=document.createElement('button');trigger.type='button';trigger.className='mr-image-preview';trigger.setAttribute('aria-label','Preview current image for '+menu.name);trigger.onclick=()=>mrPreviewMenuImage(menu,trigger);
         const image=document.createElement('img');image.src=menu.image_url;image.alt='Current menu image for '+menu.name;image.loading='lazy';image.decoding='async';image.onerror=()=>{const placeholder=document.createElement('span');placeholder.className='mr-image-placeholder';placeholder.textContent='Menu image unavailable';placeholder.setAttribute('role','status');media.replaceChildren(placeholder);};trigger.appendChild(image);media.appendChild(trigger);
       }else{const placeholder=document.createElement('span');placeholder.className='mr-image-placeholder';placeholder.textContent='No current menu image';media.appendChild(placeholder);}
-      nameCell.appendChild(media);
+      card.appendChild(media);
       const title=document.createElement('h3');title.className='mr-card-title';title.textContent=menu.name;nameCell.appendChild(title);
       const description=document.createElement('p');description.className='mr-card-description';description.textContent=menu.description||'';nameCell.appendChild(description);card.appendChild(nameCell);
-      for(const [label,value] of [['Category',menu.category||'—'],['Status',menu.display_status||'Not published'],['Validity',menu.validity_label||'Not published'],['Review',menu.review_label||'—']]){const cell=document.createElement('td');cell.dataset.label=label;cell.textContent=value;card.appendChild(cell);}
+      const badges=document.createElement('div');badges.className='mr-card-badges';
+      for(const value of [menu.category||'Other',menu.active?'Active':'Inactive']){const badge=document.createElement('span');badge.className='mr-badge';badge.textContent=value;badges.appendChild(badge);}nameCell.appendChild(badges);
+      const lifecycle=document.createElement('small');lifecycle.className='mr-publication';lifecycle.textContent=[menu.display_status,menu.validity_label,menu.review_required?menu.review_label:null].filter(Boolean).join(' · ');nameCell.appendChild(lifecycle);
       if(menu.last_approved_date){const publication=document.createElement('small');publication.className='mr-publication';publication.textContent='Last published: '+menu.last_approved_date;nameCell.appendChild(publication);}
-      const actionCell=document.createElement('td');actionCell.dataset.label='Actions';
       const actions=document.createElement('div');actions.className='mr-card-actions';
       const open=document.createElement('button');open.type='button';open.className='btn-primary';open.textContent='Open';open.onclick=()=>menu.workspace==='weekly'?mrOpenWeekly():mrOpenMenu(menu.menu_id);actions.appendChild(open);
       if(menu.workspace!=='weekly'){
@@ -435,7 +438,7 @@ async function mrMenus(preferredId){
       const edit=document.createElement('button');edit.type='button';edit.className='btn-secondary';edit.textContent='Edit details';edit.onclick=()=>mrOpenMenuForm('edit',menu.menu_id);menuActions.appendChild(edit);
       const remove=document.createElement('button');remove.type='button';remove.className='btn-secondary';remove.textContent='Permanent Delete';remove.disabled=menu.actions?.delete===false;remove.title=remove.disabled?'Used by active Instagram routing':'';remove.onclick=()=>mrDeleteMenu(menu.menu_id);menuActions.appendChild(remove);
       more.appendChild(menuActions);actions.appendChild(more);
-      }actionCell.appendChild(actions);card.appendChild(actionCell);list.appendChild(card);
+      }nameCell.appendChild(actions);list.appendChild(card);
     });
     document.getElementById('mrEmpty').hidden=!!mrCatalogue.length;
     if(preferredId && mrCatalogue.some(menu=>menu.menu_id===preferredId))await mrOpenMenu(preferredId);
@@ -444,7 +447,7 @@ async function mrMenus(preferredId){
     return true;
   }catch(e){mrMessage(e.message);return false;}
 }
-function mrShowCatalogue(){document.getElementById('menuReviewPanel').hidden=false;document.getElementById('mrCatalogueView').hidden=false;document.getElementById('mrSelectedView').hidden=true;const weekly=document.getElementById('mrWeeklyView');if(weekly)weekly.hidden=true;document.getElementById('mrMenu').value='';}
+function mrShowCatalogue(){document.getElementById('menuReviewPanel').hidden=false;document.getElementById('mrCatalogueView').hidden=false;document.getElementById('mrSelectedView').hidden=true;const weekly=document.getElementById('mrWeeklyView');if(weekly)weekly.hidden=false;document.getElementById('mrMenu').value='';}
 async function mrOpenWeekly(){document.getElementById('menuReviewPanel').hidden=false;document.getElementById('mrCatalogueView').hidden=true;document.getElementById('mrSelectedView').hidden=true;mrMessage('');document.getElementById('mrWeeklyView').hidden=false;document.getElementById('mrMenu').value='';if(typeof wsLoad==='function')await wsLoad();}
 async function mrManageCategories(){try{const data=await mrRequest('/admin/menu-categories');igMenuCategoryRecords=data.categories||[];const picker=document.getElementById('mrCategoryChoice');picker.replaceChildren();igMenuCategoryRecords.forEach(category=>{const option=document.createElement('option');option.value=category.name;option.textContent=category.name;picker.appendChild(option);});document.getElementById('mrCategoryDialog').showModal();}catch(error){mrMessage(error.message);}}
 function mrCategoryAction(action){const name=document.getElementById('mrCategoryChoice').value;document.getElementById('mrCategoryDialog').close();if(action==='delete'){document.getElementById('menuCategory').value=name;openCategoryDeleteModal();}else openCategoryModal(action==='edit'?name:'');}

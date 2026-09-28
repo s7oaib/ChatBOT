@@ -92,7 +92,8 @@ def test_menu_manager_sits_between_menu_and_ai_resolution(page):
     assert 'id="tab-menu-manager"' in page
     assert 'id="mrCatalogueView"' in page
     assert 'id="mrSelectedView" hidden' in page
-    assert 'id="mrCatalogueTable"' in page
+    assert 'id="mrCatalogueList" class="mr-catalogue-list"' in page
+    assert 'id="mrCatalogueTable"' not in page
     assert "open.textContent='Open'" in page
     assert "'tab-menu-manager'].includes(tabId)) tabId = 'tab-image'" in page
 
@@ -185,15 +186,15 @@ def test_each_tab_routes_to_a_group(page):
         assert tab_id in routed, f"tab button '{tab_id}' has no group in TAB_GROUPS"
 
 
-def test_the_menu_tab_leads_with_the_catalogue_and_preserves_review_queue_order(page):
+def test_the_menu_tab_leads_with_weekly_and_preserves_review_queue_order(page):
     """
-    Menu starts at the catalogue; Weekly Savoury is an explicit selected workspace.
+    Classic Weekly Savoury leads; catalogue and selected review remain available.
     """
     order = re.findall(r'<div [^>]*id="(tab-[\w-]+)"[^>]*class="panel-card"|'
                        r'<div class="panel-card" id="(tab-[\w-]+)"', page)
     ids = [a or b for a, b in order]
-    assert page.index('id="mrCatalogueView"') < page.index('id="weeklySavouryPanel"')
-    assert 'id="mrWeeklyView" hidden' in page
+    assert page.index('id="weeklySavouryPanel"') < page.index('id="mrCatalogueView"')
+    assert 'id="mrWeeklyView">' in page
     assert ids.index("tab-image") < ids.index("tab-paste"), (
         "the paste-text panel sits above the flyer upload"
     )

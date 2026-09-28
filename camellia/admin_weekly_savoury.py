@@ -79,7 +79,7 @@ WEEKLY_HTML = r'''
   <div id="wsFailed" class="ws-warning" hidden>We couldn't read this menu reliably. The published menu is unchanged.
     <button type="button" class="btn-secondary" onclick="wsReject()">Discard failed draft</button></div>
   <div id="wsMessage" role="status" aria-live="polite"></div>
-  <div id="wsTimelineHistory" hidden><div id="wsHistory"><h3>Previous weekly menus</h3><div id="wsVersions"></div></div></div>
+  <div id="wsTimelineHistory"><div id="wsHistory"><h3>Previous weekly menus</h3><div id="wsVersions"></div></div></div>
 </section>
 '''
 

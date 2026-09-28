@@ -25,12 +25,13 @@ def test_menu_catalogue_and_selected_menu_are_the_only_primary_views():
     assert 'id="mrCurrentRows"' in REVIEW_HTML
     assert 'id="mrHistory"' in REVIEW_HTML
     assert 'id="mrEmpty"' in REVIEW_HTML
-    assert '.mr-catalogue-table td:before{content:attr(data-label)' in REVIEW_HTML
+    assert '.mr-card{grid-template-columns:minmax(0,1fr)' in REVIEW_HTML
     assert 'id="mrImageDialog"' in REVIEW_HTML
     assert 'id="mrChooseFile"' in REVIEW_HTML and 'id="mrFileLabel"' in REVIEW_HTML
     assert 'id="mrFile" class="mr-visually-hidden"' in REVIEW_HTML
     assert 'aria-labelledby="mrFileLabel"' in REVIEW_HTML
     assert 'id="wsChooseFile"' in WEEKLY_HTML
+    assert '<div id="wsTimelineHistory"><div id="wsHistory">' in WEEKLY_HTML
     assert 'id="wsFileLabel"' in WEEKLY_HTML
     assert 'id="wsFile" class="ws-visually-hidden"' in WEEKLY_HTML
     assert 'aria-labelledby="wsFileLabel"' in WEEKLY_HTML
@@ -88,11 +89,11 @@ global.fetch=async(path,options={})=>{
 vm.runInThisContext(SOURCE);
 (async()=>{
   await mrMenus();
-  const cards=element('mrCatalogueList').children;const media=cards[0].children[0].children[0],trigger=media.children[0],image=trigger.children[0];
+  const cards=element('mrCatalogueList').children;const media=cards[0].children[0],trigger=media.children[0],image=trigger.children[0];
   const requestCount=requests.length;trigger.onclick();const preview={open:element('mrImageDialog').open,src:element('mrImagePreview').src,alt:element('mrImagePreview').alt};
   element('mrImageDialog').close();image.onerror();
-  const visual={preview,fallback:media.children[0].textContent,focusReturned:trigger.focusCount===1,noMutationRequest:requests.length===requestCount,placeholder:cards[1].children[0].children[0].children[0].textContent};
-  const initial={catalogue:!element('mrCatalogueView').hidden,selected:element('mrSelectedView').hidden,names:cards.map(card=>card.children[0].children.find(child=>child.className==='mr-card-title').textContent)};
+  const visual={preview,fallback:media.children[0].textContent,focusReturned:trigger.focusCount===1,noMutationRequest:requests.length===requestCount,placeholder:cards[1].children[0].children[0].textContent};
+  const initial={catalogue:!element('mrCatalogueView').hidden,selected:element('mrSelectedView').hidden,names:cards.map(card=>card.children[1].children.find(child=>child.className==='mr-card-title').textContent),cardTags:cards.map(card=>card.tag)};
   const uploadFile={name:'weekly-menu.png',type:'image/png',size:2048};element('mrDrop').listeners.drop({preventDefault(){},dataTransfer:{files:[uploadFile]}});
   const selection={status:element('mrFileStatus').textContent,removeVisible:!element('mrRemoveFile').hidden,extractNotStarted:!requests.some(request=>request[1].endsWith('/extract-file'))};
   await mrOpenMenu('m1');
@@ -115,7 +116,7 @@ vm.runInThisContext(SOURCE);
   blocked=true;await mrDeleteMenu('m3');
   const blockedState={message:element('mrMessage').textContent,stillExists:menus.some(m=>m.menu_id==='m3')};
   blocked=false;await mrDeleteMenu('m3');
-  const deleted={catalogue:!element('mrCatalogueView').hidden,names:element('mrCatalogueList').children.map(card=>card.children[0].children.find(child=>child.className==='mr-card-title').textContent)};
+  const deleted={catalogue:!element('mrCatalogueView').hidden,names:element('mrCatalogueList').children.map(card=>card.children[1].children.find(child=>child.className==='mr-card-title').textContent)};
   menus=[];await mrMenus();const empty={shown:!element('mrEmpty').hidden,catalogue:!element('mrCatalogueView').hidden};
   console.log(JSON.stringify({visual,initial,selection,current,textMode,fileMode,formCategories,created,prefilling,edited,beforeCancel,afterCancel,blockedState,deleted,empty,confirmations,requests}));
 })().catch(error=>{console.error(error);process.exitCode=1;});
@@ -128,7 +129,7 @@ vm.runInThisContext(SOURCE);
     result = json.loads(completed.stdout.strip())
     assert result["visual"] == {"preview": {"open": True, "src": "/images/aamar.jpg", "alt": "Current menu image for Aamar Mishti Collection"}, "fallback": "Menu image unavailable", "focusReturned": True, "noMutationRequest": True, "placeholder": "No current menu image"}
     assert result["selection"] == {"status": "Selected: weekly-menu.png (2.0 KB)", "removeVisible": True, "extractNotStarted": True}
-    assert result["initial"] == {"catalogue": True, "selected": True, "names": ["Aamar Mishti Collection", "Weekly Menu"]}
+    assert result["initial"] == {"catalogue": True, "selected": True, "names": ["Aamar Mishti Collection", "Weekly Menu"], "cardTags": ["article", "article"]}
     assert result["current"] == {"selected": "Aamar Mishti Collection", "rows": [["Kanchagolla", "250g", "₹650"]], "empty": True}
     assert result["textMode"] == {"text": True, "file": True}
     assert result["fileMode"] == {"file": True, "text": True}

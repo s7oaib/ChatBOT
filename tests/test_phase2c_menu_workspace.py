@@ -156,26 +156,28 @@ def test_category_changes_refresh_the_menu_workspace(workspace, function):
     assert "await mrMenus();" in handler
 
 
-def test_primary_menu_navigation_is_single_second_entry_and_catalogue_first(workspace):
+def test_primary_menu_navigation_is_middle_entry_and_weekly_first(workspace):
     page = workspace[0].get("/admin").text
     sidebar = page.split('<aside class="admin-sidebar"', 1)[1].split('</aside>', 1)[0]
     labels = re.findall(r'<span class="nav-label">(.*?)</span>', sidebar)
-    assert labels[:2] == ["Dashboard", "Menu"]
+    assert labels[:5] == ["Dashboard", "Instagram Stories", "Menu", "Posts &amp; Reels", "Handoffs"]
     assert labels.count("Menu") == 1
     assert "Menu Manager" not in labels and "Menu V2" not in labels and "Catalogue" not in labels
     assert 'id="menuSidebarBadge"' in sidebar
     menu = page.split('<div id="tab-image"', 1)[1].split('<div id="tab-ad-routing"', 1)[0]
-    assert menu.index('id="mrCatalogueView"') < menu.index('id="weeklySavouryPanel"')
-    assert 'id="mrWeeklyView" hidden' in menu
+    assert menu.index('id="weeklySavouryPanel"') < menu.index('id="mrCatalogueView"')
+    assert 'id="mrWeeklyView">' in menu
     assert "mrShowCatalogue();" in page.split("function switchTab", 1)[1].split("function setInstagram", 1)[0]
 
 
-def test_desktop_table_and_mobile_rows_preserve_selected_workflows():
-    assert '<table id="mrCatalogueTable"' in REVIEW_HTML
-    assert '<tbody id="mrCatalogueList">' in REVIEW_HTML
-    for column in ("Menu", "Category", "Status", "Validity", "Review", "Actions"):
-        assert f'<th scope="col">{column}</th>' in REVIEW_HTML
-    assert "const card=document.createElement('article')" not in REVIEW_SCRIPT
+def test_classic_cards_and_mobile_stacking_preserve_selected_workflows():
+    assert 'id="mrCatalogueTable"' not in REVIEW_HTML
+    assert '<div id="mrCatalogueList" class="mr-catalogue-list">' in REVIEW_HTML
+    assert "const card=document.createElement('article')" in REVIEW_SCRIPT
+    assert "menu.active?'Active':'Inactive'" in REVIEW_SCRIPT
+    assert "menu.review_required?menu.review_label:null" in REVIEW_SCRIPT
+    assert '.mr-card{grid-template-columns:minmax(0,1fr)' in REVIEW_HTML
+    assert 'overflow-y:auto;margin:auto' in REVIEW_HTML
     assert 'onclick="mrManageCategories()"' in REVIEW_HTML
     assert "Manage categories" in REVIEW_HTML
     assert "@media(max-width:600px)" in REVIEW_HTML
