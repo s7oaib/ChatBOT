@@ -7510,8 +7510,8 @@ THIS WEEK'S BENGAL SPECIALS
             <div class="panel-header">
                 <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
                     <div>
-                        <h2>✅ Waiting for your approval</h2>
-                        <p>When a customer asks something the bot has no approved answer for, it drafts one and parks it here. <b>Nothing on this page has been shown to a customer.</b> Approving an answer adds it to the bot's verified knowledge, so the next customer who asks gets it instantly instead of waiting for a human.</p>
+                        <h2>✅ Suggested answers &amp; decision history</h2>
+                        <p><b>Pending drafts are not live.</b> Review their facts before explicitly approving them for verified knowledge. Approved and rejected records are read-only decision history; approved answers may already have been used for customers.</p>
                     </div>
                     <button class="btn-secondary" onclick="loadCandidates()">🔄 Refresh</button>
                 </div>
@@ -11142,7 +11142,7 @@ Non-Veg:
                 if (status === 'PENDING_APPROVAL') updateCandidateBadge(items.length);
 
                 if (!items.length) {
-                    tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: #888;">Nothing waiting. Drafts appear here when a customer asks something the bot cannot yet answer.</td></tr>';
+                    tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: #888;">' + (status === 'PENDING_APPROVAL' ? 'Nothing waiting. Drafts appear here when a customer asks something the bot cannot yet answer.' : 'No records in the selected decision history.') + '</td></tr>';
                     return;
                 }
 

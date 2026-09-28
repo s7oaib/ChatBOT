@@ -90,6 +90,10 @@ def test_viewing_handoff_has_no_mutation_and_resume_is_explicit(page):
 
 
 def test_candidate_history_and_action_guards(page):
+    assert "Pending drafts are not live." in page
+    assert "approved answers may already have been used for customers" in page
+    assert "Nothing on this page has been shown to a customer" not in page
+    assert "No records in the selected decision history." in page
     assert 'id="candidateStatusFilter"' in page
     for status in ("PENDING_APPROVAL", "APPROVED", "REJECTED"):
         assert f'value="{status}"' in page
