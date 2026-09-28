@@ -191,6 +191,16 @@ def validate(rows, key, strict=False):
             warnings.append("Missing quantity — leave blank only if not stated")
         row["warnings"] = warnings
         result.append(row)
+    canonical_names = {}
+    for index, row in enumerate(result):
+        canonical_names.setdefault(weekly_savoury._name(row.get("item")), set()).add(index)
+    alias_owners = {}
+    for index, row in enumerate(result):
+        for alias in row["aliases"]:
+            normalized = weekly_savoury._name(alias)
+            if normalized and (canonical_names.get(normalized, {index}) != {index}
+                               or alias_owners.setdefault(normalized, index) != index):
+                errors.append("An item alias matches more than one menu row.")
     if strict and errors:
         raise ValueError("; ".join(errors))
     return result, errors
@@ -260,7 +270,7 @@ def _pdf_extract(data, weekly=False):
     return rows, "\n\n".join(texts), output.getvalue(), warnings, list(dict.fromkeys(diagnostics))
 
 
-def extract(key, actor, *, text=None, data=None, mime=None, filename="", weekly=False):
+def extract(key, actor, *, text=None, data=None, mime=None, filename="", weekly=False, retry_from=None):
     key = _key(key)
     if weekly and key != weekly_savoury.WEEKLY_KEY:
         raise ValueError("Weekly Savoury uses the existing weekly menu identity.")
@@ -291,7 +301,10 @@ def extract(key, actor, *, text=None, data=None, mime=None, filename="", weekly=
     with db.get_connection() as conn:
         conn.execute("BEGIN IMMEDIATE")
         prior = get_draft(key, conn)
-        if prior and prior["status"] not in ("REJECTED", "PUBLISHED"):
+        if retry_from is not None:
+            _check(prior, *retry_from)
+            _audit(conn, draft, "extraction_retried", actor, {"previous_draft_id": prior["draft_id"]})
+        elif prior and prior["status"] not in ("REJECTED", "PUBLISHED"):
             raise ReviewConflict("A draft already exists. Review or reject it first.")
         _store(conn, draft, actor)
         _audit(conn, draft, "draft_created", actor)
@@ -365,6 +378,25 @@ def extract(key, actor, *, text=None, data=None, mime=None, filename="", weekly=
     return draft
 
 
+def retry_extraction(key, draft_id, revision, actor):
+    """Explicit reviewer retry of retained source; never publication or repair."""
+    draft = get_draft(key)
+    _check(draft, draft_id, revision)
+    options = {"weekly": bool(draft.get("weekly_mode")), "retry_from": (draft_id, revision),
+               "filename": draft.get("original_filename") or ""}
+    if draft["source_type"] == "text":
+        return extract(key, actor, text=draft.get("raw_text"), **options)
+    asset = draft.get("source_asset")
+    if not asset or Path(asset).name != asset:
+        raise ValueError("Original source unavailable. Reject this draft and upload the source again.")
+    path = _private_dir() / asset
+    mime = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+            ".webp": "image/webp", ".pdf": "application/pdf"}.get(path.suffix.lower())
+    if not mime or not path.is_file():
+        raise ValueError("Original source unavailable. Reject this draft and upload the source again.")
+    return extract(key, actor, data=path.read_bytes(), mime=mime, **options)
+
+
 def _check(draft, draft_id, revision):
     if not draft or draft["draft_id"] != draft_id or draft["revision"] != revision:
         raise ReviewConflict("Draft changed. Reload before continuing.")
@@ -418,7 +450,16 @@ def current_versions(conn=None):
             return current_versions(connection)
     versions = [dict(r) for r in conn.execute("""SELECT v.* FROM menu_versions v
         JOIN menu_catalogue c ON c.menu_id=v.menu_key
-        WHERE v.is_current=1 AND v.approval_json IS NOT NULL AND c.active=1""")]
+        WHERE v.is_current=1 AND v.approval_json IS NOT NULL AND c.active=1
+        AND COALESCE(v.weekly_state,'') != 'SUPERSEDED'""")]
+    versions = [version for version in versions if not (version.get("valid_from") or version.get("valid_until"))
+                or weekly_savoury.version_status(version) == "CURRENT"]
+    # More than one valid approved version of a menu is ambiguous, not a reason
+    # to choose an arbitrary row. The weekly timeline has its own same rule.
+    counts = {}
+    for version in versions:
+        counts[version["menu_key"]] = counts.get(version["menu_key"], 0) + 1
+    versions = [version for version in versions if counts[version["menu_key"]] == 1]
     if not weekly_savoury.lifecycle_enabled(conn):
         return versions
     versions = [v for v in versions if v["menu_key"] not in weekly_savoury.LEGACY_WEEKLY_KEYS]
@@ -432,10 +473,114 @@ def has_current(key):
     return any(v["menu_key"] == menu_images._key(key) for v in current_versions())
 
 
+def customer_versions():
+    """Shared customer allowlist. Admin history/current views stay independent."""
+    pending = pending_review_keys()
+    if pending & set(weekly_savoury.LEGACY_WEEKLY_KEYS):
+        pending.update(weekly_savoury.LEGACY_WEEKLY_KEYS)
+    return [version for version in current_versions() if version["menu_key"] not in pending]
+
+
+def customer_blocked_keys():
+    """Known retired/inactive/pending/non-current authorities cannot use baseline fallback."""
+    with db.get_connection() as conn:
+        reviewed = {row[0] for row in conn.execute("SELECT DISTINCT menu_key FROM menu_versions WHERE approval_json IS NOT NULL")}
+        inactive = {row[0] for row in conn.execute("SELECT menu_id FROM menu_catalogue WHERE active=0")}
+        deleted = {row[0] for row in conn.execute("SELECT menu_id FROM menu_deletion_tombstones")}
+    pending = pending_review_keys()
+    visible = {version["menu_key"] for version in customer_versions()}
+    blocked = (reviewed - visible) | inactive | deleted | pending
+    weekly_keys = set(weekly_savoury.LEGACY_WEEKLY_KEYS)
+    if visible & weekly_keys or (not pending & weekly_keys and weekly_savoury.legacy_baseline_current()):
+        # A future reviewed schedule does not hide the still-current legacy week.
+        blocked -= weekly_keys
+    else:
+        blocked |= weekly_keys
+    return blocked
+
+
+def menu_question_keys(message, facts=None):
+    """Exact identity for safety relevance only; never authorizes draft facts."""
+    facts = facts or {}
+    normalized = weekly_savoury._name(message)
+    def contains(name):
+        name = weekly_savoury._name(name)
+        return bool(name and re.search(r"(?<!\w)" + re.escape(name) + r"(?!\w)", normalized))
+    explicit = set()
+    with db.get_connection() as conn:
+        for stored in conn.execute("SELECT menu_key,approval_json FROM menu_versions WHERE approval_json IS NOT NULL"):
+            for row in json.loads(stored["approval_json"]).get("rows", []):
+                if any(contains(name) for name in [row.get("item"), *(row.get("aliases") or [])]):
+                    explicit.add(stored["menu_key"])
+        for stored in conn.execute("SELECT menu_key,review_json FROM menu_drafts WHERE review_json IS NOT NULL"):
+            draft = json.loads(stored["review_json"])
+            if draft.get("status") in {"PUBLISHED", "REJECTED"}:
+                continue
+            for row in draft.get("rows", []):
+                if contains(row.get("item")):
+                    explicit.add(stored["menu_key"])
+        for menu in conn.execute("SELECT menu_id,name FROM menu_catalogue"):
+            if contains(menu["name"]):
+                explicit.add(menu["menu_id"])
+    # Legacy dated rows identify safety relevance, never authorize an expired
+    # price. Current authority still comes from the shared date/approval gate.
+    try:
+        with open(config.MENU_JSON_PATH, encoding="utf-8") as stream:
+            weeks = json.load(stream).get("weekly_menus") or []
+    except (OSError, ValueError, TypeError):
+        weeks = []  # No weekly authority; unrelated standing facts remain independent.
+    for week in weeks:
+        for section in ("vegetarian", "non_vegetarian", "norom_pak_sondesh"):
+            if any(contains(row.get("item")) for row in week.get(section) or []):
+                explicit.update(weekly_savoury.LEGACY_WEEKLY_KEYS)
+    if explicit:
+        return explicit
+    if re.search(r"\b(?:subscription|home table|bengali home)\b", normalized):
+        return set()
+    if re.search(r"\b(?:aamar|signature|sondesh|sandesh|mishti|kanchagolla|jolbhora)\b", normalized):
+        return {"aamar_mishti", "signature"} if not re.search(r"\b(?:aamar|signature)\b", normalized) else {
+            "signature" if "signature" in normalized else "aamar_mishti"}
+    if re.search(r"\bbento\b", normalized):
+        return {"bento"}
+    if re.search(r"\b(?:weekly|savoury|this week)\b", normalized):
+        return set(weekly_savoury.LEGACY_WEEKLY_KEYS)
+    topic = str(facts.get("last_topic") or facts.get("active_topic") or "")
+    if topic in {"bengali_home_table", "subscription"}:
+        return set()
+    if topic.startswith("sondesh"):
+        return {"aamar_mishti", "signature"}
+    if topic in {"bento", "aamar_mishti", "signature"}:
+        return {topic}
+    if topic == "savoury":
+        return set(weekly_savoury.LEGACY_WEEKLY_KEYS)
+    if topic and db.get_menu_catalogue_entry(topic):
+        return {topic}
+    if facts.get("source_context_superseded"):
+        return set()
+    route = facts.get("source_route") or {}
+    source_topic = facts.get("source_topic") or {}
+    key = route.get("menu_id") or source_topic.get("default_menu_id")
+    return {key} if key and route.get("menu_mode") != "NONE" else set()
+
+
+def menu_question_blocked(message, facts=None):
+    """Stable service FAQs remain independent of volatile menu authority."""
+    lowered = (message or "").casefold()
+    if re.search(r"\b(?:historical|historic|archive|last week|previous week|last month|previous month|old menu|menu from)\b", lowered) \
+            and not re.search(r"\b(?:price|cost|rate|quantity|portion|available)\b", lowered):
+        return False  # Explicit historical asset requests are not current facts.
+    if re.search(r"\b(?:delivery|deliver|pickup|pick up|how do i order|how to order)\b", lowered) and not re.search(
+            r"\b(?:menu|this week|current|on the menu|price|prices|cost|rate|much|quantity|portion|available|availability|stock)\b", lowered):
+        return False
+    if not re.search(r"\b(?:price|prices|cost|rate|much|menu|quantity|portion|serving|available|availability|stock)\b", lowered):
+        return False
+    return bool(menu_question_keys(message, facts) & customer_blocked_keys())
+
+
 def canonical_menu(path=None):
     with open(path or config.MENU_JSON_PATH, encoding="utf-8") as stream:
         menu = json.load(stream)
-    visible_versions = current_versions()
+    visible_versions = customer_versions()
     visible_versions.sort(key=lambda version: version["menu_key"] in weekly_savoury.LEGACY_WEEKLY_KEYS)
     for version in visible_versions:
         approval = json.loads(version["approval_json"])
@@ -480,6 +625,21 @@ def canonical_menu(path=None):
             for section in ("vegetarian", "non_vegetarian", "norom_pak_sondesh"):
                 weekly[-1][section] = []
             weekly[-1]["is_published"] = False
+    blocked = customer_blocked_keys()
+    for key in blocked - set(weekly_savoury.LEGACY_WEEKLY_KEYS):
+        if key == "bento":
+            for week in menu.get("weekly_menus", []):
+                week["bengali_bento"] = []
+            menu.get("order_types", {}).pop("bengali_bento", None)
+        else:
+            collection_key = "signature_collection" if key == "signature" else key
+            if collection_key in menu.get("collections", {}):
+                menu["collections"][collection_key]["products"] = []
+    if blocked & set(weekly_savoury.LEGACY_WEEKLY_KEYS):
+        for week in menu.get("weekly_menus", []):
+            for section in ("vegetarian", "non_vegetarian", "norom_pak_sondesh"):
+                week[section] = []
+            week["is_published"] = False
     return menu
 
 
@@ -530,7 +690,12 @@ def weekly_analysis(draft, options=None, conn=None):
         provenance = "UNDETECTED"
     if end and end < menu_dates.today_ist():
         errors.append("These menu dates have already expired. Confirm new valid dates before publishing.")
-    previous = weekly_savoury.previous_rows(conn)
+    previous = weekly_savoury.previous_rows(conn, start.isoformat() if start else None)
+    overlaps = weekly_savoury.overlap_versions(start, end, conn) if start and end else []
+    if len(overlaps) == 1:
+        # Replacing an overlapping schedule must still warn about changes to
+        # that exact approved schedule, even when it has not started yet.
+        previous = json.loads(overlaps[0]["approval_json"]).get("rows", [])
     changes = weekly_savoury.compare_rows(rows, previous)
     if changes["suspicious_quantity"]:
         errors.append("Unusual quantity change — review and confirm the printed quantity.")
@@ -538,7 +703,6 @@ def weekly_analysis(draft, options=None, conn=None):
         errors.append("Unusual price change — review and confirm the printed price.")
     if not start:
         errors.append("Date unclear — confirm dates or deliberately accept the 7-day fallback.")
-    overlaps = weekly_savoury.overlap_versions(start, end, conn) if start and end else []
     return {"rows": rows, "errors": list(dict.fromkeys(errors)), "changes": changes,
             "valid_from": start.isoformat() if start else None,
             "valid_until": end.isoformat() if end else None,
@@ -666,8 +830,31 @@ def source_file(key, draft_id):
     return _private_dir() / draft["source_asset"]
 
 
-def version_history(key):
-    return db.get_menu_versions(_key(key))
+def version_source_file(key, version_id):
+    version = db.get_menu_version(version_id)
+    if not version or version["menu_key"] != _key(key) or not version["approval_json"]:
+        raise KeyError(version_id)
+    approval = json.loads(version["approval_json"])
+    asset = approval.get("source_asset")
+    if asset and str(asset).lower().endswith(".pdf"):
+        asset = approval.get("flyer_asset")
+    if not asset or Path(asset).name != asset:
+        raise KeyError(version_id)
+    root = Path(config.MENU_JSON_PATH).resolve().parent / "menu-review-private"
+    path = (root / asset).resolve()
+    if path.parent != root.resolve() or not path.is_file():
+        raise KeyError(version_id)
+    return path
+
+
+def version_history(key, limit=20, before_id=None):
+    key = _key(key)
+    if not 1 <= limit <= 100 or (before_id is not None and before_id < 1):
+        raise ValueError("Invalid version page.")
+    with db.get_connection() as conn:
+        return [dict(row) for row in conn.execute(
+            "SELECT * FROM menu_versions WHERE menu_key=? AND (? IS NULL OR id<?) ORDER BY id DESC LIMIT ?",
+            (key, before_id, before_id, limit))]
 
 
 def restore_as_draft(key, version_id, actor):

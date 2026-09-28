@@ -15,7 +15,7 @@ def test_menu_catalogue_and_selected_menu_are_the_only_primary_views():
     assert '<div id="mrSelectedView" hidden>' in REVIEW_HTML
     assert 'Menu Catalogue' in REVIEW_HTML
     assert '+ Add Menu' in REVIEW_HTML
-    assert 'Manage Menu' in REVIEW_SCRIPT
+    assert "open.textContent='Open'" in REVIEW_SCRIPT
     for label in ('data-mr-pane="current"', 'data-mr-pane="upload"', 'data-mr-pane="versions"'):
         assert label in REVIEW_HTML
     assert 'Continue to Review' in REVIEW_HTML
@@ -25,7 +25,7 @@ def test_menu_catalogue_and_selected_menu_are_the_only_primary_views():
     assert 'id="mrCurrentRows"' in REVIEW_HTML
     assert 'id="mrHistory"' in REVIEW_HTML
     assert 'id="mrEmpty"' in REVIEW_HTML
-    assert 'mr-mobile-actions' in REVIEW_HTML
+    assert '.mr-catalogue-table td:before{content:attr(data-label)' in REVIEW_HTML
     assert 'id="mrImageDialog"' in REVIEW_HTML
     assert 'id="mrChooseFile"' in REVIEW_HTML and 'id="mrFileLabel"' in REVIEW_HTML
     assert 'id="mrFile" class="mr-visually-hidden"' in REVIEW_HTML
@@ -88,11 +88,11 @@ global.fetch=async(path,options={})=>{
 vm.runInThisContext(SOURCE);
 (async()=>{
   await mrMenus();
-  const cards=element('mrCatalogueList').children;const media=cards[0].children[0],trigger=media.children[0],image=trigger.children[0];
+  const cards=element('mrCatalogueList').children;const media=cards[0].children[0].children[0],trigger=media.children[0],image=trigger.children[0];
   const requestCount=requests.length;trigger.onclick();const preview={open:element('mrImageDialog').open,src:element('mrImagePreview').src,alt:element('mrImagePreview').alt};
   element('mrImageDialog').close();image.onerror();
-  const visual={preview,fallback:media.children[0].textContent,focusReturned:trigger.focusCount===1,noMutationRequest:requests.length===requestCount,placeholder:cards[1].children[0].children[0].textContent};
-  const initial={catalogue:!element('mrCatalogueView').hidden,selected:element('mrSelectedView').hidden,names:cards.map(card=>card.children.find(child=>child.className==='mr-card-title').textContent)};
+  const visual={preview,fallback:media.children[0].textContent,focusReturned:trigger.focusCount===1,noMutationRequest:requests.length===requestCount,placeholder:cards[1].children[0].children[0].children[0].textContent};
+  const initial={catalogue:!element('mrCatalogueView').hidden,selected:element('mrSelectedView').hidden,names:cards.map(card=>card.children[0].children.find(child=>child.className==='mr-card-title').textContent)};
   const uploadFile={name:'weekly-menu.png',type:'image/png',size:2048};element('mrDrop').listeners.drop({preventDefault(){},dataTransfer:{files:[uploadFile]}});
   const selection={status:element('mrFileStatus').textContent,removeVisible:!element('mrRemoveFile').hidden,extractNotStarted:!requests.some(request=>request[1].endsWith('/extract-file'))};
   await mrOpenMenu('m1');
@@ -115,7 +115,7 @@ vm.runInThisContext(SOURCE);
   blocked=true;await mrDeleteMenu('m3');
   const blockedState={message:element('mrMessage').textContent,stillExists:menus.some(m=>m.menu_id==='m3')};
   blocked=false;await mrDeleteMenu('m3');
-  const deleted={catalogue:!element('mrCatalogueView').hidden,names:element('mrCatalogueList').children.map(card=>card.children.find(child=>child.className==='mr-card-title').textContent)};
+  const deleted={catalogue:!element('mrCatalogueView').hidden,names:element('mrCatalogueList').children.map(card=>card.children[0].children.find(child=>child.className==='mr-card-title').textContent)};
   menus=[];await mrMenus();const empty={shown:!element('mrEmpty').hidden,catalogue:!element('mrCatalogueView').hidden};
   console.log(JSON.stringify({visual,initial,selection,current,textMode,fileMode,formCategories,created,prefilling,edited,beforeCancel,afterCancel,blockedState,deleted,empty,confirmations,requests}));
 })().catch(error=>{console.error(error);process.exitCode=1;});

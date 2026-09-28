@@ -2746,7 +2746,8 @@ class DeterministicResponder:
         facts["source_context_used"] = False
         facts["source_referential_intent"] = None
 
-        pending_menu = channel == "instagram" and _pending_menu_affects_question(user_message, facts)
+        pending_menu = channel == "instagram" and (_pending_menu_affects_question(user_message, facts)
+                       or menu_review.menu_question_blocked(user_message, facts))
         unknown_price = (channel == "instagram" and not pending_menu
                          and not facts.get("source_route") and _unknown_named_price(user_message))
         if pending_menu or unknown_price:
@@ -5759,8 +5760,13 @@ class DeterministicResponder:
         collection_keys = {"aamar_mishti_collection": "aamar_mishti",
                            "signature_collection": "signature"}
         if template_id in collection_keys:
-            from camellia.menu_review import current_versions
-            reviewed = next((v for v in current_versions()
+            from camellia.menu_review import customer_versions, customer_blocked_keys
+            if collection_keys[template_id] in customer_blocked_keys():
+                withheld = dict(template)
+                withheld["response"] = "Our team will help confirm the current menu details."
+                withheld.pop("responses", None)
+                return withheld
+            reviewed = next((v for v in customer_versions()
                 if v["menu_key"] == collection_keys[template_id]), None)
             if reviewed:
                 approval = json.loads(reviewed["approval_json"])
@@ -5769,6 +5775,7 @@ class DeterministicResponder:
                 template = dict(template)
                 template["response"] = "Current approved menu:\n" + "\n".join(approved)
                 template.pop("responses", None)
+                return template
         try:
             override = db.get_response_template_override(template_id)
         except Exception as exc:
@@ -5822,6 +5829,9 @@ class DeterministicResponder:
         for template in self.qa_data.get("templates", []):
             template_id = template.get("id")
             if not template_id:
+                continue
+            if template_id in {"aamar_mishti_collection", "signature_collection"}:
+                result.append(self._template_by_id(template_id))
                 continue
             override = overrides.get(str(template_id))
             if not override or str(override.get("status") or "ACTIVE").upper() != "ACTIVE":

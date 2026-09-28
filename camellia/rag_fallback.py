@@ -297,9 +297,13 @@ class RAGFallbackEngine:
         return valid, "approved_menu_exact_facts" if valid else "unsupported_menu_claim"
 
     def retrieve_approved_menu(self, user_message: str) -> RAGResult:
-        from camellia.menu_review import current_versions
+        from camellia.menu_review import customer_versions as current_versions, menu_question_blocked
         from camellia import weekly_savoury
         result = RAGResult()
+        if menu_question_blocked(user_message):
+            result.proposed_intent = "approved_menu"
+            result.contains_unapproved_facts = True
+            return result
         message = user_message.casefold().strip()
         weekly_request = bool(re.search(r"\b(?:this week|weekly|savoury)\b", message)) and not bool(
             re.search(r"\b(?:aamar mishti|signature collection|bento)\b", message))

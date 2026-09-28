@@ -8,6 +8,7 @@ order it — and any dish the catalogue did know was priced from the catalogue,
 not from the menu the customer had just been shown.
 """
 import json
+import copy
 from datetime import date, timedelta
 
 import pytest
@@ -20,21 +21,19 @@ from camellia.session_memory import session_memory
 
 
 @pytest.fixture(autouse=True)
-def isolated_menu(tmp_path):
-    original = config.MENU_JSON_PATH
-    original_responder_path = responder.menu_path
-    config.MENU_JSON_PATH = str(tmp_path / "menu.json")
+def isolated_menu(tmp_path, monkeypatch):
+    from camellia import menu_dates
+    from camellia.database import db
+    monkeypatch.setattr(menu_dates, "today_ist", lambda: date(2026, 6, 21))
+    monkeypatch.setattr(db, "db_path", str(tmp_path / "weekly-order.db"))
+    db.init_db()
+    monkeypatch.setattr(config, "MENU_JSON_PATH", str(tmp_path / "menu.json"))
     # The responder captured its menu path at construction, so redirecting the
     # config alone would leave it reading the real file.
-    responder.menu_path = config.MENU_JSON_PATH
-    order_calculator._weekly_cache["mtime"] = None
-    try:
-        yield
-    finally:
-        config.MENU_JSON_PATH = original
-        responder.menu_path = original_responder_path
-        responder.reload_templates()
-        order_calculator._weekly_cache["mtime"] = None
+    monkeypatch.setattr(responder, "menu_path", config.MENU_JSON_PATH)
+    monkeypatch.setattr(responder, "menu_data", copy.deepcopy(responder.menu_data))
+    monkeypatch.setattr(order_calculator, "_weekly_cache", {"mtime": None, "table": {}})
+    yield
 
 
 def _write_menu(week_of, veg=None, nonveg=None):
@@ -56,7 +55,7 @@ def _ordinal(day):
     return f"{day}{suffix}"
 
 
-_today = date.today()
+_today = date(2026, 6, 21)
 _week_end = _today + timedelta(days=6)
 CURRENT = (
     f"{_ordinal(_today.day)} {_today.strftime('%B')} - "

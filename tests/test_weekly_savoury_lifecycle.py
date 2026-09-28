@@ -135,7 +135,10 @@ def test_future_overlap_cannot_retire_current_week_early(weekly_env, monkeypatch
     with pytest.raises(menu_review.ReviewConflict, match="cannot retire the current"):
         _publish(future, replace_version_id=live["version_id"])
     assert weekly_savoury.current_version()["id"] == live["version_id"]
-    assert menu_review.canonical_menu()["weekly_menus"][-1]["vegetarian"][0]["price_inr"] == 650
+    # The failed scheduling operation must not retire or change approved facts.
+    assert json.loads(weekly_savoury.current_version()["approval_json"])["rows"][0]["price_inr"] == 650
+    # Its unresolved replacement nevertheless blocks stale customer facts (Phase 2B).
+    assert menu_review.canonical_menu()["weekly_menus"][-1]["vegetarian"] == []
     with pytest.raises(ValueError, match="Restore the approved Weekly Savoury"):
         menu_images.archive(weekly_savoury.WEEKLY_KEY)
 

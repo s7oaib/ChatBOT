@@ -14,7 +14,7 @@ from camellia.session_memory import SessionMemoryManager, session_memory
 
 
 @pytest.fixture
-def customer(monkeypatch):
+def customer(monkeypatch, eligible_weekly_asset):
     monkeypatch.setattr(config, "BYPASS_AD_GATE", True)
     user = "phase2a-customer"
     session_memory.clear_session(user, "instagram")

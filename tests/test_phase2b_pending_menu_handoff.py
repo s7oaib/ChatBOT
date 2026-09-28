@@ -19,7 +19,7 @@ from camellia.session_memory import session_memory
 
 
 @pytest.fixture
-def menu_env(tmp_path, monkeypatch):
+def menu_env(tmp_path, monkeypatch, current_legacy_baseline):
     menu_path = tmp_path / "menu.json"
     shutil.copy(config.MENU_JSON_PATH, menu_path)
     monkeypatch.setattr(config, "MENU_JSON_PATH", str(menu_path))

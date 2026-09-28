@@ -1324,6 +1324,33 @@ class Database:
 
     # --- Visual Menu Manager: durable menu image versions ------------------
 
+    def get_menu_image_states(self, menu_keys: list[str]) -> Dict[str, Any]:
+        """Read requested image metadata without per-menu queries or writes."""
+        keys = list(dict.fromkeys(menu_keys))
+        states = {key: {"current": None, "draft": None, "archived": False} for key in keys}
+        if not keys:
+            return states
+        try:
+            with self.get_connection() as conn:
+                placeholders = ",".join("?" for _ in keys)
+                rows = conn.execute(
+                    f"SELECT * FROM menu_image_versions WHERE menu_key IN ({placeholders})",
+                    keys).fetchall()
+            for raw in rows:
+                row = dict(raw)
+                state = states[row["menu_key"]]
+                status = row["status"]
+                if status == "archived":
+                    state["archived"] = True
+                elif status in ("current", "draft"):
+                    field = "version" if status == "current" else "id"
+                    previous = state[status]
+                    if previous is None or row[field] > previous[field]:
+                        state[status] = row
+        except sqlite3.OperationalError:
+            pass
+        return states
+
     def get_menu_image_current(self, menu_key: str) -> Optional[Dict[str, Any]]:
         # Every responder reply checks this, so a table that has not been
         # created yet (a connection racing process startup, or a test

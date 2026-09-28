@@ -59,6 +59,9 @@ def routed_db(tmp_path, monkeypatch):
     })
     import camellia.database as db_module
     monkeypatch.setattr(db_module, "db", database)
+    # Route lookup and subsequent route revalidation must use the same fixture
+    # database, rather than relying on a coincidental ID in the suite database.
+    monkeypatch.setattr(app_module, "db", database)
     return database
 
 

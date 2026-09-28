@@ -162,12 +162,47 @@ def isolate_process_session_cache(monkeypatch, request):
 
 
 @pytest.fixture
-def eligible_weekly_asset(monkeypatch):
-    """Give non-expiry routing tests an explicit reviewed current flyer."""
-    from camellia import menu_images
-    from camellia.responder import DeterministicResponder
+def current_legacy_baseline(monkeypatch, tmp_path):
+    """A dated published baseline, not a replacement for its real selector."""
+    import json
+    from datetime import date
+    from camellia import menu_dates, weekly_savoury
+    from camellia.config import config
+    from camellia.responder import responder
+    from camellia.rag_fallback import rag_fallback_engine
+    # Routing tests already use this explicit business date; authority tests
+    # control their own dates and never receive this fixture implicitly.
+    business_date = date(2026, 6, 21)
+    monkeypatch.setattr(menu_dates, "today_ist", lambda: business_date)
+    baseline = json.loads((ROOT / "data" / "menu.json").read_text(encoding="utf-8"))
+    baseline["weekly_menus"][-1].update(
+        week_of="19 Jun - 25 Jun 2026", is_published=True,
+    )
+    menu_path = tmp_path / "eligible-baseline.json"
+    menu_path.write_text(json.dumps(baseline), encoding="utf-8")
+    monkeypatch.setattr(config, "MENU_JSON_PATH", str(menu_path))
+    for engine in (responder, rag_fallback_engine):
+        monkeypatch.setattr(engine, "menu_path", str(menu_path))
+        monkeypatch.setattr(engine, "menu_data", engine._load_json(str(menu_path)))
+    assert weekly_savoury.legacy_baseline_current()
+    return menu_path
+
+
+@pytest.fixture
+def eligible_weekly_asset(monkeypatch, tmp_path, current_legacy_baseline):
+    """Real image rows and authority queries share one isolated database."""
+    from camellia import menu_images, menu_review, menu_catalogue, weekly_savoury
+    from camellia.responder import responder
+    db = _app_db
+    monkeypatch.setattr(db, "db_path", str(tmp_path / "eligible-weekly.db"))
+    db.init_db()
+    for module in (menu_images, menu_review, menu_catalogue, weekly_savoury):
+        monkeypatch.setattr(module, "db", db)
 
     url = "/uploads/test-reviewed-current-weekly.jpeg"
-    monkeypatch.setattr(menu_images, "current_weekly", lambda: {"image_path": url})
-    monkeypatch.setattr(DeterministicResponder, "_weekly_menu_expired", lambda self: False)
+    db.save_menu_image_draft("weekly_vegetarian", url, "test-fixture")
+    db.publish_menu_image("weekly_vegetarian")
+    assert weekly_savoury.legacy_baseline_current()
+    assert not responder._weekly_menu_expired()
+    assert menu_images.current_weekly()["image_path"] == url
     return url

@@ -162,7 +162,7 @@ def test_fresh_generic_price_does_not_enter_home_table(monkeypatch):
     "What's the subscription price?",
     "Show this week's Savoury menu",
 ])
-def test_explicit_new_subject_overrides_home_table(monkeypatch, question):
+def test_explicit_new_subject_overrides_home_table(monkeypatch, question, eligible_weekly_asset):
     monkeypatch.setattr(config, "BYPASS_AD_GATE", True)
     user_id = "home-table-explicit-" + str(abs(hash(question)))
     session_memory.clear_session(user_id, "instagram")

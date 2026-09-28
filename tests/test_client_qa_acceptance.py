@@ -20,7 +20,7 @@ from camellia.session_memory import session_memory
         ("share weekly menu", "savoury_food_intro"),
     ],
 )
-def test_client_questions_use_the_specific_approved_route(message, template_id):
+def test_client_questions_use_the_specific_approved_route(message, template_id, eligible_weekly_asset):
     user_id = "client-qa-" + template_id
     session_memory.clear_session(user_id, "instagram")
     response, matched, actual_template, images = responder.match_and_respond(

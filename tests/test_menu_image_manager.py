@@ -14,9 +14,12 @@ def _png(color="red"):
 
 
 @pytest.fixture
-def image_store(tmp_path, monkeypatch):
+def image_store(tmp_path, monkeypatch, current_legacy_baseline):
     database = Database(str(tmp_path / "menu.db"))
     monkeypatch.setattr(menu_images, "db", database)
+    from camellia import menu_review, weekly_savoury, menu_catalogue
+    for module in (menu_review, weekly_savoury, menu_catalogue):
+        monkeypatch.setattr(module, "db", database)
     monkeypatch.setattr(menu_images.weekly_flyer, "uploads_dir", lambda: str(tmp_path / "uploads"))
     return database
 

@@ -161,6 +161,9 @@ def current_weekly() -> Optional[Dict[str, Any]]:
     responder immediately and after a process restart.
     """
     from camellia import weekly_savoury
+    from camellia.menu_review import customer_blocked_keys
+    if customer_blocked_keys() & set(weekly_savoury.LEGACY_WEEKLY_KEYS):
+        return None
     if weekly_savoury.lifecycle_enabled():
         version = weekly_savoury.current_version()
         if not version:
@@ -191,6 +194,9 @@ def has_weekly_archive() -> bool:
 
 def current_weekly_url(fallback: Optional[str] = None) -> Optional[str]:
     """Resolve only an eligible current weekly image; never a static fallback."""
+    from camellia.menu_review import customer_blocked_keys
+    if customer_blocked_keys() & set(WEEKLY_MENU_KEYS):
+        return None
     row = current_weekly()
     if row:
         return row.get("image_path")
@@ -230,7 +236,34 @@ def card(menu_key: str) -> Dict[str, Any]:
     current = db.get_menu_image_current(key)
     draft = db.get_menu_image_draft(key)
     archived = db.has_menu_image_archive(key)
-    image_url = (current or {}).get("image_path") or (None if archived else _fallback(key))
+    fallback = _fallback(key) if not archived and not (current or {}).get("image_path") else None
+    return _card_payload(menu_key, current, draft, archived, fallback)
+
+
+def cards(menu_keys: list[str]) -> Dict[str, Dict[str, Any]]:
+    """Request-local batch projection; retain the single-card public semantics."""
+    keys = list(dict.fromkeys(_key(key) for key in menu_keys))
+    if not keys:
+        return {}
+    known = {row["menu_id"] for row in db.list_menu_catalogue()}
+    for original in menu_keys:
+        if _key(original) not in known:
+            raise KeyError(original)
+    states = db.get_menu_image_states(keys)
+    weekly_needed = any(key in WEEKLY_MENU_KEYS and not states[key]["archived"]
+                        and not (states[key]["current"] or {}).get("image_path") for key in keys)
+    weekly_url = current_weekly_url() if weekly_needed else None
+    result = {}
+    for original in menu_keys:
+        key = _key(original)
+        state = states[key]
+        fallback = weekly_url if key in WEEKLY_MENU_KEYS else _BUILTIN_DEFAULT_IMAGES.get(key)
+        result[original] = _card_payload(original, state["current"], state["draft"], state["archived"], fallback)
+    return result
+
+
+def _card_payload(menu_key, current, draft, archived, fallback) -> Dict[str, Any]:
+    image_url = (current or {}).get("image_path") or (None if archived else fallback)
     status = "Archived" if current is None and archived else ("Published" if current else "Built-in")
     return {
         "menu_key": menu_key, "image_url": image_url, "image_status": status,
@@ -318,9 +351,19 @@ def restore(menu_key: str, version_id: int) -> Optional[Dict[str, Any]]:
 def current_url(menu_key: str, fallback: Optional[str] = None) -> Optional[str]:
     menu_key = _key(menu_key)
     if menu_key in WEEKLY_MENU_KEYS:
+        entry = db.get_menu_catalogue_entry(menu_key)
+        if not entry or not entry["active"]:
+            return None
         return current_weekly_url()
     if not _known(menu_key):
         return None
+    from camellia.menu_review import customer_blocked_keys, customer_versions
+    if menu_key in customer_blocked_keys():
+        return None
+    reviewed = next((version for version in customer_versions() if version["menu_key"] == menu_key), None)
+    if reviewed:
+        import json
+        return json.loads(reviewed["approval_json"]).get("image_path") or ""
     row = db.get_menu_image_current(menu_key)
     if row:
         return row.get("image_path")

@@ -133,6 +133,10 @@ def weekly_meal_entries() -> Dict[str, Dict[str, Any]]:
     Re-read whenever menu.json changes on disk, so an upload takes effect
     without a restart.
     """
+    from camellia.menu_review import customer_blocked_keys
+    from camellia import weekly_savoury
+    if customer_blocked_keys() & set(weekly_savoury.LEGACY_WEEKLY_KEYS):
+        return {}
     path = config.MENU_JSON_PATH
     try:
         mtime = os.path.getmtime(path)
@@ -185,7 +189,16 @@ def weekly_meal_entries() -> Dict[str, Dict[str, Any]]:
 
 def meal_table() -> Dict[str, Dict[str, Any]]:
     """The standing catalogue with this week's uploaded dishes layered over it."""
-    return {**MEAL_PRICING_TABLE, **weekly_meal_entries()}
+    from camellia.menu_review import customer_blocked_keys, customer_versions
+    from camellia import weekly_savoury
+    blocked = customer_blocked_keys()
+    reviewed = customer_versions()
+    reviewed_bento = any(version["menu_key"] == "bento" for version in reviewed)
+    weekly_managed = weekly_savoury.lifecycle_enabled() or bool(blocked & set(weekly_savoury.LEGACY_WEEKLY_KEYS))
+    standing = {key: value for key, value in MEAL_PRICING_TABLE.items()
+                if ("bento" in key and "bento" not in blocked and not reviewed_bento)
+                or ("bento" not in key and not weekly_managed)}
+    return {**standing, **weekly_meal_entries()}
 
 
 class OrderCalculator:
@@ -213,6 +226,33 @@ class OrderCalculator:
         }
 
     def _parse_single_clause(self, clause_text: str, default_collection: str = "aamar_mishti") -> Optional[Dict[str, Any]]:
+        from camellia.menu_review import customer_versions, menu_question_blocked, customer_blocked_keys
+        from camellia import weekly_savoury
+        if menu_question_blocked("price " + (clause_text or "")):
+            return None
+        # Exact canonical name/approved aliases before the retained static tables.
+        # Do not turn an ambiguous pack or menu identity into a guessed price.
+        normalized = weekly_savoury._name(clause_text)
+        matches = []
+        versions = customer_versions()
+        for version in versions:
+            for row in json.loads(version["approval_json"]).get("rows", []):
+                if any(name and re.search(r"(?<!\w)" + re.escape(weekly_savoury._name(name)) + r"(?!\w)", normalized)
+                       for name in [row.get("item"), *(row.get("aliases") or [])]):
+                    matches.append((version, row))
+        quantities = re.findall(r"\b\d+(?:\.\d+)?\s*(?:kg|g|pcs|pieces)\b", clause_text or "", re.I)
+        if quantities:
+            matches = [(version, row) for version, row in matches if weekly_savoury._quantity(row.get("quantity"))
+                       in {weekly_savoury._quantity(value) for value in quantities}]
+        if len(matches) > 1:
+            return None
+        if matches:
+            version, row = matches[0]
+            item = self._build_meal_item({"name": row["item"], "price": row["price_inr"]}, (clause_text or "").lower())
+            item["collection"] = version["menu_key"]
+            item["size"] = row.get("quantity") or "Portion"
+            item["type"] = "sweet" if version["menu_key"] in {"aamar_mishti", "signature"} else "meal"
+            return item
         # This week's dishes are matched against what the customer actually
         # typed, before slang normalisation. The normaliser rewrites Bengali
         # dish words into the standing catalogue's vocabulary ("mangsho" ->
@@ -302,6 +342,8 @@ class OrderCalculator:
                 qty = 1
 
         # Lookup price
+        if collection in customer_blocked_keys() or any(version["menu_key"] == collection for version in versions):
+            return None  # Reviewed authority must not regain retired static variants.
         coll_prices = PRICING_TABLE.get(collection, PRICING_TABLE["aamar_mishti"])
         flavor_prices = coll_prices.get(flavour, coll_prices.get("rose", list(coll_prices.values())[0]))
         unit_price = flavor_prices.get(size, 450)
@@ -370,6 +412,20 @@ class OrderCalculator:
 
         draft = existing_draft or {}
         cart_history = list(existing_cart or [])
+        from camellia.menu_review import customer_blocked_keys, customer_versions, menu_question_blocked
+        from camellia import weekly_savoury
+        blocked = customer_blocked_keys()
+        governed = blocked | {version["menu_key"] for version in customer_versions()}
+        if menu_question_blocked("price " + text_lower):
+            return None
+        for item in cart_history:
+            keys = set(weekly_savoury.LEGACY_WEEKLY_KEYS) if item.get("collection") == "weekly_menu" else {item.get("collection")}
+            if keys & blocked:
+                return None
+            if keys & governed:
+                verified = self._parse_single_clause(str(item.get("flavour") or "") + " " + str(item.get("size") or ""))
+                if not verified or verified["unit_price"] != item.get("unit_price"):
+                    return None
 
         # Split text into potential multi-item clauses (by 'and', ',', '+', '&', 'also', 'with')
         clauses = re.split(r'\b(?:and|also|with)\b|[,+&]', text_lower)
@@ -402,6 +458,8 @@ class OrderCalculator:
                 flavour = draft["flavour"]
 
             if flavour and size:
+                if collection in governed:
+                    return None  # Merge context must not revive a retired static price.
                 coll_prices = PRICING_TABLE.get(collection, PRICING_TABLE["aamar_mishti"])
                 flavor_prices = coll_prices.get(flavour, coll_prices.get("rose", list(coll_prices.values())[0]))
                 unit_price = flavor_prices.get(size, 450)

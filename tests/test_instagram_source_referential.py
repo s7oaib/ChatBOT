@@ -322,7 +322,7 @@ def test_composite_explicit_product_and_topic_precedence(deterministic_responder
     assert "Manager of Kitchens" in reply
 
 
-def test_composite_greeting_keeps_menu_and_handoff_intents(deterministic_responder):
+def test_composite_greeting_keeps_menu_and_handoff_intents(deterministic_responder, eligible_weekly_asset):
     uid = "composite_menu"
     session_memory.clear_session(uid, "instagram")
     reply, matched, template_id, _images = _reply(uid, "hey show me this week's menu")
@@ -370,7 +370,7 @@ def test_named_subject_precedes_generic_detail_nlu(
     assert facts["source_context_used"] is False
 
 
-def test_explicit_weekly_menu_precedes_generic_detail_nlu(deterministic_responder, monkeypatch):
+def test_explicit_weekly_menu_precedes_generic_detail_nlu(deterministic_responder, monkeypatch, eligible_weekly_asset):
     monkeypatch.setattr(config, "STRUCTURED_NLU_ENABLED", True)
     uid = "detail_weekly_menu_precedence"
     session_memory.clear_session(uid, "instagram")

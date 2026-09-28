@@ -77,7 +77,11 @@ def test_edit_approval_hot_reload_version_and_audit(review_env):
     assert "₹800" in rag_fallback_engine.retrieve_approved_menu("Kanchagolla price?").auto_response
     restored = menu_review.restore_as_draft("aamar_mishti", published["version_id"], "reviewer")
     assert restored["rows"][0]["price_inr"] == 700
-    assert "₹800" in rag_fallback_engine.retrieve_approved_menu("Kanchagolla price?").auto_response
+    # Restore never replaces the approved snapshot, but its unresolved review
+    # withholds volatile customer facts until explicit approval or rejection.
+    assert menu_review.current_versions()[0]["id"] == second["version_id"]
+    pending = rag_fallback_engine.retrieve_approved_menu("Kanchagolla price?")
+    assert pending.auto_response == "" and pending.contains_unapproved_facts
     approve(restored)
     assert "₹700" in rag_fallback_engine.retrieve_approved_menu("Kanchagolla price?").auto_response
     with db.get_connection() as conn:

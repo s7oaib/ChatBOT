@@ -5882,11 +5882,13 @@ async def update_menu(request: Request, x_admin_key: Optional[str] = Header(None
 def list_menu_catalogue_route(x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
     require_admin(x_admin_key, x_admin_pin)
     menus = []
-    for menu in menu_catalogue.list_menus():
+    catalogue = menu_catalogue.list_menus()
+    images = menu_images.cards([menu["menu_id"] for menu in catalogue])
+    for menu in catalogue:
         # Catalogue imagery is presentation metadata only. Resolve through the
         # same lifecycle-aware image source used by the existing menu manager;
         # this read must not create drafts, publish, archive, or alter facts.
-        image = menu_images.card(menu["menu_id"])
+        image = images[menu["menu_id"]]
         menus.append({
             **menu,
             "image_url": image["image_url"],
@@ -5895,6 +5897,7 @@ def list_menu_catalogue_route(x_admin_key: Optional[str] = Header(None), x_admin
     return {
         "status": "success", "menus": menus,
         "categories": [category["name"] for category in menu_catalogue.list_categories()],
+        **menu_catalogue.workspace_summary(menus),
     }
 
 
@@ -7046,7 +7049,7 @@ def get_admin_dashboard():
             <div class="admin-sidebar-label">Workspace</div>
             <nav class="tabs-nav" aria-label="Primary">
                 <button class="tab-btn active" onclick="switchTab('tab-dashboard', this)">⌂ <span class="nav-label">Dashboard</span></button>
-                <button class="tab-btn" onclick="switchTab('tab-image', this)">🍱 <span class="nav-label">Menu</span></button>
+                <button class="tab-btn" onclick="switchTab('tab-image', this)">🍱 <span class="nav-label">Menu</span><span id="menuSidebarBadge" class="admin-nav-badge" hidden aria-label="Menus needing review"></span></button>
                 <button class="tab-btn" onclick="switchTab('tab-instagram-stories', this)">▣ <span class="nav-label">Instagram Stories</span></button>
                 <button class="tab-btn" onclick="switchTab('tab-instagram-content', this)">◉ <span class="nav-label">Posts &amp; Reels</span></button>
                 <button class="tab-btn" onclick="switchTab('tab-handoffs', this)">↗ <span class="nav-label">Handoffs</span><span id="handoffSidebarBadge" class="admin-nav-badge" style="display:none;">0</span></button>
@@ -8394,7 +8397,7 @@ THIS WEEK'S BENGAL SPECIALS
 
             // Everything in the group is on screen at once, so everything in it
             // needs its data.
-            if (group === 'menu') { loadActiveMenu(); loadAdRoutes(); if (adminAuthenticated) mrMenus(); }
+            if (group === 'menu') { mrShowCatalogue(); loadActiveMenu(); loadAdRoutes(); if (adminAuthenticated) mrMenus(); }
             if (group === 'menu_manager') { mmLoadMenuList(); }
             if (group === 'customers') { loadAnalytics(); loadConversations(); }
             if (group === 'answers') { loadCandidates(); loadKnowledge(); }
@@ -9533,6 +9536,7 @@ THIS WEEK'S BENGAL SPECIALS
                 await loadTopicsAndMenus();
                 refreshMenuCategoryPicker(data.category.name);
                 closeCategoryModal();
+                await mrMenus();
             } catch (err) {
                 result.style.display = 'block'; result.className = 'result-box error';
                 result.innerText = err.message || String(err);
@@ -9587,6 +9591,7 @@ THIS WEEK'S BENGAL SPECIALS
                 await loadTopicsAndMenus();
                 refreshMenuCategoryPicker(data.replacement ? data.replacement.name : 'Other');
                 closeCategoryDeleteModal();
+                await mrMenus();
             } catch (err) {
                 result.style.display = 'block'; result.className = 'result-box error'; result.innerText = err.message || String(err);
             }
@@ -12492,8 +12497,10 @@ Non-Veg:
     html_content = (
         html_content[:menu_start]
         + '<div id="tab-image" class="panel-card" data-group="menu">'
-        + WEEKLY_HTML
         + REVIEW_HTML
+        + '<div id="mrWeeklyView" hidden><button type="button" class="btn-secondary" onclick="mrShowCatalogue()">← Menu Catalogue</button>'
+        + WEEKLY_HTML
+        + '</div>'
         + '</div>\n        '
         + html_content[menu_end:]
     )

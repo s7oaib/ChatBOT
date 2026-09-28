@@ -92,7 +92,8 @@ def test_menu_manager_sits_between_menu_and_ai_resolution(page):
     assert 'id="tab-menu-manager"' in page
     assert 'id="mrCatalogueView"' in page
     assert 'id="mrSelectedView" hidden' in page
-    assert "Manage Menu" in page
+    assert 'id="mrCatalogueTable"' in page
+    assert "open.textContent='Open'" in page
     assert "'tab-menu-manager'].includes(tabId)) tabId = 'tab-image'" in page
 
 
@@ -184,14 +185,15 @@ def test_each_tab_routes_to_a_group(page):
         assert tab_id in routed, f"tab button '{tab_id}' has no group in TAB_GROUPS"
 
 
-def test_the_menu_tab_leads_with_the_weekly_job(page):
+def test_the_menu_tab_leads_with_the_catalogue_and_preserves_review_queue_order(page):
     """
-    Panels in a group are stacked, so DOM order is reading order. Uploading the
-    flyer is the recurring task and belongs above the alternatives to it.
+    Menu starts at the catalogue; Weekly Savoury is an explicit selected workspace.
     """
     order = re.findall(r'<div [^>]*id="(tab-[\w-]+)"[^>]*class="panel-card"|'
                        r'<div class="panel-card" id="(tab-[\w-]+)"', page)
     ids = [a or b for a, b in order]
+    assert page.index('id="mrCatalogueView"') < page.index('id="weeklySavouryPanel"')
+    assert 'id="mrWeeklyView" hidden' in page
     assert ids.index("tab-image") < ids.index("tab-paste"), (
         "the paste-text panel sits above the flyer upload"
     )

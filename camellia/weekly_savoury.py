@@ -169,7 +169,7 @@ def _quantity_anomaly(old, new):
 def compare_rows(rows, previous):
     """Exact canonical identity, then unique approved aliases; never fuzzy match."""
     changes = {"unchanged": [], "new": [], "removed": [], "price_changed": [],
-               "quantity_changed": [], "suspicious_price": [], "suspicious_quantity": []}
+               "quantity_changed": [], "section_changed": [], "suspicious_price": [], "suspicious_quantity": []}
     used = set()
     for row in rows:
         match = _match_previous(row, previous, used)
@@ -178,6 +178,9 @@ def compare_rows(rows, previous):
             continue
         index, old = match
         used.add(index)
+        section_changed = old.get("category") != row.get("category")
+        if section_changed:
+            changes["section_changed"].append({"before": old, "after": row})
         if _quantity(old.get("quantity")) != _quantity(row.get("quantity")):
             change = {"before": old, "after": row}
             changes["quantity_changed"].append(change)
@@ -193,20 +196,26 @@ def compare_rows(rows, previous):
                     changes["suspicious_price"].append(change)
             except (TypeError, ValueError, ZeroDivisionError):
                 pass
-        else:
+        elif not section_changed:
             changes["unchanged"].append(row)
     changes["removed"] = [old for index, old in enumerate(previous) if index not in used]
     return changes
 
 
-def previous_rows(conn=None):
+def previous_rows(conn=None, valid_from=None):
     if conn is None:
         with db.get_connection() as connection:
-            return previous_rows(connection)
-    version = current_version(conn=conn)
-    if not version:
-        versions = lifecycle_versions(conn)
-        version = next((row for row in versions if row.get("weekly_state") != "SUPERSEDED"), None)
+            return previous_rows(connection, valid_from)
+    cutoff = valid_from or menu_dates.today_ist().isoformat()
+    versions = [row for row in lifecycle_versions(conn) if row.get("weekly_state") != "SUPERSEDED"
+                and row["valid_until"] < cutoff]
+    version = max(versions, key=lambda row: (row["valid_until"], row["valid_from"], row["id"])) if versions else None
+    # Without an explicit comparison period, retain the current-menu default.
+    # Same-period replacement is handled by weekly_analysis's exact overlap;
+    # a requested week itself is not its own chronological predecessor.
+    current = current_version(conn=conn)
+    if current and not valid_from:
+        version = current
     if version:
         return _approval(version).get("rows", [])
     from camellia.config import config
@@ -214,6 +223,9 @@ def previous_rows(conn=None):
         with open(config.MENU_JSON_PATH, encoding="utf-8") as stream:
             week = (json.load(stream).get("weekly_menus") or [{}])[-1]
     except (OSError, ValueError, TypeError):
+        return []
+    dates = menu_dates.parse_week_date_range(week.get("week_of"))
+    if valid_from and dates and dates[1].isoformat() >= valid_from:
         return []
     return [{"item": item.get("item") or "", "quantity": item.get("quantity") or "",
              "price_inr": item.get("price_inr"), "aliases": []}

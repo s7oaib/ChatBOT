@@ -15,6 +15,7 @@ authorize a price, ingredient, allergen, availability, or delivery claim —
 those remain in canonical knowledge, entered through the existing approval
 workflow, never inferred from a menu's name or its image.
 """
+import json
 import re
 from typing import Any, Dict, List, Optional
 
@@ -112,6 +113,109 @@ def list_menus(include_inactive: bool = True) -> List[Dict[str, Any]]:
 
 def get_menu(menu_id: str) -> Optional[Dict[str, Any]]:
     return db.get_menu_catalogue_entry(menu_id)
+
+
+def workspace_summary(menus: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Admin-only, zero-write projection. Never used to select customer facts.
+
+    Keep the routing registry unchanged: Weekly Savoury is a workspace over
+    the existing timeline, not a catalogue record to insert or reseed.
+    """
+    from camellia import menu_dates, weekly_savoury
+    from camellia.config import config
+
+    try:
+        with open(config.MENU_JSON_PATH, encoding="utf-8") as stream:
+            baseline = json.load(stream)
+    except (OSError, ValueError):
+        baseline = {}
+    review_labels = {"EXTRACTING": "Extracting", "NEEDS_REVIEW": "Needs review",
+                     "READY_TO_APPROVE": "Ready to approve", "FAILED": "Needs review"}
+    with db.get_connection() as conn:
+        versions = [dict(row) for row in conn.execute(
+            "SELECT * FROM menu_versions WHERE approval_json IS NOT NULL ORDER BY id DESC")]
+        drafts = {row["menu_key"]: json.loads(row["review_json"]) for row in conn.execute(
+            "SELECT menu_key,review_json FROM menu_drafts WHERE review_json IS NOT NULL")}
+        current_weekly = weekly_savoury.current_version(conn=conn)
+        reference_counts = {}
+        for row in conn.execute("""SELECT menu_id, COUNT(*) AS n FROM instagram_source_routes
+                WHERE active=1 AND archived_at IS NULL GROUP BY menu_id
+                UNION ALL SELECT default_menu_id, COUNT(*) AS n FROM instagram_topics
+                WHERE active=1 GROUP BY default_menu_id"""):
+            reference_counts[row[0]] = reference_counts.get(row[0], 0) + row[1]
+
+    def project(menu, related, selected, baseline_standing=False):
+        key = menu["menu_id"]
+        draft = drafts.get(key) or {}
+        status = draft.get("status")
+        # Unlike customer relevance, operator action also includes inactive menus.
+        unresolved = bool(status and status not in {"PUBLISHED", "REJECTED"})
+        approval = json.loads(selected["approval_json"]) if selected else {}
+        latest = related[0] if related else None
+        latest_approval = json.loads(latest["approval_json"]) if latest else {}
+        start = selected.get("valid_from") if selected else None
+        end = selected.get("valid_until") if selected else None
+        lifecycle = weekly_savoury.version_status(selected) if start and end else None
+        published = bool(selected or baseline_standing)
+        validity = weekly_savoury.display_range(start, end) if start and end else (
+            "Standing" if published else "Not published")
+        reference_count = reference_counts.get(key, 0)
+        return {**menu, "workspace": "menu", "catalogue_state": "ACTIVE" if menu["active"] else "INACTIVE",
+                "lifecycle_status": lifecycle, "valid_from": start, "valid_until": end,
+                "display_status": "INACTIVE" if not menu["active"] else (lifecycle or (
+                    "ACTIVE" if published else "Not published")), "validity_label": validity,
+                "pending_review_status": status if unresolved else None,
+                "review_required": unresolved, "review_label": review_labels.get(status, "Needs review") if unresolved else "—",
+                "current_version": selected["id"] if selected else None,
+                "last_approved_version": latest["id"] if latest else None,
+                "last_approved_date": latest_approval.get("approved_at") or (latest.get("changed_at") if latest else None),
+                "source_type": approval.get("source_type") or ("existing" if baseline_standing else None),
+                "reference_count": reference_count,
+                "actions": {"edit": True, "toggle_active": True, "delete": not reference_count}}
+
+    rows = []
+    for menu in menus:
+        key = menu["menu_id"]
+        if key in weekly_savoury.LEGACY_WEEKLY_KEYS:
+            continue
+        related = [version for version in versions if version["menu_key"] == key]
+        selected = next((version for version in related if version["is_current"]), None)
+        standing = bool(menu["is_builtin"] and (
+            (key == "aamar_mishti" and (baseline.get("collections") or {}).get("aamar_mishti")) or
+            (key == "signature" and (baseline.get("collections") or {}).get("signature_collection")) or
+            (key == "bento" and (baseline.get("order_types") or {}).get("bengali_bento"))))
+        rows.append(project(menu, related, selected, standing))
+
+    related = [version for version in versions if version["menu_key"] in weekly_savoury.LEGACY_WEEKLY_KEYS]
+    upcoming = sorted((version for version in related if version.get("valid_from") and
+                       weekly_savoury.version_status(version) == "UPCOMING"), key=lambda version: version["valid_from"])
+    selected = current_weekly or (upcoming[0] if upcoming else (related[0] if related else None))
+    weekly = project({"menu_id": weekly_savoury.WEEKLY_KEY, "name": "Weekly Savoury",
+                      "category": "Weekly Savoury", "description": "Review this week's menu or prepare the next one.",
+                      "active": True, "is_builtin": True, "image_url": None, "image_status": None}, related, selected)
+    # The older non-vegetarian review slot is the same operator workspace.
+    pending = [drafts[key] for key in weekly_savoury.LEGACY_WEEKLY_KEYS if key in drafts and
+               drafts[key].get("status") not in {None, "PUBLISHED", "REJECTED"}]
+    if pending:
+        status = next((draft["status"] for draft in pending if draft["status"] != "READY_TO_APPROVE"), pending[0]["status"])
+        weekly.update(pending_review_status=status, review_required=True,
+                      review_label=review_labels.get(status, "Needs review"))
+    if not current_weekly and weekly_savoury.legacy_baseline_current():
+        week = baseline["weekly_menus"][-1]
+        start, end = menu_dates.parse_week_date_range(week.get("week_of"))
+        weekly.update(lifecycle_status="CURRENT", display_status="CURRENT", valid_from=start.isoformat(),
+                      valid_until=end.isoformat(), validity_label=weekly_savoury.display_range(start, end),
+                      current_version=None, source_type="existing")
+    if current_weekly:
+        weekly["image_url"] = json.loads(current_weekly["approval_json"]).get("image_path")
+        weekly["lifecycle_status"] = weekly["display_status"] = "CURRENT"
+    elif weekly["lifecycle_status"] != "CURRENT":
+        weekly["image_url"] = None
+        weekly["current_version"] = None
+    weekly.update(menu_id="__weekly_savoury__", workspace="weekly", catalogue_state=None,
+                  actions={"edit": False, "toggle_active": False, "delete": False})
+    rows.insert(0, weekly)
+    return {"workspace_rows": rows, "review_count": sum(row["review_required"] for row in rows)}
 
 
 def create_menu(name: str, category: str, description: str, active: bool = True) -> Dict[str, Any]:

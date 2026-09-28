@@ -70,7 +70,7 @@ def test_instagram_approved_faq_still_works_without_handoff():
     assert "CAM-" not in reply_text
 
 
-def test_instagram_menu_request_still_works():
+def test_instagram_menu_request_still_works(eligible_weekly_asset):
     send_reply, escalate = _ask_instagram(
         "policy_ig_menu", "Can you tell me more about the weekly menu?",
     )
