@@ -482,7 +482,16 @@ def customer_versions():
     pending = pending_review_keys()
     if pending & set(weekly_savoury.LEGACY_WEEKLY_KEYS):
         pending.update(weekly_savoury.LEGACY_WEEKLY_KEYS)
-    return [version for version in current_versions() if version["menu_key"] not in pending]
+    with db.get_connection() as conn:
+        linked = {row[0] for row in conn.execute(
+            "SELECT menu_id FROM menu_catalogue WHERE customer_topic IS NOT NULL "
+            "OR legacy_customer_eligible=1"
+        )}
+    # Weekly Savoury has a reviewed timeline identity independent of its
+    # retired catalogue row; tombstoning that old row must not hide the week.
+    linked.add(weekly_savoury.WEEKLY_KEY)
+    return [version for version in current_versions()
+            if version["menu_key"] not in pending and version["menu_key"] in linked]
 
 
 def customer_blocked_keys():

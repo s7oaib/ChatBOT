@@ -91,7 +91,7 @@ def test_shared_customer_versions_exclude_pending_without_hiding_admin_history(a
 
 @pytest.mark.parametrize("start,end", [("2026-10-01", "2026-10-07"), ("2026-09-18", "2026-09-24")])
 def test_custom_dated_versions_are_not_current_outside_window(authority, start, end):
-    menu = menu_catalogue.create_menu("Festival menu", "Other", "Festival description")
+    menu = menu_catalogue.create_menu("Festival menu", "Other", "Festival description", customer_topic="SAVOURY")
     _approved(menu["menu_id"], start=start, end=end)
     assert menu_review.current_versions() == []
     result = rag_fallback_engine.retrieve_approved_menu("Chicken Kosha price")
@@ -193,7 +193,7 @@ def test_ambiguous_standing_current_versions_fail_closed(authority):
 
 
 def test_custom_pending_source_followup_hands_off_but_explicit_stable_faq_survives(authority):
-    menu = menu_catalogue.create_menu("Festival menu", "Other", "Festival description")
+    menu = menu_catalogue.create_menu("Festival menu", "Other", "Festival description", customer_topic="SAVOURY")
     _approved(menu["menu_id"])
     _pending(menu["menu_id"])
     facts = {"source_route": {"menu_id": menu["menu_id"], "menu_mode": "SELECTED"}}
@@ -212,7 +212,7 @@ def test_current_conversation_does_not_regain_superseded_pending_source(authorit
     old = menu_catalogue.create_menu("Old festival", "Other", "Old source description")
     _pending(old["menu_id"], "Old item")
     if topic == "new_custom":
-        topic = menu_catalogue.create_menu("New festival", "Other", "Current description")["menu_id"]
+        topic = menu_catalogue.create_menu("New festival", "Other", "Current description", customer_topic="SAVOURY")["menu_id"]
         _approved(topic, item="Current item")
     facts = {"last_topic": topic, "source_context_superseded": True,
              "source_route": {"menu_id": old["menu_id"], "menu_mode": "SELECTED"}}
@@ -254,7 +254,7 @@ def test_inactive_menu_with_approved_history_cannot_quote_template_price(authori
 
 @pytest.mark.parametrize("state", ["pending", "upcoming", "expired", "superseded", "inactive"])
 def test_direct_consumers_withhold_non_authoritative_custom_menu(authority, state):
-    menu = menu_catalogue.create_menu("Audit menu", "Other", "Synthetic audit menu")
+    menu = menu_catalogue.create_menu("Audit menu", "Other", "Synthetic audit menu", customer_topic="SAVOURY")
     key = menu["menu_id"]
     start, end = {"upcoming": ("2026-10-01", "2026-10-07"),
                   "expired": ("2026-09-18", "2026-09-24")}.get(state, (None, None))
@@ -279,7 +279,7 @@ def test_direct_consumers_withhold_non_authoritative_custom_menu(authority, stat
     (date(2026, 9, 25), True), (date(2026, 9, 27), True),
     (date(2026, 9, 30), True), (date(2026, 10, 1), False)])
 def test_custom_menu_inclusive_date_boundaries(authority, monkeypatch, today, allowed):
-    menu = menu_catalogue.create_menu("Boundary menu", "Other", "Synthetic dated menu")
+    menu = menu_catalogue.create_menu("Boundary menu", "Other", "Synthetic dated menu", customer_topic="SAVOURY")
     version = _approved(menu["menu_id"], item="Boundary dish",
         start="2026-09-25", end="2026-09-30", image="/uploads/menu-images/boundary.png")
     monkeypatch.setattr(menu_dates, "today_ist", lambda: today)
@@ -291,7 +291,7 @@ def test_custom_menu_inclusive_date_boundaries(authority, monkeypatch, today, al
 
 
 def test_standing_menu_dates_remain_optional_but_pending_withholds(authority):
-    menu = menu_catalogue.create_menu("Standing audit", "Other", "Synthetic standing menu")
+    menu = menu_catalogue.create_menu("Standing audit", "Other", "Synthetic standing menu", customer_topic="SAVOURY")
     version = _approved(menu["menu_id"], item="Standing dish", image="/uploads/menu-images/standing.png")
     assert db.get_menu_version(version)["valid_from"] is None
     assert db.get_menu_version(version)["valid_until"] is None

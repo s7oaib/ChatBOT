@@ -54,6 +54,20 @@ _MANAGER_KEYS = {
     "bento": "weekly.bengali_bento",
 }
 
+# Customer-message routing metadata is deliberately separate from the Admin
+# category and from Meta's source-specific Instagram Topics.
+CUSTOMER_TOPICS = (
+    "SONDESH", "SAVOURY", "BENTO_MEAL", "GIFT_EVENT",
+    "WEEKLY_SAVOURY", "SUBSCRIPTION", "HOME_TABLE",
+)
+
+
+def clean_customer_topic(value: Optional[str]) -> Optional[str]:
+    topic = str(value or "").strip().upper()
+    if topic and topic not in CUSTOMER_TOPICS:
+        raise MenuCatalogueError("Choose an approved customer message topic.")
+    return topic or None
+
 
 def _slugify(name: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "_", name.strip().lower()).strip("_")
@@ -218,7 +232,8 @@ def workspace_summary(menus: List[Dict[str, Any]]) -> Dict[str, Any]:
     return {"workspace_rows": rows, "review_count": sum(row["review_required"] for row in rows)}
 
 
-def create_menu(name: str, category: str, description: str, active: bool = True) -> Dict[str, Any]:
+def create_menu(name: str, category: str, description: str, active: bool = True,
+                customer_topic: Optional[str] = None) -> Dict[str, Any]:
     name = (name or "").strip()
     description = (description or "").strip()
     if not name:
@@ -241,7 +256,10 @@ def create_menu(name: str, category: str, description: str, active: bool = True)
             suffix += 1
         menu_id = f"{menu_id}_{suffix}"
 
-    return db.create_menu_catalogue_entry(menu_id, name, category, description, active=active, is_builtin=False)
+    return db.create_menu_catalogue_entry(
+        menu_id, name, category, description, active=active, is_builtin=False,
+        customer_topic=clean_customer_topic(customer_topic),
+    )
 
 
 def permanently_delete_menu(menu_id: str, deleted_by: str = "admin") -> Dict[str, Any]:
@@ -273,6 +291,7 @@ def permanently_delete_menu(menu_id: str, deleted_by: str = "admin") -> Dict[str
 def update_menu(
     menu_id: str, *, name: Optional[str] = None, category: Optional[str] = None,
     description: Optional[str] = None, active: Optional[bool] = None,
+    customer_topic: Optional[str] = None, update_topic: bool = False,
 ) -> Dict[str, Any]:
     if not db.get_menu_catalogue_entry(menu_id):
         raise KeyError(menu_id)
@@ -292,5 +311,42 @@ def update_menu(
         category = selected_category["name"] if selected_category and selected_category["active"] else "Other"
     updated = db.update_menu_catalogue_entry(
         menu_id, name=name, category=category, description=description, active=active,
+        customer_topic=clean_customer_topic(customer_topic) if update_topic else None,
+        update_topic=update_topic,
     )
     return updated
+
+
+def move_menu_in_topic(menu_id: str, position: int) -> List[Dict[str, Any]]:
+    try:
+        result = db.move_menu_in_topic(menu_id, position)
+    except ValueError as exc:
+        raise MenuCatalogueError(str(exc)) from exc
+    if result is None:
+        raise KeyError(menu_id)
+    return result
+
+
+def eligible_topic_menus(topic: str) -> List[Dict[str, Any]]:
+    """Images only, after the existing review/current/pending authority gates.
+
+    No menu description or extracted facts are returned to the responder.
+    Unlinked/inactive menus and drafts are never candidates.
+    """
+    from camellia import menu_images, menu_review
+
+    selected = []
+    approved = {version["menu_key"] for version in menu_review.customer_versions()}
+    blocked = menu_review.customer_blocked_keys()
+    for menu in db.list_menu_catalogue(include_inactive=False):
+        if menu.get("customer_topic") != topic or menu["menu_id"] in blocked:
+            continue
+        # The two known standing collection assets have canonical approval in
+        # the baseline. All operator-added menus require a reviewed version.
+        if menu["menu_id"] not in approved and menu["menu_id"] not in {"aamar_mishti", "signature"}:
+            continue
+        image_url = menu_images.current_url(menu["menu_id"], None)
+        if image_url:
+            selected.append({"menu_id": menu["menu_id"], "name": menu["name"],
+                             "image_url": image_url, "display_order": menu["display_order"]})
+    return sorted(selected, key=lambda item: (item["display_order"], item["menu_id"]))

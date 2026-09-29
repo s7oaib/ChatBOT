@@ -77,7 +77,7 @@ def test_delete_unused_category_and_reject_duplicate_or_protected_category(categ
     assert "protected" in protected.json()["detail"].lower()
 
 
-def test_delete_in_use_requires_and_applies_reassignment(category_client):
+def test_delete_in_use_requires_separate_reassignment(category_client):
     client, headers = category_client
     old = client.post("/admin/menu-categories", headers=headers, json={"name": "Temporary"}).json()["category"]
     replacement = _category_id(client, headers, "Event")
@@ -85,12 +85,18 @@ def test_delete_in_use_requires_and_applies_reassignment(category_client):
     blocked = client.request("DELETE", f"/admin/menu-categories/{old['category_id']}", headers=headers, json={})
     assert blocked.status_code == 409
     assert blocked.json()["menus"][0]["menu_id"] == menu["menu_id"]
-    deleted = client.request(
+    still_blocked = client.request(
         "DELETE",
         f"/admin/menu-categories/{old['category_id']}", headers=headers,
         json={"replacement_category_id": replacement},
     )
-    assert deleted.status_code == 200 and deleted.json()["reassigned_menus"] == 1
+    assert still_blocked.status_code == 409
+    assert menu_catalogue.get_menu(menu["menu_id"])["category"] == "Temporary"
+    moved = client.patch(f"/admin/menu-catalogue/{menu['menu_id']}", headers=headers,
+                         json={"category": "Event"})
+    assert moved.status_code == 200
+    deleted = client.delete(f"/admin/menu-categories/{old['category_id']}", headers=headers)
+    assert deleted.status_code == 200 and deleted.json()["reassigned_menus"] == 0
     assert menu_catalogue.get_menu(menu["menu_id"])["category"] == "Event"
 
 

@@ -5896,6 +5896,7 @@ def list_menu_catalogue_route(x_admin_key: Optional[str] = Header(None), x_admin
     return {
         "status": "success", "menus": menus,
         "categories": [category["name"] for category in menu_catalogue.list_categories()],
+        "customer_topics": list(menu_catalogue.CUSTOMER_TOPICS),
         **menu_catalogue.workspace_summary(menus),
     }
 
@@ -5959,23 +5960,14 @@ async def delete_menu_category_route(
 ):
     require_admin(x_admin_key, x_admin_pin)
     try:
-        body = await request.json()
-    except Exception:
-        body = {}
-    replacement_id = body.get("replacement_category_id")
-    try:
-        replacement_id = int(replacement_id) if replacement_id is not None else None
-    except (TypeError, ValueError):
-        raise HTTPException(status_code=400, detail="Replacement category must be valid.")
-    try:
-        result = menu_catalogue.delete_category(category_id, replacement_id)
+        result = menu_catalogue.delete_category(category_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Category not found.")
     except MenuCatalogueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     if not result["deleted"]:
         return JSONResponse(status_code=409, content={
-            "detail": "This category is in use. Choose a replacement category before deleting it.",
+            "detail": f"{len(result['menus'])} menus currently use this category. Move those menus to another category first.",
             "category": result["category"], "menus": result["menus"],
         })
     return {"status": "success", **result}
@@ -5994,6 +5986,7 @@ async def create_menu_catalogue_entry(
     category: str = Form("Other"),
     description: str = Form(...),
     active: bool = Form(True),
+    customer_topic: str = Form(""),
     file: Optional[UploadFile] = File(None),
     x_admin_key: Optional[str] = Header(None),
     x_admin_pin: Optional[str] = Header(None),
@@ -6011,8 +6004,28 @@ async def create_menu_catalogue_entry(
     image_bytes = await file.read() if file is not None else None
     if image_bytes is not None and len(image_bytes) > MAX_UPLOAD_SIZE:
         raise HTTPException(status_code=413, detail="File too large (maximum 10MB allowed).")
+    if image_bytes is not None:
+        mime = (file.content_type or "").split(";", 1)[0].lower()
+        if mime not in (*menu_images.ALLOWED_TYPES, "application/pdf"):
+            raise HTTPException(status_code=400, detail="Use JPG, PNG, WEBP or PDF.")
+        try:
+            if mime == "application/pdf":
+                if not image_bytes.startswith(b"%PDF-"):
+                    raise ValueError("Not a valid PDF.")
+                import pypdfium2 as pdfium
+                try:
+                    with pdfium.PdfDocument(image_bytes) as document:
+                        if not 1 <= len(document) <= 8:
+                            raise ValueError("PDF must contain 1–8 pages.")
+                except Exception as exc:
+                    raise ValueError("Not a valid 1–8 page PDF.") from exc
+            else:
+                menu_images.validate_image(image_bytes, mime)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     try:
-        entry = menu_catalogue.create_menu(name, category, description, active=active)
+        entry = menu_catalogue.create_menu(name, category, description, active=active,
+                                           customer_topic=customer_topic)
     except MenuCatalogueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     if file is None:
@@ -6041,12 +6054,32 @@ async def update_menu_catalogue_entry_route(
         updated = menu_catalogue.update_menu(
             menu_id, name=body.get("name"), category=body.get("category"),
             description=body.get("description"), active=body.get("active"),
+            customer_topic=body.get("customer_topic"), update_topic="customer_topic" in body,
         )
     except KeyError:
         raise HTTPException(status_code=404, detail=f"No menu '{menu_id}'")
     except MenuCatalogueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return {"status": "success", "menu": updated}
+
+
+@app.post("/admin/menu-catalogue/{menu_id}/move")
+async def move_menu_catalogue_entry_route(
+    menu_id: str, request: Request,
+    x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None),
+):
+    require_admin(x_admin_key, x_admin_pin)
+    try:
+        body = await request.json()
+        position = int(body.get("position"))
+        menus = menu_catalogue.move_menu_in_topic(menu_id, position)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Choose a valid reply position.")
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Menu not found.")
+    except MenuCatalogueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"status": "success", "menus": menus}
 
 
 @app.delete("/admin/menu-catalogue/{menu_id}/permanent")
@@ -8077,8 +8110,9 @@ THIS WEEK'S BENGAL SPECIALS
             </div>
             <label class="field-label">Customer Description *</label>
             <textarea class="field-control" id="menuDescription" rows="3" placeholder="e.g. Weekly Bengali home-style meal subscription with rotating menus." style="margin-bottom:10px;"></textarea>
-            <div id="menuImageField"><label class="field-label">Menu Image *</label><input type="file" id="menuImageFile" accept="image/jpeg,image/png,image/webp" style="margin-bottom:10px;"></div>
-            <p id="menuMetadataHelp" class="ig-media-muted" style="display:none; margin:0 0 10px;">This changes menu details only. Use Replace → Preview → Save &amp; Publish to change the image.</p>
+            <label class="field-label" for="menuCustomerTopic">Customer message topic</label><select class="field-control" id="menuCustomerTopic" style="margin-bottom:10px;"></select>
+            <div id="menuImageField"><label class="field-label">Menu file (optional)</label><input type="file" id="menuImageFile" accept="image/jpeg,image/png,image/webp,application/pdf" style="margin-bottom:10px;"></div>
+            <p id="menuMetadataHelp" class="ig-media-muted" style="display:none; margin:0 0 10px;">Uploading creates a review draft. Published content stays unchanged until approval.</p>
             <label style="display:flex; align-items:center; gap:6px; font-size:0.85rem; margin-bottom:10px;"><input type="checkbox" id="menuActive" checked> Active</label>
             <div style="display: flex; gap: 8px; justify-content: flex-end;">
                 <button class="btn-secondary" onclick="closeMenuModal()">Cancel</button>
@@ -8103,7 +8137,6 @@ THIS WEEK'S BENGAL SPECIALS
         <div style="background:white; border-radius:16px; width:100%; max-width:480px; padding:24px; box-shadow:0 10px 30px rgba(0,0,0,.2);">
             <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:14px;"><h3 style="margin:0;color:var(--danger);">Delete Category?</h3><button onclick="closeCategoryDeleteModal()" style="background:none;border:none;font-size:1.4rem;cursor:pointer;">&times;</button></div>
             <div id="menuCategoryDeleteDetails" style="font-size:.85rem;line-height:1.55;margin-bottom:12px;"></div>
-            <div id="menuCategoryReplacementWrap" style="display:none; margin-bottom:14px;"><label class="field-label">Replacement Category *</label><select id="menuCategoryReplacement" class="field-control"></select></div>
             <div style="display:flex;gap:8px;justify-content:flex-end;"><button class="btn-secondary" onclick="closeCategoryDeleteModal()">Cancel</button><button class="btn-danger" onclick="confirmCategoryDelete()">Delete Category</button></div>
             <div id="menuCategoryDeleteResult" class="result-box"></div>
         </div>
@@ -9116,6 +9149,7 @@ THIS WEEK'S BENGAL SPECIALS
         let igAllMenus = [];
         let igMenus = [];
         let igMenuCategoryRecords = [];
+        let menuCustomerTopics = [];
         let igResponseOrder = 'description_first';
         let igMediaMetadata = { preview_url: null, media_type: null };
 
@@ -9218,6 +9252,7 @@ THIS WEEK'S BENGAL SPECIALS
                 igAllMenus = menusData.menus || [];
                 igMenus = igAllMenus.filter(m => m.active);
                 igMenuCategoryRecords = categoriesData.categories || [];
+                menuCustomerTopics = menusData.customer_topics || [];
                 window.igMenuCategories = igMenuCategoryRecords.map(category => category.name);
 
                 const activeTopics = igTopics.filter(t => t.active !== false);
@@ -9550,6 +9585,13 @@ THIS WEEK'S BENGAL SPECIALS
             if (!picker.value && igMenuCategoryRecords.length) picker.value = igMenuCategoryRecords[0].name;
         }
 
+        function menuCustomerTopicChoices(selected) {
+            const picker = document.getElementById('menuCustomerTopic');
+            picker.innerHTML = '<option value="">Not linked to customer enquiries</option>' +
+                menuCustomerTopics.map(value => `<option value="${escapeHtml(value)}">${escapeHtml(value.replaceAll('_', ' '))}</option>`).join('');
+            picker.value = selected || '';
+        }
+
         function closeCategoryModal() { document.getElementById('menuCategoryModal').style.display = 'none'; }
         function openCategoryModal(categoryName = '') {
             const category = categoryName ? igMenuCategoryRecords.find(item => item.name === categoryName) : null;
@@ -9581,14 +9623,13 @@ THIS WEEK'S BENGAL SPECIALS
             }
         }
         function closeCategoryDeleteModal() { document.getElementById('menuCategoryDeleteModal').style.display = 'none'; }
-        async function openCategoryDeleteModal() {
-            const category = igMenuCategoryRecords.find(item => item.name === document.getElementById('menuCategory').value);
+        async function openCategoryDeleteModal(categoryName = '') {
+            const category = igMenuCategoryRecords.find(item => item.name === (categoryName || document.getElementById('menuCategory').value));
             if (!category) return;
             const result = document.getElementById('menuCategoryDeleteResult');
             result.style.display = 'none';
             if (category.is_system) {
                 document.getElementById('menuCategoryDeleteDetails').innerText = 'Other is the protected fallback category and cannot be deleted.';
-                document.getElementById('menuCategoryReplacementWrap').style.display = 'none';
                 document.querySelector('#menuCategoryDeleteModal .btn-danger').style.display = 'none';
                 document.getElementById('menuCategoryDeleteModal').style.display = 'flex';
                 return;
@@ -9599,14 +9640,10 @@ THIS WEEK'S BENGAL SPECIALS
                 if (!response.ok) throw new Error(data.detail || 'Could not check category usage.');
                 const menus = data.menus || [];
                 document.getElementById('menuCategoryDeleteDetails').innerHTML = menus.length
-                    ? `<b>${escapeHtml(category.name)}</b> is used by: <ul>${menus.map(menu => `<li>${escapeHtml(menu.name)}</li>`).join('')}</ul>These menus will be reassigned before deletion.`
+                    ? `<b>${escapeHtml(category.name)}</b> is used by: <ul>${menus.map(menu => `<li>${escapeHtml(menu.name)}</li>`).join('')}</ul>Move those menus to another category first.`
                     : `Delete <b>${escapeHtml(category.name)}</b>? This category is not currently used.`;
-                const wrap = document.getElementById('menuCategoryReplacementWrap');
-                wrap.style.display = menus.length ? 'block' : 'none';
-                document.getElementById('menuCategoryReplacement').innerHTML = igMenuCategoryRecords.filter(item => item.category_id !== category.category_id)
-                    .map(item => `<option value="${item.category_id}">${escapeHtml(item.name)}</option>`).join('');
                 const button = document.querySelector('#menuCategoryDeleteModal .btn-danger');
-                button.style.display = '';
+                button.style.display = menus.length ? 'none' : '';
                 button.dataset.categoryId = category.category_id;
                 button.dataset.hasUsage = menus.length ? '1' : '';
                 document.getElementById('menuCategoryDeleteModal').style.display = 'flex';
@@ -9618,16 +9655,14 @@ THIS WEEK'S BENGAL SPECIALS
         async function confirmCategoryDelete() {
             const button = document.querySelector('#menuCategoryDeleteModal .btn-danger');
             const result = document.getElementById('menuCategoryDeleteResult');
-            const replacement_category_id = button.dataset.hasUsage ? Number(document.getElementById('menuCategoryReplacement').value) : null;
             try {
                 const response = await fetch(`/admin/menu-categories/${encodeURIComponent(button.dataset.categoryId)}`, {
-                    method: 'DELETE', headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ replacement_category_id }),
+                    method: 'DELETE', headers: getAuthHeaders(),
                 });
                 const data = await response.json();
                 if (!response.ok) throw new Error(data.detail || 'Could not delete category.');
                 await loadTopicsAndMenus();
-                refreshMenuCategoryPicker(data.replacement ? data.replacement.name : 'Other');
+                refreshMenuCategoryPicker('Other');
                 closeCategoryDeleteModal();
                 await mrMenus();
             } catch (err) {
@@ -9646,6 +9681,7 @@ THIS WEEK'S BENGAL SPECIALS
             document.getElementById('menuName').value = '';
             document.getElementById('menuDescription').value = '';
             document.getElementById('menuImageFile').value = '';
+            menuCustomerTopicChoices('');
             document.getElementById('menuActive').checked = true;
             document.getElementById('menuImageField').style.display = 'block';
             document.getElementById('menuMetadataHelp').style.display = 'none';
@@ -9663,9 +9699,10 @@ THIS WEEK'S BENGAL SPECIALS
             document.getElementById('menuName').value = menu.name || '';
             document.getElementById('menuDescription').value = menu.description || '';
             document.getElementById('menuImageFile').value = '';
+            menuCustomerTopicChoices(menu.customer_topic || '');
             document.getElementById('menuActive').checked = Boolean(menu.active);
             refreshMenuCategoryPicker(menu.category || 'Other');
-            document.getElementById('menuImageField').style.display = 'none';
+            document.getElementById('menuImageField').style.display = 'block';
             document.getElementById('menuMetadataHelp').style.display = 'block';
             document.getElementById('menuModalSubmitButton').innerText = 'Save Changes';
             document.getElementById('menuModalResult').style.display = 'none';
@@ -9682,15 +9719,15 @@ THIS WEEK'S BENGAL SPECIALS
             const file = imageInput && imageInput.files ? imageInput.files[0] : null;
             if (!name) { result.style.display='block'; result.className='result-box error'; result.innerText='Menu name is required.'; return; }
             if (!description) { result.style.display='block'; result.className='result-box error'; result.innerText='Customer description is required.'; return; }
-            if (!editingId && !file) { result.style.display='block'; result.className='result-box error'; result.innerText='A menu image is required.'; return; }
             if (editingId) {
                 try {
                     const resp = await fetch(`/admin/menu-catalogue/${encodeURIComponent(editingId)}`, {
                         method: 'PATCH', headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ name, category: document.getElementById('menuCategory').value, description, active: document.getElementById('menuActive').checked }),
+                        body: JSON.stringify({ name, category: document.getElementById('menuCategory').value, description, active: document.getElementById('menuActive').checked, customer_topic: document.getElementById('menuCustomerTopic').value }),
                     });
                     const data = await resp.json();
                     if (!resp.ok) throw new Error(data.detail || 'Could not update menu.');
+                    if (file) { const upload = new FormData(); upload.append('file',file); const extraction = await fetch(`/admin/menu-manager/menus/${encodeURIComponent(editingId)}/review/extract-file`,{method:'POST',headers:getAuthHeaders(),body:upload}); if(!extraction.ok) throw new Error('Menu details saved, but extraction failed. Published menu unchanged.'); }
                     closeMenuModal();
                     await loadTopicsAndMenus();
                     if (typeof mmLoadMenuList === 'function') await mmLoadMenuList();
@@ -9704,7 +9741,8 @@ THIS WEEK'S BENGAL SPECIALS
             form.append('category', document.getElementById('menuCategory').value);
             form.append('description', description);
             form.append('active', document.getElementById('menuActive').checked);
-            form.append('file', file);
+            form.append('customer_topic', document.getElementById('menuCustomerTopic').value);
+            if (file) form.append('file', file);
             try {
                 const resp = await fetch('/admin/menu-catalogue', { method: 'POST', headers: getAuthHeaders(), body: form });
                 const data = await resp.json();

@@ -498,7 +498,7 @@ def test_topic_and_menu_edit_actions_are_clear_and_metadata_only(page):
     assert 'id="menuModalTitle"' in page
     assert 'id="menuModalEditingId"' in page
     assert 'id="menuMetadataHelp"' in page
-    assert "Replace → Preview → Save &amp; Publish" in page
+    assert "Uploading creates a review draft. Published content stays unchanged until approval." in page
     assert "method: 'PATCH'" in page
     assert "body: JSON.stringify({ name, category:" in page
     assert "Menu Catalogue" in catalogue

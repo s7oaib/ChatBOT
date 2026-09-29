@@ -3235,7 +3235,7 @@ class DeterministicResponder:
         )
         explicit_client_subject = bool(re.search(
             r"\b(?:sondesh|sandesh|mishti|mithai|bengali\s+bento|bento|"
-            r"chicken\s+kosha|subscription|meal\s+plan|home\s+table|"
+            r"chicken\s+kosha|subscription|meal\s+plan|home\s+table|savoury|savory|weekly|"
             r"aamar|signature|jolbhora|kanchagolla|mangsho)\b",
             lowered_text,
             re.I,
@@ -3365,6 +3365,49 @@ class DeterministicResponder:
                 and bool(_CANONICAL_ROUTE_HINT_RE.search(lowered_text))
             )
         )
+        # An explicit request for menu cards may use the operator's topic
+        # links, but only after the same safety/intent exclusions above. This
+        # adds no knowledge source: eligibility is the existing reviewed,
+        # current, non-pending menu authority and the reply contains no facts
+        # from category, topic, OCR, or menu-description metadata.
+        if channel == "instagram" and not client_qa_excluded and not re.search(
+            r"\b(?:price|cost|rate|available|availability|deliver|order|book|ingredient|allergen)\b",
+            lowered_text,
+        ):
+            requested_topic = None
+            if re.search(r"\b(?:sondesh|sandesh|mishti)\b", lowered_text):
+                requested_topic = "SONDESH"
+            elif re.search(r"\b(?:savoury|savory)\b", lowered_text):
+                requested_topic = "WEEKLY_SAVOURY" if re.search(r"\b(?:this\s+week|weekly)\b", lowered_text) else "SAVOURY"
+            elif re.search(r"\bbento\b", lowered_text):
+                requested_topic = "BENTO_MEAL"
+            menu_query = lowered_text.rstrip(" ?.!").strip()
+            menu_request = bool(re.fullmatch(
+                r"(?:please\s+)?(?:show|share|send)(?:\s+me|\s+us)?"
+                r"(?:\s+the|\s+your|\s+current)?\s+(?:this\s+week(?:'s)?\s+)?"
+                r"(?:sondesh|sandesh|mishti|savoury|savory|bento)\s+"
+                r"(?:menus?|collections?|options?)|"
+                r"what\s+(?:sondesh|sandesh|mishti|savoury|savory|bento)\s+"
+                r"(?:(?:menus?|collections?|options?)\s+)?do\s+you\s+have|"
+                r"(?:sondesh|sandesh|mishti|savoury|savory|bento)\s+"
+                r"(?:menus?|collections?)",
+                menu_query,
+            ))
+            if requested_topic and menu_request:
+                from camellia import menu_catalogue
+                eligible = menu_catalogue.eligible_topic_menus(requested_topic)
+                if eligible:
+                    response_text = "Here are the current menu cards we can share. Which would you like to know more about?"
+                    facts.update({
+                        "last_route_source": "EXPLICIT_CUSTOMER_TOPIC",
+                        "last_grounding": "approved_current_menu_assets",
+                        "last_llm_called": False,
+                        "last_fallback_used": False,
+                        "source_context_superseded": True,
+                        "active_topic": requested_topic.lower(),
+                    })
+                    session_memory.add_turn(user_id, channel, user_message, response_text)
+                    return response_text, True, "customer_topic_menus", [item["image_url"] for item in eligible]
         client_match = (
             None
             if channel != "instagram" or client_qa_excluded

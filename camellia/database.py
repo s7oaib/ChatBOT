@@ -995,6 +995,10 @@ class Database:
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
             """)
+            existing_menu_columns = {row[1] for row in cursor.execute("PRAGMA table_info(menu_catalogue)")}
+            self._ensure_column(cursor, "menu_catalogue", "customer_topic", "TEXT")
+            self._ensure_column(cursor, "menu_catalogue", "display_order", "INTEGER NOT NULL DEFAULT 100")
+            self._ensure_column(cursor, "menu_catalogue", "legacy_customer_eligible", "INTEGER NOT NULL DEFAULT 0")
 
             # Menu categories are operator-managed data, not application
             # constants.  Menus retain their human-readable category string
@@ -1016,15 +1020,19 @@ class Database:
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_menu_categories_normalized_name "
                 "ON menu_categories(name COLLATE NOCASE)"
             )
-            for name, is_system in (
-                ("Sondesh", False), ("Weekly Vegetarian", False),
-                ("Weekly Non-Vegetarian", False), ("Bento / Meal", False),
-                ("Subscription", False), ("Event", False), ("Other", True),
-            ):
-                cursor.execute(
-                    "INSERT OR IGNORE INTO menu_categories (name, active, is_system) VALUES (?, 1, ?)",
-                    (name, int(is_system)),
-                )
+            if not cursor.execute("SELECT 1 FROM menu_categories LIMIT 1").fetchone():
+                for name, is_system in (
+                    ("Sondesh", False), ("Weekly Vegetarian", False),
+                    ("Weekly Non-Vegetarian", False), ("Bento / Meal", False),
+                    ("Subscription", False), ("Event", False), ("Other", True),
+                ):
+                    cursor.execute(
+                        "INSERT OR IGNORE INTO menu_categories (name, active, is_system) VALUES (?, 1, ?)",
+                        (name, int(is_system)),
+                    )
+            cursor.execute(
+                "INSERT OR IGNORE INTO menu_categories (name, active, is_system) VALUES ('Other', 1, 1)"
+            )
 
             # A hard-deleted built-in must not be recreated by the seed loop
             # below on the next process start. This table intentionally keeps
@@ -1192,6 +1200,29 @@ class Database:
                         "INSERT OR IGNORE INTO menu_catalogue (menu_id, name, category, description, active, is_builtin) "
                         "VALUES (?, ?, ?, ?, 1, 1)",
                         (menu_id, name, category, description),
+                    )
+            if "legacy_customer_eligible" not in existing_menu_columns:
+                # Preserve already-reviewed custom menus that reached the
+                # customer before explicit topic links existed. New menus do
+                # not inherit this exception.
+                cursor.execute(
+                    "UPDATE menu_catalogue SET legacy_customer_eligible=1 WHERE is_builtin=0 "
+                    "AND menu_id IN (SELECT DISTINCT menu_key FROM menu_versions WHERE approval_json IS NOT NULL)"
+                )
+            if "customer_topic" not in existing_menu_columns:
+                # Only the five built-ins have unambiguous, pre-existing
+                # customer relationships. A newly added menu stays unlinked.
+                for menu_id, topic, position in (
+                    ("aamar_mishti", "SONDESH", 10),
+                    ("signature", "SONDESH", 20),
+                    ("weekly_vegetarian", "WEEKLY_SAVOURY", 10),
+                    ("weekly_non_vegetarian", "WEEKLY_SAVOURY", 20),
+                    ("bento", "BENTO_MEAL", 10),
+                ):
+                    cursor.execute(
+                        "UPDATE menu_catalogue SET customer_topic=?, display_order=? "
+                        "WHERE menu_id=? AND is_builtin=1",
+                        (topic, position, menu_id),
                     )
 
             # A database upgraded from a version that allowed a category not
@@ -2411,7 +2442,6 @@ class Database:
         return {"category": category, "menus": [dict(row) for row in rows]}
 
     def delete_menu_category(self, category_id: int, replacement_category_id: Optional[int] = None) -> Dict[str, Any]:
-        now = datetime.utcnow().isoformat()
         with self.get_connection() as conn:
             category = conn.execute(
                 "SELECT * FROM menu_categories WHERE category_id = ?", (category_id,)
@@ -2424,25 +2454,15 @@ class Database:
                 "SELECT menu_id, name, active FROM menu_catalogue WHERE category = ? COLLATE NOCASE ORDER BY name COLLATE NOCASE",
                 (category["name"],),
             ).fetchall()
-            if menus and replacement_category_id is None:
-                return {"deleted": False, "category": dict(category), "menus": [dict(row) for row in menus]}
-            replacement = None
-            if replacement_category_id is not None:
-                replacement = conn.execute(
-                    "SELECT * FROM menu_categories WHERE category_id = ? AND active = 1", (replacement_category_id,)
-                ).fetchone()
-                if not replacement or replacement["category_id"] == category_id:
-                    raise ValueError("Choose a different active replacement category.")
+            # Reassignment is a separate operator action. A delete must never
+            # silently move menus, even if an old client supplies a replacement.
             if menus:
-                conn.execute(
-                    "UPDATE menu_catalogue SET category = ?, updated_at = ? WHERE category = ? COLLATE NOCASE",
-                    (replacement["name"], now, category["name"]),
-                )
+                return {"deleted": False, "category": dict(category), "menus": [dict(row) for row in menus]}
             conn.execute("DELETE FROM menu_categories WHERE category_id = ?", (category_id,))
             conn.commit()
         return {
-            "deleted": True, "category": dict(category), "replacement": dict(replacement) if replacement else None,
-            "reassigned_menus": len(menus),
+            "deleted": True, "category": dict(category), "replacement": None,
+            "reassigned_menus": 0,
         }
 
     def list_menu_catalogue(self, include_inactive: bool = True) -> List[Dict[str, Any]]:
@@ -2617,15 +2637,15 @@ class Database:
 
     def create_menu_catalogue_entry(
         self, menu_id: str, name: str, category: str, description: str,
-        active: bool = True, is_builtin: bool = False,
+        active: bool = True, is_builtin: bool = False, customer_topic: Optional[str] = None,
     ) -> Dict[str, Any]:
         with self.get_connection() as conn:
             conn.execute(
                 """
-                INSERT INTO menu_catalogue (menu_id, name, category, description, active, is_builtin)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO menu_catalogue (menu_id, name, category, description, active, is_builtin, customer_topic)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (menu_id, name, category, description, int(active), int(is_builtin)),
+                (menu_id, name, category, description, int(active), int(is_builtin), customer_topic),
             )
             conn.commit()
             row = conn.execute("SELECT * FROM menu_catalogue WHERE menu_id = ?", (menu_id,)).fetchone()
@@ -2634,6 +2654,7 @@ class Database:
     def update_menu_catalogue_entry(
         self, menu_id: str, *, name: Optional[str] = None, category: Optional[str] = None,
         description: Optional[str] = None, active: Optional[bool] = None,
+        customer_topic: Optional[str] = None, update_topic: bool = False,
     ) -> Optional[Dict[str, Any]]:
         fields, values = [], []
         for column, value in (("name", name), ("category", category), ("description", description)):
@@ -2643,6 +2664,12 @@ class Database:
         if active is not None:
             fields.append("active = ?")
             values.append(int(active))
+        if update_topic:
+            fields.append("legacy_customer_eligible = CASE WHEN COALESCE(customer_topic,'') != COALESCE(?, '') "
+                          "THEN 0 ELSE legacy_customer_eligible END")
+            values.append(customer_topic)
+            fields.append("customer_topic = ?")
+            values.append(customer_topic)
         if not fields:
             return self.get_menu_catalogue_entry(menu_id)
         fields.append("updated_at = ?")
@@ -2652,6 +2679,33 @@ class Database:
             cursor = conn.execute(f"UPDATE menu_catalogue SET {', '.join(fields)} WHERE menu_id = ?", values)
             conn.commit()
         return self.get_menu_catalogue_entry(menu_id) if cursor.rowcount else None
+
+    def move_menu_in_topic(self, menu_id: str, position: int) -> Optional[List[Dict[str, Any]]]:
+        """Persist a stable 10-step presentation rank within one explicit topic."""
+        with self.get_connection() as conn:
+            menu = conn.execute("SELECT customer_topic FROM menu_catalogue WHERE menu_id=?", (menu_id,)).fetchone()
+            if not menu:
+                return None
+            if not menu["customer_topic"]:
+                raise ValueError("Link this menu to a customer topic before setting reply order.")
+            rows = conn.execute(
+                "SELECT menu_id FROM menu_catalogue WHERE customer_topic=? AND menu_id!=? "
+                "ORDER BY display_order, menu_id", (menu["customer_topic"], menu_id),
+            ).fetchall()
+            ids = [row["menu_id"] for row in rows]
+            if position < 1 or position > len(ids) + 1:
+                raise ValueError("Reply position is outside this topic.")
+            ids.insert(position - 1, menu_id)
+            for index, item_id in enumerate(ids, 1):
+                conn.execute(
+                    "UPDATE menu_catalogue SET display_order=?, updated_at=? WHERE menu_id=?",
+                    (index * 10, datetime.utcnow().isoformat(), item_id),
+                )
+            conn.commit()
+            return [dict(row) for row in conn.execute(
+                "SELECT * FROM menu_catalogue WHERE customer_topic=? ORDER BY display_order, menu_id",
+                (menu["customer_topic"],),
+            )]
 
     # --- Instagram Content Routing topics -----------------------------------
 
