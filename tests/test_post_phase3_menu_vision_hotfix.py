@@ -127,4 +127,5 @@ def test_failure_copy_and_manual_actions_remain_available(script):
 
 def test_weekly_comparison_is_explicitly_unavailable_and_publish_guarded():
     assert 'Comparison unavailable until at least one valid menu item is entered.' in WEEKLY_SCRIPT
-    assert 'if(!wsAnalysis?.comparison_available)' in WEEKLY_SCRIPT
+    assert 'if(!analysis?.comparison_available)reasons.push(' in WEEKLY_SCRIPT
+    assert 'const reasons=wsBlockingReasons(wsAnalysis,options);if(reasons.length)' in WEEKLY_SCRIPT

@@ -29,11 +29,23 @@ WEEKLY_HTML = r'''
   #weeklySavouryPanel .ws-version{padding:10px 0;border-bottom:1px solid var(--border)}
   #weeklySavouryPanel .ws-version button{min-height:44px}
   #weeklySavouryPanel .ws-preview{padding:14px;background:#fff;border:1px solid var(--border);border-radius:8px;white-space:pre-wrap}
+  #weeklySavouryPanel .ws-issues{padding:14px 16px;margin:14px 0;background:#fff3e3;border:1px solid #d7aa77;border-radius:8px}
+  #weeklySavouryPanel .ws-issues h4{margin:0 0 8px}
+  #weeklySavouryPanel .ws-issues ul{margin:0;padding-left:20px}
+  #weeklySavouryPanel .ws-issues li{margin:5px 0}
+  #weeklySavouryPanel .ws-success{padding:12px 16px;margin:12px 0;background:#edf6ee;border:1px solid #86af8a;border-radius:8px}
+  #weeklySavouryPanel .ws-publish-dialog{width:min(480px,calc(100vw - 28px));max-height:calc(100vh - 32px);overflow-y:auto;margin:auto;padding:24px;border:1px solid var(--border);border-radius:10px;color:var(--text)}
+  #weeklySavouryPanel .ws-publish-dialog::backdrop{background:#0008}
+  #weeklySavouryPanel .ws-publish-dialog h3{margin:0 0 12px;color:var(--primary)}
+  #weeklySavouryPanel .ws-publish-dialog ul{padding-left:20px}
+  #weeklySavouryPanel .ws-publish-dialog-actions{display:flex;justify-content:flex-end;gap:10px;flex-wrap:wrap;margin-top:20px}
+  #weeklySavouryPanel .ws-publish-dialog-actions button{min-height:44px}
   @media(max-width:600px){#weeklySavouryPanel .ws-dates{grid-template-columns:1fr}#weeklySavouryPanel .ws-review-table{overflow:visible}#weeklySavouryPanel .ws-review-table thead{display:none}#weeklySavouryPanel .ws-review-table tr{display:block;border:1px solid var(--border);border-radius:10px;padding:10px;margin-bottom:10px}#weeklySavouryPanel .ws-review-table td{display:block;border:0;padding:6px}#weeklySavouryPanel .ws-review-table td:before{content:attr(data-label);display:block;font-size:.75rem;color:var(--text-muted)}#weeklySavouryPanel .ws-review-table input,#weeklySavouryPanel .ws-review-table select{width:100%}}
 </style>
 <section id="weeklySavouryPanel" aria-labelledby="wsHeading">
   <h2 id="wsHeading">Weekly Savoury Menu</h2>
   <p class="ws-muted">Update this week's menu or prepare the next one.</p>
+  <div id="wsSuccess" class="ws-success" role="status" hidden></div>
   <nav class="ws-actions" aria-label="Weekly menu timeline"><button type="button" class="btn-secondary" data-ws-pane="current" aria-selected="true" onclick="wsShowTimeline('current')">Current</button><button type="button" class="btn-secondary" data-ws-pane="upcoming" aria-selected="false" onclick="wsShowTimeline('upcoming')">Upcoming</button><button type="button" class="btn-secondary" data-ws-pane="history" aria-selected="false" onclick="wsShowTimeline('history')">History</button></nav>
   <div id="wsTimelineCurrent"><div id="wsState" class="ws-status" aria-live="polite">Loading weekly menu…</div></div>
   <div id="wsTimelineUpcoming" hidden><h3>Scheduled menus</h3><div id="wsUpcomingVersions"></div></div>
@@ -56,6 +68,7 @@ WEEKLY_HTML = r'''
       <label>Valid until<input id="wsUntil" class="field-control" type="date" onchange="wsRefreshAnalysis()"></label></div>
     <p id="wsNoDate" class="ws-warning" hidden>Confirm dates before publishing, or explicitly choose the 7-day fallback below.</p>
     <label><input id="wsUndated" type="checkbox" onchange="wsRefreshAnalysis()"> Use 7-day fallback without printed dates</label>
+    <div id="wsValidation" class="ws-issues" role="alert" tabindex="-1" hidden></div>
     <div id="wsChanges" class="ws-changes"></div>
     <h4>Extracted items</h4><p class="ws-muted">Check names, quantities and prices against the source before confirming.</p>
     <div id="wsExtractedRows"></div>
@@ -68,6 +81,7 @@ WEEKLY_HTML = r'''
     <h4>Preview customer response</h4><p class="ws-muted">Preview only — not sent to customers.</p>
     <input id="wsQuestion" class="field-control" value="What's on the Savoury menu this week?" aria-label="Preview question">
     <div class="ws-actions"><button type="button" class="btn-secondary" onclick="wsPreview()">Preview response</button></div>
+    <div id="wsPreviewError" class="ws-issues" role="alert" tabindex="-1" hidden></div>
     <div id="wsPreviewResult" class="ws-preview" hidden></div>
     <div id="wsSafetyChecks">
       <label id="wsSuspiciousLabel" hidden><input id="wsConfirmSuspicious" type="checkbox"> I checked the unusual price or quantity against the source.</label>
@@ -75,18 +89,41 @@ WEEKLY_HTML = r'''
     </div>
     <div class="ws-actions"><button id="wsPublishButton" type="button" class="btn-primary" onclick="wsPublish()">Update Weekly Menu</button>
       <button type="button" class="btn-secondary" onclick="wsReject()">Discard draft</button></div>
+    <div id="wsPublishError" class="ws-issues" role="alert" tabindex="-1" hidden></div>
   </div>
   <div id="wsFailed" class="ws-warning" hidden>We couldn't read this menu reliably. The published menu is unchanged.
     <button type="button" class="btn-secondary" onclick="wsReject()">Discard failed draft</button></div>
   <div id="wsMessage" role="status" aria-live="polite"></div>
   <div id="wsTimelineHistory"><div id="wsHistory"><h3>Previous weekly menus</h3><div id="wsVersions"></div></div></div>
+  <dialog id="wsPublishDialog" class="ws-publish-dialog" aria-labelledby="wsPublishDialogTitle">
+    <h3 id="wsPublishDialogTitle">Update Weekly Savoury Menu</h3>
+    <p id="wsPublishSummary"></p>
+    <ul><li>Menu reviewed</li><li>Dates confirmed</li><li>Flyer and facts will be published together</li></ul>
+    <div id="wsModalError" class="ws-issues" role="alert" tabindex="-1" hidden></div>
+    <div class="ws-publish-dialog-actions"><button type="button" class="btn-secondary" onclick="wsCancelPublish()">Cancel</button>
+      <button id="wsConfirmPublishButton" type="button" class="btn-primary" onclick="wsConfirmPublish()">Update Menu</button></div>
+  </dialog>
 </section>
 '''
 
 WEEKLY_SCRIPT = r'''
 <script>
-let wsDraft=null,wsAnalysis=null,wsToday='',wsBusy=false,wsDirty=false,wsPreviewUrl=null;
+let wsDraft=null,wsAnalysis=null,wsToday='',wsBusy=false,wsDirty=false,wsPreviewUrl=null,wsPublishOptions=null,wsPublishOpener=null;
 function wsMessage(message){document.getElementById('wsMessage').textContent=message;}
+function wsIssue(boxId,title,reasons,focus=false){const box=document.getElementById(boxId);box.replaceChildren();box.hidden=!reasons.length;if(!reasons.length)return;
+  const heading=document.createElement('h4');heading.textContent=title;box.appendChild(heading);
+  const list=document.createElement('ul');for(const reason of reasons){const item=document.createElement('li');item.textContent=reason;list.appendChild(item);}box.appendChild(list);
+  if(focus){box.scrollIntoView({block:'center'});box.focus();}}
+function wsBlockingReasons(analysis,options,preview=false){const errors=[...(analysis?.errors||[])];
+  const reasons=preview?errors.filter(error=>!error.startsWith('Unusual price change')&&!error.startsWith('Unusual quantity change')):
+    errors.filter(error=>!options.confirm_suspicious||!error.startsWith('Unusual price change')&&!error.startsWith('Unusual quantity change'));
+  if(!analysis?.comparison_available)reasons.push('Enter at least one valid menu item before continuing.');
+  if(!preview){if(wsDraft?.warnings?.length)reasons.push(...wsDraft.warnings);
+    if(analysis?.overlaps?.length&&(!options.replace_version_id||analysis.overlaps.length!==1))reasons.push('Confirm the overlapping weekly menu replacement first.');
+    if(options.replace_version_id&&!analysis?.overlaps?.length)reasons.push('The overlapping weekly version changed. Reload before publishing.');}
+  return [...new Set(reasons)];}
+document.getElementById('wsPublishDialog').addEventListener('close',()=>{wsPublishOptions=null;const opener=wsPublishOpener;wsPublishOpener=null;if(opener?.isConnected)opener.focus();});
+document.getElementById('wsPublishDialog').addEventListener('cancel',event=>{if(wsBusy)event.preventDefault();});
 function wsOptions(){return {draft_id:wsDraft?.draft_id,revision:wsDraft?.revision,
   valid_from:document.getElementById('wsFrom').value,valid_until:document.getElementById('wsUntil').value,
   accept_undated:document.getElementById('wsUndated').checked,
@@ -153,7 +190,8 @@ function wsRenderAnalysis(){
     for(const item of changes[key]||[]){const line=document.createElement('p');const value=key.includes('quantity')?item.before.quantity+' → '+item.after.quantity:key==='section_changed'?item.before.category+' → '+item.after.category:item.before?wsPriceLabel(item.before.price_inr)+' → '+wsPriceLabel(item.after.price_inr):wsPriceLabel(item.price_inr);line.textContent=label+' · '+(item.after?.item||item.item)+' · '+value;box.appendChild(line);}
   }
   }
-  const warnings=document.getElementById('wsWarnings');warnings.hidden=!wsAnalysis.errors.length;warnings.textContent=wsAnalysis.errors.join(' ');
+  const warnings=document.getElementById('wsWarnings');warnings.hidden=true;warnings.textContent='';
+  wsIssue('wsValidation','Needs attention before publishing',wsBlockingReasons(wsAnalysis,wsOptions()));
   const extracted=document.getElementById('wsExtractedRows');extracted.replaceChildren();
   for(const row of wsAnalysis.rows){const line=document.createElement('div');line.className='ws-item';line.textContent=(row.item||'Item unclear')+' · '+(row.quantity||'Quantity not stated')+' · '+
     (row.price_inr===null||row.price_inr===undefined||row.price_inr===''?'Price unclear':'₹'+row.price_inr);extracted.appendChild(line);}
@@ -181,16 +219,34 @@ function wsRenderRows(){const body=document.getElementById('wsRows');body.replac
   });
 }
 function wsAddRow(){if(!wsDraft)return;wsDraft.rows.push({item:'',category:'vegetarian',quantity:'',price_inr:'',description:'',aliases:[]});wsDirty=true;wsRenderRows();}
-async function wsRefreshAnalysis(){if(!wsDraft||wsBusy)return;try{const result=await mrRequest('/admin/weekly-savoury/analyse','POST',wsOptions());wsAnalysis=result.analysis;document.getElementById('wsNoDate').hidden=!!(wsOptions().valid_from&&wsOptions().valid_until);wsRenderAnalysis();}catch(error){wsMessage(error.message);}}
+async function wsRefreshAnalysis(){if(!wsDraft||wsBusy)return;try{const result=await mrRequest('/admin/weekly-savoury/analyse','POST',wsOptions());wsAnalysis=result.analysis;document.getElementById('wsNoDate').hidden=!!(wsOptions().valid_from&&wsOptions().valid_until);wsRenderAnalysis();}catch(error){wsIssue('wsValidation','Needs attention before publishing',[error.message],true);}}
 async function wsSaveCorrections(){if(!wsDraft||wsBusy)return;wsBusy=true;const options=wsOptions();try{const result=await mrRequest('/admin/weekly-savoury/draft','PUT',{...options,rows:wsDraft.rows});wsDraft=result.draft;wsAnalysis=result.analysis;wsDirty=false;wsRenderReview(options);wsMessage('Corrections saved. Published menu unchanged.');}catch(error){wsMessage(error.message);}finally{wsBusy=false;}}
-async function wsPreview(){if(!wsDraft||wsBusy)return;if(wsDirty){wsMessage('Save corrections before previewing.');return;}try{const result=await mrRequest('/admin/weekly-savoury/preview','POST',{...wsOptions(),question:document.getElementById('wsQuestion').value});const box=document.getElementById('wsPreviewResult');box.textContent=result.label+(result.schedule_note?'\n'+result.schedule_note:'')+'\n\n'+result.answer;box.hidden=false;}catch(error){wsMessage(error.message);}}
-async function wsPublish(){if(!wsDraft||wsBusy)return;if(wsDirty){wsMessage('Save corrections before publishing.');return;}const options=wsOptions();
-  if(!wsAnalysis?.comparison_available){wsMessage('Enter valid menu items before publishing.');return;}
-  if(wsAnalysis?.overlaps?.length&&!options.replace_version_id){wsMessage('Confirm the overlapping menu replacement first.');return;}
-  if((wsAnalysis?.changes?.suspicious_price?.length||wsAnalysis?.changes?.suspicious_quantity?.length)&&!options.confirm_suspicious){wsMessage('Confirm the unusual change against the source first.');return;}
-  const action=options.valid_from&&options.valid_from>wsToday?'Schedule':'Update';
-  if(!confirm(action+' Weekly Savoury Menu?\n\n'+wsDraft.rows.length+' items · '+(wsAnalysis?.display_date_range||'7-day undated fallback')+'\nThe flyer and facts will use the same approved version.'))return;
-  wsBusy=true;try{await mrRequest('/admin/weekly-savoury/publish','POST',options);wsMessage(action==='Schedule'?'Weekly menu scheduled. It will become current automatically.':'Weekly menu updated.');await wsLoad();}catch(error){wsMessage(error.message);}finally{wsBusy=false;}}
+async function wsPreview(){if(!wsDraft||wsBusy)return;
+  if(wsDirty){wsIssue('wsPreviewError','Preview unavailable',['Save corrections before previewing.'],true);return;}
+  try{const options=wsOptions();const result=await mrRequest('/admin/weekly-savoury/analyse','POST',options);wsAnalysis=result.analysis;wsRenderAnalysis();
+    const reasons=wsBlockingReasons(wsAnalysis,options,true);if(reasons.length){wsIssue('wsPreviewError','Preview unavailable',reasons,true);return;}
+    const preview=await mrRequest('/admin/weekly-savoury/preview','POST',{...options,question:document.getElementById('wsQuestion').value});
+    wsIssue('wsPreviewError','Preview unavailable',[]);const box=document.getElementById('wsPreviewResult');box.textContent=preview.label+(preview.schedule_note?'\n'+preview.schedule_note:'')+'\n\n'+preview.answer;box.hidden=false;
+  }catch(error){wsIssue('wsPreviewError','Preview unavailable',[error.message],true);}}
+async function wsPublish(){if(!wsDraft||wsBusy)return;
+  if(wsDirty){wsIssue('wsPublishError','Menu was not updated',['Save corrections before publishing.'],true);return;}
+  const options=wsOptions();try{const result=await mrRequest('/admin/weekly-savoury/analyse','POST',options);wsAnalysis=result.analysis;wsRenderAnalysis();
+    const reasons=wsBlockingReasons(wsAnalysis,options);if(reasons.length){wsIssue('wsPublishError','Needs attention before publishing',reasons,true);return;}
+    wsIssue('wsPublishError','Needs attention before publishing',[]);wsPublishOptions=options;wsPublishOpener=document.getElementById('wsPublishButton');
+    const scheduled=!!(wsAnalysis.valid_from&&wsAnalysis.valid_from>wsToday);document.getElementById('wsPublishDialogTitle').textContent=scheduled?'Schedule Weekly Savoury Menu':'Update Weekly Savoury Menu';
+    document.getElementById('wsPublishSummary').textContent=wsAnalysis.rows.length+' items · '+(wsAnalysis.display_date_range||'7-day undated fallback');
+    document.getElementById('wsConfirmPublishButton').textContent=scheduled?'Schedule Menu':'Update Menu';
+    wsIssue('wsModalError','Menu was not updated',[]);document.getElementById('wsPublishDialog').showModal();document.getElementById('wsConfirmPublishButton').focus();
+  }catch(error){wsIssue('wsPublishError','Needs attention before publishing',[error.message],true);}}
+function wsCancelPublish(){if(!wsBusy)document.getElementById('wsPublishDialog').close();}
+async function wsConfirmPublish(){if(wsBusy||!wsPublishOptions||!document.getElementById('wsPublishDialog').open)return;
+  wsBusy=true;const button=document.getElementById('wsConfirmPublishButton');button.disabled=true;
+  const scheduled=!!(wsAnalysis.valid_from&&wsAnalysis.valid_from>wsToday);
+  try{await mrRequest('/admin/weekly-savoury/publish','POST',wsPublishOptions);document.getElementById('wsPublishDialog').close();
+    await wsLoad();wsShowTimeline(scheduled?'upcoming':'current');
+    const success=document.getElementById('wsSuccess');success.textContent=scheduled?'Weekly Savoury menu scheduled':'Weekly Savoury menu updated';success.hidden=false;success.scrollIntoView({block:'center'});
+  }catch(error){const reasons=[error.message,'Your currently published menu has not changed.'];wsIssue('wsModalError','Menu was not updated',reasons,true);wsIssue('wsPublishError','Menu was not updated',reasons);}
+  finally{wsBusy=false;button.disabled=false;}}
 async function wsReject(){if(wsBusy||!wsDraft||!confirm('Discard Weekly Savoury draft #'+wsDraft.draft_id+'? The published menu will not change.'))return;wsBusy=true;wsMessage('Discarding draft…');try{await mrRequest('/admin/weekly-savoury/reject','POST',{draft_id:wsDraft.draft_id,revision:wsDraft.revision});wsDraft=null;wsAnalysis=null;await wsLoad();wsMessage('Draft discarded.');}catch(error){wsMessage(error.message);}finally{wsBusy=false;}}
 async function wsRestore(version){if(!confirm('Restore previous weekly menu?\n\n'+(version.display_date_range||'Undated')+'\nIt will become a review draft, not live immediately.'))return;
   if(version.dates_expired&&!confirm('This menu has already expired. Confirm new valid dates before publishing it again. Continue to review?'))return;
