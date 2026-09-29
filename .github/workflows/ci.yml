@@ -74,6 +74,7 @@ jobs:
         run: >-
           python -m pytest -q
           tests/test_client_approved_only_policy.py
+          tests/test_phase2f_observability_operations.py
           tests/test_client_approved_qa.py
           tests/test_client_qa_acceptance.py
           tests/test_ordered_approved_response.py

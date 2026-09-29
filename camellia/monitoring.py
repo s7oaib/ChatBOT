@@ -1,16 +1,51 @@
 import logging
 import os
 import sys
+import json
+import re
+import time
+from collections import Counter, deque
+from datetime import datetime, timezone
+from threading import Lock
 
 from camellia.config import config
 
 _LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
 
+def sanitize_log_text(value: str) -> str:
+    """Defence in depth for common secret/PII shapes, not arbitrary prose."""
+    text = str(value)
+    for name in ("GROQ_API_KEY", "META_APP_SECRET", "META_VERIFY_TOKEN",
+                 "INSTAGRAM_ACCESS_TOKEN", "ADMIN_API_KEY", "ADMIN_PASSWORD_HASH"):
+        secret = getattr(config, name, None)
+        if secret:
+            text = text.replace(str(secret), "[REDACTED]")
+    text = re.sub(r"(?i)Bearer\s+[^\s,;'\"]+", "Bearer [REDACTED]", text)
+    text = re.sub(r"(?i)((?:password(?:_hash)?|api[_-]?key|access_token|session(?:_token)?|cookie|authorization)\s*['\"]?\s*[:=]\s*)[^\n,;]+", r"\1[REDACTED]", text)
+    text = re.sub(r"\b(?:gsk_|sk-)[A-Za-z0-9_-]+", "[REDACTED]", text)
+    text = re.sub(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", "[EMAIL]", text)
+    return re.sub(r"(?<!\w)\+?\d[\d ()-]{8,}\d(?!\w)", "[PHONE]", text)
+
+
+class SafeLogFilter(logging.Filter):
+    def filter(self, record):
+        record.msg = sanitize_log_text(record.getMessage())
+        record.args = ()
+        # Untrusted exception messages can contain payloads; retain class only.
+        if record.exc_info:
+            record.msg += " exception_class=" + record.exc_info[0].__name__
+            record.exc_info = None
+            record.exc_text = None
+        return True
+
+
 def get_logger(name: str) -> logging.Logger:
     """Returns a configured logger. Replaces bare print() so a real log
     aggregator (or `docker compose logs`) can filter by severity."""
     logger = logging.getLogger(name)
+    if not any(isinstance(item, SafeLogFilter) for item in logger.filters):
+        logger.addFilter(SafeLogFilter())
     if not logging.getLogger().handlers:
         logging.basicConfig(
             level=getattr(logging, _LEVEL, logging.INFO),
@@ -23,6 +58,46 @@ def get_logger(name: str) -> logging.Logger:
 
 
 log = get_logger("camellia")
+
+
+class ProviderEvents:
+    """Bounded diagnostics scoped explicitly to this process lifetime."""
+    def __init__(self):
+        self._events = deque(maxlen=50)
+        self._counts = Counter()
+        self._lock = Lock()
+        self.started_at = datetime.now(timezone.utc).isoformat()
+
+    def record(self, operation, outcome, started, *, fallback=False):
+        if operation not in {"answer", "refinement", "structured", "menu_extraction"}:
+            operation = "structured"
+        if outcome not in {"success", "timeout", "rate_limited", "auth_config_failure",
+                           "unavailable", "invalid_response", "validation_failure", "refused"}:
+            outcome = "unavailable"
+        event = {"timestamp": datetime.now(timezone.utc).isoformat(),
+                 "operation": operation, "outcome": outcome,
+                 "latency_ms": round(max(0, time.monotonic() - started) * 1000, 1),
+                 "fallback_used": bool(fallback)}
+        with self._lock:
+            self._events.append(event)
+            self._counts[outcome] += 1
+        log.info("groq.%s %s", outcome, json.dumps(event, sort_keys=True))
+
+    def snapshot(self):
+        with self._lock:
+            return {"scope": "since_process_start", "started_at": self.started_at,
+                    "counts": dict(self._counts), "recent": list(self._events)}
+
+
+def provider_http_outcome(status):
+    if status == 429:
+        return "rate_limited"
+    if status in {400, 401, 403, 404}:
+        return "auth_config_failure"
+    return "unavailable"
+
+
+provider_events = ProviderEvents()
 
 
 def classify_instagram_delivery(

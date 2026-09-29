@@ -2884,14 +2884,57 @@ def instagram_token_status(force: bool = False) -> Dict[str, Any]:
     if result["state"] == "invalid":
         log.error(
             "Instagram access token rejected by Meta (%s). Replies cannot be "
-            "delivered until INSTAGRAM_ACCESS_TOKEN is renewed: %s",
-            result.get("meta_code"), result.get("detail"),
+            "delivered until INSTAGRAM_ACCESS_TOKEN is renewed.",
+            result.get("meta_code"),
         )
     return {**result, "checked_seconds_ago": 0.0}
 
 
 @app.get("/health")
 def health_check():
+    """Public readiness contract: no paths, identities, or provider messages."""
+    try:
+        response = _health_details()
+        data = json.loads(response.body)
+    except Exception as exc:
+        log.error("health.not_ready exception_class=%s", type(exc).__name__)
+        return JSONResponse({"status": "not_ready", "database": "unavailable",
+                             "warnings": ["Critical readiness check failed"]}, status_code=503)
+    data["database"] = "available"
+    safe_warnings = []
+    for warning in data.get("warnings", []):
+        if warning.startswith("Database is at"):
+            safe_warnings.append("Database is at a non-durable location inside the container; storage needs review.")
+        elif warning.startswith("Menu is at"):
+            safe_warnings.append("Menu is at a non-durable location; review storage.")
+        elif warning.startswith("Instagram outbound auth") or warning.startswith("Instagram access token"):
+            safe_warnings.append("Instagram access token is rejected or misconfigured; see authenticated operations.")
+        else:
+            safe_warnings.append(warning)
+    data["warnings"] = safe_warnings
+    data["answering"].pop("qa_templates_path", None)
+    data["answering"].pop("menu_json_path", None)
+    data["answering"]["problems"] = [problem.split(" from ", 1)[0] for problem in data["answering"].get("problems", [])]
+    # Details belong to the authenticated operations view, not uptime probes.
+    for part in data.get("storage", {}).values():
+        if isinstance(part, dict):
+            part.pop("path", None)
+    data["instagram_token"] = {key: value for key, value in data.get("instagram_token", {}).items()
+                               if key in {"state", "checked_seconds_ago"}}
+    seed = data["answering"].get("template_seed") or {}
+    data["answering"]["template_seed"] = {key: value for key, value in seed.items()
+                                           if isinstance(value, (bool, int)) or key == "home_table_required_templates_missing"}
+    # Successful readiness remains HTTP 200 during optional provider outages.
+    if not data["answering"].get("ready"):
+        data["status"] = "not_ready"
+    elif data.get("ai", {}).get("enabled") and data.get("ai", {}).get("last_call_ok") is False:
+        data["status"] = "degraded"
+    # Raw last-call detail is intentionally not a public provider diagnostic.
+    data.get("ai", {}).pop("last_call", None)
+    return JSONResponse(data, status_code=response.status_code)
+
+
+def _health_details():
     """Deep health check. Point an uptime monitor at this, not at /."""
     outbound = delivery_monitor.snapshot()
     answering = _answering_capability()
@@ -3016,7 +3059,9 @@ def health_check():
                 "simulation_enabled": config.LLM_AUTO_RESOLVE_SIMULATION_ENABLED,
                 "actual_enabled": bool(config.LLM_AUTO_RESOLVE_ENABLED and db.get_auto_resolve_settings().get("kill_switch", True)),
                 "min_confidence": config.LLM_AUTO_RESOLVE_MIN_CONFIDENCE,
-                "readiness": db.auto_resolve_evaluation().get("readiness_status", "NOT READY"),
+                # Full historical evaluation remains on its authenticated
+                # endpoint; uptime polling must not materialize every decision.
+                "readiness": "ADMIN_EVALUATION_REQUIRED",
             },
             "language_understanding": {
                 "structured_nlu_enabled": config.STRUCTURED_NLU_ENABLED,
@@ -5592,43 +5637,39 @@ def create_db_backup(
     x_admin_pin: Optional[str] = Header(None),
 ):
     """
-    Snapshots the live SQLite file next to itself before a schema migration
-    runs — every prior schema change in this project (routing tables, the
-    Topic/Menu catalogue, router/triage shadow) landed via additive
-    `_ensure_column` calls with no separate backup step, but a client asked
-    for one explicitly ahead of the Custom Q&A migration, so this exists to
-    make that step actually possible from here (nothing in this repo can
-    reach the Railway volume directly). Checkpoints WAL first so the copy is
-    consistent, not just a copy of the base file with pending writes still
-    sitting in a -wal sidecar.
+    Creates a verified SQLite online snapshot beside the source, including
+    committed WAL writes without checkpointing or overwriting live state.
+    Does not restore, delete older backups, or copy anything off-host.
     """
     require_admin(x_admin_key, x_admin_pin)
-    import shutil
-    import sqlite3
-
-    src_path = db.db_path
-    if not os.path.exists(src_path):
-        raise HTTPException(status_code=404, detail=f"No database file at {src_path}")
-
+    from camellia.operations import backup_database
     try:
-        with sqlite3.connect(src_path) as conn:
-            conn.execute("PRAGMA wal_checkpoint(FULL);")
-    except Exception as e:
-        log.warning("WAL checkpoint before backup failed (continuing anyway): %s", e)
+        result = backup_database(db.db_path)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Database unavailable")
+    except Exception as exc:
+        log.error("database.backup.failed exception_class=%s", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Backup could not be verified; live database unchanged")
+    log.info("database.backup.verified size_bytes=%s", result["size_bytes"])
+    return result
 
-    stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-    backup_path = f"{src_path}.backup-{stamp}"
-    shutil.copy2(src_path, backup_path)
-    size_bytes = os.path.getsize(backup_path)
-    integrity_check = "unknown"
+
+@app.get("/admin/operations")
+def admin_operations(x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    """Authenticated read-only diagnostics, bounded to recent existing records."""
+    require_admin(x_admin_key, x_admin_pin)
+    from camellia.operations import database_summary, backup_visibility
+    from camellia.monitoring import provider_events
     try:
-        with sqlite3.connect(backup_path) as verify_conn:
-            integrity_check = str(verify_conn.execute("PRAGMA integrity_check;").fetchone()[0])
-    except Exception as e:
-        log.warning("Database backup integrity check failed: %s", e)
-        integrity_check = f"error:{type(e).__name__}"
-    log.info("Database backed up to %s (%d bytes)", backup_path, size_bytes)
-    return {"status": "backed_up", "backup_path": backup_path, "size_bytes": size_bytes, "source_path": src_path, "integrity_check": integrity_check, "verified": integrity_check.lower() == "ok" and size_bytes > 0}
+        summary = database_summary(db)
+    except Exception as exc:
+        log.error("operations.database.unavailable exception_class=%s", type(exc).__name__)
+        summary = {"database": "unavailable", "scope": "unknown"}
+    summary.update({"provider": provider_events.snapshot(), "groq": ai_responder.status(),
+                    "backup": backup_visibility(db.db_path), "whatsapp": "HUMAN ONLY",
+                    "retention": {"configured_days": config.DATA_RETENTION_DAYS,
+                                  "other_history": "RETENTION_POLICY_UNDEFINED"}})
+    return summary
 
 @app.get("/admin/knowledge-gaps")
 def get_knowledge_gaps(
@@ -8768,12 +8809,34 @@ THIS WEEK'S BENGAL SPECIALS
                 const safe = [
                     ['App health', label],
                     ['Answering', data.answering?.ready ? 'Ready' : 'Needs attention'],
-                    ['Durable storage', data.storage?.database?.expected_durable ? 'Durable' : 'Check volume'],
+                    ['Durable storage', data.storage?.database?.expected_durable ? 'Expected durable — verify volume' : 'Check volume'],
                     ['Instagram delivery', data.reply_delivery?.mode || (data.outbound_delivery?.healthy ? 'Available' : 'Needs attention')],
                     ['Webhook signatures', data.webhook_signature || 'Unknown'],
                     ['Auth readiness', data.admin_auth?.password_configured && data.admin_auth?.https_required !== false ? 'Ready' : 'Needs attention'],
                     ['Failure counters', data.instagram_outbound?.failures_last_24h ?? data.outbound_delivery?.failures_last_24h ?? 0],
                 ];
+                const opsResponse = await fetch('/admin/operations', { headers: getAuthHeaders(), cache: 'no-store' });
+                if (opsResponse.ok) {
+                    const ops = await opsResponse.json();
+                    safe.push(['Database', ops.database || 'Unknown'],
+                        ['WhatsApp', ops.whatsapp || 'Unknown'],
+                        ['Groq', ops.groq?.enabled ? (ops.groq.working === false ? 'Recent failure — deterministic routes remain available' : ops.groq.working === true ? 'Last call succeeded' : 'Configured; not yet checked') : 'Disabled'],
+                        ['Recent answer paths', JSON.stringify(ops.answer_paths || {})],
+                        ['Recent decision lanes', JSON.stringify(ops.response_lanes || {})],
+                        ['Response sample', ops.scope || 'Unknown'],
+                        ['Handoff lifecycle (sample)', JSON.stringify(ops.handoffs || {})],
+                        ['Candidate status (sample)', JSON.stringify(ops.candidates || {})],
+                        ['Unsupported (sample)', ops.unsupported ?? 'Unknown'],
+                        ['Menu review status', (ops.menu_reviews || []).map(m => `${m.menu_key}: ${m.status}${m.extraction_failed ? ' — extraction failed; publication unchanged' : ''}`).join('; ') || 'No pending reviews'],
+                        ['Recent menu version metadata', (ops.menu_versions || []).slice(0,10).map(m => `${m.name || m.menu_key} v${m.id} — ${m.lifecycle_window_status} — ${formatAdminTimestamp(m.changed_at)} — ${m.valid_from || ''}–${m.valid_until || ''}`).join('; ') || 'No reviewed versions in recent sample'],
+                        ['Current menu authority', ops.menu_authority || 'Unknown — see Menu workspace'],
+                        ['Provider outcomes since process start', JSON.stringify(ops.provider?.counts || {})],
+                        ['Last local backup', ops.backup?.last_modified ? `${formatAdminTimestamp(ops.backup.last_modified)} — unverified artifact` : 'Unknown'],
+                        ['Off-host backup / schedule', 'Unknown'],
+                        ['Other history retention', ops.retention?.other_history || 'Unknown']);
+                } else {
+                    safe.push(['Authenticated operations', 'Unavailable']);
+                }
                 if (data.web_push) safe.push(['Web Push', data.web_push.status || data.web_push.ready || 'Not configured']);
                 if (indicators) indicators.innerHTML = safe.map(([name, value]) => `<div class="health-indicator"><span class="health-indicator-label">${escapeHtml(name)}</span><span class="health-indicator-value">${escapeHtml(value)}</span></div>`).join('');
             } catch (error) {

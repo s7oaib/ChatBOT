@@ -326,7 +326,11 @@ class AIResponder:
         reply — the router runs on every message and needs its own token
         budget, since rate limits on Groq are per model.
         """
+        from camellia.monitoring import provider_events, provider_http_outcome
+        started = time.monotonic()
+        operation = "refinement" if is_refinement else "structured" if model or response_format else "answer"
         if not config.GROQ_API_KEY:
+            provider_events.record(operation, "auth_config_failure", started, fallback=True)
             return "", False, "groq_no_key"
 
         payload: Dict[str, Any] = {
@@ -413,17 +417,25 @@ class AIResponder:
                     if not on_side_model:
                         self._record_call(False, f"HTTP {resp.status_code}: provider_error")
                     if strict_json_failure:
+                        provider_events.record(operation, "validation_failure", started, fallback=True)
                         return "", False, "groq_json_validate_failed"
+                    provider_events.record(operation, provider_http_outcome(resp.status_code), started, fallback=True)
                     return "", False, f"groq_http_{resp.status_code}"
 
                 data = resp.json()
                 choices = data.get("choices", [])
                 if not choices:
+                    if not on_side_model:
+                        self._record_call(False, "invalid_response")
+                    provider_events.record(operation, "invalid_response", started, fallback=True)
                     return "", False, "groq_no_choices"
 
                 assistant_text = choices[0].get("message", {}).get("content", "").strip()
 
                 if "OUT_OF_CONTEXT" in assistant_text.upper() or not assistant_text:
+                    if not assistant_text and not on_side_model:
+                        self._record_call(False, "invalid_response")
+                    provider_events.record(operation, "refused" if assistant_text else "invalid_response", started, fallback=True)
                     fallback = self.qa_data.get("escalation_triggers", {}).get(
                         "fallback_response",
                         "Thanks for reaching out! I can only help with questions about Camellia Artisanal menu, prices, and delivery. Let me connect you with our team. 🙏"
@@ -432,9 +444,13 @@ class AIResponder:
 
                 if not on_side_model:
                     self._record_call(True, "ok")
+                provider_events.record(operation, "success", started)
                 return assistant_text, True, "groq_rag"
 
         except Exception as e:
+            provider_events.record(operation, "timeout" if isinstance(e, httpx.TimeoutException) else
+                                   "validation_failure" if isinstance(e, (ValueError, TypeError, AttributeError)) else
+                                   "unavailable", started, fallback=True)
             if not on_side_model:
                 self._groq_cooldown_until = time.time() + TRANSIENT_COOLDOWN_SECONDS
                 self._record_call(False, f"exception_class={type(e).__name__}")

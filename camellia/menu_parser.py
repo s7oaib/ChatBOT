@@ -378,6 +378,8 @@ class MenuParser:
         last_reason = "Groq vision parsing did not return items."
         last_code = "PROVIDER_UNEXPECTED_ERROR"
         for attempt in range(1, _VISION_MAX_ATTEMPTS + 1):
+            from camellia.monitoring import provider_events, provider_http_outcome
+            started = time.monotonic()
             # The final attempt drops strict JSON mode and parses the object
             # out of whatever comes back. When the model keeps tripping the
             # schema validator it is usually still producing readable JSON,
@@ -397,6 +399,7 @@ class MenuParser:
                     except (ValueError, KeyError, IndexError, TypeError):
                         data = None
                     if data is None:
+                        provider_events.record("menu_extraction", "validation_failure", started, fallback=True)
                         last_reason = "Vision model returned no readable JSON."
                         last_code = "INVALID_JSON"
                         backoff = _VISION_RETRY_BACKOFF_SECONDS
@@ -411,8 +414,12 @@ class MenuParser:
                                 attempt, _VISION_MAX_ATTEMPTS,
                                 " (without strict JSON mode)" if lenient else "",
                             )
-                        return self._apply_extracted_data_to_menu(data, provider_contract=True)
+                        result = self._apply_extracted_data_to_menu(data, provider_contract=True)
+                        valid = result.get("status") == "success" and not result.get("diagnostic_codes")
+                        provider_events.record("menu_extraction", "success" if valid else "validation_failure", started, fallback=not valid)
+                        return result
                 else:
+                    provider_events.record("menu_extraction", provider_http_outcome(resp.status_code), started, fallback=True)
                     body = resp.text or ""
                     # Say which of the two it was. "Could not read the flyer"
                     # sends the operator hunting for a clearer photo; a spent
@@ -435,11 +442,13 @@ class MenuParser:
                                 "diagnostic_codes": [last_code]}
                     backoff = _vision_backoff_seconds(resp, resp.status_code)
             except httpx.TimeoutException:
+                provider_events.record("menu_extraction", "timeout", started, fallback=True)
                 last_reason = "Vision model request timed out."
                 last_code = "PROVIDER_TIMEOUT"
                 backoff = _VISION_RETRY_BACKOFF_SECONDS
                 log.warning("Groq vision attempt %d/%d timed out.", attempt, _VISION_MAX_ATTEMPTS)
             except Exception as e:
+                provider_events.record("menu_extraction", "unavailable", started, fallback=True)
                 last_reason = "Vision model request failed."
                 last_code = "PROVIDER_UNEXPECTED_ERROR"
                 backoff = _VISION_RETRY_BACKOFF_SECONDS

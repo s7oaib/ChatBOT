@@ -2538,6 +2538,7 @@ class DeterministicResponder:
         channel = channel or "default_channel"
 
         started = time.perf_counter()
+        session_memory.get_facts(user_id, channel).pop("operational_answer_path", None)
         try:
             response_text, was_matched, template_id, image_url = self._resolve_response(
                 user_message, user_id, channel, referral_source, referral_ad_id, referral_ad_title
@@ -2639,6 +2640,12 @@ class DeterministicResponder:
                 audit_facts.get("knowledge_sufficient") is False
                 or (not was_matched and template_id is None)
             )
+            answer_path = audit_facts.get("operational_answer_path")
+            if not answer_path:
+                answer_path = "DYNAMIC_APPROVED_MENU" if audit_facts.get("last_route_source") == "APPROVED_MENU" else "DETERMINISTIC"
+            if not was_matched:
+                answer_path = "HANDOFF"
+            audit_actions = actions + ["OBSERVABILITY_PATH:" + answer_path]
             db.log_message_route(
                 user_id=user_id,
                 channel=channel,
@@ -2648,7 +2655,7 @@ class DeterministicResponder:
                 entities=audit_facts.get("last_entities") or {},
                 confidence=audit_facts.get("last_nlu_confidence"),
                 knowledge_ids=audit_facts.get("last_knowledge_ids") or [],
-                actions=actions,
+                actions=audit_actions,
                 llm_called=bool(audit_facts.get("last_llm_called")),
                 fallback_used=bool(audit_facts.get("last_fallback_used")),
                 grounding_result=audit_facts.get("last_grounding"),
@@ -2663,12 +2670,11 @@ class DeterministicResponder:
                 handoff_reason=audit_facts["route_trace"].get("handoff_reason"),
             )
             log.info(
-                "MESSAGE_ROUTE route=%s source=%s intents=%s entities=%s knowledge=%s actions=%s "
+                "response.selected path=%s route=%s source=%s intents=%s knowledge=%s actions=%s "
                 "llm=%s fallback=%s grounding=%s gap=%s escalation=%s",
-                template_id,
+                answer_path, template_id,
                 audit_facts.get("last_route_source"),
                 audit_facts.get("last_intents") or [],
-                audit_facts.get("last_entities") or {},
                 audit_facts.get("last_knowledge_ids") or [],
                 actions,
                 bool(audit_facts.get("last_llm_called")),
@@ -5564,6 +5570,7 @@ class DeterministicResponder:
                     final_customer_response=response_text,
                 )
                 session_memory.add_turn(user_id, channel, user_message, response_text)
+                facts["operational_answer_path"] = "CONTROLLED_RAG"
                 return response_text, True, rag_res.proposed_intent, image_url
         except Exception as e:
             log.error("RAG retrieval error: %s", e)
@@ -5651,6 +5658,7 @@ class DeterministicResponder:
                             final_customer_response=ai_resp,
                         )
                         session_memory.add_turn(user_id, channel, user_message, ai_resp)
+                        facts["operational_answer_path"] = "CONTROLLED_RAG"
                         return ai_resp, True, "groq_grounded_answer", None
                     log.warning(
                         "Discarded a Groq answer for message_hash=%s: it stated a number "

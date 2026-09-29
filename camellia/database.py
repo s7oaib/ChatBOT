@@ -3745,6 +3745,8 @@ class Database:
                 (status, handoff_ref),
             )
             conn.commit()
+        from camellia.monitoring import get_logger
+        get_logger("camellia.database").info("handoff.status_updated status=%s", status)
 
     def resume_handoff(self, handoff_ref: str) -> Optional[Dict[str, Any]]:
         """Close the waiting gate through an explicit operator action."""
@@ -3767,6 +3769,8 @@ class Database:
                 "SELECT * FROM cross_channel_handoffs WHERE handoff_ref = ?",
                 (handoff_ref,),
             ).fetchone()
+            from camellia.monitoring import get_logger
+            get_logger("camellia.database").info("handoff.resumed")
             return dict(updated)
 
     def get_handoffs(self, limit: int = 50, status: Optional[str] = None) -> List[Dict[str, Any]]:

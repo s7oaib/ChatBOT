@@ -59,6 +59,10 @@ def _dump(value):
 def _audit(conn, draft, action, actor, details=None):
     conn.execute("INSERT INTO menu_review_audit(draft_id,menu_key,action,actor,details_json) VALUES(?,?,?,?,?)",
                  (draft["draft_id"], draft["menu_key"], action, actor, _dump(details or {})))
+    from camellia.monitoring import get_logger
+    # Transaction attempts are not claims of committed publication. Durable
+    # menu_review_audit remains the source of truth after transaction commit.
+    get_logger("camellia.menu_review").info("menu.review.audit_attempt action=%s", action)
 
 
 def _store(conn, draft, actor):

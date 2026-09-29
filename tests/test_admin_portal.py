@@ -330,7 +330,7 @@ def test_health_fails_when_no_templates_are_loaded():
         resp = client.get("/health")
         assert resp.status_code == 503, "A bot with no templates must not report healthy"
         body = resp.json()
-        assert body["status"] == "degraded"
+        assert body["status"] == "not_ready"
         assert body["answering"]["ready"] is False
         assert any("template" in p.lower() for p in body["answering"]["problems"])
     finally:
