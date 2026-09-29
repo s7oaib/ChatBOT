@@ -8,7 +8,7 @@ from fastapi import APIRouter, Body, Depends, File, Header, HTTPException, Query
 from fastapi.responses import FileResponse
 from starlette.concurrency import run_in_threadpool
 
-from camellia import menu_dates, menu_review, weekly_savoury
+from camellia import menu_catalogue, menu_dates, menu_review, weekly_savoury
 
 router = APIRouter(prefix="/admin/menu-manager/menus/{menu_key}/review")
 
@@ -106,6 +106,33 @@ def restore_review(menu_key: str, version_id: int, actor=Depends(reviewer)):
 
 
 weekly_router = APIRouter(prefix="/admin/weekly-savoury")
+
+
+# Customer-message topics are operator-managed routing labels. They remain
+# separate from Admin categories and map to one of the responder's existing
+# semantic routing families; no arbitrary second intent router is created.
+@weekly_router.get("/customer-topics")
+def customer_topics(actor=Depends(reviewer)):
+    return {"topics": call(menu_catalogue.list_customer_topics),
+            "routing_keys": [{"value": key, "label": menu_catalogue._CORE_TOPIC_LABELS[key]}
+                             for key in menu_catalogue.CUSTOMER_TOPICS]}
+
+
+@weekly_router.post("/customer-topics")
+def create_customer_topic(body: dict = Body(...), actor=Depends(reviewer)):
+    return {"topic": call(menu_catalogue.create_customer_topic,
+                          body.get("name"), body.get("routing_key"))}
+
+
+@weekly_router.patch("/customer-topics/{topic_id}")
+def update_customer_topic(topic_id: str, body: dict = Body(...), actor=Depends(reviewer)):
+    return {"topic": call(menu_catalogue.update_customer_topic,
+                          topic_id, body.get("name"), body.get("routing_key"))}
+
+
+@weekly_router.delete("/customer-topics/{topic_id}")
+def delete_customer_topic(topic_id: str, actor=Depends(reviewer)):
+    return call(menu_catalogue.delete_customer_topic, topic_id)
 
 
 def _weekly_view():
@@ -314,13 +341,17 @@ REVIEW_HTML = r'''
   #menuReviewPanel .mr-menu-form{display:grid;gap:16px}
   #menuReviewPanel .mr-menu-form-field{display:grid;gap:6px}
   #menuReviewPanel .mr-menu-form-field .field-control{margin:0}
+  #menuReviewPanel .mr-inline-control{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:end}
+  #menuReviewPanel .mr-inline-control .btn-secondary{min-height:44px;white-space:nowrap}
   #menuReviewPanel .mr-menu-form-help{margin:0;color:var(--text-muted);font-size:.9rem}
-  #menuReviewPanel .mr-topic-help{padding:10px 12px;background:#f7f4f0;border-left:3px solid var(--primary);border-radius:6px}
   #menuReviewPanel .mr-menu-file-box{padding:14px;border:1px solid var(--border);border-radius:8px;background:#fcfaf7}
   #menuReviewPanel .mr-menu-file-actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
   #menuReviewPanel .mr-menu-file-status{margin:8px 0 0;color:var(--text-muted);overflow-wrap:anywhere}
+  #menuReviewPanel .mr-topic-list{display:grid;gap:10px;margin:12px 0}
+  #menuReviewPanel .mr-topic-row{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:8px;align-items:center;padding:10px;border:1px solid var(--border);border-radius:8px}
+  #menuReviewPanel .mr-topic-row small{display:block;color:var(--text-muted)}
   @media(max-width:600px){#menuReviewPanel .mr-current-row{grid-template-columns:minmax(0,1fr) 65px 65px;font-size:.9rem}#menuReviewPanel .mr-review-table{overflow:visible}#menuReviewPanel .mr-review-table thead{display:none}#menuReviewPanel .mr-review-table tr{display:block;border:1px solid var(--border);border-radius:10px;padding:10px;margin-bottom:12px}#menuReviewPanel .mr-review-table td{display:block;border:0;padding:6px}#menuReviewPanel .mr-review-table td:before{content:attr(data-label);display:block;font-size:.75rem;color:var(--text-muted)}#menuReviewPanel .mr-review-table input,#menuReviewPanel .mr-review-table select{width:100%!important}}
-  @media(max-width:600px){#menuReviewPanel .mr-card{grid-template-columns:minmax(0,1fr);gap:9px}#menuReviewPanel .mr-card-image{width:100%;max-width:360px;aspect-ratio:16/10}#menuReviewPanel .mr-card-actions{gap:8px}#menuReviewPanel .mr-menu-actions{max-width:100%}}
+  @media(max-width:600px){#menuReviewPanel .mr-card{grid-template-columns:minmax(0,1fr);gap:9px}#menuReviewPanel .mr-card-image{width:100%;max-width:360px;aspect-ratio:16/10}#menuReviewPanel .mr-card-actions{gap:8px}#menuReviewPanel .mr-menu-actions{max-width:100%}#menuReviewPanel .mr-inline-control{grid-template-columns:1fr}#menuReviewPanel .mr-topic-row{grid-template-columns:1fr auto auto}}
 </style>
 <section id="menuReviewPanel" aria-labelledby="menuReviewHeading">
   <select id="mrMenu" hidden aria-hidden="true"></select>
@@ -381,13 +412,19 @@ REVIEW_HTML = r'''
   <dialog id="mrCategoryDialog" aria-labelledby="mrCategoryHeading"><h3 id="mrCategoryHeading">Manage categories</h3><label for="mrCategoryChoice">Category</label><select id="mrCategoryChoice" class="field-control"></select>
     <div class="mr-card-actions"><button type="button" class="btn-secondary" onclick="mrCategoryAction('add')">+ Add category</button><button type="button" class="btn-secondary" onclick="mrCategoryAction('edit')">Edit</button><button type="button" class="btn-secondary" onclick="mrCategoryAction('delete')">Delete</button></div>
     <div class="mr-dialog-actions"><button type="button" class="btn-secondary" onclick="document.getElementById('mrCategoryDialog').close()">Done</button></div></dialog>
+  <dialog id="mrTopicDialog" aria-labelledby="mrTopicHeading"><h3 id="mrTopicHeading">Manage customer message topics</h3>
+    <div id="mrTopicList" class="mr-topic-list"></div>
+    <div class="mr-dialog-actions"><button type="button" class="btn-secondary" onclick="mrTopicEdit()">+ Add topic</button><button type="button" class="btn-secondary" onclick="document.getElementById('mrTopicDialog').close()">Done</button></div></dialog>
+  <dialog id="mrTopicEditDialog" aria-labelledby="mrTopicEditHeading"><h3 id="mrTopicEditHeading">Add customer message topic</h3>
+    <form id="mrTopicEditForm" onsubmit="mrSaveTopic(event)"><label for="mrTopicName">Topic name</label><input id="mrTopicName" class="field-control" maxlength="100" required>
+      <label for="mrTopicRoute">Routes customer enquiries as</label><select id="mrTopicRoute" class="field-control" required></select>
+      <p id="mrTopicEditError" role="alert"></p><div class="mr-dialog-actions"><button type="button" class="btn-secondary" onclick="document.getElementById('mrTopicEditDialog').close()">Cancel</button><button type="submit" class="btn-primary">Save Topic</button></div></form></dialog>
   <dialog id="mrMenuDialog" aria-labelledby="mrMenuDialogTitle">
     <h3 id="mrMenuDialogTitle">Add New Menu</h3>
     <form id="mrMenuForm" class="mr-menu-form" onsubmit="mrSaveMenu(event)">
       <div class="mr-menu-form-field"><label for="mrMenuName">Menu name *</label><input id="mrMenuName" class="field-control" maxlength="120" required></div>
-      <div class="mr-menu-form-field"><label for="mrMenuCategory">Category *</label><select id="mrMenuCategory" class="field-control" required></select></div>
-      <div class="mr-menu-form-field"><label for="mrMenuTopic">Customer message topic</label><select id="mrMenuTopic" class="field-control" onchange="mrRefreshPosition()"></select>
-        <p id="mrMenuTopicHelp" class="mr-menu-form-help mr-topic-help">A menu without a topic is not linked to customer enquiries. This link does not approve menu facts.</p></div>
+      <div class="mr-menu-form-field"><label for="mrMenuCategory">Category *</label><div class="mr-inline-control"><select id="mrMenuCategory" class="field-control" required></select><button type="button" class="btn-secondary" onclick="mrManageCategories()">Manage</button></div></div>
+      <div class="mr-menu-form-field"><label for="mrMenuTopic">Customer message topic</label><div class="mr-inline-control"><select id="mrMenuTopic" class="field-control" onchange="mrRefreshPosition()"></select><button type="button" class="btn-secondary" onclick="mrManageTopics()">Manage</button></div></div>
       <div class="mr-menu-form-field"><label for="mrMenuPosition">Reply position in this topic</label><select id="mrMenuPosition" class="field-control" aria-describedby="mrMenuPositionHelp"></select>
         <p id="mrMenuPositionHelp" class="mr-menu-form-help">Choose a customer message topic to set reply order.</p></div>
       <div class="mr-menu-form-field"><label for="mrMenuDescription">Description *</label><textarea id="mrMenuDescription" class="field-control" maxlength="1000" required></textarea></div>
@@ -412,7 +449,7 @@ REVIEW_HTML = r'''
 
 REVIEW_SCRIPT = r'''
 <script>
-let mrDraft=null, mrCategories=[], mrMenuCategories=[], mrCustomerTopics=[], mrAllMenus=[], mrCatalogue=[], mrWorkspaceRows=[], mrPreviewUrl=null, mrBusy=false, mrEditingId=null, mrInput='file', mrChosenFile=null, mrPreviewOpener=null;
+let mrDraft=null, mrCategories=[], mrMenuCategories=[], mrCustomerTopics=[], mrTopicRoutes=[], mrAllMenus=[], mrCatalogue=[], mrWorkspaceRows=[], mrPreviewUrl=null, mrBusy=false, mrEditingId=null, mrInput='file', mrChosenFile=null, mrPreviewOpener=null, mrEditingTopicId=null;
 function mrBase(){return '/admin/menu-manager/menus/'+encodeURIComponent(document.getElementById('mrMenu').value)+'/review';}
 function mrMessage(value){document.getElementById('mrMessage').textContent=value;}
 function mrWarningLabel(value){const text=String(value||'');if(/price/i.test(text))return 'Missing or unclear price';if(/quantity/i.test(text))return 'Check quantity against the source';if(/category|section/i.test(text))return 'Unknown section — choose a section';if(/duplicate|alias/i.test(text))return 'Check duplicate names or aliases';if(/read this menu|extraction|provider/i.test(text))return 'We could not read this source reliably. Please review or retry.';return 'Review required — check against the source';}
@@ -427,168 +464,63 @@ let mrHistoryPreviewUrl=null;
 async function mrPreviewVersionSource(key,id,opener){try{const response=await fetch('/admin/menu-manager/menus/'+encodeURIComponent(key)+'/review/versions/'+id+'/source',{headers:getAuthHeaders()});if(!response.ok)throw Error('Source preview unavailable');const blob=await response.blob();if(mrHistoryPreviewUrl)URL.revokeObjectURL(mrHistoryPreviewUrl);mrHistoryPreviewUrl=URL.createObjectURL(blob);mrPreviewMenuImage({name:'Approved version '+id,image_url:mrHistoryPreviewUrl},opener);}catch(error){mrMessage(error.message);}}
 document.getElementById('mrImageDialog').addEventListener('close',()=>{if(mrHistoryPreviewUrl){URL.revokeObjectURL(mrHistoryPreviewUrl);mrHistoryPreviewUrl=null;}const opener=mrPreviewOpener;mrPreviewOpener=null;if(opener?.isConnected)opener.focus();});
 async function mrRequest(path,method='GET',body){const options={method,headers:getAuthHeaders()};if(body instanceof FormData){options.body=body;}else if(body!==undefined){options.headers={...options.headers,'Content-Type':'application/json'};options.body=JSON.stringify(body);}const response=await fetch(path,options);let data={};try{data=await response.json();}catch(_){data={};}if(!response.ok){const detail=typeof data.detail==='string'?data.detail:'';const safe=response.status<500&&detail.length<500&&!/traceback|sqlite|groq|authorization|api.key|exception|\/app\//i.test(detail);const error=Error(safe&&detail?detail:'Request could not be completed. Refresh the current state before trying again.');error.status=response.status;throw error;}return data;}
+function mrTopicName(topicId){return (mrCustomerTopics.find(topic=>topic.topic_id===topicId)?.name)||String(topicId||'').replaceAll('_',' ');}
+function mrTopicPositionLabel(menu){if(!menu?.customer_topic)return '';const group=mrAllMenus.filter(item=>item.customer_topic===menu.customer_topic).sort((a,b)=>(a.display_order||100)-(b.display_order||100)||a.menu_id.localeCompare(b.menu_id));const index=group.findIndex(item=>item.menu_id===menu.menu_id);if(index<=0)return 'First';if(index===group.length-1)return 'Last';return 'Middle';}
+async function mrLoadTopics(){const data=await mrRequest('/admin/weekly-savoury/customer-topics');mrCustomerTopics=data.topics||[];mrTopicRoutes=data.routing_keys||[];return data;}
 async function mrMenus(preferredId){
   try{
-    const data=await mrRequest('/admin/menu-catalogue');
-    mrAllMenus=data.menus||[];mrCatalogue=mrAllMenus.filter(menu=>!['weekly_vegetarian','weekly_non_vegetarian'].includes(menu.menu_id));mrMenuCategories=data.categories||[];mrCustomerTopics=data.customer_topics||[];
+    const [data]=await Promise.all([mrRequest('/admin/menu-catalogue'),mrLoadTopics()]);
+    mrAllMenus=data.menus||[];mrCatalogue=mrAllMenus.filter(menu=>!['weekly_vegetarian','weekly_non_vegetarian'].includes(menu.menu_id));mrMenuCategories=data.categories||[];
     mrWorkspaceRows=data.workspace_rows||mrCatalogue;
     const reviewBadge=document.getElementById('menuSidebarBadge');if(reviewBadge){reviewBadge.textContent=String(data.review_count||0);reviewBadge.hidden=!(data.review_count>0);}
     const picker=document.getElementById('mrMenu');picker.replaceChildren();
     const list=document.getElementById('mrCatalogueList');list.replaceChildren();
-    mrCatalogue.forEach(menu=>{
-      const option=document.createElement('option');option.value=menu.menu_id;option.textContent=menu.name;picker.appendChild(option);
-    });
+    mrCatalogue.forEach(menu=>{const option=document.createElement('option');option.value=menu.menu_id;option.textContent=menu.name;picker.appendChild(option);});
     mrWorkspaceRows.filter(menu=>menu.workspace!=='weekly').forEach(menu=>{
       const card=document.createElement('article');card.className='mr-card';
       const nameCell=document.createElement('div');nameCell.className='mr-card-info';
       const media=document.createElement('div');media.className='mr-card-image';
-      if(menu.image_url){const trigger=document.createElement('button');trigger.type='button';trigger.className='mr-image-preview';trigger.setAttribute('aria-label','Preview current image for '+menu.name);trigger.onclick=()=>mrPreviewMenuImage(menu,trigger);
-        const image=document.createElement('img');image.src=menu.image_url;image.alt='Current menu image for '+menu.name;image.loading='lazy';image.decoding='async';image.onerror=()=>{const placeholder=document.createElement('span');placeholder.className='mr-image-placeholder';placeholder.textContent='Menu image unavailable';placeholder.setAttribute('role','status');media.replaceChildren(placeholder);};trigger.appendChild(image);media.appendChild(trigger);
-      }else{const placeholder=document.createElement('span');placeholder.className='mr-image-placeholder';placeholder.textContent='No current menu image';media.appendChild(placeholder);}
-      card.appendChild(media);
-      const title=document.createElement('h3');title.className='mr-card-title';title.textContent=menu.name;nameCell.appendChild(title);
-      const description=document.createElement('p');description.className='mr-card-description';description.textContent=menu.description||'';nameCell.appendChild(description);card.appendChild(nameCell);
-      const badges=document.createElement('div');badges.className='mr-card-badges';
-      for(const value of [menu.category||'Other',menu.customer_topic?'Topic: '+menu.customer_topic.replaceAll('_',' '):'Not linked to customer enquiries',menu.active?'Active':'Inactive']){const badge=document.createElement('span');badge.className='mr-badge';badge.textContent=value;badges.appendChild(badge);}nameCell.appendChild(badges);
-      if(menu.customer_topic){const order=document.createElement('small');order.className='mr-publication';order.textContent='Reply order: '+String(menu.display_order||100);nameCell.appendChild(order);}
-      const lifecycle=document.createElement('small');lifecycle.className='mr-publication';lifecycle.textContent=[menu.display_status,menu.validity_label,menu.review_required?menu.review_label:null].filter(Boolean).join(' · ');nameCell.appendChild(lifecycle);
-      if(menu.last_approved_date){const publication=document.createElement('small');publication.className='mr-publication';publication.textContent='Last published: '+menu.last_approved_date;nameCell.appendChild(publication);}
-      const actions=document.createElement('div');actions.className='mr-card-actions';
-      const open=document.createElement('button');open.type='button';open.className='btn-primary';open.textContent='Open';open.onclick=()=>menu.workspace==='weekly'?mrOpenWeekly():mrOpenMenu(menu.menu_id);actions.appendChild(open);
-      if(menu.workspace!=='weekly'){
-      const more=document.createElement('details');const summary=document.createElement('summary');summary.textContent='⋯';summary.setAttribute('aria-label','Actions for '+menu.name);more.appendChild(summary);
-      const menuActions=document.createElement('div');menuActions.className='mr-menu-actions';
-      const edit=document.createElement('button');edit.type='button';edit.className='btn-secondary';edit.textContent='Edit details';edit.onclick=()=>mrOpenMenuForm('edit',menu.menu_id);menuActions.appendChild(edit);
-      const remove=document.createElement('button');remove.type='button';remove.className='btn-secondary';remove.textContent='Permanent Delete';remove.disabled=menu.actions?.delete===false;remove.title=remove.disabled?'Used by active Instagram routing':'';remove.onclick=()=>mrDeleteMenu(menu.menu_id);menuActions.appendChild(remove);
-      more.appendChild(menuActions);actions.appendChild(more);
-      }nameCell.appendChild(actions);list.appendChild(card);
+      if(menu.image_url){const trigger=document.createElement('button');trigger.type='button';trigger.className='mr-image-preview';trigger.setAttribute('aria-label','Preview current image for '+menu.name);trigger.onclick=()=>mrPreviewMenuImage(menu,trigger);const image=document.createElement('img');image.src=menu.image_url;image.alt='Current menu image for '+menu.name;image.loading='lazy';image.decoding='async';image.onerror=()=>{const placeholder=document.createElement('span');placeholder.className='mr-image-placeholder';placeholder.textContent='Menu image unavailable';placeholder.setAttribute('role','status');media.replaceChildren(placeholder);};trigger.appendChild(image);media.appendChild(trigger);}else{const placeholder=document.createElement('span');placeholder.className='mr-image-placeholder';placeholder.textContent='No current menu image';media.appendChild(placeholder);}card.appendChild(media);
+      const title=document.createElement('h3');title.className='mr-card-title';title.textContent=menu.name;nameCell.appendChild(title);const description=document.createElement('p');description.className='mr-card-description';description.textContent=menu.description||'';nameCell.appendChild(description);card.appendChild(nameCell);
+      const badges=document.createElement('div');badges.className='mr-card-badges';for(const value of [menu.category||'Other',menu.customer_topic?'Topic: '+mrTopicName(menu.customer_topic):'Not linked to customer enquiries',menu.active?'Active':'Inactive']){const badge=document.createElement('span');badge.className='mr-badge';badge.textContent=value;badges.appendChild(badge);}nameCell.appendChild(badges);
+      if(menu.customer_topic){const order=document.createElement('small');order.className='mr-publication';order.textContent='Reply position: '+mrTopicPositionLabel(menu);nameCell.appendChild(order);}const lifecycle=document.createElement('small');lifecycle.className='mr-publication';lifecycle.textContent=[menu.display_status,menu.validity_label,menu.review_required?menu.review_label:null].filter(Boolean).join(' · ');nameCell.appendChild(lifecycle);if(menu.last_approved_date){const publication=document.createElement('small');publication.className='mr-publication';publication.textContent='Last published: '+menu.last_approved_date;nameCell.appendChild(publication);}
+      const actions=document.createElement('div');actions.className='mr-card-actions';const open=document.createElement('button');open.type='button';open.className='btn-primary';open.textContent='Open';open.onclick=()=>menu.workspace==='weekly'?mrOpenWeekly():mrOpenMenu(menu.menu_id);actions.appendChild(open);if(menu.workspace!=='weekly'){const more=document.createElement('details');const summary=document.createElement('summary');summary.textContent='⋯';summary.setAttribute('aria-label','Actions for '+menu.name);more.appendChild(summary);const menuActions=document.createElement('div');menuActions.className='mr-menu-actions';const edit=document.createElement('button');edit.type='button';edit.className='btn-secondary';edit.textContent='Edit details';edit.onclick=()=>mrOpenMenuForm('edit',menu.menu_id);menuActions.appendChild(edit);const remove=document.createElement('button');remove.type='button';remove.className='btn-secondary';remove.textContent='Permanent Delete';remove.disabled=menu.actions?.delete===false;remove.title=remove.disabled?'Used by active Instagram routing':'';remove.onclick=()=>mrDeleteMenu(menu.menu_id);menuActions.appendChild(remove);more.appendChild(menuActions);actions.appendChild(more);}nameCell.appendChild(actions);list.appendChild(card);
     });
     document.getElementById('mrEmpty').hidden=!!mrCatalogue.length;
-    if(preferredId && mrCatalogue.some(menu=>menu.menu_id===preferredId))await mrOpenMenu(preferredId);
-    else mrShowCatalogue();
-    if(typeof wsLoad==='function')await wsLoad();
-    return true;
+    if(preferredId && mrCatalogue.some(menu=>menu.menu_id===preferredId))await mrOpenMenu(preferredId);else mrShowCatalogue();
+    if(typeof wsLoad==='function')await wsLoad();return true;
   }catch(e){mrMessage(e.message);return false;}
 }
 function mrShowCatalogue(){document.getElementById('menuReviewPanel').hidden=false;document.getElementById('mrCatalogueView').hidden=false;document.getElementById('mrSelectedView').hidden=true;const weekly=document.getElementById('mrWeeklyView');if(weekly)weekly.hidden=false;document.getElementById('mrMenu').value='';}
 async function mrOpenWeekly(){document.getElementById('menuReviewPanel').hidden=false;document.getElementById('mrCatalogueView').hidden=true;document.getElementById('mrSelectedView').hidden=true;mrMessage('');document.getElementById('mrWeeklyView').hidden=false;document.getElementById('mrMenu').value='';if(typeof wsLoad==='function')await wsLoad();}
 async function mrManageCategories(){try{const data=await mrRequest('/admin/menu-categories');igMenuCategoryRecords=data.categories||[];const picker=document.getElementById('mrCategoryChoice');picker.replaceChildren();igMenuCategoryRecords.forEach(category=>{const option=document.createElement('option');option.value=category.name;option.textContent=category.name;picker.appendChild(option);});document.getElementById('mrCategoryDialog').showModal();}catch(error){mrMessage(error.message);}}
 function mrCategoryAction(action){const name=document.getElementById('mrCategoryChoice').value;document.getElementById('mrCategoryDialog').close();if(action==='delete')openCategoryDeleteModal(name);else openCategoryModal(action==='edit'?name:'');}
-async function mrOpenMenu(id,pane='current'){
-  const menu=mrCatalogue.find(item=>item.menu_id===id);if(!menu)return;
-  document.getElementById('mrMenu').value=id;
-  document.getElementById('mrSelectedName').textContent=menu.name;
-  document.getElementById('mrSelectedDescription').textContent=menu.description||'';
-  const summary=mrWorkspaceRows.find(item=>item.menu_id===id);document.getElementById('mrSelectedStatus').textContent=[summary?.display_status,summary?.validity_label,summary?.review_required?summary.review_label:null].filter(Boolean).join(' · ');
-  document.getElementById('mrSelectedInactive').hidden=!!menu.active;
-  document.getElementById('menuReviewPanel').hidden=false;const weekly=document.getElementById('mrWeeklyView');if(weekly)weekly.hidden=true;document.getElementById('mrCatalogueView').hidden=true;document.getElementById('mrSelectedView').hidden=false;
-  mrDraft=null;mrRender();await mrLoad(id);await mrShowPane(pane);
-}
-async function mrShowPane(pane){
-  for(const [name,id] of [['current','mrCurrentPane'],['upload','mrUploadPane'],['versions','mrVersionsPane']])document.getElementById(id).hidden=name!==pane;
-  document.querySelectorAll('#menuReviewPanel [data-mr-pane]').forEach(button=>button.setAttribute('aria-selected',String(button.dataset.mrPane===pane)));
-  if(pane==='current')await mrLoadCurrent();if(pane==='versions')await mrHistory();if(pane==='upload')mrInputMode(mrInput);
-}
+async function mrManageTopics(){try{await mrLoadTopics();const box=document.getElementById('mrTopicList');box.replaceChildren();mrCustomerTopics.forEach(topic=>{const row=document.createElement('div');row.className='mr-topic-row';const label=document.createElement('div');const strong=document.createElement('strong');strong.textContent=topic.name;const small=document.createElement('small');small.textContent='Routes as '+(mrTopicRoutes.find(item=>item.value===topic.routing_key)?.label||topic.routing_key)+' · '+topic.menu_count+' menu'+(topic.menu_count===1?'':'s');label.append(strong,small);const edit=document.createElement('button');edit.type='button';edit.className='btn-secondary';edit.textContent='Edit';edit.onclick=()=>mrTopicEdit(topic);const remove=document.createElement('button');remove.type='button';remove.className='btn-secondary';remove.textContent='Delete';remove.disabled=topic.menu_count>0;remove.title=topic.menu_count>0?'Move or unlink menus using this topic first.':'';remove.onclick=()=>mrDeleteTopic(topic);row.append(label,edit,remove);box.appendChild(row);});document.getElementById('mrTopicDialog').showModal();}catch(error){mrMessage(error.message);}}
+function mrTopicEdit(topic=null){mrEditingTopicId=topic?.topic_id||null;document.getElementById('mrTopicEditHeading').textContent=topic?'Edit customer message topic':'Add customer message topic';document.getElementById('mrTopicName').value=topic?.name||'';const route=document.getElementById('mrTopicRoute');route.replaceChildren();mrTopicRoutes.forEach(item=>{const option=document.createElement('option');option.value=item.value;option.textContent=item.label;route.appendChild(option);});route.value=topic?.routing_key||mrTopicRoutes[0]?.value||'';document.getElementById('mrTopicEditError').textContent='';document.getElementById('mrTopicEditDialog').showModal();document.getElementById('mrTopicName').focus();}
+async function mrSaveTopic(event){event.preventDefault();const body={name:document.getElementById('mrTopicName').value.trim(),routing_key:document.getElementById('mrTopicRoute').value};try{if(mrEditingTopicId)await mrRequest('/admin/weekly-savoury/customer-topics/'+encodeURIComponent(mrEditingTopicId),'PATCH',body);else await mrRequest('/admin/weekly-savoury/customer-topics','POST',body);document.getElementById('mrTopicEditDialog').close();await mrLoadTopics();await mrManageTopics();mrRefreshMenuTopicOptions();}catch(error){document.getElementById('mrTopicEditError').textContent=error.message;}}
+async function mrDeleteTopic(topic){if(topic.menu_count>0)return;if(!confirm('Delete customer message topic “'+topic.name+'”?'))return;try{await mrRequest('/admin/weekly-savoury/customer-topics/'+encodeURIComponent(topic.topic_id),'DELETE');await mrLoadTopics();await mrManageTopics();mrRefreshMenuTopicOptions();}catch(error){mrMessage(error.message);}}
+function mrRefreshMenuTopicOptions(selectedValue=document.getElementById('mrMenuTopic').value){const topic=document.getElementById('mrMenuTopic');topic.replaceChildren();const none=document.createElement('option');none.value='';none.textContent='Not linked to customer enquiries';topic.appendChild(none);mrCustomerTopics.forEach(item=>{const option=document.createElement('option');option.value=item.topic_id;option.textContent=item.name;topic.appendChild(option);});topic.value=mrCustomerTopics.some(item=>item.topic_id===selectedValue)?selectedValue:'';mrRefreshPosition();}
+async function mrOpenMenu(id,pane='current'){const menu=mrCatalogue.find(item=>item.menu_id===id);if(!menu)return;document.getElementById('mrMenu').value=id;document.getElementById('mrSelectedName').textContent=menu.name;document.getElementById('mrSelectedDescription').textContent=menu.description||'';const summary=mrWorkspaceRows.find(item=>item.menu_id===id);document.getElementById('mrSelectedStatus').textContent=[summary?.display_status,summary?.validity_label,summary?.review_required?summary.review_label:null].filter(Boolean).join(' · ');document.getElementById('mrSelectedInactive').hidden=!!menu.active;document.getElementById('menuReviewPanel').hidden=false;const weekly=document.getElementById('mrWeeklyView');if(weekly)weekly.hidden=true;document.getElementById('mrCatalogueView').hidden=true;document.getElementById('mrSelectedView').hidden=false;mrDraft=null;mrRender();await mrLoad(id);await mrShowPane(pane);}
+async function mrShowPane(pane){for(const [name,id] of [['current','mrCurrentPane'],['upload','mrUploadPane'],['versions','mrVersionsPane']])document.getElementById(id).hidden=name!==pane;document.querySelectorAll('#menuReviewPanel [data-mr-pane]').forEach(button=>button.setAttribute('aria-selected',String(button.dataset.mrPane===pane)));if(pane==='current')await mrLoadCurrent();if(pane==='versions')await mrHistory();if(pane==='upload')mrInputMode(mrInput);}
 function mrInputMode(mode){mrInput=mode;document.getElementById('mrFilePane').hidden=mode!=='file';document.getElementById('mrTextPane').hidden=mode!=='text';document.getElementById('mrFileTab').setAttribute('aria-selected',String(mode==='file'));document.getElementById('mrTextTab').setAttribute('aria-selected',String(mode==='text'));}
-const mrDrop=document.getElementById('mrDrop');
-['dragenter','dragover'].forEach(type=>mrDrop.addEventListener(type,event=>{event.preventDefault();mrDrop.classList.add('is-dragging');}));
-['dragleave','dragend'].forEach(type=>mrDrop.addEventListener(type,event=>{event.preventDefault();mrDrop.classList.remove('is-dragging');}));
-mrDrop.addEventListener('drop',event=>{event.preventDefault();mrDrop.classList.remove('is-dragging');if(event.dataTransfer?.files?.length){mrInputMode('file');mrFileSelected(event.dataTransfer.files[0]);}});
-async function mrLoadCurrent(){
-  const id=document.getElementById('mrMenu').value;if(!id)return;
-  try{
-    const data=await mrRequest(mrBase()+'/versions');if(document.getElementById('mrMenu').value!==id)return;
-    const current=(data.versions||[]).find(version=>version.is_current&&version.approval_json);
-    const rows=document.getElementById('mrCurrentRows');rows.replaceChildren();
-    document.getElementById('mrCurrentEmpty').hidden=!!current;
-    document.getElementById('mrLastPublished').textContent=current?'Last published: '+(current.changed_at||'Date unavailable'):'';
-    if(!current)return;
-    const approval=JSON.parse(current.approval_json);
-    (approval.rows||[]).forEach(item=>{
-      const row=document.createElement('div');row.className='mr-current-row';
-      for(const value of [item.item||'',item.quantity||'',item.price_inr===null||item.price_inr===undefined?'':'₹'+item.price_inr]){
-        const span=document.createElement('span');span.textContent=value;row.appendChild(span);
-      }
-      rows.appendChild(row);
-    });
-  }catch(e){mrMessage(e.message);}
-}
+const mrDrop=document.getElementById('mrDrop');['dragenter','dragover'].forEach(type=>mrDrop.addEventListener(type,event=>{event.preventDefault();mrDrop.classList.add('is-dragging');}));['dragleave','dragend'].forEach(type=>mrDrop.addEventListener(type,event=>{event.preventDefault();mrDrop.classList.remove('is-dragging');}));mrDrop.addEventListener('drop',event=>{event.preventDefault();mrDrop.classList.remove('is-dragging');if(event.dataTransfer?.files?.length){mrInputMode('file');mrFileSelected(event.dataTransfer.files[0]);}});
+async function mrLoadCurrent(){const id=document.getElementById('mrMenu').value;if(!id)return;try{const data=await mrRequest(mrBase()+'/versions');if(document.getElementById('mrMenu').value!==id)return;const current=(data.versions||[]).find(version=>version.is_current&&version.approval_json);const rows=document.getElementById('mrCurrentRows');rows.replaceChildren();document.getElementById('mrCurrentEmpty').hidden=!!current;document.getElementById('mrLastPublished').textContent=current?'Last published: '+(current.changed_at||'Date unavailable'):'';if(!current)return;const approval=JSON.parse(current.approval_json);(approval.rows||[]).forEach(item=>{const row=document.createElement('div');row.className='mr-current-row';for(const value of [item.item||'',item.quantity||'',item.price_inr===null||item.price_inr===undefined?'':'₹'+item.price_inr]){const span=document.createElement('span');span.textContent=value;row.appendChild(span);}rows.appendChild(row);});}catch(e){mrMessage(e.message);}}
 async function mrLoad(id=document.getElementById('mrMenu').value){if(!id)return;try{const data=await mrRequest('/admin/menu-manager/menus/'+encodeURIComponent(id)+'/review');if(document.getElementById('mrMenu').value!==id)return;mrDraft=data.draft;mrCategories=data.categories;mrRender();}catch(e){mrMessage(e.message);}}
-function mrRefreshPosition(){const topic=document.getElementById('mrMenuTopic').value;const position=document.getElementById('mrMenuPosition');position.replaceChildren();position.disabled=!topic;document.getElementById('mrMenuPositionHelp').hidden=!!topic;if(!topic){const placeholder=document.createElement('option');placeholder.value='';placeholder.textContent='Choose a customer message topic to set reply order.';position.appendChild(placeholder);return;}const others=mrAllMenus.filter(menu=>menu.customer_topic===topic&&menu.menu_id!==mrEditingId).sort((a,b)=>(a.display_order||100)-(b.display_order||100)||a.menu_id.localeCompare(b.menu_id));others.forEach((menu,index)=>{const option=document.createElement('option');option.value=String(index+1);option.textContent='Before '+menu.name;position.appendChild(option);});const last=document.createElement('option');last.value=String(others.length+1);last.textContent='Last';position.appendChild(last);const current=mrAllMenus.find(menu=>menu.menu_id===mrEditingId);const currentIndex=current&&current.customer_topic===topic?mrAllMenus.filter(menu=>menu.customer_topic===topic).sort((a,b)=>(a.display_order||100)-(b.display_order||100)||a.menu_id.localeCompare(b.menu_id)).findIndex(menu=>menu.menu_id===mrEditingId)+1:others.length+1;position.value=String(currentIndex||others.length+1);}
-function mrOpenMenuForm(mode,id){const selected=mrCatalogue.find(m=>m.menu_id===(id||document.getElementById('mrMenu').value));if(mode==='edit'&&!selected)return;mrEditingId=mode==='edit'?selected.menu_id:null;document.getElementById('mrMenuDialogTitle').textContent=mrEditingId?'Edit Menu':'Add New Menu';document.getElementById('mrMenuSubmit').textContent=mrEditingId?'Save Changes':'Add Menu';document.getElementById('mrMenuName').value=selected&&mrEditingId?selected.name:'';document.getElementById('mrMenuDescription').value=selected&&mrEditingId?selected.description:'';mrClearMenuFile();document.getElementById('mrMenuActive').checked=selected&&mrEditingId?!!selected.active:true;document.getElementById('mrMenuFormError').textContent='';const category=document.getElementById('mrMenuCategory');category.replaceChildren();[...new Set([...mrMenuCategories,...(selected&&mrEditingId?[selected.category]:[])])].forEach(name=>{const option=document.createElement('option');option.value=name;option.textContent=name;category.appendChild(option);});category.value=selected&&mrEditingId?selected.category:mrMenuCategories[0]||'';const topic=document.getElementById('mrMenuTopic');topic.replaceChildren();for(const value of ['',...mrCustomerTopics]){const option=document.createElement('option');option.value=value;option.textContent=value?value.replaceAll('_',' '):'Not linked to customer enquiries';topic.appendChild(option);}topic.value=selected&&mrEditingId?selected.customer_topic||'':'';mrRefreshPosition();document.getElementById('mrMenuDialog').showModal();document.getElementById('mrMenuName').focus();}
-async function mrSaveMenu(event){
-  event.preventDefault();if(mrBusy)return;
-  const form=document.getElementById('mrMenuForm');if(!form.reportValidity())return;
-  const payload={name:document.getElementById('mrMenuName').value.trim(),category:document.getElementById('mrMenuCategory').value,description:document.getElementById('mrMenuDescription').value.trim(),active:document.getElementById('mrMenuActive').checked,customer_topic:document.getElementById('mrMenuTopic').value};
-  const file=document.getElementById('mrMenuFile').files?.[0];
-  if(file){const issue=mrUploadFileError(file);if(issue){document.getElementById('mrMenuFormError').textContent=issue;return;}}
-  if(!payload.name||!payload.category||!payload.description){document.getElementById('mrMenuFormError').textContent='Complete all required fields.';return;}
-  mrBusy=true;document.getElementById('mrMenuSubmit').disabled=true;
-  try{
-    const editing=!!mrEditingId;let result;
-    if(editing){
-      result=await mrRequest('/admin/menu-catalogue/'+encodeURIComponent(mrEditingId),'PATCH',payload);
-      if(file){const upload=new FormData();upload.append('file',file);await mrRequest('/admin/menu-manager/menus/'+encodeURIComponent(mrEditingId)+'/review/extract-file','POST',upload);}
-    }else{
-      const body=new FormData();Object.entries(payload).forEach(([key,value])=>body.append(key,String(value)));if(file)body.append('file',file);
-      result=await mrRequest('/admin/menu-catalogue','POST',body);
-    }
-    if(payload.customer_topic)await mrRequest('/admin/menu-catalogue/'+encodeURIComponent(result.menu.menu_id)+'/move','POST',{position:Number(document.getElementById('mrMenuPosition').value)});
-    document.getElementById('mrMenuDialog').close();await mrMenus(result.menu.menu_id);
-    if(file||!editing)await mrShowPane('upload');
-    mrMessage(file?'Review the extracted draft before publishing.':editing?'Menu updated.':'Menu added. Upload or paste its content to begin review.');
-  }catch(e){document.getElementById('mrMenuFormError').textContent=e.message;}
-  finally{mrBusy=false;document.getElementById('mrMenuSubmit').disabled=false;}
-}
+function mrRefreshPosition(){const topic=document.getElementById('mrMenuTopic').value;const position=document.getElementById('mrMenuPosition');position.replaceChildren();position.disabled=!topic;document.getElementById('mrMenuPositionHelp').hidden=!!topic;if(!topic){const placeholder=document.createElement('option');placeholder.value='';placeholder.textContent='Choose a customer message topic to set reply order.';position.appendChild(placeholder);return;}for(const value of ['first','middle','last']){const option=document.createElement('option');option.value=value;option.textContent=value[0].toUpperCase()+value.slice(1);position.appendChild(option);}const current=mrAllMenus.find(menu=>menu.menu_id===mrEditingId);position.value=current&&current.customer_topic===topic?mrTopicPositionLabel(current).toLowerCase():'last';}
+function mrPositionNumber(){const topic=document.getElementById('mrMenuTopic').value;if(!topic)return null;const others=mrAllMenus.filter(menu=>menu.customer_topic===topic&&menu.menu_id!==mrEditingId).sort((a,b)=>(a.display_order||100)-(b.display_order||100)||a.menu_id.localeCompare(b.menu_id));const choice=document.getElementById('mrMenuPosition').value;if(choice==='first')return 1;if(choice==='middle')return Math.floor(others.length/2)+1;return others.length+1;}
+function mrOpenMenuForm(mode,id){const selected=mrCatalogue.find(m=>m.menu_id===(id||document.getElementById('mrMenu').value));if(mode==='edit'&&!selected)return;mrEditingId=mode==='edit'?selected.menu_id:null;document.getElementById('mrMenuDialogTitle').textContent=mrEditingId?'Edit Menu':'Add New Menu';document.getElementById('mrMenuSubmit').textContent=mrEditingId?'Save Changes':'Add Menu';document.getElementById('mrMenuName').value=selected&&mrEditingId?selected.name:'';document.getElementById('mrMenuDescription').value=selected&&mrEditingId?selected.description:'';mrClearMenuFile();document.getElementById('mrMenuActive').checked=selected&&mrEditingId?!!selected.active:true;document.getElementById('mrMenuFormError').textContent='';const category=document.getElementById('mrMenuCategory');category.replaceChildren();[...new Set([...mrMenuCategories,...(selected&&mrEditingId?[selected.category]:[])])].forEach(name=>{const option=document.createElement('option');option.value=name;option.textContent=name;category.appendChild(option);});category.value=selected&&mrEditingId?selected.category:mrMenuCategories[0]||'';mrRefreshMenuTopicOptions(selected&&mrEditingId?selected.customer_topic||'':'');document.getElementById('mrMenuDialog').showModal();document.getElementById('mrMenuName').focus();}
+async function mrSaveMenu(event){event.preventDefault();if(mrBusy)return;const form=document.getElementById('mrMenuForm');if(!form.reportValidity())return;const payload={name:document.getElementById('mrMenuName').value.trim(),category:document.getElementById('mrMenuCategory').value,description:document.getElementById('mrMenuDescription').value.trim(),active:document.getElementById('mrMenuActive').checked,customer_topic:document.getElementById('mrMenuTopic').value};const file=document.getElementById('mrMenuFile').files?.[0];if(file){const issue=mrUploadFileError(file);if(issue){document.getElementById('mrMenuFormError').textContent=issue;return;}}if(!payload.name||!payload.category||!payload.description){document.getElementById('mrMenuFormError').textContent='Complete all required fields.';return;}mrBusy=true;document.getElementById('mrMenuSubmit').disabled=true;try{const editing=!!mrEditingId;let result;if(editing){result=await mrRequest('/admin/menu-catalogue/'+encodeURIComponent(mrEditingId),'PATCH',payload);if(file){const upload=new FormData();upload.append('file',file);await mrRequest('/admin/menu-manager/menus/'+encodeURIComponent(mrEditingId)+'/review/extract-file','POST',upload);}}else{const body=new FormData();Object.entries(payload).forEach(([key,value])=>body.append(key,String(value)));if(file)body.append('file',file);result=await mrRequest('/admin/menu-catalogue','POST',body);}if(payload.customer_topic)await mrRequest('/admin/menu-catalogue/'+encodeURIComponent(result.menu.menu_id)+'/move','POST',{position:mrPositionNumber()});document.getElementById('mrMenuDialog').close();await mrMenus(result.menu.menu_id);if(file||!editing)await mrShowPane('upload');mrMessage(file?'Review the extracted draft before publishing.':editing?'Menu updated.':'Menu added. Upload or paste its content to begin review.');}catch(e){document.getElementById('mrMenuFormError').textContent=e.message;}finally{mrBusy=false;document.getElementById('mrMenuSubmit').disabled=false;}}
 async function mrDeleteMenu(id){if(mrBusy)return;const menu=mrCatalogue.find(m=>m.menu_id===(id||document.getElementById('mrMenu').value));if(!menu)return;if(!confirm('Delete “'+menu.name+'”?\n\nThis permanently removes this menu and its local menu assets/history. It cannot be undone.'))return;mrBusy=true;mrMessage('Deleting selected menu…');try{await mrRequest('/admin/menu-catalogue/'+encodeURIComponent(menu.menu_id)+'/permanent','DELETE');await mrMenus();mrMessage('Menu deleted.');}catch(e){mrMessage(e.status===409?'This menu is currently being used. Remove or change the connected Instagram source first, then try again.':e.message);}finally{mrBusy=false;}}
 async function mrWork(task){if(mrBusy)return;mrBusy=true;document.getElementById('mrMenu').disabled=true;try{await task();}catch(e){mrMessage(e.message);}finally{mrBusy=false;document.getElementById('mrMenu').disabled=false;}}
 async function mrExtract(){return mrWork(async()=>{let data;mrMessage('Extracting menu details. The published menu is unchanged.');if(mrInput==='file'){const file=mrChosenFile||document.getElementById('mrFile').files?.[0];const issue=mrUploadFileError(file);if(issue)throw Error(issue);const form=new FormData();form.append('file',file);data=await mrRequest(mrBase()+'/extract-file','POST',form);}else{const value=document.getElementById('mrText').value.trim();if(!value)throw Error('Paste menu text first.');data=await mrRequest(mrBase()+'/extract-text','POST',{text:value});}mrDraft=data.draft;mrRender();});}
-function mrRender(){
-  const reviewing=!!mrDraft&&!['PUBLISHED','REJECTED'].includes(mrDraft.status);
-  document.getElementById('mrReview').hidden=!reviewing;document.getElementById('mrUploadInput').hidden=reviewing;
-  if(!reviewing)return;
-  const done=mrDraft.status==='EXTRACTING';
-  document.getElementById('mrReviewCount').textContent=mrDraft.rows.length?'We found '+mrDraft.rows.length+' items.':"Extraction unsuccessful. We couldn't extract any menu items from this flyer. Your published menu is unchanged. You can retry extraction or enter the items manually.";
-  document.getElementById('mrApproveButton').disabled=done||!mrDraft.rows.length;
-  document.getElementById('mrStatus').textContent=({EXTRACTING:'Reading menu…',NEEDS_REVIEW:'Needs review',READY_TO_APPROVE:'Ready to approve',FAILED:'Needs review'})[mrDraft.status]||'Review required';
-  document.getElementById('mrActions').hidden=done;
-  document.getElementById('mrOriginal').textContent=mrDraft.raw_text||'';
-  document.getElementById('mrWeek').value=mrDraft.menu_metadata?.week_of||'';
-  document.getElementById('mrWindow').value=mrDraft.menu_metadata?.service_window||'';
-  mrMessage([...new Set((mrDraft.warnings||[]).map(mrWarningLabel))].join('; '));
-  const body=document.getElementById('mrRows');body.replaceChildren();
-  mrDraft.rows.forEach((row,index)=>{
-    const tr=document.createElement('tr');
-    for(const field of ['item','category','quantity','price_inr','description','aliases']){
-      const td=document.createElement('td');td.dataset.label=field==='price_inr'?'Price (₹)':field==='category'?'Section':field;
-      const control=document.createElement(field==='category'?'select':'input');control.setAttribute('aria-label',field+' row '+(index+1));
-      if(field==='category')for(const category of ['',...mrCategories]){const option=document.createElement('option');option.value=category;option.textContent=category||'Choose category';control.appendChild(option);}
-      control.value=field==='aliases'?(row.aliases||[]).join(', '):row[field]??'';control.disabled=done;control.style.width=field==='description'?'220px':'125px';
-      control.oninput=()=>{row[field]=field==='aliases'?control.value.split(',').map(value=>value.trim()).filter(Boolean):control.value;};td.appendChild(control);
-      const origin=document.createElement('small');origin.textContent=row.provenance?.[field]==='OPERATOR_EDITED'?' Entered manually':' From source';td.appendChild(origin);tr.appendChild(td);
-    }
-    const source=document.createElement('td');source.dataset.label='Warnings';source.textContent=(row.source_page?'Page '+row.source_page+'. ':'')+[...new Set((row.warnings||[]).map(mrWarningLabel))].join('; ');tr.appendChild(source);
-    const action=document.createElement('td');action.dataset.label='Action';const button=document.createElement('button');button.type='button';button.textContent='Delete Row';button.disabled=done;button.onclick=()=>{mrDraft.rows.splice(index,1);mrRender();};action.appendChild(button);tr.appendChild(action);body.appendChild(tr);
-  });
-  const preview=document.getElementById('mrSource');preview.hidden=true;if(mrPreviewUrl){URL.revokeObjectURL(mrPreviewUrl);mrPreviewUrl=null;}
-  if(mrDraft.source_asset){const id=mrDraft.draft_id;fetch(mrBase()+'/source/'+id,{headers:getAuthHeaders()}).then(r=>{if(!r.ok)throw Error('Preview unavailable');return r.blob();}).then(blob=>{if(mrDraft?.draft_id!==id)return;mrPreviewUrl=URL.createObjectURL(blob);preview.src=mrPreviewUrl;preview.hidden=false;}).catch(e=>mrMessage(e.message));}
-}
+function mrRender(){const reviewing=!!mrDraft&&!['PUBLISHED','REJECTED'].includes(mrDraft.status);document.getElementById('mrReview').hidden=!reviewing;document.getElementById('mrUploadInput').hidden=reviewing;if(!reviewing)return;const done=mrDraft.status==='EXTRACTING';document.getElementById('mrReviewCount').textContent=mrDraft.rows.length?'We found '+mrDraft.rows.length+' items.':"Extraction unsuccessful. We couldn't extract any menu items from this flyer. Your published menu is unchanged. You can retry extraction or enter the items manually.";document.getElementById('mrApproveButton').disabled=done||!mrDraft.rows.length;document.getElementById('mrStatus').textContent=({EXTRACTING:'Reading menu…',NEEDS_REVIEW:'Needs review',READY_TO_APPROVE:'Ready to approve',FAILED:'Needs review'})[mrDraft.status]||'Review required';document.getElementById('mrActions').hidden=done;document.getElementById('mrOriginal').textContent=mrDraft.raw_text||'';document.getElementById('mrWeek').value=mrDraft.menu_metadata?.week_of||'';document.getElementById('mrWindow').value=mrDraft.menu_metadata?.service_window||'';mrMessage([...new Set((mrDraft.warnings||[]).map(mrWarningLabel))].join('; '));const body=document.getElementById('mrRows');body.replaceChildren();mrDraft.rows.forEach((row,index)=>{const tr=document.createElement('tr');for(const field of ['item','category','quantity','price_inr','description','aliases']){const td=document.createElement('td');td.dataset.label=field==='price_inr'?'Price (₹)':field==='category'?'Section':field;const control=document.createElement(field==='category'?'select':'input');control.setAttribute('aria-label',field+' row '+(index+1));if(field==='category')for(const category of ['',...mrCategories]){const option=document.createElement('option');option.value=category;option.textContent=category||'Choose category';control.appendChild(option);}control.value=field==='aliases'?(row.aliases||[]).join(', '):row[field]??'';control.disabled=done;control.style.width=field==='description'?'220px':'125px';control.oninput=()=>{row[field]=field==='aliases'?control.value.split(',').map(value=>value.trim()).filter(Boolean):control.value;};td.appendChild(control);const origin=document.createElement('small');origin.textContent=row.provenance?.[field]==='OPERATOR_EDITED'?' Entered manually':' From source';td.appendChild(origin);tr.appendChild(td);}const source=document.createElement('td');source.dataset.label='Warnings';source.textContent=(row.source_page?'Page '+row.source_page+'. ':'')+[...new Set((row.warnings||[]).map(mrWarningLabel))].join('; ');tr.appendChild(source);const action=document.createElement('td');action.dataset.label='Action';const button=document.createElement('button');button.type='button';button.textContent='Delete Row';button.disabled=done;button.onclick=()=>{mrDraft.rows.splice(index,1);mrRender();};action.appendChild(button);tr.appendChild(action);body.appendChild(tr);});const preview=document.getElementById('mrSource');preview.hidden=true;if(mrPreviewUrl){URL.revokeObjectURL(mrPreviewUrl);mrPreviewUrl=null;}if(mrDraft.source_asset){const id=mrDraft.draft_id;fetch(mrBase()+'/source/'+id,{headers:getAuthHeaders()}).then(r=>{if(!r.ok)throw Error('Preview unavailable');return r.blob();}).then(blob=>{if(mrDraft?.draft_id!==id)return;mrPreviewUrl=URL.createObjectURL(blob);preview.src=mrPreviewUrl;preview.hidden=false;}).catch(e=>mrMessage(e.message));}}
 function mrAdd(){mrDraft.rows.push({item:'',category:'',quantity:'',price_inr:'',description:''});mrRender();}
 async function mrSaveInternal(){const data=await mrRequest(mrBase(),'PUT',{draft_id:mrDraft.draft_id,revision:mrDraft.revision,rows:mrDraft.rows,menu_metadata:{week_of:document.getElementById('mrWeek').value,service_window:document.getElementById('mrWindow').value}});mrDraft=data.draft;mrRender();return data;}
 async function mrSave(){return mrWork(async()=>{await mrSaveInternal();mrMessage('Draft saved. Published menu unchanged.');});}
 async function mrRetryExtraction(){if(!mrDraft||!confirm('Read the original source again? Unsaved corrections will be replaced. The published menu will not change.'))return;return mrWork(async()=>{const data=await mrRequest(mrBase()+'/retry-extraction','POST',{draft_id:mrDraft.draft_id,revision:mrDraft.revision});mrDraft=data.draft;mrRender();mrMessage('Source read again. Check every item before approving.');});}
 async function mrReject(){return mrWork(async()=>{if(!confirm('Reject this draft? The published menu will not change.'))return;const data=await mrRequest(mrBase()+'/reject','POST',{draft_id:mrDraft.draft_id,revision:mrDraft.revision});mrDraft=data.draft;mrRender();});}
 async function mrApprove(){return mrWork(async()=>{await mrSaveInternal();const menu=mrCatalogue.find(item=>item.menu_id===document.getElementById('mrMenu').value);if(!confirm('Publish this menu?\n\n'+mrDraft.rows.length+' approved items will replace the current published version of '+(menu?.name||'this menu')+'.'))return;const data=await mrRequest(mrBase()+'/approve-publish','POST',{draft_id:mrDraft.draft_id,revision:mrDraft.revision});mrDraft=data.draft;mrRender();await mrShowPane('current');mrMessage('Approved and published. Menu knowledge is live.');});}
-async function mrHistory(beforeId){const id=document.getElementById('mrMenu').value;if(!id)return;try{
-  const data=await mrRequest(mrBase()+'/versions'+(beforeId?'?before_id='+beforeId:''));if(document.getElementById('mrMenu').value!==id)return;
-  const box=document.getElementById('mrHistory');if(!beforeId)box.replaceChildren();else document.getElementById('mrMoreVersions')?.remove();
-  const versions=(data.versions||[]).filter(v=>v.approval_json);if(!versions.length&&!beforeId&&!data.has_more)box.textContent='No published versions yet.';
-  versions.forEach(v=>{const approval=JSON.parse(v.approval_json);const line=document.createElement('div');line.className='mr-version';
-    const label=document.createElement('span');label.textContent='Version '+v.id+' · '+v.changed_at+' · Approved by '+(approval.approved_by||v.changed_by||'Admin')+' · '+(v.valid_from&&v.valid_until?v.valid_from+' – '+v.valid_until:'Standing');line.appendChild(label);
-    if(approval.source_asset){const source=document.createElement('button');source.type='button';source.className='btn-secondary';source.textContent='Source flyer';source.onclick=()=>mrPreviewVersionSource(v.menu_key,v.id,source);line.appendChild(source);}
-    const button=document.createElement('button');button.type='button';button.className='btn-secondary';button.textContent='Restore to review draft';button.onclick=()=>mrWork(async()=>{if(!confirm('Restore this version as a draft? It will require review and explicit approval.'))return;const data=await mrRequest(mrBase()+'/versions/'+v.id+'/restore','POST');mrDraft=data.draft;mrRender();await mrShowPane('upload');mrMessage('Version restored to a review draft. Published menu unchanged.');});line.appendChild(button);box.appendChild(line);
-  });if(data.has_more){const more=document.createElement('button');more.id='mrMoreVersions';more.type='button';more.className='btn-secondary';more.textContent='Load more versions';more.onclick=()=>mrHistory(data.next_before_id);box.appendChild(more);}
-}catch(e){mrMessage(e.message);}}
+async function mrHistory(beforeId){const id=document.getElementById('mrMenu').value;if(!id)return;try{const data=await mrRequest(mrBase()+'/versions'+(beforeId?'?before_id='+beforeId:''));if(document.getElementById('mrMenu').value!==id)return;const box=document.getElementById('mrHistory');if(!beforeId)box.replaceChildren();else document.getElementById('mrMoreVersions')?.remove();const versions=(data.versions||[]).filter(v=>v.approval_json);if(!versions.length&&!beforeId&&!data.has_more)box.textContent='No published versions yet.';versions.forEach(v=>{const approval=JSON.parse(v.approval_json);const line=document.createElement('div');line.className='mr-version';const label=document.createElement('span');label.textContent='Version '+v.id+' · '+v.changed_at+' · Approved by '+(approval.approved_by||v.changed_by||'Admin')+' · '+(v.valid_from&&v.valid_until?v.valid_from+' – '+v.valid_until:'Standing');line.appendChild(label);if(approval.source_asset){const source=document.createElement('button');source.type='button';source.className='btn-secondary';source.textContent='Source flyer';source.onclick=()=>mrPreviewVersionSource(v.menu_key,v.id,source);line.appendChild(source);}const button=document.createElement('button');button.type='button';button.className='btn-secondary';button.textContent='Restore to review draft';button.onclick=()=>mrWork(async()=>{if(!confirm('Restore this version as a draft? It will require review and explicit approval.'))return;const data=await mrRequest(mrBase()+'/versions/'+v.id+'/restore','POST');mrDraft=data.draft;mrRender();await mrShowPane('upload');mrMessage('Version restored to a review draft. Published menu unchanged.');});line.appendChild(button);box.appendChild(line);});if(data.has_more){const more=document.createElement('button');more.id='mrMoreVersions';more.type='button';more.className='btn-secondary';more.textContent='Load more versions';more.onclick=()=>mrHistory(data.next_before_id);box.appendChild(more);}}catch(e){mrMessage(e.message);}}
 // All visible menu input actions converge on the review screen.
 async function mmReplaceImage(key){switchTab('tab-image',null);await mrMenus();const aliases={'collections.aamar_mishti':'aamar_mishti','collections.signature_collection':'signature','weekly.vegetarian':'weekly_vegetarian','weekly.non_vegetarian':'weekly_non_vegetarian','weekly.bengali_bento':'bento'};await mrOpenMenu(aliases[key]||key,'upload');mrInputMode('file');document.getElementById('mrFile').click();}
 async function submitMenuImage(){return mrExtract();}
