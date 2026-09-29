@@ -14,8 +14,9 @@ services:
       - META_APP_SECRET=${META_APP_SECRET}
       - PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-}
       - ADMIN_API_KEY=${ADMIN_API_KEY}
-      # Without this the /admin portal cannot be unlocked by PIN in a container
-      - ADMIN_PIN=${ADMIN_PIN}
+      # Browser sessions use username/password; API tools use ADMIN_API_KEY.
+      - ADMIN_USERNAME=${ADMIN_USERNAME:-}
+      - ADMIN_PASSWORD_HASH=${ADMIN_PASSWORD_HASH:-}
       # Used only to build the manual customer-facing wa.me handoff link.
       - WHATSAPP_BUSINESS_NUMBER=${WHATSAPP_BUSINESS_NUMBER:-}
       - INSTAGRAM_PAGE_ID=${INSTAGRAM_PAGE_ID}
