@@ -1,4 +1,4 @@
-"""Weekly publication explains invalid drafts before any approval request."""
+"""Weekly publication and final operator controls stay explicit and actionable."""
 
 import copy
 import json
@@ -27,13 +27,14 @@ def isolated_weekly(tmp_path, monkeypatch):
     return menu
 
 
-def test_thirteen_row_bento_draft_is_rejected_without_changing_published_menu(isolated_weekly):
+def test_thirteen_row_bento_draft_is_valid_weekly_savoury_and_can_publish(isolated_weekly):
     first = menu_review.extract(weekly_savoury.WEEKLY_KEY, "admin",
         text="25 Sep - 30 Sep 2026\nVeg:\nApproved fixture dish 250g ₹100", weekly=True)
     published = menu_review.publish_approved_menu(weekly_savoury.WEEKLY_KEY,
         first["draft_id"], first["revision"], "admin", weekly_options={})
     version_before = weekly_savoury.current_version()["id"]
     assert version_before == published["version_id"]
+
     draft = menu_review.extract(weekly_savoury.WEEKLY_KEY, "admin",
         text="25 Sep - 30 Sep 2026\nVeg:\nFixture dish 250g ₹100", weekly=True)
     rows = []
@@ -51,17 +52,19 @@ def test_thirteen_row_bento_draft_is_rejected_without_changing_published_menu(is
     analysis = menu_review.weekly_analysis(draft, options)
     assert len(analysis["rows"]) == 13
     assert sum(row["category"] == "bengali_bento" for row in analysis["rows"]) == 4
-    assert "Bengali Bento belongs in Menu Catalogue, not Weekly Savoury." in analysis["errors"]
+    assert not any("Bengali Bento belongs" in error for error in analysis["errors"])
+
     client = TestClient(app)
     headers = {"X-Admin-Key": config.ADMIN_API_KEY}
     preview = client.post("/admin/weekly-savoury/preview", json=options, headers=headers)
     publish = client.post("/admin/weekly-savoury/publish", json=options, headers=headers)
-    assert preview.status_code == 400
-    assert "Bengali Bento belongs in Menu Catalogue" in preview.json()["detail"]
-    assert publish.status_code == 400
-    assert "Bengali Bento belongs in Menu Catalogue" in publish.json()["detail"]
-    assert weekly_savoury.current_version()["id"] == version_before
-    assert [version["id"] for version in weekly_savoury.lifecycle_versions()] == [version_before]
+    assert preview.status_code == 200
+    assert publish.status_code == 200
+    current = weekly_savoury.current_version()
+    assert current["id"] != version_before
+    approval = json.loads(current["approval_json"])
+    assert sum(row["category"] == "bengali_bento" for row in approval["rows"]) == 4
+    assert json.loads(current["snapshot_json"]) == approval["rows"]
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is needed for Admin JavaScript tests")
@@ -83,7 +86,7 @@ wsDraft={draft_id:7,revision:3,rows:Array.from({length:13},(_,i)=>({item:'Fixtur
 wsToday='2026-09-27';element('wsFrom').value='2026-09-25';element('wsUntil').value='2026-09-30';
 element('wsQuestion').value='What is on the weekly menu?';
 wsRenderAnalysis=()=>{render++;};wsLoad=async()=>{loads++;};wsShowTimeline=pane=>{panes.push(pane);};
-let analysis={errors:['Bengali Bento belongs in Menu Catalogue, not Weekly Savoury.'],comparison_available:true,
+let analysis={errors:['Row 4: Missing or invalid price'],comparison_available:true,
   overlaps:[],rows:wsDraft.rows,valid_from:'2026-09-25',display_date_range:'25 Sep - 30 Sep 2026'};
 let publishError='',previewError='',pending=null;
 mrRequest=async(path)=>{requests.push(path);if(path.endsWith('/analyse'))return{analysis};
@@ -103,7 +106,7 @@ function box(id){return element(id).children.map(n=>n.textContent||n.children.ma
     button:element('wsConfirmPublishButton').textContent,publishRequests:requests.filter(p=>p.endsWith('/publish')).length};
   wsCancelPublish();const cancelled={open:element('wsPublishDialog').open,
     publishRequests:requests.filter(p=>p.endsWith('/publish')).length,focus:element('wsPublishButton').focusCount};
-  await wsPublish();publishError='Bengali Bento belongs in Menu Catalogue, not Weekly Savoury.';
+  await wsPublish();publishError='Review the printed menu dates.';
   await wsConfirmPublish();const failed={open:element('wsPublishDialog').open,reason:box('wsModalError'),
     nearButton:box('wsPublishError'),enabled:!element('wsConfirmPublishButton').disabled};
   publishError='';wsCancelPublish();await wsPublish();
@@ -123,15 +126,15 @@ function box(id){return element(id).children.map(n=>n.textContent||n.children.ma
                           text=True, encoding="utf-8", capture_output=True, timeout=20)
     assert done.returncode == 0, done.stderr
     result = json.loads(done.stdout.strip())
-    assert result["invalid"] == {"dialog": False, "reason": "Needs attention before publishing|Bengali Bento belongs in Menu Catalogue, not Weekly Savoury.", "focus": 1, "publishRequests": 0}
-    assert "Bengali Bento belongs" in result["previewBlocked"]["reason"]
+    assert result["invalid"] == {"dialog": False, "reason": "Needs attention before publishing|Row 4: Missing or invalid price", "focus": 1, "publishRequests": 0}
+    assert "Missing or invalid price" in result["previewBlocked"]["reason"]
     assert result["previewBlocked"]["requests"] == 0
     assert "Review the printed menu dates." in result["previewServer"]["reason"]
     assert result["previewServer"]["requests"] == 1
     assert result["opened"] == {"open": True, "title": "Update Weekly Savoury Menu", "summary": "13 items · 25 Sep - 30 Sep 2026", "button": "Update Menu", "publishRequests": 0}
     assert result["cancelled"] == {"open": False, "publishRequests": 0, "focus": 1}
     assert result["failed"]["open"] is True and result["failed"]["enabled"] is True
-    assert "Bengali Bento belongs" in result["failed"]["reason"]
+    assert "Review the printed menu dates." in result["failed"]["reason"]
     assert "currently published menu has not changed" in result["failed"]["nearButton"]
     assert result["whilePending"] == {"disabled": True, "publishRequests": 2}
     assert result["success"] == {"open": False, "loads": 1, "panes": ["current"],
@@ -145,11 +148,15 @@ def test_menu_editor_and_publish_modal_accessibility_contract():
     assert 'aria-labelledby="wsPublishDialogTitle"' in WEEKLY_HTML
     assert 'onclick="wsCancelPublish()"' in WEEKLY_HTML
     assert 'width:min(480px,calc(100vw - 28px))' in WEEKLY_HTML
-    assert '<p id="mrMenuTopicHelp" class="mr-menu-form-help mr-topic-help">' in REVIEW_HTML
+    assert 'A menu without a topic is not linked to customer enquiries.' not in REVIEW_HTML
+    assert 'onclick="mrManageCategories()">Manage</button>' in REVIEW_HTML
+    assert 'onclick="mrManageTopics()">Manage</button>' in REVIEW_HTML
+    assert 'id="mrTopicDialog"' in REVIEW_HTML
     assert 'id="mrMenuPositionHelp"' in REVIEW_HTML
     assert 'id="mrMenuFile" class="mr-visually-hidden" type="file"' in REVIEW_HTML
     assert 'JPG, PNG, WEBP or PDF · Maximum 10 MB' in REVIEW_HTML
     assert "position.disabled=!topic" in REVIEW_SCRIPT
+    assert "['first','middle','last']" in REVIEW_SCRIPT
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is needed for Admin JavaScript tests")
@@ -166,9 +173,9 @@ vm.runInThisContext(SOURCE);
 mrAllMenus=[];mrEditingId=null;
 mrRefreshPosition();const unlinked={disabled:element('mrMenuPosition').disabled,
   label:element('mrMenuPosition').children[0].textContent,help:!element('mrMenuPositionHelp').hidden};
-element('mrMenuTopic').value='weekly_savoury';mrRefreshPosition();
+element('mrMenuTopic').value='WEEKLY_SAVOURY';mrRefreshPosition();
 const linked={disabled:element('mrMenuPosition').disabled,help:element('mrMenuPositionHelp').hidden,
-  option:element('mrMenuPosition').children[0].textContent};
+  options:element('mrMenuPosition').children.map(option=>option.textContent),selected:element('mrMenuPosition').value};
 element('mrMenuFile').files=[{name:'menu.png',type:'image/png',size:2048}];mrMenuFileSelected();
 const chosen={name:element('mrMenuFileStatus').textContent,button:element('mrMenuFileChoose').textContent,
   removeVisible:!element('mrMenuFileRemove').hidden};mrClearMenuFile();
@@ -182,6 +189,7 @@ console.log(JSON.stringify({unlinked,linked,chosen,removed}));
     result = json.loads(done.stdout.strip())
     assert result["unlinked"] == {"disabled": True,
         "label": "Choose a customer message topic to set reply order.", "help": True}
-    assert result["linked"] == {"disabled": False, "help": True, "option": "Last"}
+    assert result["linked"] == {"disabled": False, "help": False,
+        "options": ["First", "Middle", "Last"], "selected": "last"}
     assert result["chosen"] == {"name": "menu.png (2.0 KB)", "button": "Change", "removeVisible": True}
     assert result["removed"] == {"status": "No file selected.", "button": "Upload Menu File", "removeHidden": True}
