@@ -1,5 +1,10 @@
 # Camellia Engineering Queue
 
+> HISTORICAL — September 2026 fast-development queue, retained as handover
+> evidence. The staging-only operating mode below is superseded and must not
+> govern current releases. Use the current task's explicit authorization and
+> [production runbook](docs/PRODUCTION_RUNBOOK.md).
+
 This file is the single source of truth for deferred engineering work during fast development.
 
 ## Staging target

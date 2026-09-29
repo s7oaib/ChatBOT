@@ -1,5 +1,8 @@
 # Ralph stabilization checkpoint
 
+> HISTORICAL — prior routing stabilization evidence, not the current branch,
+> release baseline or operating procedure. See [current operations](docs/PRODUCTION_RUNBOOK.md).
+
 - Branch: `codex/routing-stabilization-ralph-20260920`
 - Base: `ae8b554fc737d8383ee9ec218d3beeb2569c9386`
 - Completed: client-QA precedence fixes, additive handoff schema migration,

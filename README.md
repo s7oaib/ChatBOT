@@ -8,7 +8,9 @@
 
 Production-ready customer auto-response engine for **Camellia Artisanal** (a gourmet sweets & cloud kitchen brand in Delhi NCR).
 
-Built to convert Meta Ad leads, filter out organic DM noise, send high-resolution Menu Photo Cards (`Till Thursday.jpeg`, `From Friday.jpeg`, `Signature Sondesh.jpeg`, `AAMAR MISHTI.jpeg`), and route complex or sensitive customer inquiries to human staff.
+Built to handle Instagram conversations using approved answers and eligible
+menu assets, with durable human handoffs for unsupported or sensitive requests.
+Current release operations: [production runbook](docs/PRODUCTION_RUNBOOK.md).
 
 ---
 
@@ -22,13 +24,13 @@ Built to convert Meta Ad leads, filter out organic DM noise, send high-resolutio
 > The production channel policy keeps Instagram AI enabled. Whether organic
 > Instagram DMs are answered is controlled by the explicitly configured
 > `BYPASS_AD_GATE` environment setting; verify the live setting before relying
-> on this behavior. See the [deployment guide](docs/deployment.md).
+> on this behavior. See the [production runbook](docs/PRODUCTION_RUNBOOK.md).
 
 ### 2. 🖼️ Visual Menu Photo Card Engine
 - Delivers high-resolution menu photo cards directly in Instagram DMs instead of long text lists.
-- **Dynamic Weekly Menu Switch**:
-  - **Mon – Thu**: Sends `Till Thursday.jpeg` (Mid-week menu card).
-  - **Fri – Sun**: Sends `From Friday.jpeg` (Weekend menu card).
+- **Reviewed Weekly Menu Lifecycle**: Only eligible current reviewed/dated
+  menu assets may be sent. Undated static From Friday/Till Thursday images are
+  not a current-menu fallback. Expired/upcoming menus are not current authority.
 - **Sondesh Collections**:
   - Sends `Signature Sondesh.jpeg` or `AAMAR MISHTI.jpeg` for Sondesh price inquiries.
 
@@ -40,14 +42,17 @@ Built to convert Meta Ad leads, filter out organic DM noise, send high-resolutio
 ### 4. 🚨 Human Escalation Pipeline (PRD Requirement #4b)
 - **Out-of-Syllabus Protection**: Unmatched customer queries are never answered with guesses.
 - **Sensitive Trigger Guard**: Queries containing sensitive keywords (`refund`, `complaint`, `cancel order`, `custom order`, `bulk order`, `payment link`) immediately trigger human escalation.
-- **Manual Handoff**: Stores durable conversation/handoff state in `camellia.db` subject to retention, while normal logs use hashed identifiers and safe error metadata only. Customers receive a `wa.me` link; WhatsApp is handled by a human.
+- **Manual Handoff**: Stores durable conversation/handoff state in SQLite.
+  Generic unsupported handoffs do not automatically include WhatsApp links;
+  approved purchase/order flows may include a manual `wa.me` continuation.
 
 ### 5. 🔐 Kitchen & Menu Admin Portal (`/admin` / `/admin/dashboard`)
 - **Secure Admin Authentication**: Browser access uses `ADMIN_USERNAME` + an Argon2id `ADMIN_PASSWORD_HASH`, durable rate limiting, CSRF-protected server sessions, and logout revocation. `ADMIN_API_KEY` remains a separate machine credential; legacy `ADMIN_PIN` is not accepted.
 - **📋 Paste Menu Card Parser**: Extracts dish names, descriptions, weights, and prices from flyer notes or dish lists, automatically categorizing items as Veg or Non-Veg.
 - **📸 Flyer Photo & Graphic OCR**: Scans printed menu photos or Instagram flyers with a Groq vision model, using the same key the bot already needs for replies.
-- **📊 Google Sheets Live Sync**: One-click sync from Google Sheets CSV without server restarts or touching code.
-- **🍱 Active Menu Viewer**: Inspect live menu items visually with an instant **Reset to Authentic Bengali Culinary Baseline**.
+- **Human Review Required**: Extraction creates a draft, not customer authority.
+  Review and explicit approval/publication use the existing Menu workspace;
+  legacy sync/reset publication paths are disabled.
 - **📈 Analytics & Escalations**: Tracks real-time match rates, query totals, and unresolved human escalations.
 
 ### 6. 💬 Browser-Based Live Chat Tester (`/chat`)
@@ -83,12 +88,12 @@ Camellia.artisal/
 │   ├── session_memory.py        # Customer facts & conversation state
 │   ├── database.py              # SQLite storage (logs, sessions, escalations)
 │   ├── escalator.py             # Human escalation & alert pipeline
-│   ├── sheet_sync.py            # Google Sheet CSV live menu update
+│   ├── sheet_sync.py            # Retained compatibility parser; no live publication
 │   ├── slang_normalizer.py      # Hinglish / shorthand normalisation
 │   ├── monitoring.py            # Logging, delivery health & reply latency
 │   └── config.py                # Environment variable loader
 ├── data/                        # Seed configuration loaded at runtime
-│   ├── menu.json                # Structured weekly menu database
+│   ├── menu.json                # Compatibility/read baseline, not current version authority
 │   └── qa_templates.json        # Q&A triggers & template responses
 ├── images/                      # Menu photo cards served at /images
 ├── tests/                       # Pytest suite (conftest puts the root on sys.path)
@@ -104,7 +109,7 @@ Camellia.artisal/
 ```
 
 See [docs/architecture.md](docs/architecture.md) for package ownership,
-[docs/deployment.md](docs/deployment.md) for hosting,
+[docs/PRODUCTION_RUNBOOK.md](docs/PRODUCTION_RUNBOOK.md) for current hosting,
 [docs/CLIENT_HANDOVER.md](docs/CLIENT_HANDOVER.md) for operator handover,
 [docs/PRODUCTION_BACKUP_RECOVERY.md](docs/PRODUCTION_BACKUP_RECOVERY.md) for
 recovery, [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md) for monitoring, and
@@ -163,7 +168,9 @@ uvicorn camellia.app:app --reload --port 8000
 
 The bot comes with a built-in **Interactive Web Chat Tester** available at `/chat`, `/demo`, or `/test`. It is a local-only diagnostic surface for testing approved responses, menu image cards, channel policy, and safe fallback behavior without requiring live Meta delivery.
 
-> **Off by default.** The tester writes real conversation rows and fires real escalation alerts to the owner's phone, so it returns `404` unless `ENABLE_WEB_TESTER=true` is set. Enable it in local development only — never on a public domain.
+> **Off by default.** The tester writes real conversation and durable handoff
+> state, so it returns `404` unless `ENABLE_WEB_TESTER=true` is set. Enable it
+> in isolated local development only — never on a public domain.
 
 ### Accessing the Web Interface
 
@@ -178,6 +185,10 @@ Then open the Web Chat Interface in your browser:
 ---
 
 ### Features of the Web Chat Interface
+
+> HISTORICAL ILLUSTRATION — the wireframe/preset copy below is not approved
+> business knowledge or proof of current UI/weekly-menu authority. Use current
+> automated tests and human-approved menu versions; never copy example prices.
 
 ```text
  ┌────────────────────────────────────────────────────────────────────────┐
@@ -217,6 +228,10 @@ Then open the Web Chat Interface in your browser:
 
 ## 📊 Google Spreadsheet Live Menu Sync (`sheet_sync.py`)
 
+> HISTORICAL — the legacy sync/publication instructions below are superseded
+> and must not be executed. Import/extraction does not bypass human review.
+> Use the existing Menu workspace review → approve → publish lifecycle.
+
 Menu items and pricing can be updated directly via a published Google Sheet CSV without modifying any code or JSON files.
 
 ### How it works
@@ -239,7 +254,7 @@ curl -X POST "http://localhost:8000/admin/sync-menu?csv_url=https://docs.google.
 Set `ENABLE_WEB_TESTER=true`, then open **[http://localhost:8000/chat](http://localhost:8000/chat)** in your web browser.
 
 ### Method 2: Automated Unit Test Suite (`tests/test_bot.py`)
-Run all 25 automated unit tests:
+Run the current repository suite (the suite is not limited to test_bot.py):
 ```bash
 python -m pytest tests/
 ```

@@ -1,10 +1,17 @@
 # Deployment
 
+> HISTORICAL DEPLOYMENT NOTES — pre-Phase-2C menu/seed instructions below
+> are preserved as evidence, not current menu authority or release procedures.
+> Current production: `https://web-production-0cad70.up.railway.app`.
+> Current staging: `https://chatbot-staging-staging.up.railway.app`.
+> Use [PRODUCTION_RUNBOOK.md](PRODUCTION_RUNBOOK.md) and
+> [PRODUCTION_BACKUP_RECOVERY.md](PRODUCTION_BACKUP_RECOVERY.md).
+
 The live service runs on **Railway**. The current service URL is an operator-managed
 deployment value; verify it in Railway before running a production health check.
 
 Build and start config lives in [`railway.json`](railway.json) (`main.py` via
-Nixpacks). Railway has no committed environment file — **every variable below is
+Railpack). Railway has no committed environment file — **every variable below is
 set in the Railway dashboard only**, so nothing in this repository will tell you
 when one is missing or wrong. `/health` is the authority on what is actually
 live; check it after any change.
@@ -171,7 +178,7 @@ still goes out as text, built from `menu.json`'s structured items.
 `META_APP_SECRET`, `META_VERIFY_TOKEN`, `INSTAGRAM_ACCESS_TOKEN`,
 `INSTAGRAM_AUTH_MODE`,
 `INSTAGRAM_ACCOUNT_ID`, `INSTAGRAM_PAGE_ID`, `WHATSAPP_BUSINESS_NUMBER`,
-`ADMIN_API_KEY`, `ADMIN_PIN`, `GROQ_API_KEY`.
+`ADMIN_API_KEY`, `GROQ_API_KEY`.
 
 Instagram Business Login uses a separate, explicit credential pair:
 `INSTAGRAM_APP_ID`, `INSTAGRAM_APP_SECRET`,

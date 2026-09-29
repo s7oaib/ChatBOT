@@ -1,5 +1,10 @@
 # Camellia Artisanal v1.0 Production Runbook
 
+> HISTORICAL — superseded v1 procedures, preserved for acceptance evidence.
+> Do not execute the historical rollback, seed or customer-message checklist
+> below. Current procedures: [production runbook](docs/PRODUCTION_RUNBOOK.md)
+> and [backup/recovery](docs/PRODUCTION_BACKUP_RECOVERY.md).
+
 ## Health check
 
 ```powershell

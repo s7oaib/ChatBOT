@@ -1,5 +1,12 @@
 # Camellia Production Backup & Recovery Runbook
 
+> HISTORICAL RECOVERY EVIDENCE — the freeze SHA/branch below are retained
+> recovery references, not current deployment or automatic rollback targets.
+> The authoritative procedure is [docs/PRODUCTION_BACKUP_RECOVERY.md](docs/PRODUCTION_BACKUP_RECOVERY.md):
+> SQLite online backup includes committed WAL, uses unique sibling files and
+> verifies integrity. Routine recovery validation uses a disposable path only.
+> Live restore, rollback and configuration changes require explicit authorization.
+
 Status: maintenance documentation only. This file does not enable, create, restore, or deploy backups.
 
 ## Stable recovery references
