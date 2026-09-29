@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional
 
 from camellia.database import db
 
+
 class MenuCatalogueError(ValueError):
     """A create/update request failed validation."""
 
@@ -54,19 +55,213 @@ _MANAGER_KEYS = {
     "bento": "weekly.bengali_bento",
 }
 
-# Customer-message routing metadata is deliberately separate from the Admin
-# category and from Meta's source-specific Instagram Topics.
+# These are semantic routing families understood by the existing responder.
+# Operator-managed customer topics below point at one of these families, so
+# adding/renaming a topic never creates a second free-form intent router.
 CUSTOMER_TOPICS = (
     "SONDESH", "SAVOURY", "BENTO_MEAL", "GIFT_EVENT",
     "WEEKLY_SAVOURY", "SUBSCRIPTION", "HOME_TABLE",
 )
 
+_CORE_TOPIC_LABELS = {
+    "SONDESH": "Sondesh",
+    "SAVOURY": "Savoury",
+    "BENTO_MEAL": "Bento / Meal",
+    "GIFT_EVENT": "Gift / Event",
+    "WEEKLY_SAVOURY": "Weekly Savoury",
+    "SUBSCRIPTION": "Subscription",
+    "HOME_TABLE": "Home Table",
+}
+
+
+def _ensure_menu_taxonomy() -> None:
+    """Apply the small, idempotent operator-taxonomy upgrade.
+
+    This changes routing/catalogue metadata only. It never changes approved
+    menu rows, prices, versions, publication state, or customer facts.
+    """
+    with db.get_connection() as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS menu_customer_topics (
+                topic_id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                routing_key TEXT NOT NULL,
+                active INTEGER NOT NULL DEFAULT 1,
+                is_system INTEGER NOT NULL DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_menu_customer_topics_name "
+            "ON menu_customer_topics(name COLLATE NOCASE)"
+        )
+        for routing_key, name in _CORE_TOPIC_LABELS.items():
+            conn.execute(
+                "INSERT OR IGNORE INTO menu_customer_topics "
+                "(topic_id,name,routing_key,active,is_system) VALUES (?,?,?,1,1)",
+                (routing_key, name, routing_key),
+            )
+
+        # Weekly Vegetarian and Weekly Non-Vegetarian are sections/legacy
+        # identities of the single Weekly Savoury workflow, not catalogue
+        # categories in their own right.
+        conn.execute(
+            "INSERT OR IGNORE INTO menu_categories (name,active,is_system) "
+            "VALUES ('Savoury Menu',1,0)"
+        )
+        conn.execute(
+            "UPDATE menu_catalogue SET category='Savoury Menu',updated_at=CURRENT_TIMESTAMP "
+            "WHERE menu_id IN ('weekly_vegetarian','weekly_non_vegetarian') "
+            "AND category IN ('Weekly Vegetarian','Weekly Non-Vegetarian','Weekly Savoury')"
+        )
+        for obsolete in ("Weekly Vegetarian", "Weekly Non-Vegetarian"):
+            used = conn.execute(
+                "SELECT 1 FROM menu_catalogue WHERE category=? COLLATE NOCASE LIMIT 1", (obsolete,)
+            ).fetchone()
+            if not used:
+                conn.execute(
+                    "DELETE FROM menu_categories WHERE name=? COLLATE NOCASE AND is_system=0",
+                    (obsolete,),
+                )
+        conn.commit()
+
+
+def _clean_label(value: str, field: str, max_length: int = 100) -> str:
+    cleaned = " ".join(str(value or "").split())
+    if not cleaned:
+        raise MenuCatalogueError(f"{field} is required.")
+    if len(cleaned) > max_length:
+        raise MenuCatalogueError(f"{field} must be {max_length} characters or fewer.")
+    if any(ord(char) < 32 for char in cleaned):
+        raise MenuCatalogueError(f"{field} contains invalid characters.")
+    return cleaned
+
+
+def _topic_id(name: str) -> str:
+    base = re.sub(r"[^A-Z0-9]+", "_", name.upper()).strip("_") or "TOPIC"
+    candidate = f"CUSTOM_{base}"[:80]
+    with db.get_connection() as conn:
+        if not conn.execute("SELECT 1 FROM menu_customer_topics WHERE topic_id=?", (candidate,)).fetchone():
+            return candidate
+        suffix = 2
+        while conn.execute(
+            "SELECT 1 FROM menu_customer_topics WHERE topic_id=?", (f"{candidate}_{suffix}",)
+        ).fetchone():
+            suffix += 1
+    return f"{candidate}_{suffix}"
+
+
+def list_customer_topics(include_inactive: bool = False) -> List[Dict[str, Any]]:
+    _ensure_menu_taxonomy()
+    where = "" if include_inactive else "WHERE t.active=1"
+    with db.get_connection() as conn:
+        rows = conn.execute(f"""
+            SELECT t.*, COUNT(m.menu_id) AS menu_count
+            FROM menu_customer_topics t
+            LEFT JOIN menu_catalogue m ON m.customer_topic=t.topic_id
+            {where}
+            GROUP BY t.topic_id
+            ORDER BY t.name COLLATE NOCASE, t.topic_id
+        """).fetchall()
+    return [dict(row) for row in rows]
+
+
+def create_customer_topic(name: str, routing_key: str) -> Dict[str, Any]:
+    _ensure_menu_taxonomy()
+    name = _clean_label(name, "Topic name")
+    routing_key = str(routing_key or "").strip().upper()
+    if routing_key not in CUSTOMER_TOPICS:
+        raise MenuCatalogueError("Choose a supported customer enquiry type.")
+    topic_id = _topic_id(name)
+    try:
+        with db.get_connection() as conn:
+            conn.execute(
+                "INSERT INTO menu_customer_topics(topic_id,name,routing_key,active,is_system) "
+                "VALUES (?,?,?,1,0)", (topic_id, name, routing_key)
+            )
+            conn.commit()
+            row = conn.execute("SELECT * FROM menu_customer_topics WHERE topic_id=?", (topic_id,)).fetchone()
+    except Exception as exc:
+        if "UNIQUE" in str(exc).upper():
+            raise MenuCatalogueError("A customer message topic with that name already exists.") from exc
+        raise
+    return dict(row)
+
+
+def update_customer_topic(topic_id: str, name: str, routing_key: str) -> Dict[str, Any]:
+    _ensure_menu_taxonomy()
+    name = _clean_label(name, "Topic name")
+    routing_key = str(routing_key or "").strip().upper()
+    if routing_key not in CUSTOMER_TOPICS:
+        raise MenuCatalogueError("Choose a supported customer enquiry type.")
+    try:
+        with db.get_connection() as conn:
+            cursor = conn.execute(
+                "UPDATE menu_customer_topics SET name=?,routing_key=?,updated_at=CURRENT_TIMESTAMP "
+                "WHERE topic_id=? AND active=1", (name, routing_key, topic_id)
+            )
+            if not cursor.rowcount:
+                raise KeyError(topic_id)
+            conn.commit()
+            row = conn.execute("SELECT * FROM menu_customer_topics WHERE topic_id=?", (topic_id,)).fetchone()
+    except Exception as exc:
+        if isinstance(exc, KeyError):
+            raise
+        if "UNIQUE" in str(exc).upper():
+            raise MenuCatalogueError("A customer message topic with that name already exists.") from exc
+        raise
+    return dict(row)
+
+
+def delete_customer_topic(topic_id: str) -> Dict[str, Any]:
+    _ensure_menu_taxonomy()
+    with db.get_connection() as conn:
+        row = conn.execute("SELECT * FROM menu_customer_topics WHERE topic_id=? AND active=1", (topic_id,)).fetchone()
+        if not row:
+            raise KeyError(topic_id)
+        count = int(conn.execute(
+            "SELECT COUNT(*) FROM menu_catalogue WHERE customer_topic=?", (topic_id,)
+        ).fetchone()[0])
+        if count:
+            raise MenuCatalogueError(
+                f"Cannot delete '{row['name']}'. {count} menu{'s' if count != 1 else ''} use this topic. "
+                "Move or unlink those menus first."
+            )
+        if row["is_system"]:
+            conn.execute(
+                "UPDATE menu_customer_topics SET active=0,updated_at=CURRENT_TIMESTAMP WHERE topic_id=?",
+                (topic_id,),
+            )
+        else:
+            conn.execute("DELETE FROM menu_customer_topics WHERE topic_id=?", (topic_id,))
+        conn.commit()
+    return {"deleted": True, "topic_id": topic_id}
+
+
+def routing_key_for_topic(topic_id: Optional[str]) -> Optional[str]:
+    if not topic_id:
+        return None
+    _ensure_menu_taxonomy()
+    with db.get_connection() as conn:
+        row = conn.execute(
+            "SELECT routing_key FROM menu_customer_topics WHERE topic_id=? AND active=1", (topic_id,)
+        ).fetchone()
+    return str(row[0]) if row else None
+
 
 def clean_customer_topic(value: Optional[str]) -> Optional[str]:
     topic = str(value or "").strip().upper()
-    if topic and topic not in CUSTOMER_TOPICS:
+    if not topic:
+        return None
+    _ensure_menu_taxonomy()
+    with db.get_connection() as conn:
+        row = conn.execute(
+            "SELECT topic_id FROM menu_customer_topics WHERE UPPER(topic_id)=? AND active=1", (topic,)
+        ).fetchone()
+    if not row:
         raise MenuCatalogueError("Choose an approved customer message topic.")
-    return topic or None
+    return str(row[0])
 
 
 def _slugify(name: str) -> str:
@@ -76,21 +271,16 @@ def _slugify(name: str) -> str:
 
 def clean_category_name(name: str) -> str:
     """Normalize an operator label without accepting control characters."""
-    cleaned = " ".join(str(name or "").split())
-    if not cleaned:
-        raise MenuCatalogueError("Category name is required.")
-    if len(cleaned) > 100:
-        raise MenuCatalogueError("Category name must be 100 characters or fewer.")
-    if any(ord(char) < 32 for char in cleaned):
-        raise MenuCatalogueError("Category name contains invalid characters.")
-    return cleaned
+    return _clean_label(name, "Category name")
 
 
 def list_categories(include_inactive: bool = False) -> List[Dict[str, Any]]:
+    _ensure_menu_taxonomy()
     return db.list_menu_categories(include_inactive=include_inactive)
 
 
 def create_category(name: str) -> Dict[str, Any]:
+    _ensure_menu_taxonomy()
     try:
         return db.create_menu_category(clean_category_name(name))
     except ValueError as exc:
@@ -98,6 +288,7 @@ def create_category(name: str) -> Dict[str, Any]:
 
 
 def update_category(category_id: int, name: str) -> Dict[str, Any]:
+    _ensure_menu_taxonomy()
     try:
         category = db.rename_menu_category(category_id, clean_category_name(name))
     except ValueError as exc:
@@ -108,6 +299,7 @@ def update_category(category_id: int, name: str) -> Dict[str, Any]:
 
 
 def category_usage(category_id: int) -> Dict[str, Any]:
+    _ensure_menu_taxonomy()
     usage = db.menu_category_usage(category_id)
     if not usage:
         raise KeyError(category_id)
@@ -115,6 +307,7 @@ def category_usage(category_id: int) -> Dict[str, Any]:
 
 
 def delete_category(category_id: int, replacement_category_id: Optional[int] = None) -> Dict[str, Any]:
+    _ensure_menu_taxonomy()
     try:
         return db.delete_menu_category(category_id, replacement_category_id)
     except ValueError as exc:
@@ -122,10 +315,12 @@ def delete_category(category_id: int, replacement_category_id: Optional[int] = N
 
 
 def list_menus(include_inactive: bool = True) -> List[Dict[str, Any]]:
+    _ensure_menu_taxonomy()
     return db.list_menu_catalogue(include_inactive=include_inactive)
 
 
 def get_menu(menu_id: str) -> Optional[Dict[str, Any]]:
+    _ensure_menu_taxonomy()
     return db.get_menu_catalogue_entry(menu_id)
 
 
@@ -138,6 +333,7 @@ def workspace_summary(menus: List[Dict[str, Any]]) -> Dict[str, Any]:
     from camellia import menu_dates, weekly_savoury
     from camellia.config import config
 
+    _ensure_menu_taxonomy()
     try:
         with open(config.MENU_JSON_PATH, encoding="utf-8") as stream:
             baseline = json.load(stream)
@@ -162,7 +358,6 @@ def workspace_summary(menus: List[Dict[str, Any]]) -> Dict[str, Any]:
         key = menu["menu_id"]
         draft = drafts.get(key) or {}
         status = draft.get("status")
-        # Unlike customer relevance, operator action also includes inactive menus.
         unresolved = bool(status and status not in {"PUBLISHED", "REJECTED"})
         approval = json.loads(selected["approval_json"]) if selected else {}
         latest = related[0] if related else None
@@ -205,9 +400,8 @@ def workspace_summary(menus: List[Dict[str, Any]]) -> Dict[str, Any]:
                        weekly_savoury.version_status(version) == "UPCOMING"), key=lambda version: version["valid_from"])
     selected = current_weekly or (upcoming[0] if upcoming else (related[0] if related else None))
     weekly = project({"menu_id": weekly_savoury.WEEKLY_KEY, "name": "Weekly Savoury",
-                      "category": "Weekly Savoury", "description": "Review this week's menu or prepare the next one.",
+                      "category": "Savoury Menu", "description": "Review this week's menu or prepare the next one.",
                       "active": True, "is_builtin": True, "image_url": None, "image_status": None}, related, selected)
-    # The older non-vegetarian review slot is the same operator workspace.
     pending = [drafts[key] for key in weekly_savoury.LEGACY_WEEKLY_KEYS if key in drafts and
                drafts[key].get("status") not in {None, "PUBLISHED", "REJECTED"}]
     if pending:
@@ -234,6 +428,7 @@ def workspace_summary(menus: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 def create_menu(name: str, category: str, description: str, active: bool = True,
                 customer_topic: Optional[str] = None) -> Dict[str, Any]:
+    _ensure_menu_taxonomy()
     name = (name or "").strip()
     description = (description or "").strip()
     if not name:
@@ -248,9 +443,6 @@ def create_menu(name: str, category: str, description: str, active: bool = True,
 
     menu_id = _slugify(name)
     if db.get_menu_catalogue_entry(menu_id) or db.is_menu_deleted(menu_id):
-        # A different name that slugifies to the same id (e.g. punctuation-only
-        # difference) — disambiguate rather than silently colliding into the
-        # existing menu's image history.
         suffix = 2
         while db.get_menu_catalogue_entry(f"{menu_id}_{suffix}"):
             suffix += 1
@@ -264,9 +456,6 @@ def create_menu(name: str, category: str, description: str, active: bool = True,
 
 def permanently_delete_menu(menu_id: str, deleted_by: str = "admin") -> Dict[str, Any]:
     """Irreversibly remove a catalogue menu and its local assets/history."""
-    # The Menu Manager gallery uses its legacy dotted keys while the Menu
-    # Catalogue uses durable catalogue ids. Accept both at this boundary so
-    # the destructive action cannot silently target the wrong record.
     menu_id = next(
         (catalogue_id for catalogue_id, manager_key in _MANAGER_KEYS.items() if manager_key == menu_id),
         menu_id,
@@ -282,7 +471,6 @@ def permanently_delete_menu(menu_id: str, deleted_by: str = "admin") -> Dict[str
     if not result or not result.get("deleted"):
         raise MenuCatalogueInUseError(menu_id, (result or {}).get("references", []))
 
-    # SQLite owns the metadata; the image module owns the durable upload path.
     from camellia import menu_images
     result["image_files_removed"] = menu_images.remove_persisted_files(result.pop("image_paths", []))
     return result
@@ -293,6 +481,7 @@ def update_menu(
     description: Optional[str] = None, active: Optional[bool] = None,
     customer_topic: Optional[str] = None, update_topic: bool = False,
 ) -> Dict[str, Any]:
+    _ensure_menu_taxonomy()
     if not db.get_menu_catalogue_entry(menu_id):
         raise KeyError(menu_id)
     if name is not None:
@@ -331,18 +520,20 @@ def eligible_topic_menus(topic: str) -> List[Dict[str, Any]]:
     """Images only, after the existing review/current/pending authority gates.
 
     No menu description or extracted facts are returned to the responder.
-    Unlinked/inactive menus and drafts are never candidates.
+    Unlinked/inactive menus and drafts are never candidates. Operator-managed
+    topic labels resolve to one of the existing semantic routing families.
     """
     from camellia import menu_images, menu_review
 
+    _ensure_menu_taxonomy()
+    requested_routing_key = str(topic or "").strip().upper()
     selected = []
     approved = {version["menu_key"] for version in menu_review.customer_versions()}
     blocked = menu_review.customer_blocked_keys()
+    topic_map = {row["topic_id"]: row["routing_key"] for row in list_customer_topics()}
     for menu in db.list_menu_catalogue(include_inactive=False):
-        if menu.get("customer_topic") != topic or menu["menu_id"] in blocked:
+        if topic_map.get(menu.get("customer_topic")) != requested_routing_key or menu["menu_id"] in blocked:
             continue
-        # The two known standing collection assets have canonical approval in
-        # the baseline. All operator-added menus require a reviewed version.
         if menu["menu_id"] not in approved and menu["menu_id"] not in {"aamar_mishti", "signature"}:
             continue
         image_url = menu_images.current_url(menu["menu_id"], None)
