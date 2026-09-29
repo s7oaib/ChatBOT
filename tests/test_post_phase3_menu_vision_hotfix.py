@@ -116,8 +116,9 @@ def test_manual_valid_row_restores_normal_comparison(isolated):
     assert analysis['changes']['removed'][0]['item'] == 'Old dish'
 
 
-@pytest.mark.parametrize('script', [REVIEW_SCRIPT, WEEKLY_SCRIPT])
-def test_failure_copy_and_manual_actions_remain_available(script):
+@pytest.mark.parametrize('script_name', ['review', 'weekly'])
+def test_failure_copy_and_manual_actions_remain_available(script_name):
+    script = REVIEW_SCRIPT if script_name == 'review' else WEEKLY_SCRIPT
     assert 'Extraction unsuccessful' in script
     assert 'Your published menu is unchanged' in script
     assert 'RetryExtraction' in script

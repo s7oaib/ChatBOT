@@ -92,3 +92,64 @@ def test_core_topic_can_be_renamed_without_changing_its_routing_key(taxonomy_env
     assert updated["name"] == "Savoury Menu"
     assert updated["routing_key"] == "SAVOURY"
     assert menu_catalogue.clean_customer_topic("SAVOURY") == "SAVOURY"
+    with pytest.raises(menu_catalogue.MenuCatalogueError, match="Unlink menus"):
+        menu_catalogue.update_customer_topic("SAVOURY", "Wrong family", "SONDESH")
+    assert menu_catalogue.routing_key_for_topic("SAVOURY") == "SAVOURY"
+
+
+def test_taxonomy_reads_preserve_legacy_catalogue_and_category_rows(taxonomy_env):
+    with db.get_connection() as conn:
+        before = [tuple(row) for row in conn.execute(
+            "SELECT menu_id,category,updated_at FROM menu_catalogue "
+            "WHERE menu_id IN ('weekly_vegetarian','weekly_non_vegetarian') ORDER BY menu_id"
+        )]
+        old_categories = [tuple(row) for row in conn.execute(
+            "SELECT category_id,name FROM menu_categories "
+            "WHERE name IN ('Weekly Vegetarian','Weekly Non-Vegetarian') ORDER BY name"
+        )]
+    assert old_categories
+    assert menu_catalogue.get_menu("weekly_vegetarian")["category"] == "Savoury Menu"
+    assert "Weekly Vegetarian" not in [row["name"] for row in menu_catalogue.list_categories()]
+    menu_catalogue.list_menus()
+    db.init_db()
+    with db.get_connection() as conn:
+        after = [tuple(row) for row in conn.execute(
+            "SELECT menu_id,category,updated_at FROM menu_catalogue "
+            "WHERE menu_id IN ('weekly_vegetarian','weekly_non_vegetarian') ORDER BY menu_id"
+        )]
+        retained_categories = [tuple(row) for row in conn.execute(
+            "SELECT category_id,name FROM menu_categories "
+            "WHERE name IN ('Weekly Vegetarian','Weekly Non-Vegetarian') ORDER BY name"
+        )]
+    assert after == before
+    assert retained_categories == old_categories
+
+
+def test_savoury_umbrella_cannot_be_renamed_or_deleted(taxonomy_env):
+    category = next(row for row in menu_catalogue.list_categories() if row["name"] == "Savoury Menu")
+    with pytest.raises(menu_catalogue.MenuCatalogueError, match="protected weekly menu umbrella"):
+        menu_catalogue.update_category(category["category_id"], "Something else")
+    with pytest.raises(menu_catalogue.MenuCatalogueError, match="protected weekly menu umbrella"):
+        menu_catalogue.delete_category(category["category_id"])
+    with pytest.raises(menu_catalogue.MenuCatalogueError, match="Use Savoury Menu"):
+        menu_catalogue.create_category("Weekly Vegetarian")
+    created = menu_catalogue.create_menu("Weekend savoury", "Weekly Non-Vegetarian", "Weekend menu.")
+    assert created["category"] == "Savoury Menu"
+
+
+def test_savoury_workflow_opens_from_its_catalogue_card(taxonomy_env):
+    page = TestClient(app).get("/admin").text
+    assert '<div id="mrWeeklyView" hidden>' in page
+    assert "mrWorkspaceRows.forEach(menu=>" in page
+    assert "menu.workspace==='weekly'?mrOpenWeekly()" in page
+    assert "if(weekly)weekly.hidden=true" in page
+    assert "← Menu Catalogue" in page
+
+
+def test_used_custom_topic_cannot_change_routing_family(taxonomy_env):
+    topic = menu_catalogue.create_customer_topic("Party Savoury", "SAVOURY")
+    menu_catalogue.create_menu("Party Trays", "Savoury Menu", "Party savoury trays.",
+                               customer_topic=topic["topic_id"])
+    with pytest.raises(menu_catalogue.MenuCatalogueError, match="Unlink menus"):
+        menu_catalogue.update_customer_topic(topic["topic_id"], "Party Savoury", "SONDESH")
+    assert menu_catalogue.routing_key_for_topic(topic["topic_id"]) == "SAVOURY"

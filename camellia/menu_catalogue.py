@@ -19,7 +19,7 @@ import json
 import re
 from typing import Any, Dict, List, Optional
 
-from camellia.database import db
+from camellia.database import MENU_TOPIC_DEFAULTS, db
 
 
 class MenuCatalogueError(ValueError):
@@ -63,68 +63,23 @@ CUSTOMER_TOPICS = (
     "WEEKLY_SAVOURY", "SUBSCRIPTION", "HOME_TABLE",
 )
 
-_CORE_TOPIC_LABELS = {
-    "SONDESH": "Sondesh",
-    "SAVOURY": "Savoury",
-    "BENTO_MEAL": "Bento / Meal",
-    "GIFT_EVENT": "Gift / Event",
-    "WEEKLY_SAVOURY": "Weekly Savoury",
-    "SUBSCRIPTION": "Subscription",
-    "HOME_TABLE": "Home Table",
-}
+_CORE_TOPIC_LABELS = MENU_TOPIC_DEFAULTS
 
 
-def _ensure_menu_taxonomy() -> None:
-    """Apply the small, idempotent operator-taxonomy upgrade.
+_LEGACY_SAVOURY_CATEGORIES = frozenset({"Weekly Vegetarian", "Weekly Non-Vegetarian", "Weekly Savoury"})
 
-    This changes routing/catalogue metadata only. It never changes approved
-    menu rows, prices, versions, publication state, or customer facts.
-    """
-    with db.get_connection() as conn:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS menu_customer_topics (
-                topic_id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                routing_key TEXT NOT NULL,
-                active INTEGER NOT NULL DEFAULT 1,
-                is_system INTEGER NOT NULL DEFAULT 0,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        conn.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_menu_customer_topics_name "
-            "ON menu_customer_topics(name COLLATE NOCASE)"
-        )
-        for routing_key, name in _CORE_TOPIC_LABELS.items():
-            conn.execute(
-                "INSERT OR IGNORE INTO menu_customer_topics "
-                "(topic_id,name,routing_key,active,is_system) VALUES (?,?,?,1,1)",
-                (routing_key, name, routing_key),
-            )
 
-        # Weekly Vegetarian and Weekly Non-Vegetarian are sections/legacy
-        # identities of the single Weekly Savoury workflow, not catalogue
-        # categories in their own right.
-        conn.execute(
-            "INSERT OR IGNORE INTO menu_categories (name,active,is_system) "
-            "VALUES ('Savoury Menu',1,0)"
-        )
-        conn.execute(
-            "UPDATE menu_catalogue SET category='Savoury Menu',updated_at=CURRENT_TIMESTAMP "
-            "WHERE menu_id IN ('weekly_vegetarian','weekly_non_vegetarian') "
-            "AND category IN ('Weekly Vegetarian','Weekly Non-Vegetarian','Weekly Savoury')"
-        )
-        for obsolete in ("Weekly Vegetarian", "Weekly Non-Vegetarian"):
-            used = conn.execute(
-                "SELECT 1 FROM menu_catalogue WHERE category=? COLLATE NOCASE LIMIT 1", (obsolete,)
-            ).fetchone()
-            if not used:
-                conn.execute(
-                    "DELETE FROM menu_categories WHERE name=? COLLATE NOCASE AND is_system=0",
-                    (obsolete,),
-                )
-        conn.commit()
+def _operator_menu(menu: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Present legacy weekly sections under one umbrella without migrating data."""
+    if menu and menu.get("category") in _LEGACY_SAVOURY_CATEGORIES:
+        return {**menu, "category": "Savoury Menu"}
+    return menu
+
+
+def _operator_category(name: str) -> str:
+    return "Savoury Menu" if name.casefold() in {
+        legacy.casefold() for legacy in _LEGACY_SAVOURY_CATEGORIES
+    } else name
 
 
 def _clean_label(value: str, field: str, max_length: int = 100) -> str:
@@ -153,7 +108,6 @@ def _topic_id(name: str) -> str:
 
 
 def list_customer_topics(include_inactive: bool = False) -> List[Dict[str, Any]]:
-    _ensure_menu_taxonomy()
     where = "" if include_inactive else "WHERE t.active=1"
     with db.get_connection() as conn:
         rows = conn.execute(f"""
@@ -168,7 +122,6 @@ def list_customer_topics(include_inactive: bool = False) -> List[Dict[str, Any]]
 
 
 def create_customer_topic(name: str, routing_key: str) -> Dict[str, Any]:
-    _ensure_menu_taxonomy()
     name = _clean_label(name, "Topic name")
     routing_key = str(routing_key or "").strip().upper()
     if routing_key not in CUSTOMER_TOPICS:
@@ -190,13 +143,23 @@ def create_customer_topic(name: str, routing_key: str) -> Dict[str, Any]:
 
 
 def update_customer_topic(topic_id: str, name: str, routing_key: str) -> Dict[str, Any]:
-    _ensure_menu_taxonomy()
     name = _clean_label(name, "Topic name")
     routing_key = str(routing_key or "").strip().upper()
     if routing_key not in CUSTOMER_TOPICS:
         raise MenuCatalogueError("Choose a supported customer enquiry type.")
     try:
         with db.get_connection() as conn:
+            existing = conn.execute(
+                "SELECT routing_key,is_system FROM menu_customer_topics WHERE topic_id=? AND active=1",
+                (topic_id,),
+            ).fetchone()
+            if not existing:
+                raise KeyError(topic_id)
+            in_use = conn.execute(
+                "SELECT 1 FROM menu_catalogue WHERE customer_topic=? LIMIT 1", (topic_id,)
+            ).fetchone()
+            if routing_key != existing["routing_key"] and (existing["is_system"] or in_use):
+                raise MenuCatalogueError("Unlink menus before changing this topic's enquiry type.")
             cursor = conn.execute(
                 "UPDATE menu_customer_topics SET name=?,routing_key=?,updated_at=CURRENT_TIMESTAMP "
                 "WHERE topic_id=? AND active=1", (name, routing_key, topic_id)
@@ -215,7 +178,6 @@ def update_customer_topic(topic_id: str, name: str, routing_key: str) -> Dict[st
 
 
 def delete_customer_topic(topic_id: str) -> Dict[str, Any]:
-    _ensure_menu_taxonomy()
     with db.get_connection() as conn:
         row = conn.execute("SELECT * FROM menu_customer_topics WHERE topic_id=? AND active=1", (topic_id,)).fetchone()
         if not row:
@@ -242,7 +204,6 @@ def delete_customer_topic(topic_id: str) -> Dict[str, Any]:
 def routing_key_for_topic(topic_id: Optional[str]) -> Optional[str]:
     if not topic_id:
         return None
-    _ensure_menu_taxonomy()
     with db.get_connection() as conn:
         row = conn.execute(
             "SELECT routing_key FROM menu_customer_topics WHERE topic_id=? AND active=1", (topic_id,)
@@ -254,7 +215,6 @@ def clean_customer_topic(value: Optional[str]) -> Optional[str]:
     topic = str(value or "").strip().upper()
     if not topic:
         return None
-    _ensure_menu_taxonomy()
     with db.get_connection() as conn:
         row = conn.execute(
             "SELECT topic_id FROM menu_customer_topics WHERE UPPER(topic_id)=? AND active=1", (topic,)
@@ -275,22 +235,29 @@ def clean_category_name(name: str) -> str:
 
 
 def list_categories(include_inactive: bool = False) -> List[Dict[str, Any]]:
-    _ensure_menu_taxonomy()
-    return db.list_menu_categories(include_inactive=include_inactive)
+    return [category for category in db.list_menu_categories(include_inactive=include_inactive)
+            if _operator_category(category["name"]) == category["name"]]
 
 
 def create_category(name: str) -> Dict[str, Any]:
-    _ensure_menu_taxonomy()
+    name = clean_category_name(name)
+    if _operator_category(name) != name:
+        raise MenuCatalogueError("Use Savoury Menu for weekly savoury menus.")
     try:
-        return db.create_menu_category(clean_category_name(name))
+        return db.create_menu_category(name)
     except ValueError as exc:
         raise MenuCatalogueError(str(exc)) from exc
 
 
 def update_category(category_id: int, name: str) -> Dict[str, Any]:
-    _ensure_menu_taxonomy()
+    name = clean_category_name(name)
+    if _operator_category(name) != name:
+        raise MenuCatalogueError("Use Savoury Menu for weekly savoury menus.")
+    existing = db.get_menu_category(category_id)
+    if existing and existing["name"] == "Savoury Menu" and name != "Savoury Menu":
+        raise MenuCatalogueError("Savoury Menu is the protected weekly menu umbrella.")
     try:
-        category = db.rename_menu_category(category_id, clean_category_name(name))
+        category = db.rename_menu_category(category_id, name)
     except ValueError as exc:
         raise MenuCatalogueError(str(exc)) from exc
     if not category:
@@ -299,7 +266,6 @@ def update_category(category_id: int, name: str) -> Dict[str, Any]:
 
 
 def category_usage(category_id: int) -> Dict[str, Any]:
-    _ensure_menu_taxonomy()
     usage = db.menu_category_usage(category_id)
     if not usage:
         raise KeyError(category_id)
@@ -307,7 +273,9 @@ def category_usage(category_id: int) -> Dict[str, Any]:
 
 
 def delete_category(category_id: int, replacement_category_id: Optional[int] = None) -> Dict[str, Any]:
-    _ensure_menu_taxonomy()
+    existing = db.get_menu_category(category_id)
+    if existing and existing["name"] == "Savoury Menu":
+        raise MenuCatalogueError("Savoury Menu is the protected weekly menu umbrella.")
     try:
         return db.delete_menu_category(category_id, replacement_category_id)
     except ValueError as exc:
@@ -315,13 +283,11 @@ def delete_category(category_id: int, replacement_category_id: Optional[int] = N
 
 
 def list_menus(include_inactive: bool = True) -> List[Dict[str, Any]]:
-    _ensure_menu_taxonomy()
-    return db.list_menu_catalogue(include_inactive=include_inactive)
+    return [_operator_menu(menu) for menu in db.list_menu_catalogue(include_inactive=include_inactive)]
 
 
 def get_menu(menu_id: str) -> Optional[Dict[str, Any]]:
-    _ensure_menu_taxonomy()
-    return db.get_menu_catalogue_entry(menu_id)
+    return _operator_menu(db.get_menu_catalogue_entry(menu_id))
 
 
 def workspace_summary(menus: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -333,7 +299,6 @@ def workspace_summary(menus: List[Dict[str, Any]]) -> Dict[str, Any]:
     from camellia import menu_dates, weekly_savoury
     from camellia.config import config
 
-    _ensure_menu_taxonomy()
     try:
         with open(config.MENU_JSON_PATH, encoding="utf-8") as stream:
             baseline = json.load(stream)
@@ -393,13 +358,13 @@ def workspace_summary(menus: List[Dict[str, Any]]) -> Dict[str, Any]:
             (key == "aamar_mishti" and (baseline.get("collections") or {}).get("aamar_mishti")) or
             (key == "signature" and (baseline.get("collections") or {}).get("signature_collection")) or
             (key == "bento" and (baseline.get("order_types") or {}).get("bengali_bento"))))
-        rows.append(project(menu, related, selected, standing))
+        rows.append(project(_operator_menu(menu), related, selected, standing))
 
     related = [version for version in versions if version["menu_key"] in weekly_savoury.LEGACY_WEEKLY_KEYS]
     upcoming = sorted((version for version in related if version.get("valid_from") and
                        weekly_savoury.version_status(version) == "UPCOMING"), key=lambda version: version["valid_from"])
     selected = current_weekly or (upcoming[0] if upcoming else (related[0] if related else None))
-    weekly = project({"menu_id": weekly_savoury.WEEKLY_KEY, "name": "Weekly Savoury",
+    weekly = project({"menu_id": weekly_savoury.WEEKLY_KEY, "name": "Savoury Menu",
                       "category": "Savoury Menu", "description": "Review this week's menu or prepare the next one.",
                       "active": True, "is_builtin": True, "image_url": None, "image_status": None}, related, selected)
     pending = [drafts[key] for key in weekly_savoury.LEGACY_WEEKLY_KEYS if key in drafts and
@@ -428,14 +393,13 @@ def workspace_summary(menus: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 def create_menu(name: str, category: str, description: str, active: bool = True,
                 customer_topic: Optional[str] = None) -> Dict[str, Any]:
-    _ensure_menu_taxonomy()
     name = (name or "").strip()
     description = (description or "").strip()
     if not name:
         raise MenuCatalogueError("Menu name is required.")
     if not description:
         raise MenuCatalogueError("Customer description is required.")
-    selected_category = db.find_menu_category_by_name((category or "").strip())
+    selected_category = db.find_menu_category_by_name(_operator_category((category or "").strip()))
     category = selected_category["name"] if selected_category and selected_category["active"] else "Other"
 
     if db.find_menu_catalogue_entry_by_name(name):
@@ -481,7 +445,6 @@ def update_menu(
     description: Optional[str] = None, active: Optional[bool] = None,
     customer_topic: Optional[str] = None, update_topic: bool = False,
 ) -> Dict[str, Any]:
-    _ensure_menu_taxonomy()
     if not db.get_menu_catalogue_entry(menu_id):
         raise KeyError(menu_id)
     if name is not None:
@@ -496,7 +459,7 @@ def update_menu(
         if not description:
             raise MenuCatalogueError("Customer description is required.")
     if category is not None:
-        selected_category = db.find_menu_category_by_name(category.strip())
+        selected_category = db.find_menu_category_by_name(_operator_category(category.strip()))
         category = selected_category["name"] if selected_category and selected_category["active"] else "Other"
     updated = db.update_menu_catalogue_entry(
         menu_id, name=name, category=category, description=description, active=active,
@@ -525,7 +488,6 @@ def eligible_topic_menus(topic: str) -> List[Dict[str, Any]]:
     """
     from camellia import menu_images, menu_review
 
-    _ensure_menu_taxonomy()
     requested_routing_key = str(topic or "").strip().upper()
     selected = []
     approved = {version["menu_key"] for version in menu_review.customer_versions()}

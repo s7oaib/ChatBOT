@@ -19,6 +19,12 @@ from camellia.candidate_safety import (
 
 _KOLKATA_TZ = ZoneInfo("Asia/Kolkata")
 
+MENU_TOPIC_DEFAULTS = {
+    "SONDESH": "Sondesh", "SAVOURY": "Savoury", "BENTO_MEAL": "Bento / Meal",
+    "GIFT_EVENT": "Gift / Event", "WEEKLY_SAVOURY": "Weekly Savoury",
+    "SUBSCRIPTION": "Subscription", "HOME_TABLE": "Home Table",
+}
+
 
 def _parse_trustworthy_datetime(value: Optional[str]) -> Optional[datetime]:
     """Parse an ISO-8601 timestamp into a timezone-aware UTC datetime.
@@ -1033,6 +1039,32 @@ class Database:
             cursor.execute(
                 "INSERT OR IGNORE INTO menu_categories (name, active, is_system) VALUES ('Other', 1, 1)"
             )
+            # Additive taxonomy metadata belongs to DB initialization, never
+            # a read of the Admin catalogue. Existing labels and menu rows
+            # remain untouched across restarts.
+            cursor.execute(
+                "INSERT OR IGNORE INTO menu_categories (name, active, is_system) "
+                "VALUES ('Savoury Menu', 1, 0)"
+            )
+            cursor.execute("""CREATE TABLE IF NOT EXISTS menu_customer_topics (
+                topic_id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                routing_key TEXT NOT NULL,
+                active INTEGER NOT NULL DEFAULT 1,
+                is_system INTEGER NOT NULL DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )""")
+            cursor.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_menu_customer_topics_name "
+                "ON menu_customer_topics(name COLLATE NOCASE)"
+            )
+            for routing_key, name in MENU_TOPIC_DEFAULTS.items():
+                cursor.execute(
+                    "INSERT OR IGNORE INTO menu_customer_topics "
+                    "(topic_id,name,routing_key,active,is_system) VALUES (?,?,?,1,1)",
+                    (routing_key, name, routing_key),
+                )
 
             # A hard-deleted built-in must not be recreated by the seed loop
             # below on the next process start. This table intentionally keeps

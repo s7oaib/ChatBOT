@@ -156,7 +156,8 @@ def test_menu_editor_and_publish_modal_accessibility_contract():
     assert 'id="mrMenuFile" class="mr-visually-hidden" type="file"' in REVIEW_HTML
     assert 'JPG, PNG, WEBP or PDF · Maximum 10 MB' in REVIEW_HTML
     assert "position.disabled=!topic" in REVIEW_SCRIPT
-    assert "['first','middle','last']" in REVIEW_SCRIPT
+    assert "option.textContent='Before '+menu.name" in REVIEW_SCRIPT
+    assert "last.textContent='Last'" in REVIEW_SCRIPT
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is needed for Admin JavaScript tests")
@@ -176,12 +177,17 @@ mrRefreshPosition();const unlinked={disabled:element('mrMenuPosition').disabled,
 element('mrMenuTopic').value='WEEKLY_SAVOURY';mrRefreshPosition();
 const linked={disabled:element('mrMenuPosition').disabled,help:element('mrMenuPositionHelp').hidden,
   options:element('mrMenuPosition').children.map(option=>option.textContent),selected:element('mrMenuPosition').value};
+mrAllMenus=[{menu_id:'weekly_vegetarian',name:'Weekly Vegetarian',customer_topic:'WEEKLY_SAVOURY',display_order:10},
+  {menu_id:'party',name:'Party Menu',customer_topic:'WEEKLY_SAVOURY',display_order:20},
+  {menu_id:'event',name:'Event Menu',customer_topic:'WEEKLY_SAVOURY',display_order:30}];
+mrRefreshPosition();element('mrMenuPosition').value='before:event';
+const ordered={options:element('mrMenuPosition').children.map(option=>option.textContent),position:mrPositionNumber()};
 element('mrMenuFile').files=[{name:'menu.png',type:'image/png',size:2048}];mrMenuFileSelected();
 const chosen={name:element('mrMenuFileStatus').textContent,button:element('mrMenuFileChoose').textContent,
   removeVisible:!element('mrMenuFileRemove').hidden};mrClearMenuFile();
 const removed={status:element('mrMenuFileStatus').textContent,button:element('mrMenuFileChoose').textContent,
   removeHidden:element('mrMenuFileRemove').hidden};
-console.log(JSON.stringify({unlinked,linked,chosen,removed}));
+console.log(JSON.stringify({unlinked,linked,ordered,chosen,removed}));
 """
     done = subprocess.run([shutil.which("node")], input="const SOURCE=" + json.dumps(source) + ";\n" + scenario,
                           text=True, encoding="utf-8", capture_output=True, timeout=20)
@@ -189,7 +195,9 @@ console.log(JSON.stringify({unlinked,linked,chosen,removed}));
     result = json.loads(done.stdout.strip())
     assert result["unlinked"] == {"disabled": True,
         "label": "Choose a customer message topic to set reply order.", "help": True}
-    assert result["linked"] == {"disabled": False, "help": False,
-        "options": ["First", "Middle", "Last"], "selected": "last"}
+    assert result["linked"] == {"disabled": False, "help": True,
+        "options": ["Last"], "selected": "last"}
+    assert result["ordered"] == {"options": ["Before Party Menu", "Before Event Menu", "Last"],
+                                 "position": 3}
     assert result["chosen"] == {"name": "menu.png (2.0 KB)", "button": "Change", "removeVisible": True}
     assert result["removed"] == {"status": "No file selected.", "button": "Upload Menu File", "removeHidden": True}

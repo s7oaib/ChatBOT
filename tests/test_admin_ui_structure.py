@@ -186,15 +186,16 @@ def test_each_tab_routes_to_a_group(page):
         assert tab_id in routed, f"tab button '{tab_id}' has no group in TAB_GROUPS"
 
 
-def test_the_menu_tab_leads_with_weekly_and_preserves_review_queue_order(page):
+def test_the_menu_tab_keeps_weekly_subordinate_and_preserves_review_queue_order(page):
     """
-    Classic Weekly Savoury leads; catalogue and selected review remain available.
+    Weekly Savoury remains reachable from the catalogue but starts hidden.
     """
     order = re.findall(r'<div [^>]*id="(tab-[\w-]+)"[^>]*class="panel-card"|'
                        r'<div class="panel-card" id="(tab-[\w-]+)"', page)
     ids = [a or b for a, b in order]
     assert page.index('id="weeklySavouryPanel"') < page.index('id="mrCatalogueView"')
-    assert 'id="mrWeeklyView">' in page
+    assert 'id="mrWeeklyView" hidden>' in page
+    assert "menu.workspace==='weekly'?mrOpenWeekly()" in page
     assert ids.index("tab-image") < ids.index("tab-paste"), (
         "the paste-text panel sits above the flyer upload"
     )

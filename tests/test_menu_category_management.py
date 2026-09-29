@@ -38,7 +38,7 @@ def test_seeded_categories_are_listed_and_available_to_menu_forms(category_clien
     response = client.get("/admin/menu-categories", headers=headers)
     assert response.status_code == 200
     assert {item["name"] for item in response.json()["categories"]} == {
-        "Sondesh", "Weekly Vegetarian", "Weekly Non-Vegetarian", "Bento / Meal", "Subscription", "Event", "Other",
+        "Sondesh", "Savoury Menu", "Bento / Meal", "Subscription", "Event", "Other",
     }
     page = client.get("/admin").text
     assert "openCategoryModal()" in page and "openCategoryDeleteModal()" in page

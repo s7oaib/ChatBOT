@@ -71,6 +71,7 @@ global.confirm=message=>{confirmations.push(message);return confirmations.length
 global.fetch=async(path,options={})=>{
   const method=options.method||'GET';requests.push([method,path]);let status=200,data={};
   if(path==='/admin/menu-catalogue'&&method==='GET')data={menus,categories:['Sweets','Other']};
+  else if(path==='/admin/weekly-savoury/customer-topics'&&method==='GET')data={topics:[],routing_keys:[]};
   else if(path.endsWith('/versions')&&method==='GET')data={versions:path.includes('/m1/')?[{id:7,is_current:1,changed_at:'2026-09-26',approval_json:JSON.stringify({rows:[{item:'Kanchagolla',quantity:'250g',price_inr:650}]})}]:[]};
   else if(path.endsWith('/review')&&method==='GET')data={draft:null,categories:['Dish']};
   else if(path==='/admin/menu-catalogue'&&method==='POST'){
