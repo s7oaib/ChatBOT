@@ -39,11 +39,10 @@ def _env_secret(env_var: str) -> str:
     Reads a credential, tolerating the way hosting dashboards store values.
 
     A `.env` file has quoting rules and python-dotenv applies them, so
-    ADMIN_PIN="1234" yields 1234. A dashboard variable has no such rules: the
+    ADMIN_API_KEY="example" yields example. A dashboard variable has no such rules: the
     value is taken literally, so the same entry yields `"1234"` including the
     quotes. The credential then never matches what anyone types, and the
-    failure is indistinguishable from a wrong PIN — the portal simply refuses a
-    password that is correct.
+    failure is indistinguishable from an incorrect machine credential.
 
     Surrounding matching quotes are stripped, and the substitution is logged so
     it is visible rather than magic. A credential that genuinely begins and ends
@@ -129,10 +128,7 @@ class Config:
     # Machine authentication for trusted tools. Never use this as a browser
     # password and never inject it into the Admin Portal JavaScript.
     ADMIN_API_KEY: str = _env_secret("ADMIN_API_KEY")
-    # Browser authentication is username + Argon2id password. ADMIN_PIN remains
-    # readable only for deprecation telemetry; it is never accepted by the
-    # browser or require_admin().
-    ADMIN_PIN: str = _env_secret("ADMIN_PIN")
+    # Browser authentication is username + Argon2id password, not a legacy PIN.
     ADMIN_USERNAME: str = _env_secret("ADMIN_USERNAME")
     ADMIN_PASSWORD_HASH: str = _env_secret("ADMIN_PASSWORD_HASH")
     ADMIN_REQUIRE_HTTPS: bool = os.getenv("ADMIN_REQUIRE_HTTPS", "true").lower() in ("true", "1", "t", "yes")
@@ -169,14 +165,6 @@ class Config:
     # is to measure where the two disagree before anything depends on it.
     # Off by default: it costs a Groq call per message.
     ROUTER_SHADOW_ENABLED: bool = os.getenv("ROUTER_SHADOW_ENABLED", "false").lower() in ("true", "1", "t", "yes")
-    # Compatibility controls for the Phase 3 assisted-resolution rollout.
-    # Triage remains shadow-only; automatic model resolution is never enabled
-    # by this slice and has no customer-send path.
-    LLM_TRIAGE_ENABLED: bool = os.getenv("LLM_TRIAGE_ENABLED", "true").lower() in ("true", "1", "t", "yes")
-    LLM_AUTO_RESOLVE_ENABLED: bool = os.getenv("LLM_AUTO_RESOLVE_ENABLED", "false").lower() in ("true", "1", "t", "yes")
-    # Assisted Resolution drafts suggestions for an authenticated human review
-    # queue. It never sends a model-generated customer reply by itself.
-    LLM_ASSISTED_RESOLUTION_ENABLED: bool = os.getenv("LLM_ASSISTED_RESOLUTION_ENABLED", "false").lower() in ("true", "1", "t", "yes")
     # The router runs on every message, so it is the call most likely to hit a
     # per-minute token ceiling — and it is a different job from writing a
     # reply, so it gets its own production model rather than sharing GROQ_MODEL.

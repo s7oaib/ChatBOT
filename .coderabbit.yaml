@@ -29,7 +29,7 @@ reviews:
       instructions: "Ensure exact template matching logic, session memory integration, and image suppression behavior."
     - path: "camellia/order_calculator.py"
       instructions: "Check unit price lookups, itemized receipt formatting, and mathematical correctness."
-    - path: "camellia/gemini_responder.py"
+    - path: "camellia/ai_responder.py"
       instructions: "Verify provider cooldown handling, prompt-size budgets, and that AI output never bypasses the approval gate."
     - path: "tests/test_bot.py"
       instructions: "Verify unit test completeness and ensure mock objects properly simulate external network calls."

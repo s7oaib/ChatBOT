@@ -269,8 +269,6 @@ async def lifespan(app: FastAPI):
             )
     if not (config.ADMIN_USERNAME and config.ADMIN_PASSWORD_HASH):
         log.critical("Browser admin authentication is not configured; password login fails closed.")
-    if config.ADMIN_PIN:
-        log.warning("ADMIN_PIN is configured only as a legacy value and is never accepted for browser admin authentication.")
     if config.ADMIN_API_KEY:
         log.info("Machine admin API authentication is configured separately from browser sessions.")
     try:

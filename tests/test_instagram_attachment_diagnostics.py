@@ -40,7 +40,7 @@ def clear_buffer():
 
 @pytest.fixture
 def admin_headers():
-    key = config.ADMIN_API_KEY or config.ADMIN_PIN
+    key = config.ADMIN_API_KEY
     return {"X-Admin-Key": key} if key else {}
 
 
