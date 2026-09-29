@@ -139,11 +139,14 @@ def test_supported_asset_routes_never_call_nlu_or_llm():
     assert session_memory.get_facts(user_id, "whatsapp")["last_llm_called"] is False
 
 
-def test_approved_qa_sources_are_byte_for_byte_unchanged():
+def test_approved_qa_sources_are_unchanged_across_checkout_line_endings():
     root = Path(__file__).resolve().parents[1]
     expected = {
-        "data/qa_templates.json": "736525135DC452EDD4270F7D65422D2EAF7822E2006EAEBBD09C73703564E2F0",
-        "data/client_approved_qa_source.txt": "8B976BB68EC91B3B978FAA4C0BDBF0CDA770ED4972A5E8BC77D6581AE7F967B8",
+        "data/qa_templates.json": "A17A363C89EDB47BBD74E288D55E5886A2412A96726E6364C5CF74B548E4E628",
+        "data/client_approved_qa_source.txt": "8E4CD7DDC0C7F7D15A9C103483BCF85110DD12193F96B2F3877E898E78F86EE5",
     }
     for relative, digest in expected.items():
-        assert hashlib.sha256((root / relative).read_bytes()).hexdigest().upper() == digest
+        # Git checks out LF on Linux and CRLF on Windows; only that transport difference is allowed.
+        content = (root / relative).read_bytes().replace(b"\r\n", b"\n")
+        assert b"\r" not in content
+        assert hashlib.sha256(content).hexdigest().upper() == digest
