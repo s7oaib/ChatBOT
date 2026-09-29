@@ -2,6 +2,15 @@
 
 ## Health and safety checks
 
+Production: `https://web-production-0cad70.up.railway.app`, ChatBOT in production.
+Staging: `https://chatbot-staging-staging.up.railway.app`, ChatBOT-Staging in staging.
+Both belong to Camellia-Artisanal-Chatbot, project
+`036c018e-2841-4412-8c97-fdf098af4a79`. Do not use the similarly named service
+inside the production environment. Volume mount remains `/app/var`.
+See authenticated Settings / Health for bounded operations diagnostics.
+Provider outages can report degraded with HTTP 200 when deterministic readiness
+remains available; missing critical knowledge/database gives HTTP 503.
+
 1. Check `GET /health` and confirm `status=healthy`, Instagram delivery is
    configured, `ENABLE_WEB_TESTER=false`, and WhatsApp is human-only.
 2. Check the authenticated `GET /admin/auto-resolve/evaluation` endpoint.
@@ -32,7 +41,25 @@ operator-approved operation: stop the service, preserve the current database,
 replace it with the verified backup, and restart. Do not perform a destructive
 production restore as part of routine deployment.
 
-## LLM/provider outage
+## Incident quick checks
+
+Bot not responding: check public health, Railway deployment/startup logs, safe
+webhook receipt/signature rejection logs, database readiness, and active
+WAITING_FOR_HUMAN records. Run deterministic regressions in an isolated fixture;
+check Groq only if long-tail answers are affected. Never enable a public tester.
+
+Wrong price/menu: inspect the current human-approved version, pending replacement,
+validity window and existing Menu workspace authority state. Pending review must
+block stale volatile facts. Review or reject through the approved workflow; never
+edit SQLite or OCR truth to force a customer answer. Human handoff is safe until
+approval. A failed extraction does not mean a failed publication.
+
+Database issue: inspect safe error classes and storage attachment read-only.
+Do not initialize an empty production DB or restore over live data. Obtain explicit
+recovery authorization. Groq outage: deterministic answers stay available; long-tail
+may hand off. Do not activate any alternate provider.
+
+## LLM/provider outage procedure
 
 Provider timeouts, rate limits, malformed JSON, or grounding failures must fall
 back to deterministic replies or Assisted/Human review. Do not increase retry
@@ -41,10 +68,10 @@ degradation, then inspect logs for the error class and keep Auto Resolve off.
 
 ## Instagram webhook and source routing
 
-Verify Meta's challenge and signature configuration, then send one controlled
-test message. A shared reel/post or ad route must win before Assisted or Auto
-Resolve. If `source-routing overrides` becomes non-zero, disable Assisted and
-Auto Resolve, preserve the evidence, and roll back the deployment.
+Verify Meta's challenge and signature configuration read-only, then use isolated
+regression fixtures, not customer DMs. A shared reel/post or ad route must win before Assisted or Auto
+Resolve. If `source-routing overrides` becomes non-zero, preserve the evidence
+and request explicit incident authorization before configuration changes or rollback.
 
 ## WhatsApp safety
 
@@ -56,7 +83,7 @@ manually from the business account.
 
 ## Rollback deployment
 
-1. Disable Auto Resolve and Assisted Resolution in the host environment.
+1. Obtain explicit approval for rollback and any configuration changes.
 2. Record the deployment ID and the failing health/evaluation evidence.
 3. Redeploy the last known-good commit or use the host's rollback action.
 4. Re-run `/health`, Instagram webhook verification, and the manual handoff check.

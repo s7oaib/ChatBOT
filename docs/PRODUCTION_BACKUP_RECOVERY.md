@@ -25,9 +25,9 @@ The authenticated `POST /admin/db-backup` endpoint is implemented in
 `camellia/app.py`. It:
 
 1. checks admin authentication;
-2. checkpoints SQLite WAL when possible;
-3. copies the live database to a timestamped sibling such as
-   `/app/var/camellia.db.backup-YYYYMMDD_HHMMSS`;
+2. opens the source read-only and uses SQLite's online backup API, including
+   committed WAL writes without checkpointing or mutating the source;
+3. writes an exclusively created timestamped/unique sibling backup;
 4. runs `PRAGMA integrity_check` against the copy; and
 5. returns the source path, backup path, size, integrity result, and a boolean
    `verified` result.
@@ -71,10 +71,10 @@ as a debugging shortcut.
 
 ### Bad deploy, healthy database
 
-1. Disable Auto Resolve/Assisted Resolution if the incident involves replies.
+1. Obtain explicit incident authorization before any configuration change or rollback.
 2. Record health, deployment, and safe correlation evidence.
-3. Roll back code to the approved rollback reference:
-   `0ced6ed4050a2c295e25d4c2bc64dd1cbaec7804`.
+3. Select and explicitly approve the last verified compatible code SHA; never
+   assume an old hardcoded rollback reference is safe for the current database.
 4. Do not roll back or overwrite the database automatically.
 5. Verify health, webhook signature enforcement, Instagram routing, and the
    WhatsApp automation-removed/manual-handoff policy.
