@@ -135,9 +135,7 @@ def test_future_overlap_cannot_retire_current_week_early(weekly_env, monkeypatch
     with pytest.raises(menu_review.ReviewConflict, match="cannot retire the current"):
         _publish(future, replace_version_id=live["version_id"])
     assert weekly_savoury.current_version()["id"] == live["version_id"]
-    # The failed scheduling operation must not retire or change approved facts.
     assert json.loads(weekly_savoury.current_version()["approval_json"])["rows"][0]["price_inr"] == 650
-    # Its unresolved replacement nevertheless blocks stale customer facts (Phase 2B).
     assert menu_review.canonical_menu()["weekly_menus"][-1]["vegetarian"] == []
     with pytest.raises(ValueError, match="Restore the approved Weekly Savoury"):
         menu_images.archive(weekly_savoury.WEEKLY_KEY)
@@ -206,16 +204,20 @@ def test_invalid_operator_dates_cannot_publish(weekly_env, monkeypatch, start, e
     assert weekly_savoury.lifecycle_versions() == []
 
 
-def test_bento_catalogue_facts_cannot_be_replaced_by_weekly_upload(weekly_env, monkeypatch):
+def test_bengali_bento_is_a_valid_weekly_savoury_section(weekly_env, monkeypatch):
     monkeypatch.setattr(menu_dates, "today_ist", lambda: date(2026, 9, 27))
     draft = _draft("22 Sep - 28 Sep 2026", 850)
     rows = copy.deepcopy(draft["rows"])
     rows[0]["category"] = "bengali_bento"
     edited = menu_review.edit(weekly_savoury.WEEKLY_KEY, draft["draft_id"], draft["revision"], rows, "admin")
-    assert any("Bengali Bento belongs in Menu Catalogue" in error
-               for error in menu_review.weekly_analysis(edited)["errors"])
-    with pytest.raises(ValueError, match="Bengali Bento"):
-        _publish(edited)
+    analysis = menu_review.weekly_analysis(edited)
+    assert not any("Bengali Bento belongs" in error for error in analysis["errors"])
+    published = _publish(edited)
+    approval = json.loads(db.get_menu_version(published["version_id"])["approval_json"])
+    assert approval["rows"][0]["category"] == "bengali_bento"
+    week = menu_review.canonical_menu()["weekly_menus"][-1]
+    assert week["bengali_bento"][0]["item"] == rows[0]["item"]
+    assert week["bengali_bento"][0]["price_inr"] == 850
 
 
 def test_unavailable_weekly_price_never_uses_expired_or_upcoming(weekly_env, monkeypatch):
