@@ -4262,6 +4262,7 @@ async def approve_assisted_resolution(suggestion_id: int, request: Request, x_ad
 
 @app.post("/admin/assisted-resolutions/{suggestion_id}/edit-resolve")
 async def edit_assisted_resolution(suggestion_id: int, request: Request, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
     try: body = await request.json()
     except Exception: body = {}
     if not str(body.get("final_answer") or "").strip(): raise HTTPException(status_code=400, detail="final_answer is required for edit-and-resolve.")
