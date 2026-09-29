@@ -128,7 +128,7 @@ async function wsRetryExtraction(){if(!wsDraft||wsBusy||!confirm('Read the origi
 function wsRenderReview(options){
   const failed=!!wsDraft&&wsDraft.status==='FAILED';document.getElementById('wsFailed').hidden=!failed;
   const review=!!wsDraft&&!failed;document.getElementById('wsReview').hidden=!review;if(!review)return;
-  document.getElementById('wsReviewCount').textContent='We found '+wsDraft.rows.length+' items.';
+  document.getElementById('wsReviewCount').textContent=wsDraft.rows.length?'We found '+wsDraft.rows.length+' items.':"Extraction unsuccessful. We couldn't extract any menu items from this flyer. Your published menu is unchanged. You can retry extraction or enter the items manually.";
   document.getElementById('wsFrom').value=options?.valid_from??wsDraft.weekly_dates?.valid_from??'';
   document.getElementById('wsUntil').value=options?.valid_until??wsDraft.weekly_dates?.valid_until??'';
   document.getElementById('wsUndated').checked=!!options?.accept_undated;
@@ -145,10 +145,13 @@ function wsRenderAnalysis(){
   if(!wsAnalysis)return;
   const changes=wsAnalysis.changes;const box=document.getElementById('wsChanges');box.replaceChildren();
   const heading=document.createElement('strong');heading.textContent="What's changed?";box.appendChild(heading);
+  if(!wsAnalysis.comparison_available){const note=document.createElement('p');note.textContent='Comparison unavailable until at least one valid menu item is entered.';box.appendChild(note);}
+  else {
   const summary=document.createElement('p');summary.textContent=[['unchanged','unchanged'],['new','new'],['removed','removed'],['price_changed','price changes'],['quantity_changed','quantity changes']]
     .map(([key,label])=>changes[key].length+' '+label).join(' · ');box.appendChild(summary);
   for(const [key,label] of [['unchanged','UNCHANGED'],['new','NEW'],['removed','REMOVED'],['price_changed','PRICE CHANGED'],['quantity_changed','QUANTITY CHANGED'],['section_changed','SECTION CHANGED'],['suspicious_price','SUSPICIOUS PRICE'],['suspicious_quantity','SUSPICIOUS QUANTITY']]){
     for(const item of changes[key]||[]){const line=document.createElement('p');const value=key.includes('quantity')?item.before.quantity+' → '+item.after.quantity:key==='section_changed'?item.before.category+' → '+item.after.category:item.before?wsPriceLabel(item.before.price_inr)+' → '+wsPriceLabel(item.after.price_inr):wsPriceLabel(item.price_inr);line.textContent=label+' · '+(item.after?.item||item.item)+' · '+value;box.appendChild(line);}
+  }
   }
   const warnings=document.getElementById('wsWarnings');warnings.hidden=!wsAnalysis.errors.length;warnings.textContent=wsAnalysis.errors.join(' ');
   const extracted=document.getElementById('wsExtractedRows');extracted.replaceChildren();
@@ -160,6 +163,7 @@ function wsRenderAnalysis(){
   document.getElementById('wsOverlapLabel').hidden=!wsAnalysis.overlaps.length;
   if(wsAnalysis.overlaps.length)document.getElementById('wsOverlapLabel').lastChild.textContent=' Replace existing schedule: '+wsAnalysis.overlaps.map(item=>item.date_range).join(', ');
   document.getElementById('wsPublishButton').textContent=wsAnalysis.valid_from&&wsAnalysis.valid_from>wsToday?'Schedule Weekly Menu':'Update Weekly Menu';
+  document.getElementById('wsPublishButton').disabled=!wsAnalysis.comparison_available;
   wsRenderRows();
 }
 function wsRenderRows(){const body=document.getElementById('wsRows');body.replaceChildren();if(!wsDraft)return;
@@ -181,6 +185,7 @@ async function wsRefreshAnalysis(){if(!wsDraft||wsBusy)return;try{const result=a
 async function wsSaveCorrections(){if(!wsDraft||wsBusy)return;wsBusy=true;const options=wsOptions();try{const result=await mrRequest('/admin/weekly-savoury/draft','PUT',{...options,rows:wsDraft.rows});wsDraft=result.draft;wsAnalysis=result.analysis;wsDirty=false;wsRenderReview(options);wsMessage('Corrections saved. Published menu unchanged.');}catch(error){wsMessage(error.message);}finally{wsBusy=false;}}
 async function wsPreview(){if(!wsDraft||wsBusy)return;if(wsDirty){wsMessage('Save corrections before previewing.');return;}try{const result=await mrRequest('/admin/weekly-savoury/preview','POST',{...wsOptions(),question:document.getElementById('wsQuestion').value});const box=document.getElementById('wsPreviewResult');box.textContent=result.label+(result.schedule_note?'\n'+result.schedule_note:'')+'\n\n'+result.answer;box.hidden=false;}catch(error){wsMessage(error.message);}}
 async function wsPublish(){if(!wsDraft||wsBusy)return;if(wsDirty){wsMessage('Save corrections before publishing.');return;}const options=wsOptions();
+  if(!wsAnalysis?.comparison_available){wsMessage('Enter valid menu items before publishing.');return;}
   if(wsAnalysis?.overlaps?.length&&!options.replace_version_id){wsMessage('Confirm the overlapping menu replacement first.');return;}
   if((wsAnalysis?.changes?.suspicious_price?.length||wsAnalysis?.changes?.suspicious_quantity?.length)&&!options.confirm_suspicious){wsMessage('Confirm the unusual change against the source first.');return;}
   const action=options.valid_from&&options.valid_from>wsToday?'Schedule':'Update';

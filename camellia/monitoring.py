@@ -72,7 +72,7 @@ class ProviderEvents:
         if operation not in {"answer", "refinement", "structured", "menu_extraction"}:
             operation = "structured"
         if outcome not in {"success", "timeout", "rate_limited", "auth_config_failure",
-                           "unavailable", "invalid_response", "validation_failure", "refused"}:
+                           "unavailable", "model_unavailable", "invalid_response", "validation_failure", "refused"}:
             outcome = "unavailable"
         event = {"timestamp": datetime.now(timezone.utc).isoformat(),
                  "operation": operation, "outcome": outcome,

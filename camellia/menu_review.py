@@ -700,7 +700,10 @@ def weekly_analysis(draft, options=None, conn=None):
         # Replacing an overlapping schedule must still warn about changes to
         # that exact approved schedule, even when it has not started yet.
         previous = json.loads(overlaps[0]["approval_json"]).get("rows", [])
-    changes = weekly_savoury.compare_rows(rows, previous)
+    # An unreadable/incomplete source is not an intentional remove-all menu.
+    # Manual corrections re-enable comparison through the same validation.
+    comparison_available = any(not row.get("warnings") for row in rows)
+    changes = weekly_savoury.compare_rows(rows, previous) if comparison_available else weekly_savoury.compare_rows([], [])
     if changes["suspicious_quantity"]:
         errors.append("Unusual quantity change — review and confirm the printed quantity.")
     if changes["suspicious_price"]:
@@ -708,6 +711,7 @@ def weekly_analysis(draft, options=None, conn=None):
     if not start:
         errors.append("Date unclear — confirm dates or deliberately accept the 7-day fallback.")
     return {"rows": rows, "errors": list(dict.fromkeys(errors)), "changes": changes,
+            "comparison_available": comparison_available,
             "valid_from": start.isoformat() if start else None,
             "valid_until": end.isoformat() if end else None,
             "display_date_range": weekly_savoury.display_range(start, end) if start and end else None,

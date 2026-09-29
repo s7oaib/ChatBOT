@@ -419,7 +419,10 @@ class MenuParser:
                         provider_events.record("menu_extraction", "success" if valid else "validation_failure", started, fallback=not valid)
                         return result
                 else:
-                    provider_events.record("menu_extraction", provider_http_outcome(resp.status_code), started, fallback=True)
+                    last_code = self._provider_http_diagnostic(resp)
+                    outcome = ("model_unavailable" if last_code == "PROVIDER_MODEL_UNAVAILABLE"
+                               else provider_http_outcome(resp.status_code))
+                    provider_events.record("menu_extraction", outcome, started, fallback=True)
                     body = resp.text or ""
                     # Say which of the two it was. "Could not read the flyer"
                     # sends the operator hunting for a clearer photo; a spent

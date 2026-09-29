@@ -360,7 +360,7 @@ REVIEW_HTML = r'''
           <button type="button" class="btn-secondary" onclick="mrSave()">Save Draft</button>
           <button type="button" class="btn-secondary" onclick="mrRetryExtraction()">Retry Extraction</button>
           <button type="button" class="btn-danger" onclick="mrReject()">Reject Draft</button>
-          <button type="button" class="btn-primary" onclick="mrApprove()">Approve &amp; Publish</button>
+          <button id="mrApproveButton" type="button" class="btn-primary" onclick="mrApprove()">Approve &amp; Publish</button>
         </div>
         <p>Leave details blank when they are not stated. Publishing text without a flyer removes the old flyer.</p>
       </div>
@@ -501,7 +501,8 @@ function mrRender(){
   document.getElementById('mrReview').hidden=!reviewing;document.getElementById('mrUploadInput').hidden=reviewing;
   if(!reviewing)return;
   const done=mrDraft.status==='EXTRACTING';
-  document.getElementById('mrReviewCount').textContent='We found '+mrDraft.rows.length+' items.';
+  document.getElementById('mrReviewCount').textContent=mrDraft.rows.length?'We found '+mrDraft.rows.length+' items.':"Extraction unsuccessful. We couldn't extract any menu items from this flyer. Your published menu is unchanged. You can retry extraction or enter the items manually.";
+  document.getElementById('mrApproveButton').disabled=done||!mrDraft.rows.length;
   document.getElementById('mrStatus').textContent=({EXTRACTING:'Reading menu…',NEEDS_REVIEW:'Needs review',READY_TO_APPROVE:'Ready to approve',FAILED:'Needs review'})[mrDraft.status]||'Review required';
   document.getElementById('mrActions').hidden=done;
   document.getElementById('mrOriginal').textContent=mrDraft.raw_text||'';

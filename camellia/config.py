@@ -374,7 +374,7 @@ class Config:
     # needs no second provider account. Verified against console.groq.com/docs/vision
     # on 2026-09-02; an unserved name here answers 404 and parks the provider,
     # so change it only against that list.
-    GROQ_VISION_MODEL: str = os.getenv("GROQ_VISION_MODEL", "qwen/qwen3.6-27b")
+    GROQ_VISION_MODEL: str = os.getenv("GROQ_VISION_MODEL", "qwen/qwen3.8-27b")
     AI_FIRST_MODE: bool = os.getenv("AI_FIRST_MODE", "true").lower() in ("true", "1", "t", "yes")
 
     @property
