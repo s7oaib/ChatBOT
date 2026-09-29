@@ -543,7 +543,7 @@ def menu_question_keys(message, facts=None):
     except (OSError, ValueError, TypeError):
         weeks = []  # No weekly authority; unrelated standing facts remain independent.
     for week in weeks:
-        for section in ("vegetarian", "non_vegetarian", "norom_pak_sondesh"):
+        for section in ("vegetarian", "non_vegetarian", "bengali_bento", "norom_pak_sondesh"):
             if any(contains(row.get("item")) for row in week.get(section) or []):
                 explicit.update(weekly_savoury.LEGACY_WEEKLY_KEYS)
     if explicit:
@@ -610,9 +610,6 @@ def canonical_menu(path=None):
             if not weekly:
                 weekly.append({})
             for field in SECTIONS:
-                if field == "bengali_bento" and key in weekly_savoury.LEGACY_WEEKLY_KEYS and approval.get("weekly_mode"):
-                    # Bengali Bento is its own permanent catalogue menu.
-                    continue
                 weekly[-1][field] = [{f: r[f] for f in ("item", "quantity", "price_inr", "description")}
                                      for r in rows if r["category"] == field]
             weekly[-1].update(approval.get("menu_metadata") or _metadata({}))
@@ -635,7 +632,7 @@ def canonical_menu(path=None):
         # older JSON rotation as a current fallback through any consumer.
         weekly = menu.setdefault("weekly_menus", [])
         if weekly:
-            for section in ("vegetarian", "non_vegetarian", "norom_pak_sondesh"):
+            for section in ("vegetarian", "non_vegetarian", "bengali_bento", "norom_pak_sondesh"):
                 weekly[-1][section] = []
             weekly[-1]["is_published"] = False
     blocked = customer_blocked_keys()
@@ -650,7 +647,7 @@ def canonical_menu(path=None):
                 menu["collections"][collection_key]["products"] = []
     if blocked & set(weekly_savoury.LEGACY_WEEKLY_KEYS):
         for week in menu.get("weekly_menus", []):
-            for section in ("vegetarian", "non_vegetarian", "norom_pak_sondesh"):
+            for section in ("vegetarian", "non_vegetarian", "bengali_bento", "norom_pak_sondesh"):
                 week[section] = []
             week["is_published"] = False
     return menu
@@ -664,9 +661,10 @@ def weekly_analysis(draft, options=None, conn=None):
     if conn is None:
         with db.get_connection() as connection:
             return weekly_analysis(draft, options, connection)
+    # Vegetarian, non-vegetarian and Bengali Bento are all valid sections of
+    # the operator's Weekly Savoury menu. Section identity remains preserved;
+    # it is not a separate catalogue-ownership restriction.
     rows, errors = validate(draft["rows"], weekly_savoury.WEEKLY_KEY)
-    if any(row["category"] == "bengali_bento" for row in rows):
-        errors.append("Bengali Bento belongs in Menu Catalogue, not Weekly Savoury.")
     canonical_names = {}
     for index, row in enumerate(rows):
         canonical_names.setdefault(weekly_savoury._name(row.get("item")), set()).add(index)
