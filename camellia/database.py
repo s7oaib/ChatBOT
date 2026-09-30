@@ -221,6 +221,8 @@ class Database:
             # Enable Write-Ahead Logging for high-concurrency read/write operations
             cursor.execute("PRAGMA journal_mode=WAL;")
             cursor.execute("PRAGMA synchronous=NORMAL;")
+            from camellia.approved_qa_schema import initialize as initialize_approved_qa
+            initialize_approved_qa(cursor)
             
             # Sessions table to track ad qualification
             cursor.execute("""

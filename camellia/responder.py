@@ -2754,6 +2754,18 @@ class DeterministicResponder:
         facts["source_referential_intent"] = None
 
         if channel == "instagram":
+            lifecycle_candidate = client_qa._match_base(user_message, facts)
+            if lifecycle_candidate and client_qa.effective_entry(lifecycle_candidate.entry.qa_id) is None:
+                # A retired/scheduled approved ID cannot fall through to an old
+                # template or be revived by durable follow-up state.
+                facts.update({"client_qa_id": None, "ordered_response_blocks": [],
+                              "last_route_source": "HUMAN_HANDOFF", "last_grounding": "approved_qa_unavailable",
+                              "last_actions": [BusinessAction.ESCALATE_TO_TEAM.value], "knowledge_sufficient": False})
+                text = self._generic_fallback()
+                session_memory.add_turn(user_id, channel, user_message, text)
+                return text, False, "approved_qa_unavailable", None
+
+        if channel == "instagram":
             active_intake = isinstance(facts.get("order_intake_draft"), dict)
             continuity_reply = None
             if order_intake.is_new_order_request(user_message):
@@ -3573,7 +3585,8 @@ class DeterministicResponder:
                 response_text = "\n\n".join(block["text"] for block in ordered_response_blocks if block["kind"] == "TEXT")
             if entry.qa_id == "home_table_price" and facts.get("last_answer_id") == "bengali_home_table_details":
                 previous = session_memory.get_session(user_id, channel)["turns"][-1:]
-                details = client_qa.REGISTRY_BY_ID["home_table_details"].answer
+                details_entry = client_qa.effective_entry("home_table_details")
+                details = details_entry.answer if details_entry else ""
                 previous_text = previous[0].get("content") if previous else None
                 if (
                     previous and previous[0].get("role") == "assistant"

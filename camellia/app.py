@@ -514,6 +514,12 @@ def require_admin(provided_key: Optional[str] = None, provided_pin: Optional[str
         return
     raise HTTPException(status_code=403, detail="Authentication required.")
 
+from camellia.admin_approved_qa import create_router as create_approved_qa_router
+app.router.routes.extend(create_approved_qa_router(
+    require_admin, lambda: "authenticated_admin" if (_admin_context.get() or {}).get("kind") == "session" else "admin_api_key",
+).routes)
+
+
 def require_web_tester() -> None:
     """
     Guards the browser chat tester and its APIs.
@@ -12617,7 +12623,16 @@ Non-Veg:
         + '</div>\n        '
         + html_content[menu_end:]
     )
-    html_content = html_content.replace('</body>', REVIEW_SCRIPT + WEEKLY_SCRIPT + '</body>', 1)
+    from camellia.admin_approved_qa import HTML as APPROVED_HTML, SCRIPT as APPROVED_SCRIPT
+    html_content = html_content.replace('<div id="tab-custom-qa"', APPROVED_HTML + '<div id="tab-custom-qa"', 1)
+    old_qa_nav = '<button class="tab-btn" onclick="switchTab(\'tab-custom-qa\', this)">▤ <span class="nav-label">QA Templates</span></button>'
+    html_content = html_content.replace(old_qa_nav, '<button class="tab-btn" onclick="switchTab(\'tab-approved-qa\', this)">▤ <span class="nav-label">Approved Q&amp;A</span></button><details><summary>Advanced / Legacy</summary>' + old_qa_nav + '</details>', 1)
+    html_content = html_content.replace("'tab-custom-qa': 'custom_qa'", "'tab-approved-qa': 'approved_qa', 'tab-custom-qa': 'custom_qa'", 1)
+    html_content = html_content.replace("custom_qa: 'tab-custom-qa',", "custom_qa: 'tab-custom-qa', approved_qa: 'tab-approved-qa',", 1)
+    html_content = html_content.replace("legacy: 'tab-ai-resolution',", "'approved-qa': 'tab-approved-qa', legacy: 'tab-ai-resolution',", 1)
+    html_content = html_content.replace("if (group === 'custom_qa')", "if (group === 'approved_qa') { loadApprovedQa(); }\n            if (group === 'custom_qa')", 1)
+    html_content = html_content.replace('loadDashboardOverview(); loadHandoffs(); loadInstagramContentGallery();', 'loadDashboardOverview(); loadHandoffs(); loadInstagramContentGallery(); if (document.getElementById("tab-approved-qa").style.display !== "none") loadApprovedQa();')
+    html_content = html_content.replace('</body>', REVIEW_SCRIPT + WEEKLY_SCRIPT + APPROVED_SCRIPT + '</body>', 1)
     return HTMLResponse(
         content=html_content,
         headers={

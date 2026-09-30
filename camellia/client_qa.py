@@ -439,7 +439,7 @@ def _followup_subject(state: Dict[str, Any]) -> str:
     return {"bento": "bento", "subscription": "subscription", "savoury": "savoury"}.get(topic, "")
 
 
-def match(message: str, facts: Optional[Dict[str, Any]] = None) -> Optional[ApprovedMatch]:
+def _match_base(message: str, facts: Optional[Dict[str, Any]] = None) -> Optional[ApprovedMatch]:
     """Extend existing matching with bounded aliases; return source entries only."""
     state = facts or {}
     text = _normalise_match_text(message)
@@ -514,6 +514,21 @@ def match(message: str, facts: Optional[Dict[str, Any]] = None) -> Optional[Appr
         return None
     entry = REGISTRY_BY_ID[candidates.pop()]
     return ApprovedMatch(entry, "semantic_alias", entry.asset_keys)
+
+
+def match(message: str, facts: Optional[Dict[str, Any]] = None) -> Optional[ApprovedMatch]:
+    from camellia import approved_qa
+    return approved_qa.match(message, facts)
+
+
+def effective_registry():
+    from camellia import approved_qa
+    return approved_qa.registry()
+
+
+def effective_entry(qa_id):
+    from camellia import approved_qa
+    return approved_qa.get(qa_id)
 
 
 def source_fingerprint() -> str:

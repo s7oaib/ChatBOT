@@ -31,7 +31,7 @@ def system_reply(
 
 
 def _bento_prices() -> Dict[str, int]:
-    entry = client_qa.REGISTRY_BY_ID.get(BENTO_SOURCE)
+    entry = client_qa.effective_entry(BENTO_SOURCE)
     if not entry:
         return {}
     matches = re.findall(r"\b(Vegetarian|Chicken|Mangsho) Bento\s*[—-]\s*₹\s*(\d+)", entry.answer, re.I)
@@ -90,13 +90,16 @@ def validate_model_draft(draft: Any, expected_answer: str, source_id: str = BENT
     """A model may select a derivation, but cannot author unverified customer facts."""
     if not isinstance(draft, dict) or draft.get("decision") != "GROUNDED_DERIVED":
         return False
+    source = client_qa.effective_entry(source_id)
+    if source is None:
+        return False
     if draft.get("answer") != expected_answer or draft.get("source_ids") != [source_id]:
         return False
     confidence = draft.get("confidence")
     if isinstance(confidence, bool) or not isinstance(confidence, (float, int)) or confidence < MIN_CONFIDENCE:
         return False
     claims = draft.get("claims")
-    approved_answer = client_qa.REGISTRY_BY_ID[source_id].answer if source_id in client_qa.REGISTRY_BY_ID else ""
+    approved_answer = source.answer
     return bool(isinstance(claims, list) and claims and all(
         isinstance(claim, dict) and claim.get("supported_by") == [source_id]
         and isinstance(claim.get("claim"), str)
@@ -107,7 +110,7 @@ def validate_model_draft(draft: Any, expected_answer: str, source_id: str = BENT
 
 def derive(message: str, facts: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if re.search(r"\bsondesh\b", message, re.I) and re.search(r"\bgluten\b", message, re.I):
-        source = client_qa.REGISTRY_BY_ID.get("general_details")
+        source = client_qa.effective_entry("general_details")
         if source and "no gluten" in source.answer.casefold() and not re.search(r"\b(?:allerg\w*|coeliac|celiac|cross[- ]contamination|strict|severe)\b", message, re.I):
             return {"answer": "The client-approved Sondesh description says ‘no gluten.’",
                     "source_ids": ["general_details"], "confidence": 1.0,
@@ -139,7 +142,7 @@ def derive(message: str, facts: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             "question": message,
             "approved_sources": [
                 {"source_id": entry.qa_id, "answer": entry.answer}
-                for entry in client_qa.REGISTRY
+                for entry in client_qa.effective_registry()
             ],
             "expected_answer": answer,
             "schema": {"decision": "GROUNDED_DERIVED or HANDOFF", "answer": "string", "source_ids": [BENTO_SOURCE],

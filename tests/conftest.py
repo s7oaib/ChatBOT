@@ -9,6 +9,7 @@ needs the root on sys.path regardless of where it was invoked from.
 import sys
 import os
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -92,6 +93,17 @@ def pytest_unconfigure(config):
         else:
             os.environ[key] = value
     _PYTEST_DB_DIR.cleanup()
+
+
+@pytest.fixture(autouse=True)
+def approved_qa_acceptance_clock(monkeypatch):
+    """Canonical acceptance copy is asserted as of QA-A1, before Bento expiry.
+
+    Lifecycle tests override this clock explicitly to prove scheduled/expired
+    behavior. Production uses the real timezone-aware clock.
+    """
+    from camellia import approved_qa
+    monkeypatch.setattr(approved_qa, "now_utc", lambda: datetime(2026, 10, 1, tzinfo=timezone.utc))
 
 
 @pytest.fixture(autouse=True)
