@@ -156,8 +156,8 @@ def test_menu_editor_and_publish_modal_accessibility_contract():
     assert 'id="mrMenuFile" class="mr-visually-hidden" type="file"' in REVIEW_HTML
     assert 'JPG, PNG, WEBP or PDF · Maximum 10 MB' in REVIEW_HTML
     assert "position.disabled=!topic" in REVIEW_SCRIPT
-    assert "option.textContent='Before '+menu.name" in REVIEW_SCRIPT
-    assert "last.textContent='Last'" in REVIEW_SCRIPT
+    assert "['First','Middle','Last']" in REVIEW_SCRIPT
+    assert "option.textContent='Before '" not in REVIEW_SCRIPT
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is needed for Admin JavaScript tests")
@@ -180,14 +180,20 @@ const linked={disabled:element('mrMenuPosition').disabled,help:element('mrMenuPo
 mrAllMenus=[{menu_id:'weekly_vegetarian',name:'Weekly Vegetarian',customer_topic:'WEEKLY_SAVOURY',display_order:10},
   {menu_id:'party',name:'Party Menu',customer_topic:'WEEKLY_SAVOURY',display_order:20},
   {menu_id:'event',name:'Event Menu',customer_topic:'WEEKLY_SAVOURY',display_order:30}];
-mrRefreshPosition();element('mrMenuPosition').value='before:event';
+mrRefreshPosition();element('mrMenuPosition').value='middle';
 const ordered={options:element('mrMenuPosition').children.map(option=>option.textContent),position:mrPositionNumber()};
+const mappings=[];for(let n=0;n<=4;n++){mrAllMenus=Array.from({length:n},(_,i)=>({menu_id:'m'+i,customer_topic:'WEEKLY_SAVOURY',display_order:(i+1)*10}));const values=[];for(const choice of ['first','middle','last']){element('mrMenuPosition').value=choice;values.push(mrPositionNumber());}mappings.push(values);}
+mrAllMenus=Array.from({length:3},(_,i)=>({menu_id:'m'+i,customer_topic:'WEEKLY_SAVOURY',display_order:(i+1)*10}));
+const preselection=[];for(const id of ['m0','m1','m2']){mrEditingId=id;mrRefreshPosition();preselection.push(element('mrMenuPosition').value);}
+mrAllMenus=[mrAllMenus[0]];mrEditingId='m0';mrRefreshPosition();const single=element('mrMenuPosition').value;
+mrAllMenus.push({menu_id:'new1',customer_topic:'SONDESH'},{menu_id:'new2',customer_topic:'SONDESH'});element('mrMenuTopic').value='SONDESH';mrRefreshPosition();element('mrMenuPosition').value='last';const newTopic=mrPositionNumber();
+element('mrMenuTopic').value='';mrRefreshPosition();const noTopic=mrPositionNumber();
 element('mrMenuFile').files=[{name:'menu.png',type:'image/png',size:2048}];mrMenuFileSelected();
 const chosen={name:element('mrMenuFileStatus').textContent,button:element('mrMenuFileChoose').textContent,
   removeVisible:!element('mrMenuFileRemove').hidden};mrClearMenuFile();
 const removed={status:element('mrMenuFileStatus').textContent,button:element('mrMenuFileChoose').textContent,
   removeHidden:element('mrMenuFileRemove').hidden};
-console.log(JSON.stringify({unlinked,linked,ordered,chosen,removed}));
+console.log(JSON.stringify({unlinked,linked,ordered,mappings,preselection,single,newTopic,noTopic,chosen,removed}));
 """
     done = subprocess.run([shutil.which("node")], input="const SOURCE=" + json.dumps(source) + ";\n" + scenario,
                           text=True, encoding="utf-8", capture_output=True, timeout=20)
@@ -196,8 +202,12 @@ console.log(JSON.stringify({unlinked,linked,ordered,chosen,removed}));
     assert result["unlinked"] == {"disabled": True,
         "label": "Choose a customer message topic to set reply order.", "help": True}
     assert result["linked"] == {"disabled": False, "help": True,
-        "options": ["Last"], "selected": "last"}
-    assert result["ordered"] == {"options": ["Before Party Menu", "Before Event Menu", "Last"],
-                                 "position": 3}
+        "options": ["First", "Middle", "Last"], "selected": "first"}
+    assert result["ordered"] == {"options": ["First", "Middle", "Last"], "position": 2}
+    assert result["mappings"] == [[1, 1, 1], [1, 1, 2], [1, 2, 3], [1, 2, 4], [1, 3, 5]]
+    assert result["preselection"] == ["first", "middle", "last"]
+    assert result["single"] == "first"
+    assert result["newTopic"] == 3
+    assert result["noTopic"] is None
     assert result["chosen"] == {"name": "menu.png (2.0 KB)", "button": "Change", "removeVisible": True}
     assert result["removed"] == {"status": "No file selected.", "button": "Upload Menu File", "removeHidden": True}

@@ -118,8 +118,14 @@ vm.runInThisContext(SOURCE);
   const blockedState={message:element('mrMessage').textContent,stillExists:menus.some(m=>m.menu_id==='m3')};
   blocked=false;await mrDeleteMenu('m3');
   const deleted={catalogue:!element('mrCatalogueView').hidden,names:element('mrCatalogueList').children.map(card=>card.children[1].children.find(child=>child.className==='mr-card-title').textContent)};
+  const unlinkedMoves=requests.filter(request=>request[1].endsWith('/move')).length;
   menus=[];await mrMenus();const empty={shown:!element('mrEmpty').hidden,catalogue:!element('mrCatalogueView').hidden};
-  console.log(JSON.stringify({visual,initial,selection,current,textMode,fileMode,formCategories,created,prefilling,edited,beforeCancel,afterCancel,blockedState,deleted,empty,confirmations,requests}));
+  const moves=[];mrEditingId='m1';element('mrMenuTopic').value='SONDESH';element('mrMenuPosition').value='middle';
+  mrAllMenus=[{menu_id:'peer1',customer_topic:'SONDESH'},{menu_id:'peer2',customer_topic:'SONDESH'}];
+  mrRequest=async(path,method,body)=>{if(path.endsWith('/move'))moves.push({path,method,body});return {menu:{menu_id:'m1'}};};
+  mrMenus=async()=>true;mrShowPane=async()=>{};
+  await mrSaveMenu({preventDefault(){}});
+  console.log(JSON.stringify({visual,initial,selection,current,textMode,fileMode,formCategories,created,prefilling,edited,beforeCancel,afterCancel,blockedState,deleted,empty,unlinkedMoves,moves,confirmations,requests}));
 })().catch(error=>{console.error(error);process.exitCode=1;});
 """
     completed = subprocess.run(
@@ -144,7 +150,10 @@ vm.runInThisContext(SOURCE);
     assert result["beforeCancel"] == result["afterCancel"]
     assert result["blockedState"] == {"message": "This menu is currently being used. Remove or change the connected Instagram source first, then try again.", "stillExists": True}
     assert result["deleted"] == {"catalogue": True, "names": ["Aamar Mishti Collection", "Weekly Menu"]}
+    assert result["unlinkedMoves"] == 0
     assert result["empty"] == {"shown": True, "catalogue": True}
+    assert result["moves"] == [{"path": "/admin/menu-catalogue/m1/move", "method": "POST",
+                                "body": {"position": 2}}]
     assert len(result["confirmations"]) == 3
     assert all(request[1].endswith("/m3/permanent") for request in result["requests"] if request[0] == "DELETE")
 
