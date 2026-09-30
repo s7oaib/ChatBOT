@@ -1,5 +1,6 @@
 """Customer-provided Instagram order request drafts (never confirmations)."""
 
+import hashlib
 import re
 from urllib.parse import quote
 
@@ -415,13 +416,79 @@ def request_summary(draft: dict) -> str:
     return summary
 
 
-def whatsapp_draft_link(draft: dict) -> str:
+def whatsapp_draft_link(draft: dict, *, reference: str | None = None) -> str:
     number = re.sub(r"\D", "", config.WHATSAPP_BUSINESS_NUMBER or "") or "918796551990"
     lines = [
         "Hi, I'd like to place a pre-order with Camellia Artisanal.",
         "",
-        request_summary(draft),
+        ((f"Camellia reference: {reference}\n\n" if reference else "") + request_summary(draft)),
         "",
         "Please help me complete any missing details and confirm this order.",
     ]
     return f"https://wa.me/{number}?text={quote(chr(10).join(lines))}"
+
+
+
+def draft_fingerprint(draft: dict) -> str:
+    """Hash only the normalized customer-visible fields, never internal state."""
+    visible = " ".join(request_summary(draft).casefold().split())
+    return hashlib.sha256(visible.encode("utf-8")).hexdigest()
+
+
+def is_link_resend_request(message: str) -> bool:
+    text = " ".join(str(message or "").casefold().split()).strip(" .?!")
+    return bool(re.fullmatch(
+        r"(?:send (?:the )?whatsapp link(?: again)?|where is (?:the )?whatsapp link|"
+        r"whatsapp link please|send (?:the )?link(?: again)?|how do i continue on whatsapp)", text,
+    ))
+
+
+def is_new_order_request(message: str) -> bool:
+    text = " ".join(str(message or "").casefold().split()).strip(" .?!")
+    return bool(re.fullmatch(
+        r"(?:start (?:a )?new order|i want to place another order|new order please|i need a separate order)", text,
+    ))
+
+
+def is_whatsapp_referral_ack(message: str) -> bool:
+    """Require an explicit past-tense send; weak acknowledgements are not proof."""
+    text = " ".join(str(message or "").casefold().split()).strip(" .?!")
+    return bool(re.fullmatch(
+        r"(?:done[, ]*)?(?:i(?:['’]ve| have)?\s+)?(?:sent|messaged)\s+"
+        r"(?:(?:it|(?:the |my )?order|you|your manager|the manager)\s+)?"
+        r"(?:on|to|via)\s+whatsapp|"
+        r"i(?:['’]ve| have)? sent (?:the |my )?order to (?:the |your )?manager", text,
+    ))
+
+
+def is_order_detail_message(message: str) -> bool:
+    """Detect updates to a referred order without borrowing its snapshot."""
+    if is_order_information_question(message):
+        return False
+    text = str(message or "")
+    return bool(
+        is_order_process_question(text) or is_order_request(text) or is_edit_request(text)
+        or _EDIT_FIELD_RE.search(text) or _QUANTITY_RE.search(text) or _SLOT_RE.search(text)
+        or _AREA_RE.search(text) or _PHONE_RE.search(text) or _PIN_RE.search(text)
+        or re.fullmatch(r"(?:make it |actually )?\d{1,4}|(?:today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday|lunch|dinner)", text.strip(), re.I)
+    )
+
+
+def present_draft(facts: dict, draft: dict, message: str) -> str:
+    fingerprint = draft_fingerprint(draft)
+    force = is_link_resend_request(message) or is_order_process_question(message) or is_new_order_request(message)
+    if not force and facts.get("order_intake_last_presented_fingerprint") == fingerprint and facts.get("order_intake_whatsapp_link_sent_for_fingerprint") == fingerprint:
+        return "Your order draft is unchanged. The details are already noted."
+    prefix = instruction_message() + "\n\n" if is_order_process_question(message) or is_new_order_request(message) else ""
+    response = (
+        prefix + "I've prepared your order draft. Please continue on WhatsApp "
+        "to send it to our team. Missing details are marked Not provided, "
+        "and our manager can help complete them.\n\n"
+        + request_summary(draft)
+        + "\n\nOur manager will review availability, delivery charges, "
+        "and the final invoice.\n\n[Edit Order]\nReply with the change you want."
+        + f"\n\n[Continue on WhatsApp]\n{whatsapp_draft_link(draft)}"
+    )
+    facts["order_intake_last_presented_fingerprint"] = fingerprint
+    facts["order_intake_whatsapp_link_sent_for_fingerprint"] = fingerprint
+    return response

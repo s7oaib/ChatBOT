@@ -27,6 +27,7 @@ from camellia import weekly_savoury
 from camellia import menu_dates
 from camellia import client_qa
 from camellia import menu_review
+from camellia import handoff as human_handoff
 from camellia import order_intake
 from camellia import grounded_answers
 from camellia.menu_images import (
@@ -2752,6 +2753,31 @@ class DeterministicResponder:
         facts["source_context_used"] = False
         facts["source_referential_intent"] = None
 
+        if channel == "instagram":
+            active_intake = isinstance(facts.get("order_intake_draft"), dict)
+            continuity_reply = None
+            if order_intake.is_new_order_request(user_message):
+                session_memory.clear_order_draft(user_id, channel)
+                facts["order_intake_referred"] = False
+                facts["active_product_context"] = None
+                facts["order_intake_draft"] = order_intake.new_order_draft()
+                facts["source_context_superseded"] = True
+                continuity_reply = order_intake.present_draft(facts, facts["order_intake_draft"], user_message)
+            elif (active_intake or facts.get("order_intake_referred")) and order_intake.is_whatsapp_referral_ack(user_message):
+                if active_intake:
+                    human_handoff.retire_order_state(user_id, channel)
+                continuity_reply = "Thank you. Our Manager of Kitchens will continue with you on WhatsApp and help complete or confirm the order."
+            elif facts.get("order_intake_referred") and (order_intake.is_order_detail_message(user_message) or order_intake.is_link_resend_request(user_message)):
+                continuity_reply = "Your order has already been handed over to our Manager of Kitchens on WhatsApp. Please send this change there so the manager has the latest details."
+            elif active_intake and order_intake.is_link_resend_request(user_message):
+                continuity_reply = order_intake.present_draft(facts, facts["order_intake_draft"], user_message)
+            if continuity_reply:
+                facts.update({"last_route_source": "ORDER_INTAKE_DRAFT", "last_intents": ["order_request_draft"],
+                              "last_actions": [BusinessAction.SEND_RESPONSE.value], "knowledge_sufficient": True,
+                              "last_grounding": "customer_provided_order_draft", "last_llm_called": False, "last_fallback_used": False})
+                session_memory.add_turn(user_id, channel, user_message, re.sub(r"https://wa\.me/[^\s]+", "[Continue on WhatsApp]", continuity_reply))
+                return continuity_reply, True, "order_intake_draft", None
+
         pending_menu = channel == "instagram" and (_pending_menu_affects_question(user_message, facts)
                        or menu_review.menu_question_blocked(user_message, facts))
         unknown_price = (channel == "instagram" and not pending_menu
@@ -2803,7 +2829,7 @@ class DeterministicResponder:
         # requests must be recognized before order-intake slot filling. In
         # particular, an “I want a refund” message must never receive an
         # unrelated quantity prompt.
-        if channel == "instagram" and self.check_explicit_escalation_triggers(user_message):
+        if channel == "instagram" and (self.check_explicit_escalation_triggers(user_message) or human_handoff.is_human_help_request(user_message)):
             handoff = self._generic_fallback()
             facts.update({
                 "last_route_source": "HUMAN_HANDOFF",
@@ -3037,16 +3063,7 @@ class DeterministicResponder:
                         if draft.get("edit_field"):
                             response_text = order_intake.next_question(draft)
                         else:
-                            response_text = (
-                                (order_intake.instruction_message() + "\n\n" if order_intake.is_order_process_question(user_message) else "")
-                                + "I've prepared your order draft. Please continue on WhatsApp "
-                                "to send it to our team. Missing details are marked Not provided, "
-                                "and our manager can help complete them.\n\n"
-                                + order_intake.request_summary(draft)
-                                + "\n\nOur manager will review availability, delivery charges, "
-                                "and the final invoice.\n\n[Edit Order]\nReply with the change you want."
-                                + f"\n\n[Continue on WhatsApp]\n{order_intake.whatsapp_draft_link(draft)}"
-                            )
+                            response_text = order_intake.present_draft(facts, draft, user_message)
 
                     facts.update({
                         "last_route_source": "ORDER_INTAKE_DRAFT",

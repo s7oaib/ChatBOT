@@ -104,6 +104,10 @@ class SessionMemoryManager:
                     "quantity": 1,
                 },
                 "order_intake_draft": None,
+                "order_intake_last_presented_fingerprint": None,
+                "order_intake_whatsapp_link_sent_for_fingerprint": None,
+                "order_intake_referred": False,
+                "last_referred_order_draft": None,
             },
             "turns": [],
         }
@@ -163,6 +167,7 @@ class SessionMemoryManager:
             "pending_clarification", "clarification_options", "clarification_intent", "presented_options",
             "last_bot_question", "last_answer_id", "last_assets_sent", "last_asset_ids", "active_asset",
             "cart", "order_draft", "order_intake_draft",
+            "order_intake_last_presented_fingerprint", "order_intake_whatsapp_link_sent_for_fingerprint",
         }
         for key in transient:
             facts[key] = defaults[key]
@@ -218,6 +223,9 @@ class SessionMemoryManager:
     def clear_order_draft(self, user_id: str, channel: str) -> None:
         """Resets the active order draft and cart for a session."""
         session = self.get_session(user_id, channel)
+        session["facts"]["order_intake_draft"] = None
+        session["facts"]["order_intake_last_presented_fingerprint"] = None
+        session["facts"]["order_intake_whatsapp_link_sent_for_fingerprint"] = None
         session["facts"]["cart"] = []
         session["facts"]["order_draft"] = {
             "flavour": None,

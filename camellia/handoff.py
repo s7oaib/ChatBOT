@@ -20,6 +20,7 @@ import urllib.parse
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
+from camellia import order_intake
 from camellia.config import config
 from camellia.database import db
 from camellia.monitoring import get_logger
@@ -66,8 +67,10 @@ def normalize_instagram_username(value: Any) -> Optional[str]:
     return candidate
 
 
-def handoff_contact_mode(user_message: str, *, template_id: Optional[str] = None) -> str:
+def handoff_contact_mode(user_message: str, *, template_id: Optional[str] = None, facts: Optional[Dict[str, Any]] = None) -> str:
     """Return the customer-facing continuation allowed for this request."""
+    if is_human_help_request(user_message) and customer_order_intake_summary(facts or {}):
+        return "whatsapp_order"
     if template_id in {"order_draft_receipt", "order_next_steps"}:
         return "whatsapp_order"
     if _PURCHASE_HANDOFF_RE.search(str(user_message or "")):
@@ -85,7 +88,8 @@ def is_human_help_request(user_message: str) -> bool:
     if _MANAGER_CONTACT_RE.search(text):
         return False
     return bool(
-        text in {"human", "person", "people", "agent", "staff", "support"}
+        text in {"human", "person", "people", "agent", "staff", "support", "manager", "manager please", "human please"}
+        or re.search(r"\b(?:connect|speak|talk)\b.{0,30}\b(?:your |the )?manager\b", text)
         or _HUMAN_HELP_RE.search(text)
     )
 
@@ -162,6 +166,16 @@ def verified_order_summary(facts: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         return None
     return {"items": verified, "estimated_item_total": sum(i["total_price"] for i in verified)}
 
+
+
+def customer_order_intake_summary(facts: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """A copy of explicit customer data, never verified cart/business knowledge."""
+    draft = facts.get("order_intake_draft")
+    if not isinstance(draft, dict) or not draft.get("status"):
+        return None
+    fields = ("item", "quantity", "delivery_area", "delivery_address", "receiver_phone", "delivery_slot", "location_pin")
+    result = {field: draft.get(field) if isinstance(draft.get(field), str) else None for field in fields}
+    return result if any(result.values()) else None
 
 def _order_item_lines(summary: Dict[str, Any]) -> List[str]:
     lines = []
@@ -258,12 +272,15 @@ def get_or_create_handoff(
     my Camellia Instagram order" and quoted a Jolbhora order from a previous
     day — an order they had not mentioned and might no longer want.
     """
+    effective_mode = contact_mode or handoff_contact_mode(user_message, facts=facts)
+    customer_draft = customer_order_intake_summary(facts) if (include_order or (effective_mode == "whatsapp_order" and is_human_help_request(user_message))) else None
     order_summary = verified_order_summary(facts) if include_order else None
     known_entities = _known_entities(facts, include_order=include_order)
     if order_summary:
         known_entities["verified_order"] = order_summary
+    if customer_draft:
+        known_entities["customer_order_intake_draft"] = customer_draft
     unresolved_topic = str((facts.get("last_entities") or {}).get("topic") or "").strip() or None
-    effective_mode = contact_mode or handoff_contact_mode(user_message)
     safe_username = normalize_instagram_username(instagram_username)
     effective_query_summary = query_summary or customer_query_summary(
         user_message, contact_mode=effective_mode, reason=reason,
@@ -274,6 +291,8 @@ def get_or_create_handoff(
     summary_lines.extend(_summarize_known_entities(known_entities))
     if unresolved_topic:
         summary_lines.append(f"Needs human confirmation: {unresolved_topic}")
+    if customer_draft:
+        summary_lines.extend(["", "CUSTOMER-PROVIDED ORDER DRAFT — UNVERIFIED", order_intake.request_summary(customer_draft).split("\n\n", 1)[1]])
     summary = "\n".join(summary_lines)
 
     expires_at = (
@@ -300,11 +319,12 @@ def get_or_create_handoff(
     if newly_created:
         log.info("Created handoff %s for channel=%s user_hash=%s (%s).", reference, channel, _user_hash(user_id), reason)
     handoff["newly_created"] = newly_created
+    handoff["customer_order_intake_draft"] = customer_draft
     handoff["verified_order"] = order_summary
     return handoff
 
 
-def whatsapp_link(handoff_ref: str, order_summary: Optional[Dict[str, Any]] = None) -> Optional[str]:
+def whatsapp_link(handoff_ref: str, order_summary: Optional[Dict[str, Any]] = None, *, customer_draft: Optional[Dict[str, Any]] = None) -> Optional[str]:
     """A wa.me click-to-chat link to the client's own WhatsApp number.
 
     Returns None when WHATSAPP_BUSINESS_NUMBER is not yet configured — the
@@ -313,6 +333,8 @@ def whatsapp_link(handoff_ref: str, order_summary: Optional[Dict[str, Any]] = No
     details, no customer data, nothing beyond the opaque reference the human
     team looks up on their side.
     """
+    if customer_draft:
+        return order_intake.whatsapp_draft_link(customer_draft, reference=handoff_ref)
     number = re.sub(r"\D", "", config.WHATSAPP_BUSINESS_NUMBER or "")
     if not number:
         return None
@@ -373,9 +395,10 @@ def customer_facing_notice(*, order_receipt: bool = False, finalized_order: bool
 def customer_facing_link_message(
     handoff_ref: str,
     order_summary: Optional[Dict[str, Any]] = None,
+    *, customer_draft: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Second Instagram message: a raw URL on its own line when configured."""
-    link = whatsapp_link(handoff_ref, order_summary)
+    link = whatsapp_link(handoff_ref, order_summary, customer_draft=customer_draft)
     if link:
         return f"Continue on WhatsApp:\n{link}"
     return f"Please quote reference {handoff_ref} when you message us on WhatsApp."
@@ -425,5 +448,10 @@ def retire_order_state(user_id: str, channel: str) -> None:
     survive, because none of them are order state — a customer who shared a
     reel and then ordered is still in that reel's context afterwards.
     """
+    facts = session_memory.get_facts(user_id, channel)
+    customer_draft = customer_order_intake_summary(facts)
+    if isinstance(facts.get("order_intake_draft"), dict):
+        facts["last_referred_order_draft"] = dict(customer_draft or {})
+        facts["order_intake_referred"] = True
     session_memory.clear_order_draft(user_id, channel)
     log.info("Retired Instagram order state for channel=%s user_hash=%s after WhatsApp referral.", channel, _user_hash(user_id))

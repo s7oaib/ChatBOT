@@ -422,10 +422,17 @@ def one_shot_customer(monkeypatch):
     uid = 'one-shot-' + uuid.uuid4().hex
     session_memory.clear_session(uid, 'instagram')
     def reply(message):
+        from camellia.order_intake import draft_fingerprint, is_link_resend_request, is_order_process_question
+        facts = session_memory.get_facts(uid, 'instagram')
+        previous = facts.get('order_intake_last_presented_fingerprint')
         with patch('camellia.ai_responder.ai_responder._query_groq', side_effect=AssertionError('LLM called')):
             text, matched, template, images = _respond(uid, message)
         assert matched and template == 'order_intake_draft' and images is None
-        assert 'https://wa.me/918796551990?text=' in text
+        unchanged = previous == draft_fingerprint(facts['order_intake_draft']) and not (is_link_resend_request(message) or is_order_process_question(message))
+        if unchanged:
+            assert 'https://wa.me/' not in text and 'ORDER DRAFT' not in text
+        else:
+            assert 'https://wa.me/918796551990?text=' in text
         assert 'order confirmed' not in text.lower()
         assert 'Please send' not in text
         return text, session_memory.get_facts(uid, 'instagram')['order_intake_draft']
@@ -486,7 +493,7 @@ def test_sequential_item_area_and_slot_preserve_prior_values_without_questions(o
     one_shot_customer('2 boxes')
     first, _ = one_shot_customer('Gurgaon')
     second, _ = one_shot_customer('Gurgaon')
-    assert first == second
+    assert 'https://wa.me/' in first and 'https://wa.me/' not in second
     assert draft['delivery_area'] == 'Gurgaon' and draft['delivery_address'] is None
     one_shot_customer('Friday dinner')
     assert draft['quantity'] == '2 boxes' and draft['delivery_slot'] == 'Friday Dinner'
@@ -528,7 +535,7 @@ def test_day_slot_and_bare_quantity_are_captured_in_separate_messages(one_shot_c
     assert draft['item'] == 'Sondesh' and draft['delivery_area'] == 'Gurgaon'
     first, _ = one_shot_customer('phone is 9876543210')
     second, _ = one_shot_customer('phone is 9876543210')
-    assert first == second
+    assert 'https://wa.me/' in first and 'https://wa.me/' not in second
     assert draft['quantity'] == '2' and draft['receiver_phone'] == '9876543210'
 
 
@@ -608,7 +615,10 @@ def test_natural_corrections_change_only_the_intended_field(one_shot_customer, m
     for key in ("item", "quantity", "delivery_area", "delivery_slot", "receiver_phone", "delivery_address"):
         if key != field:
             assert draft[key] == before[key]
-    assert value in unquote(text)
+    if draft[field] != before[field]:
+        assert value in unquote(text)
+    else:
+        assert "https://wa.me/" not in text
 
 
 @pytest.mark.parametrize("correction", ["actually Noida", "not Gurgaon, Noida", "change delivery to Noida"])

@@ -44,6 +44,7 @@ from camellia.handoff import (
     customer_facing_link_message,
     customer_facing_notice,
     customer_query_summary,
+    customer_order_intake_summary,
     handoff_contact_mode,
     get_or_create_handoff,
     is_human_help_request,
@@ -967,10 +968,12 @@ def _process_instagram_event(
             # A registry miss stays on Instagram even when the wording looks
             # purchase-shaped (for example, a 200-box wedding enquiry). Only
             # an approved order workflow may offer the WhatsApp continuation.
+            intake_order_handoff = bool(explicit_human_help and customer_order_intake_summary(facts))
             contact_mode = (
+                "whatsapp_order" if intake_order_handoff else
                 "support_callback"
                 if not was_matched and template_id in (None, "pending_menu_handoff", "unknown_price_handoff")
-                else handoff_contact_mode(customer_message, template_id=template_id)
+                else handoff_contact_mode(customer_message, template_id=template_id, facts=facts)
             )
             reason = (
                 "Order Confirmation & Intake Request"
@@ -1027,11 +1030,11 @@ def _process_instagram_event(
                     finalized_order=template_id == "order_next_steps"
                 )
             link_message = (
-                customer_facing_link_message(handoff["handoff_ref"], order_summary)
+                customer_facing_link_message(handoff["handoff_ref"], order_summary, customer_draft=handoff.get("customer_order_intake_draft"))
                 if contact_mode == "whatsapp_order" else None
             )
             mark_referred(handoff["handoff_ref"])
-            if is_order_handoff and order_summary:
+            if intake_order_handoff or (is_order_handoff and order_summary):
                 # The order is now on its way to a human, prefilled in the
                 # link above. Instagram's copy has done its job; keeping it
                 # would make it luggage for every later enquiry.
