@@ -17,6 +17,17 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 SOURCE_PATH = Path(__file__).resolve().parents[1] / "data" / "client_approved_qa_source.txt"
 
+HOME_TABLE_VIDEO_ANCHOR = (
+    "Sharing 4 videos for you to take a look at details & also a bit of videos "
+    "from the 100 Bengali home tables we did at gurgaon."
+)
+HOME_TABLE_REEL_URLS = (
+    "https://www.instagram.com/reel/DdJhXQMT4VZ/",
+    "https://www.instagram.com/reel/Dcd5bbEzbCo/",
+    "https://www.instagram.com/reel/DcLZpuQzCKE/",
+    "https://www.instagram.com/reel/DcQYp72zf8D/",
+)
+
 
 @dataclass(frozen=True)
 class ApprovedQA:
@@ -485,7 +496,9 @@ def match(message: str, facts: Optional[Dict[str, Any]] = None) -> Optional[Appr
             return ApprovedMatch(entry, "exact", entry.asset_keys)
 
     if not candidates and subject:
-        if subject == "sondesh" and re.search(
+        if subject == "home_table" and re.fullmatch(r"tell me about (?:your |the )?(?:kolkata|bengali) home lunch", text):
+            candidates.add("home_table_details")
+        elif subject == "sondesh" and re.search(
             r"\b(?:delivery time|shipping time|arrive|reach|how long for (?:the )?sondesh)\b", text,
         ) and not re.search(r"\b(?:invented|created|started|founded|history)\b", text):
             candidates.add("sondesh_delivery_time")

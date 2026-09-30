@@ -106,16 +106,22 @@ def test_sondesh_dispatch_uses_exact_confirmed_copy_and_modified_copy_stays_quar
 def test_home_table_routes_reach_instagram_without_handoff(tmp_path, monkeypatch, message, template_id):
     sent, escalated = _run_instagram(monkeypatch, _fixtures(tmp_path), message)
 
-    assert len(sent) == 1
     assert not escalated.called
-    from camellia.client_qa import REGISTRY_BY_ID
+    from camellia.client_qa import REGISTRY_BY_ID, HOME_TABLE_REEL_URLS, HOME_TABLE_VIDEO_ANCHOR
     source_id = {
         "bengali_home_table_details": "home_table_details",
         "bengali_home_table_pricing": "home_table_price",
         "bengali_home_table_payment": "home_table_payment",
     }[template_id]
-    assert sent[0]["text"] == REGISTRY_BY_ID[source_id].answer
-    assert sent[0]["image_url"] is None
+    if source_id == "home_table_payment":
+        assert len(sent) == 1
+        assert sent[0]["text"] == REGISTRY_BY_ID[source_id].answer
+    else:
+        assert len(sent) == 6
+        assert tuple(item["text"] for item in sent[1:5]) == HOME_TABLE_REEL_URLS
+        assert sent[0]["text"].endswith(HOME_TABLE_VIDEO_ANCHOR)
+        assert sent[0]["text"] + sent[5]["text"] == REGISTRY_BY_ID[source_id].answer
+    assert all(item["image_url"] is None for item in sent)
 
 
 def test_stale_always_human_source_policy_cannot_replace_new_informational_answer(

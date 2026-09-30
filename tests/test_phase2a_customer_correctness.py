@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
-from camellia import client_qa, menu_dates, menu_images, weekly_flyer
+from camellia import app as app_module, client_qa, menu_dates, menu_images, weekly_flyer
 from camellia.config import config
 from camellia.database import Database
 from camellia.responder import _approved_continuation, responder
@@ -21,7 +21,11 @@ def customer(monkeypatch, eligible_weekly_asset):
 
     def reply(message):
         result = responder.match_and_respond(message, user_id=user, channel="instagram")
-        return result, session_memory.get_facts(user, "instagram")
+        facts = session_memory.get_facts(user, "instagram")
+        if result[2] in {"bengali_home_table_details", "bengali_home_table_pricing"}:
+            with patch.object(app_module, "send_instagram_reply", return_value={"message_id": "delivered"}):
+                app_module.send_instagram_response_blocks(user, facts["ordered_response_blocks"])
+        return result, facts
 
     return reply
 

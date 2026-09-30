@@ -74,6 +74,7 @@ from camellia.instagram_routing import (
 from camellia.sheet_sync import sheet_sync
 from camellia.menu_parser import menu_parser
 from camellia import weekly_flyer
+from camellia import client_qa
 from camellia import menu_dates
 from camellia import menu_manager
 from camellia import menu_images
@@ -2148,8 +2149,17 @@ def _public_url(path: str) -> str:
 
 def send_instagram_response_blocks(recipient_id: str, blocks: list, *, inbound_message_id: Optional[int] = None) -> None:
     """Deliver one approved answer in its client-authored text/asset order."""
+    facts = session_memory.get_facts(recipient_id, "instagram")
+    home_table_links = []
     for index, block in enumerate(blocks):
-        if block.get("kind") == "TEXT":
+        if block.get("kind") == "LINK":
+            if facts.get("home_table_videos_sent") and block.get("url") in client_qa.HOME_TABLE_REEL_URLS:
+                continue
+            result = _send_or_queue_instagram_reply(
+                recipient_id, block["url"],
+                inbound_message_id=inbound_message_id, response_type="reply",
+            )
+        elif block.get("kind") == "TEXT":
             result = _send_or_queue_instagram_reply(
                 recipient_id, block.get("text", ""),
                 inbound_message_id=inbound_message_id, response_type="reply",
@@ -2162,6 +2172,11 @@ def send_instagram_response_blocks(recipient_id: str, blocks: list, *, inbound_m
         if isinstance(result, dict) and result.get("status") == "failed":
             log.warning("Instagram approved response stopped after failed block %s (%s).", index + 1, block.get("kind"))
             break
+        if block.get("kind") == "LINK":
+            home_table_links.append(block["url"])
+            if tuple(home_table_links) == client_qa.HOME_TABLE_REEL_URLS:
+                facts["home_table_videos_sent"] = True
+                session_memory._persist(recipient_id, "instagram")
 
 
 def send_instagram_reply(

@@ -204,18 +204,23 @@ def test_home_table_final_output_uses_exact_copy_after_stale_override(
     user_id = f"home-table-final-output-{template_id}"
     sent, escalated = _run_instagram_worker(monkeypatch, database, message, user_id)
 
-    assert len(sent) == 1
     assert not escalated.called
-    from camellia.client_qa import REGISTRY_BY_ID
+    from camellia.client_qa import REGISTRY_BY_ID, HOME_TABLE_REEL_URLS, HOME_TABLE_VIDEO_ANCHOR
     source_id = {
         "bengali_home_table_details": "home_table_details",
         "bengali_home_table_pricing": "home_table_price",
         "bengali_home_table_payment": "home_table_payment",
     }[template_id]
-    assert sent[0]["text"] == REGISTRY_BY_ID[source_id].answer
-    assert stale not in sent[0]["text"]
-    assert "wa.me" not in sent[0]["text"]
-    assert sent[0]["image_url"] is None
+    if source_id == "home_table_payment":
+        assert len(sent) == 1
+        assert sent[0]["text"] == REGISTRY_BY_ID[source_id].answer
+    else:
+        assert len(sent) == 6
+        assert tuple(item["text"] for item in sent[1:5]) == HOME_TABLE_REEL_URLS
+        assert sent[0]["text"].endswith(HOME_TABLE_VIDEO_ANCHOR)
+        assert sent[0]["text"] + sent[5]["text"] == REGISTRY_BY_ID[source_id].answer
+    assert all(stale not in item["text"] and "wa.me" not in item["text"] for item in sent)
+    assert all(item["image_url"] is None for item in sent)
 
 
 def test_home_table_booking_remains_handoff_after_copy_remediation(tmp_path, monkeypatch):

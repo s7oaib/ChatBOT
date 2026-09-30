@@ -3470,6 +3470,17 @@ class DeterministicResponder:
                             ordered_response_blocks.append({"kind": "TEXT", "text": block_text})
                         continue
                 if block.kind == "TEXT":
+                    if (
+                        entry.qa_id in {"home_table_details", "home_table_price"}
+                        and not facts.get("home_table_videos_sent")
+                        and client_qa.HOME_TABLE_VIDEO_ANCHOR in block.value
+                    ):
+                        end = block.value.index(client_qa.HOME_TABLE_VIDEO_ANCHOR) + len(client_qa.HOME_TABLE_VIDEO_ANCHOR)
+                        ordered_response_blocks.append({"kind": "TEXT", "text": block.value[:end]})
+                        ordered_response_blocks.extend({"kind": "LINK", "url": url} for url in client_qa.HOME_TABLE_REEL_URLS)
+                        if block.value[end:]:
+                            ordered_response_blocks.append({"kind": "TEXT", "text": block.value[end:]})
+                        continue
                     ordered_response_blocks.append({"kind": "TEXT", "text": block.value})
                     continue
                 values = [value for value in asset_map.get(block.value, []) if value]
@@ -3569,7 +3580,8 @@ class DeterministicResponder:
                     == _normalize_approved_transport_text(details)
                 ):
                     response_text = _approved_continuation(response_text, details)
-                    ordered_response_blocks[:] = [{"kind": "TEXT", "text": response_text}]
+                    if facts.get("home_table_videos_sent"):
+                        ordered_response_blocks[:] = [{"kind": "TEXT", "text": response_text}]
             session_memory.add_turn(user_id, channel, user_message, response_text)
             return (
                 response_text,

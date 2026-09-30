@@ -143,9 +143,9 @@ def test_preview_shows_the_draft_without_publishing(isolated_menu, client, admin
     assert "Lychee Rose" not in live_text
 
 
-def test_publish_does_not_authorize_unapproved_customer_facts(isolated_menu, client, admin_headers):
+def test_publish_does_not_authorize_unapproved_customer_facts(isolated_menu, eligible_weekly_asset, client, admin_headers):
     """Admin template publication cannot authorize unapproved customer facts."""
-    before_text, _, _, _ = responder.match_and_respond("Show me Aamar Mishti", user_id="mm_pub_before", channel="instagram")
+    before_text, before_matched, _, _ = responder.match_and_respond("aamar mishti price", user_id="mm_pub_before", channel="instagram")
 
     resp = client.post(
         "/admin/menu-manager/menus/collections.aamar_mishti/publish",
@@ -157,7 +157,9 @@ def test_publish_does_not_authorize_unapproved_customer_facts(isolated_menu, cli
     assert "Lychee Rose" not in after_text
     assert "Saffron Pista" not in after_text
     assert after_text == before_text
-    assert matched is False
+    from camellia.client_qa import REGISTRY_BY_ID
+    assert after_text == REGISTRY_BY_ID["sondesh_price_client"].answer
+    assert before_matched is True and matched is True
 
 
 def test_published_menu_is_read_from_disk_not_a_process_cache(isolated_menu, client, admin_headers):
