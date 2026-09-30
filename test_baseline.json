@@ -1,8 +1,10 @@
 {
-  "known_good_sha": "1d19a97bef4967bff806b14ac58c9328cd0aaa74",
+  "known_good_sha": "bfa1036e3dc59f5a22e78fe5afb594f5673453bc",
   "full_regression_passed": true,
-  "full_regression_test_count": 2597,
-  "production_validated": true,
-  "production_deployment_id": "a784414d-d8db-48b8-9a31-11c1083338fe",
-  "evidence_source": "Explicit operator-approved frozen release baseline, 2026-09-30"
+  "full_regression_test_count": 2686,
+  "production_validated": false,
+  "production_deployment_id": null,
+  "evidence_source": "Explicit operator attestation; utility does not execute tests or verify production",
+  "promoted_at_utc": "2026-09-30T13:32:22.116575+00:00",
+  "previous_known_good_sha": "1d19a97bef4967bff806b14ac58c9328cd0aaa74"
 }
