@@ -38,6 +38,7 @@ def test_alias_coverage_is_bounded_and_contains_no_answers():
 
 
 @pytest.mark.parametrize('message,expected_id', [
+    ('500g price?', 'general_price'),
     ('what is pirce of BENGALI BENTO', 'bento_price_client'),
     ('how much is the Bengali bento?', 'bento_price_client'),
     ('bento price please', 'bento_price_client'),
@@ -105,7 +106,7 @@ def test_followups_use_existing_topic_facts_but_explicit_subject_wins(message, f
     'how much is chicken curry?', 'how much is fish?', 'tell me more about paneer',
     'bento and sondesh price?', 'bento and chicken kosha price?',
     'how much for vegan bento?', 'can i replace the chicken in bento?',
-    'how much is the weather?', 'when was sondesh invented?',
+    'paneer 500g price?', 'how much is the weather?', 'when was sondesh invented?',
     'when was sondesh first created?', 'when is sondesh available?', 'when did sondesh become popular?', 'bento with paneer price?',
     'fish bento price?', 'how much for mutton bento?',
 ])

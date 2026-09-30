@@ -448,7 +448,8 @@ def match(message: str, facts: Optional[Dict[str, Any]] = None) -> Optional[Appr
         return None
     if price and not timing and not objection and not subjects:
         generic_words = set("what whats is are the a an price cost rate how much do does your you food meal menu options for please tell me can show give it this that of".split())
-        if set(text.split()) - generic_words:
+        generic_text = re.sub(r"\b\d+(?: \d+)?\s*(?:g|kg)\b", "", text)
+        if set(generic_text.split()) - generic_words:
             return None
     subject = next(iter(subjects), "") or _followup_subject(state)
     # Only genuine short follow-ups use session context. Explicit named
