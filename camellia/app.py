@@ -12592,8 +12592,7 @@ Non-Veg:
     html_content = (
         html_content[:menu_start]
         + '<div id="tab-image" class="panel-card" data-group="menu">'
-        + '<div id="mrWeeklyView" hidden>'
-        + '<button type="button" class="btn-secondary" onclick="mrShowCatalogue()">← Menu Catalogue</button>'
+        + '<div id="mrWeeklyView">'
         + WEEKLY_HTML
         + '</div>'
         + REVIEW_HTML

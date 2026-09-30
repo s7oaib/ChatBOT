@@ -96,9 +96,10 @@ def test_review_ui_exposes_retry_aliases_friendly_warnings_and_load_more():
     assert "Load more versions" in REVIEW_SCRIPT
     assert "Source flyer" in REVIEW_SCRIPT and "mrPreviewVersionSource" in REVIEW_SCRIPT
     assert "Source flyer" in WEEKLY_SCRIPT and "Approved by" in WEEKLY_SCRIPT
-    weekly_open = REVIEW_SCRIPT.split("async function mrOpenWeekly(){", 1)[1].split("async function mrManageCategories", 1)[0]
+    weekly_open = REVIEW_SCRIPT.split("function mrShowCatalogue(){", 1)[1].split("async function mrManageCategories", 1)[0]
     assert "document.getElementById('menuReviewPanel').hidden=false" in weekly_open
-    assert "document.getElementById('mrCatalogueView').hidden=true" in weekly_open
+    assert "document.getElementById('mrCatalogueView').hidden=false" in weekly_open
+    assert "if(weekly)weekly.hidden=false" in weekly_open
     assert "retry-extraction" in WEEKLY_SCRIPT and "Retry Extraction" in WEEKLY_HTML
     assert 'id="wsNeedsReview"' in WEEKLY_HTML
     assert "document.getElementById('wsNeedsReview').hidden=false" in WEEKLY_SCRIPT

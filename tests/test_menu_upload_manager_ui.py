@@ -70,7 +70,7 @@ let blocked=false,requests=[],confirmations=[];
 global.confirm=message=>{confirmations.push(message);return confirmations.length!==1;};
 global.fetch=async(path,options={})=>{
   const method=options.method||'GET';requests.push([method,path]);let status=200,data={};
-  if(path==='/admin/menu-catalogue'&&method==='GET')data={menus,categories:['Sweets','Other']};
+  if(path==='/admin/menu-catalogue'&&method==='GET')data={menus,workspace_rows:[{menu_id:'weekly_savoury',name:'Savoury Menu',workspace:'weekly'},...menus],categories:['Sweets','Other']};
   else if(path==='/admin/weekly-savoury/customer-topics'&&method==='GET')data={topics:[],routing_keys:[]};
   else if(path.endsWith('/versions')&&method==='GET')data={versions:path.includes('/m1/')?[{id:7,is_current:1,changed_at:'2026-09-26',approval_json:JSON.stringify({rows:[{item:'Kanchagolla',quantity:'250g',price_inr:650}]})}]:[]};
   else if(path.endsWith('/review')&&method==='GET')data={draft:null,categories:['Dish']};
@@ -94,9 +94,15 @@ vm.runInThisContext(SOURCE);
   const requestCount=requests.length;trigger.onclick();const preview={open:element('mrImageDialog').open,src:element('mrImagePreview').src,alt:element('mrImagePreview').alt};
   element('mrImageDialog').close();image.onerror();
   const visual={preview,fallback:media.children[0].textContent,focusReturned:trigger.focusCount===1,noMutationRequest:requests.length===requestCount,placeholder:cards[1].children[0].children[0].textContent};
-  const initial={catalogue:!element('mrCatalogueView').hidden,selected:element('mrSelectedView').hidden,names:cards.map(card=>card.children[1].children.find(child=>child.className==='mr-card-title').textContent),cardTags:cards.map(card=>card.tag)};
+  const initial={catalogue:!element('mrCatalogueView').hidden,selected:element('mrSelectedView').hidden,weekly:!element('mrWeeklyView').hidden,names:cards.map(card=>card.children[1].children.find(child=>child.className==='mr-card-title').textContent),cardTags:cards.map(card=>card.tag)};
   const uploadFile={name:'weekly-menu.png',type:'image/png',size:2048};element('mrDrop').listeners.drop({preventDefault(){},dataTransfer:{files:[uploadFile]}});
   const selection={status:element('mrFileStatus').textContent,removeVisible:!element('mrRemoveFile').hidden,extractNotStarted:!requests.some(request=>request[1].endsWith('/extract-file'))};
+  await cards[0].children[1].children.find(child=>child.className==='mr-card-actions').children[0].onclick();
+  const navigation={weeklyHidden:element('mrWeeklyView').hidden,catalogueHidden:element('mrCatalogueView').hidden,selectedVisible:!element('mrSelectedView').hidden};
+  mrShowCatalogue();
+  navigation.weeklyRestored=!element('mrWeeklyView').hidden;
+  navigation.catalogueRestored=!element('mrCatalogueView').hidden;
+  navigation.selectedHidden=element('mrSelectedView').hidden;
   await mrOpenMenu('m1');
   const current={selected:element('mrSelectedName').textContent,rows:element('mrCurrentRows').children.map(row=>row.children.map(cell=>cell.textContent)),empty:element('mrCurrentEmpty').hidden};
   mrInputMode('text');const textMode={text:!element('mrTextPane').hidden,file:element('mrFilePane').hidden};
@@ -125,7 +131,7 @@ vm.runInThisContext(SOURCE);
   mrRequest=async(path,method,body)=>{if(path.endsWith('/move'))moves.push({path,method,body});return {menu:{menu_id:'m1'}};};
   mrMenus=async()=>true;mrShowPane=async()=>{};
   await mrSaveMenu({preventDefault(){}});
-  console.log(JSON.stringify({visual,initial,selection,current,textMode,fileMode,formCategories,created,prefilling,edited,beforeCancel,afterCancel,blockedState,deleted,empty,unlinkedMoves,moves,confirmations,requests}));
+  console.log(JSON.stringify({navigation,visual,initial,selection,current,textMode,fileMode,formCategories,created,prefilling,edited,beforeCancel,afterCancel,blockedState,deleted,empty,unlinkedMoves,moves,confirmations,requests}));
 })().catch(error=>{console.error(error);process.exitCode=1;});
 """
     completed = subprocess.run(
@@ -136,7 +142,8 @@ vm.runInThisContext(SOURCE);
     result = json.loads(completed.stdout.strip())
     assert result["visual"] == {"preview": {"open": True, "src": "/images/aamar.jpg", "alt": "Current menu image for Aamar Mishti Collection"}, "fallback": "Menu image unavailable", "focusReturned": True, "noMutationRequest": True, "placeholder": "No current menu image"}
     assert result["selection"] == {"status": "Selected: weekly-menu.png (2.0 KB)", "removeVisible": True, "extractNotStarted": True}
-    assert result["initial"] == {"catalogue": True, "selected": True, "names": ["Aamar Mishti Collection", "Weekly Menu"], "cardTags": ["article", "article"]}
+    assert result["navigation"] == dict(weeklyHidden=True, catalogueHidden=True, selectedVisible=True, weeklyRestored=True, catalogueRestored=True, selectedHidden=True)
+    assert result["initial"] == {"catalogue": True, "selected": True, "weekly": True, "names": ["Aamar Mishti Collection", "Weekly Menu"], "cardTags": ["article", "article"]}
     assert result["current"] == {"selected": "Aamar Mishti Collection", "rows": [["Kanchagolla", "250g", "₹650"]], "empty": True}
     assert result["textMode"] == {"text": True, "file": True}
     assert result["fileMode"] == {"file": True, "text": True}

@@ -156,7 +156,7 @@ def test_category_changes_refresh_the_menu_workspace(workspace, function):
     assert "await mrMenus();" in handler
 
 
-def test_primary_menu_navigation_is_middle_entry_and_weekly_available_from_catalogue(workspace):
+def test_primary_menu_navigation_is_middle_entry_and_weekly_visible_above_catalogue(workspace):
     page = workspace[0].get("/admin").text
     sidebar = page.split('<aside class="admin-sidebar"', 1)[1].split('</aside>', 1)[0]
     labels = re.findall(r'<span class="nav-label">(.*?)</span>', sidebar)
@@ -166,8 +166,9 @@ def test_primary_menu_navigation_is_middle_entry_and_weekly_available_from_catal
     assert 'id="menuSidebarBadge"' in sidebar
     menu = page.split('<div id="tab-image"', 1)[1].split('<div id="tab-ad-routing"', 1)[0]
     assert menu.index('id="weeklySavouryPanel"') < menu.index('id="mrCatalogueView"')
-    assert 'id="mrWeeklyView" hidden>' in menu
-    assert "menu.workspace==='weekly'?mrOpenWeekly()" in page
+    assert 'id="mrWeeklyView">' in menu
+    assert "menu.workspace==='weekly'?mrOpenWeekly()" not in page
+    assert "catalogueRows=mrWorkspaceRows.filter(menu=>menu.workspace!=='weekly')" in page
     assert "mrShowCatalogue();" in page.split("function switchTab", 1)[1].split("function setInstagram", 1)[0]
 
 
@@ -186,7 +187,7 @@ def test_classic_cards_and_mobile_stacking_preserve_selected_workflows():
     assert "min-height:44px" in REVIEW_HTML
     for target in ("mrSelectedView", "mrCurrentPane", "mrUploadPane", "mrVersionsPane", "mrMenuDialog"):
         assert f'id="{target}"' in REVIEW_HTML
-    assert "mrOpenWeekly" in REVIEW_SCRIPT
+    assert "mrOpenWeekly" not in REVIEW_SCRIPT
 
 
 @pytest.mark.parametrize("status,label,required", [

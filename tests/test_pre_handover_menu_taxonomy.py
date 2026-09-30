@@ -139,9 +139,10 @@ def test_savoury_umbrella_cannot_be_renamed_or_deleted(taxonomy_env):
 
 def test_savoury_workflow_opens_from_its_catalogue_card(taxonomy_env):
     page = TestClient(app).get("/admin").text
-    assert '<div id="mrWeeklyView" hidden>' in page
-    assert "mrWorkspaceRows.forEach(menu=>" in page
-    assert "menu.workspace==='weekly'?mrOpenWeekly()" in page
+    assert '<div id="mrWeeklyView">' in page
+    assert "catalogueRows.forEach(menu=>" in page
+    assert "menu.workspace==='weekly'?mrOpenWeekly()" not in page
+    assert "catalogueRows=mrWorkspaceRows.filter(menu=>menu.workspace!=='weekly')" in page
     assert "if(weekly)weekly.hidden=true" in page
     assert "← Menu Catalogue" in page
 

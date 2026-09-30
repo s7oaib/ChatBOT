@@ -186,16 +186,24 @@ def test_each_tab_routes_to_a_group(page):
         assert tab_id in routed, f"tab button '{tab_id}' has no group in TAB_GROUPS"
 
 
-def test_the_menu_tab_keeps_weekly_subordinate_and_preserves_review_queue_order(page):
+def test_the_menu_tab_shows_weekly_first_and_preserves_review_queue_order(page):
     """
-    Weekly Savoury remains reachable from the catalogue but starts hidden.
+    Weekly Savoury starts visible above the other menu cards.
     """
     order = re.findall(r'<div [^>]*id="(tab-[\w-]+)"[^>]*class="panel-card"|'
                        r'<div class="panel-card" id="(tab-[\w-]+)"', page)
     ids = [a or b for a, b in order]
     assert page.index('id="weeklySavouryPanel"') < page.index('id="mrCatalogueView"')
-    assert 'id="mrWeeklyView" hidden>' in page
-    assert "menu.workspace==='weekly'?mrOpenWeekly()" in page
+    assert 'id="mrWeeklyView">' in page
+    for target in ('mrWeeklyView', 'weeklySavouryPanel', 'wsDrop', 'wsFile'):
+        assert page.count(f'id="{target}"') == 1
+    weekly = page.split('id="mrWeeklyView">', 1)[1].split('id="mrCatalogueView"', 1)[0]
+    assert 'id="wsDrop" class="ws-drop"' in weekly
+    assert 'Paste Menu Text' in weekly
+    assert 'mrShowCatalogue()' not in weekly
+
+    assert "menu.workspace==='weekly'?mrOpenWeekly()" not in page
+    assert "catalogueRows=mrWorkspaceRows.filter(menu=>menu.workspace!=='weekly')" in page
     assert ids.index("tab-image") < ids.index("tab-paste"), (
         "the paste-text panel sits above the flyer upload"
     )
