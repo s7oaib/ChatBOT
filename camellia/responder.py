@@ -2954,10 +2954,11 @@ class DeterministicResponder:
                 and not order_intake.is_order_process_question(user_message)
             )
             explicit_order_details = bool(
-                not explicit_product_question
-                and order_intake._PRODUCT_RE.search(user_message)
-                and order_intake.is_order_request(
-                    user_message, facts.get("active_product_context"),
+                order_intake._structured_fields(user_message)
+                or order_intake.is_order_process_question(user_message)
+                or (
+                    order_intake.is_order_request(user_message, facts.get("active_product_context"))
+                    and not re.search(r"\b(?:what|why|how|when|can|does|know|tell|about|price|cost|pay|payment|available)\b", lowered_text)
                 )
             )
             approved_intent_precedes_draft = bool(
@@ -3017,7 +3018,6 @@ class DeterministicResponder:
                     )
                 )
                 if has_order_intake or starts_order_intake:
-                    is_new_draft = not has_order_intake
                     draft = existing_order_intake if has_order_intake else order_intake.new_order_draft()
                     facts["order_intake_draft"] = draft
                     facts["source_context_superseded"] = True
@@ -3033,35 +3033,19 @@ class DeterministicResponder:
                             draft, user_message,
                             active_product_context=facts.get("active_product_context"),
                         )
-                        if order_intake.has_meaningful_order_details(draft):
+                        if draft.get("edit_field"):
+                            response_text = order_intake.next_question(draft)
+                        else:
                             response_text = (
-                                "I've prepared your order draft. Please continue on WhatsApp "
-                                "to send it to our team. Missing details are left blank, and "
-                                "our manager can help complete them.\n\n"
+                                (order_intake.instruction_message() + "\n\n" if order_intake.is_order_process_question(user_message) else "")
+                                + "I've prepared your order draft. Please continue on WhatsApp "
+                                "to send it to our team. Missing details are marked Not provided, "
+                                "and our manager can help complete them.\n\n"
                                 + order_intake.request_summary(draft)
                                 + "\n\nOur manager will review availability, delivery charges, "
                                 "and the final invoice.\n\n[Edit Order]\nReply with the change you want."
+                                + f"\n\n[Continue on WhatsApp]\n{order_intake.whatsapp_draft_link(draft)}"
                             )
-                            link = order_intake.whatsapp_draft_link(draft)
-                            if link:
-                                response_text += f"\n\n[Continue on WhatsApp]\n{link}"
-                            else:
-                                response_text += (
-                                    "\n\nYour order draft is ready, but the WhatsApp handoff "
-                                    "link is temporarily unavailable. Our team can assist you directly."
-                                )
-                        else:
-                            if (
-                                is_new_draft
-                                and order_intake.is_order_process_question(user_message)
-                                and not any(draft.get(field) for field in (
-                                    "item", "quantity", "delivery_area", "delivery_slot",
-                                    "delivery_address", "receiver_phone", "location_pin",
-                                ))
-                            ):
-                                response_text = order_intake.instruction_message()
-                            else:
-                                response_text = order_intake.next_question(draft)
 
                     facts.update({
                         "last_route_source": "ORDER_INTAKE_DRAFT",

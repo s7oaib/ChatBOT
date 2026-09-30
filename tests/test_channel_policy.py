@@ -176,8 +176,8 @@ def test_order_request_opens_a_draft_without_inventing_price():
     assert not escalate.called
     assert "delivery area" in reply_text.lower()
     assert "ORDER DRAFT" in reply_text
-    assert "Delivery area: \n" in reply_text
-    assert "Receiver phone: \n" in reply_text
+    assert "Delivery area: Not provided\n" in reply_text
+    assert "Receiver phone: Not provided\n" in reply_text
     assert "₹" not in reply_text
     assert "CAM-" not in reply_text
     facts = session_memory.get_facts(user_id, "instagram")

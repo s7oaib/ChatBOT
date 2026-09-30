@@ -36,8 +36,9 @@ def test_generic_how_to_order_starts_request_draft_with_customer_instructions(mo
 
     assert matched is True
     assert template_id == "order_intake_draft"
-    assert response == instruction_message()
-    assert "wa.me" not in response
+    assert response.startswith(instruction_message())
+    assert "https://wa.me/" in response
+    assert "wa.me" in response
     facts = session_memory.get_facts(uid, "instagram")
     assert facts["order_intake_draft"]["status"] == ORDER_DRAFT_INCOMPLETE
     assert not [row for row in db.get_handoffs(limit=300) if row["source_user_id"] == uid]
@@ -61,9 +62,9 @@ def test_complete_natural_order_sentence_immediately_hands_off_partial_draft(mon
     assert draft["status"] == ORDER_DRAFT_INCOMPLETE
     assert "ORDER DRAFT" in response
     assert "Preferred day/slot: Friday Dinner" in response
-    assert "Delivery address: \n" in response
-    assert "Receiver phone: \n" in response
-    assert "Location pin: \n" in response
+    assert "Delivery address: Not provided\n" in response
+    assert "Receiver phone: Not provided\n" in response
+    assert "Location pin: Not provided\n" in response
     assert "https://wa.me/919800000000?text=" in response
     assert not any(value in response for value in ("Not supplied", "Needed", "N/A", "Unknown"))
     assert not any(value in response.lower() for value in (
@@ -108,9 +109,9 @@ def test_sondesh_classic_size_and_area_leaves_missing_fields_blank(monkeypatch):
     assert draft["delivery_slot"] is None
     assert draft["status"] == ORDER_DRAFT_INCOMPLETE
     assert "ORDER DRAFT" in response
-    assert "Preferred day/slot: \n" in response
-    assert "Delivery address: \n" in response
-    assert "Receiver phone: \n" in response
+    assert "Preferred day/slot: Not provided\n" in response
+    assert "Delivery address: Not provided\n" in response
+    assert "Receiver phone: Not provided\n" in response
     assert "https://wa.me/919800000000?text=" in response
     body = unquote(response.split("?text=", 1)[1])
     assert body == (
@@ -119,11 +120,11 @@ def test_sondesh_classic_size_and_area_leaves_missing_fields_blank(monkeypatch):
         "Item: Sondesh Classic\n"
         "Quantity: 250g\n"
         "Delivery area: Gurgaon\n"
-        "Preferred day/slot: \n"
-        "Delivery address: \n"
-        "Receiver phone: \n"
-        "Location pin: \n\n"
-        "Please help me complete and confirm this order."
+        "Preferred day/slot: Not provided\n"
+        "Delivery address: Not provided\n"
+        "Receiver phone: Not provided\n"
+        "Location pin: Not provided\n\n"
+        "Please help me complete any missing details and confirm this order."
     )
 
 
@@ -137,8 +138,8 @@ def test_missing_whatsapp_number_keeps_draft_without_inventing_link(monkeypatch)
 
     assert matched is True and template_id == "order_intake_draft"
     assert "ORDER DRAFT" in response
-    assert "WhatsApp handoff link is temporarily unavailable" in response
-    assert "wa.me" not in response
+    assert "https://wa.me/918796551990?text=" in response
+    assert "wa.me" in response
     assert session_memory.get_facts(uid, "instagram")["order_intake_draft"]["status"] == ORDER_DRAFT_INCOMPLETE
 
 
@@ -177,7 +178,7 @@ def test_ordering_question_keeps_product_named_in_the_same_message(monkeypatch):
     assert draft["delivery_area"] == "Gurgaon"
     assert "What quantity" not in response
     assert "ORDER DRAFT" in response
-    assert "Preferred day/slot: \n" in response
+    assert "Preferred day/slot: Not provided\n" in response
 
 
 def test_multiturn_draft_persists_supplied_fields_and_renders_customer_values(monkeypatch):
@@ -188,10 +189,10 @@ def test_multiturn_draft_persists_supplied_fields_and_renders_customer_values(mo
     _respond(uid, "Need 2 boxes Sondesh in Gurgaon")
     second, *_ = _respond(uid, "Friday dinner")
     assert "Preferred day/slot: Friday Dinner" in second
-    assert "Delivery address: \n" in second and "Receiver phone: \n" in second
+    assert "Delivery address: Not provided\n" in second and "Receiver phone: Not provided\n" in second
     third, *_ = _respond(uid, "DLF Phase 4, Gurgaon")
     assert "Delivery address: DLF Phase 4, Gurgaon" in third
-    assert "Receiver phone: \n" in third
+    assert "Receiver phone: Not provided\n" in third
     final, matched, template_id, _images = _respond(uid, "9876543210")
 
     draft = session_memory.get_facts(uid, "instagram")["order_intake_draft"]
@@ -270,7 +271,7 @@ def test_standalone_house_requires_a_pin_before_ready(monkeypatch):
 
     draft = session_memory.get_facts(uid, "instagram")["order_intake_draft"]
     assert draft["location_pin_required"] is True
-    assert "Receiver phone: \n" in response
+    assert "Receiver phone: Not provided\n" in response
     assert "Location pin: " in response
     assert "Please send" not in response
     assert draft["status"] == ORDER_DRAFT_INCOMPLETE
@@ -294,7 +295,7 @@ def test_whatsapp_link_prefills_the_order_request_but_only_creates_a_click_link(
         "Item: Sondesh Classic", "Quantity: 250g", "Delivery area: Gurgaon",
         "Delivery address: DLF Phase 4, Gurgaon", "Preferred day/slot: Friday Dinner",
         "Receiver phone: 9876543210", "Location pin: ",
-        "Please help me complete and confirm this order.",
+        "Please help me complete any missing details and confirm this order.",
     ):
         assert value in body
     send_instagram.assert_not_called()
@@ -311,7 +312,8 @@ def test_instagram_order_start_sends_one_reply_and_creates_no_human_handoff(monk
         app_module._process_instagram_event(uid, "how do i order", "ad-order-intake")
 
     assert send.call_count == 1
-    assert send.call_args.args[1] == instruction_message()
+    assert send.call_args.args[1].startswith(instruction_message())
+    assert "https://wa.me/" in send.call_args.args[1]
     escalate.assert_not_called()
     assert not [row for row in db.get_handoffs(limit=300) if row["source_user_id"] == uid]
     assert session_memory.get_facts(uid, "instagram")["order_intake_draft"]["status"] == ORDER_DRAFT_INCOMPLETE
@@ -375,7 +377,8 @@ def test_how_to_order_overrides_mapped_source_without_sending_source_description
     response, matched, template_id, _images = _respond(uid, "how do i order")
 
     assert matched is True and template_id == "order_intake_draft"
-    assert response == instruction_message()
+    assert response.startswith(instruction_message())
+    assert "https://wa.me/" in response
     assert "Source description" not in response
     assert facts["source_context_superseded"] is True
     assert facts["order_intake_draft"]["status"] == ORDER_DRAFT_INCOMPLETE
@@ -415,3 +418,137 @@ def test_price_payment_finalized_order_and_unsupported_questions_keep_separate_r
     assert active_payment_match is True and active_payment_template == "GUARD_payment_method"
     assert session_memory.get_facts(active_payment_id, "instagram")["order_intake_draft"]["status"] == ORDER_DRAFT_INCOMPLETE
 
+
+# QA-O1: one response creates a manual handoff draft, never an interview.
+@pytest.fixture
+def one_shot_customer(monkeypatch):
+    monkeypatch.setattr(config, 'BYPASS_AD_GATE', True)
+    monkeypatch.setattr(config, 'WHATSAPP_BUSINESS_NUMBER', '918796551990')
+    uid = 'one-shot-' + uuid.uuid4().hex
+    session_memory.clear_session(uid, 'instagram')
+    def reply(message):
+        with patch('camellia.ai_responder.ai_responder._query_groq', side_effect=AssertionError('LLM called')):
+            text, matched, template, images = _respond(uid, message)
+        assert matched and template == 'order_intake_draft' and images is None
+        assert 'https://wa.me/918796551990?text=' in text
+        assert 'order confirmed' not in text.lower()
+        assert 'Please send' not in text
+        return text, session_memory.get_facts(uid, 'instagram')['order_intake_draft']
+    return reply
+
+@pytest.mark.parametrize('message', ['how do I order?', 'how can I place an order?'])
+def test_zero_detail_request_has_exact_four_point_instruction_and_immediate_template(one_shot_customer, message):
+    expected = (
+        'To place a pre-order, Kindly call / WhatsApp our kitchen at 8796551990 with following details\n\n'
+        '1. Your choice of items & the quantity\n'
+        '2. delivery address so that I can tell u Porter charges,\n'
+        '3. phone number of person who will receive the package\n'
+        '4. which slot - example : Friday / Saturday / Sunday - lunch or dinner or any day next week'
+    )
+    text, draft = one_shot_customer(message)
+    assert instruction_message() == expected
+    assert text.startswith(expected)
+    body = unquote(text.split('?text=', 1)[1])
+    assert body.count('Not provided') == 7
+    assert body.endswith('Please help me complete any missing details and confirm this order.')
+    assert all(draft[field] is None for field in ('item','quantity','delivery_area','receiver_phone','delivery_slot'))
+
+@pytest.mark.parametrize('message', [
+    '1. 2 boxes Sondesh\n2. Flat 12, Sector 51, Gurgaon\n3. 9876543210\n4. Friday dinner',
+    'Item: Sondesh\nQuantity: 2 boxes\nDelivery address: Flat 12, Sector 51, Gurgaon\nPhone: 9876543210\nPreferred slot: Friday dinner',
+    'Item: Sondesh; Quantity: 2 boxes; Delivery address: Flat 12, Sector 51, Gurgaon; Phone: 9876543210; Slot: Friday dinner',
+    'Need 2 boxes Sondesh delivery to Flat 12, Sector 51, Gurgaon Friday dinner 9876543210',
+])
+def test_complete_numbered_labelled_and_natural_forms_capture_all_fields(one_shot_customer, message):
+    text, draft = one_shot_customer(message)
+    assert draft['item'] == 'Sondesh'
+    assert draft['quantity'] == '2 boxes'
+    assert draft['delivery_area'] == 'Gurgaon'
+    assert draft['receiver_phone'] == '9876543210'
+    assert draft['delivery_slot'].casefold() == 'friday dinner'
+    assert draft['delivery_address'] == 'Flat 12, Sector 51, Gurgaon'
+    body = unquote(text.split('?text=',1)[1])
+    for field in ('item','quantity','delivery_address','receiver_phone','delivery_slot'):
+        assert draft[field] in body
+
+@pytest.mark.parametrize('message,missing', [
+    ('2 boxes sondesh Gurgaon Friday dinner','receiver_phone'),
+    ('2 boxes sondesh Gurgaon 9876543210','delivery_slot'),
+    ('2 boxes sondesh','delivery_area'),
+])
+def test_partial_order_immediately_hands_off_with_explicit_missing_values(one_shot_customer, message, missing):
+    text, draft = one_shot_customer(message)
+    assert draft['item'] == 'Sondesh' and draft['quantity'] == '2 boxes'
+    assert draft[missing] is None
+    assert 'Not provided' in unquote(text.split('?text=',1)[1])
+    assert 'full delivery address' not in text
+    assert "receiver's phone" not in text
+
+
+def test_sequential_item_area_and_slot_preserve_prior_values_without_questions(one_shot_customer):
+    _, draft = one_shot_customer('Sondesh')
+    assert draft['item'] == 'Sondesh' and draft['quantity'] is None
+    one_shot_customer('2 boxes')
+    first, _ = one_shot_customer('Gurgaon')
+    second, _ = one_shot_customer('Gurgaon')
+    assert first == second
+    assert draft['delivery_area'] == 'Gurgaon' and draft['delivery_address'] is None
+    one_shot_customer('Friday dinner')
+    assert draft['quantity'] == '2 boxes' and draft['delivery_slot'] == 'Friday Dinner'
+    assert draft['item'] == 'Sondesh' and draft['delivery_area'] == 'Gurgaon'
+
+
+def test_voluntary_address_and_explicit_corrections_regenerate_link(one_shot_customer):
+    first, draft = one_shot_customer('2 boxes Sondesh Gurgaon Friday dinner')
+    one_shot_customer('Flat 12, Sector 51, Gurgaon')
+    assert draft['delivery_address'] == 'Flat 12, Sector 51, Gurgaon'
+    one_shot_customer('phone is 9876543210')
+    one_shot_customer('make it Saturday dinner')
+    changed, _ = one_shot_customer('change delivery to Noida')
+    assert changed != first
+    assert draft['delivery_area'] == 'Noida' and draft['delivery_address'] is None
+    assert draft['item'] == 'Sondesh' and draft['quantity'] == '2 boxes'
+    assert draft['receiver_phone'] == '9876543210'
+    assert draft['delivery_slot'] == 'Saturday Dinner'
+    body = unquote(changed.split('?text=',1)[1])
+    assert 'Delivery area: Noida' in body and 'Preferred day/slot: Saturday Dinner' in body
+
+
+def test_order_process_area_only_does_not_invent_item(one_shot_customer):
+    one_shot_customer('how do I order?')
+    text, draft = one_shot_customer('Gurgaon')
+    assert draft['delivery_area'] == 'Gurgaon'
+    assert draft['item'] is None and draft['delivery_address'] is None
+    assert 'Item: Not provided' in unquote(text.split('?text=',1)[1])
+
+
+def test_day_slot_and_bare_quantity_are_captured_in_separate_messages(one_shot_customer):
+    one_shot_customer('Sondesh')
+    one_shot_customer('2')
+    one_shot_customer('Gurgaon')
+    one_shot_customer('Friday')
+    text, draft = one_shot_customer('dinner')
+    assert draft['quantity'] == '2'
+    assert draft['delivery_slot'] == 'Friday Dinner'
+    assert draft['item'] == 'Sondesh' and draft['delivery_area'] == 'Gurgaon'
+    first, _ = one_shot_customer('phone is 9876543210')
+    second, _ = one_shot_customer('phone is 9876543210')
+    assert first == second
+    assert draft['quantity'] == '2' and draft['receiver_phone'] == '9876543210'
+
+
+def test_numbered_quantity_only_preserves_existing_item(one_shot_customer):
+    one_shot_customer('2 boxes Sondesh Gurgaon Friday dinner')
+    text, draft = one_shot_customer('1. 3 boxes')
+    assert draft['item'] == 'Sondesh' and draft['quantity'] == '3 boxes'
+    assert draft['delivery_area'] == 'Gurgaon' and draft['delivery_slot'] == 'Friday Dinner'
+    assert 'Item: Sondesh' in unquote(text.split('?text=',1)[1])
+
+
+def test_area_only_completes_explicit_address_edit_without_repeated_question(one_shot_customer):
+    _, draft = one_shot_customer('2 boxes Sondesh Gurgaon Friday dinner')
+    # Simulate an explicitly requested address edit; a city is enough.
+    draft['edit_field'] = 'delivery_address'
+    one_shot_customer('Noida')
+    assert draft['delivery_area'] == 'Noida' and draft['edit_field'] is None
+    assert draft['delivery_address'] is None and draft['item'] == 'Sondesh'

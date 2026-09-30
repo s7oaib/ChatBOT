@@ -57,8 +57,8 @@ def test_order_draft_yes_does_not_invent_missing_address_or_finalize():
 
         assert reply[2] == "order_intake_draft"
         assert "ORDER DRAFT" in reply[0]
-        assert "Delivery address: \n" in reply[0]
-        assert "Receiver phone: \n" in reply[0]
+        assert "Delivery address: Not provided\n" in reply[0]
+        assert "Receiver phone: Not provided\n" in reply[0]
         assert facts["order_intake_draft"]["delivery_address"] is None
         assert facts["order_intake_draft"]["receiver_phone"] is None
         assert facts["order_intake_draft"]["status"] == ORDER_DRAFT_INCOMPLETE

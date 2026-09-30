@@ -110,7 +110,8 @@ def test_order_process_phrases_start_the_customer_order_draft(monkeypatch, messa
 
     assert matched is True
     assert template_id == "order_intake_draft"
-    assert response == instruction_message()
+    assert response.startswith(instruction_message())
+    assert "https://wa.me/" in response
     assert session_memory.get_facts(user_id, "instagram")["order_intake_draft"]["status"] == ORDER_DRAFT_INCOMPLETE
 
 
