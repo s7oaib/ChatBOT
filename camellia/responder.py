@@ -3005,6 +3005,7 @@ class DeterministicResponder:
                 return order_response, False, "order_next_steps", None
             if (
                 not finalized_order
+                and (not order_intake.is_order_information_question(user_message) or bool(order_intake._structured_fields(user_message)))
                 and not approved_intent_precedes_draft
                 and not source_referential_order
                 and not order_intake.is_price_or_payment(user_message)

@@ -61,10 +61,10 @@ def test_complete_natural_order_sentence_immediately_hands_off_partial_draft(mon
     )
     assert draft["status"] == ORDER_DRAFT_INCOMPLETE
     assert "ORDER DRAFT" in response
-    assert "Preferred day/slot: Friday Dinner" in response
-    assert "Delivery address: Not provided\n" in response
+    assert "Preferred slot: Friday Dinner" in response
+    assert "Delivery address/area: Gurgaon\n" in response
     assert "Receiver phone: Not provided\n" in response
-    assert "Location pin: Not provided\n" in response
+    assert "Location pin:" not in response
     assert "https://wa.me/919800000000?text=" in response
     assert not any(value in response for value in ("Not supplied", "Needed", "N/A", "Unknown"))
     assert not any(value in response.lower() for value in (
@@ -109,21 +109,18 @@ def test_sondesh_classic_size_and_area_leaves_missing_fields_blank(monkeypatch):
     assert draft["delivery_slot"] is None
     assert draft["status"] == ORDER_DRAFT_INCOMPLETE
     assert "ORDER DRAFT" in response
-    assert "Preferred day/slot: Not provided\n" in response
-    assert "Delivery address: Not provided\n" in response
+    assert "Preferred slot: Not provided\n" in response
+    assert "Delivery address/area: Gurgaon\n" in response
     assert "Receiver phone: Not provided\n" in response
     assert "https://wa.me/919800000000?text=" in response
     body = unquote(response.split("?text=", 1)[1])
     assert body == (
-        "Hi, I'd like to place an order with Camellia Artisanal.\n\n"
+        "Hi, I'd like to place a pre-order with Camellia Artisanal.\n\n"
         "ORDER DRAFT\n\n"
-        "Item: Sondesh Classic\n"
-        "Quantity: 250g\n"
-        "Delivery area: Gurgaon\n"
-        "Preferred day/slot: Not provided\n"
-        "Delivery address: Not provided\n"
-        "Receiver phone: Not provided\n"
-        "Location pin: Not provided\n\n"
+        "1. Items & quantity: 250g Sondesh Classic\n"
+        "2. Delivery address/area: Gurgaon\n"
+        "3. Receiver phone: Not provided\n"
+        "4. Preferred slot: Not provided\n\n"
         "Please help me complete any missing details and confirm this order."
     )
 
@@ -178,7 +175,7 @@ def test_ordering_question_keeps_product_named_in_the_same_message(monkeypatch):
     assert draft["delivery_area"] == "Gurgaon"
     assert "What quantity" not in response
     assert "ORDER DRAFT" in response
-    assert "Preferred day/slot: Not provided\n" in response
+    assert "Preferred slot: Not provided\n" in response
 
 
 def test_multiturn_draft_persists_supplied_fields_and_renders_customer_values(monkeypatch):
@@ -188,23 +185,21 @@ def test_multiturn_draft_persists_supplied_fields_and_renders_customer_values(mo
 
     _respond(uid, "Need 2 boxes Sondesh in Gurgaon")
     second, *_ = _respond(uid, "Friday dinner")
-    assert "Preferred day/slot: Friday Dinner" in second
-    assert "Delivery address: Not provided\n" in second and "Receiver phone: Not provided\n" in second
+    assert "Preferred slot: Friday Dinner" in second
+    assert "Delivery address/area: Gurgaon\n" in second and "Receiver phone: Not provided\n" in second
     third, *_ = _respond(uid, "DLF Phase 4, Gurgaon")
-    assert "Delivery address: DLF Phase 4, Gurgaon" in third
+    assert "Delivery address/area: DLF Phase 4, Gurgaon" in third
     assert "Receiver phone: Not provided\n" in third
     final, matched, template_id, _images = _respond(uid, "9876543210")
 
     draft = session_memory.get_facts(uid, "instagram")["order_intake_draft"]
     assert draft["status"] == ORDER_DRAFT_READY
     assert matched is True and template_id == "order_intake_draft"
-    assert "Item: Sondesh" in final
-    assert "Quantity: 2 boxes" in final
-    assert "Delivery area: Gurgaon" in final
-    assert "Delivery address: DLF Phase 4, Gurgaon" in final
-    assert "Preferred day/slot: Friday Dinner" in final
+    assert "Items & quantity: 2 boxes Sondesh" in final
+    assert "Delivery address/area: DLF Phase 4, Gurgaon" in final
+    assert "Preferred slot: Friday Dinner" in final
     assert "Receiver phone: 9876543210" in final
-    assert "Location pin: " in final
+    assert "Location pin:" not in final
     assert "Our manager will review availability, delivery charges, and the final invoice." in final
     assert "order confirmed" not in final.lower()
     assert "booking confirmed" not in final.lower()
@@ -228,7 +223,7 @@ def test_editing_quantity_updates_the_same_draft_without_reasking_other_fields(m
     assert updated["quantity"] == "500g"
     assert updated["delivery_address"] == "DLF Phase 4, Gurgaon"
     assert updated["receiver_phone"] == "9876543210"
-    assert "Quantity: 500g" in edited
+    assert "Items & quantity: 500g Sondesh" in edited
     assert "full delivery address" not in edited
     assert "receiver's phone number" not in edited
 
@@ -248,7 +243,7 @@ def test_edit_order_command_and_quantity_change_reuse_the_same_draft(monkeypatch
 
     assert session_memory.get_facts(uid, "instagram")["order_intake_draft"] is draft
     assert draft["quantity"] == "3 boxes"
-    assert "Quantity: 3 boxes" in changed
+    assert "Items & quantity: 3 boxes Sondesh" in changed
     assert draft["delivery_address"] == "DLF Phase 4, Gurgaon"
 
 
@@ -272,7 +267,7 @@ def test_standalone_house_requires_a_pin_before_ready(monkeypatch):
     draft = session_memory.get_facts(uid, "instagram")["order_intake_draft"]
     assert draft["location_pin_required"] is True
     assert "Receiver phone: Not provided\n" in response
-    assert "Location pin: " in response
+    assert "Location pin:" not in response
     assert "Please send" not in response
     assert draft["status"] == ORDER_DRAFT_INCOMPLETE
 
@@ -291,10 +286,10 @@ def test_whatsapp_link_prefills_the_order_request_but_only_creates_a_click_link(
     assert link.startswith("https://wa.me/919800000000?text=")
     body = unquote(link)
     for value in (
-        "Hi, I'd like to place an order with Camellia Artisanal.", "ORDER DRAFT",
-        "Item: Sondesh Classic", "Quantity: 250g", "Delivery area: Gurgaon",
-        "Delivery address: DLF Phase 4, Gurgaon", "Preferred day/slot: Friday Dinner",
-        "Receiver phone: 9876543210", "Location pin: ",
+        "Hi, I'd like to place a pre-order with Camellia Artisanal.", "ORDER DRAFT",
+        "Items & quantity: 250g Sondesh Classic",
+        "Delivery address/area: DLF Phase 4, Gurgaon", "Preferred slot: Friday Dinner",
+        "Receiver phone: 9876543210",
         "Please help me complete any missing details and confirm this order.",
     ):
         assert value in body
@@ -449,7 +444,7 @@ def test_zero_detail_request_has_exact_four_point_instruction_and_immediate_temp
     assert instruction_message() == expected
     assert text.startswith(expected)
     body = unquote(text.split('?text=', 1)[1])
-    assert body.count('Not provided') == 7
+    assert body.count('Not provided') == 4
     assert body.endswith('Please help me complete any missing details and confirm this order.')
     assert all(draft[field] is None for field in ('item','quantity','delivery_area','receiver_phone','delivery_slot'))
 
@@ -511,7 +506,7 @@ def test_voluntary_address_and_explicit_corrections_regenerate_link(one_shot_cus
     assert draft['receiver_phone'] == '9876543210'
     assert draft['delivery_slot'] == 'Saturday Dinner'
     body = unquote(changed.split('?text=',1)[1])
-    assert 'Delivery area: Noida' in body and 'Preferred day/slot: Saturday Dinner' in body
+    assert 'Delivery address/area: Noida' in body and 'Preferred slot: Saturday Dinner' in body
 
 
 def test_order_process_area_only_does_not_invent_item(one_shot_customer):
@@ -519,7 +514,7 @@ def test_order_process_area_only_does_not_invent_item(one_shot_customer):
     text, draft = one_shot_customer('Gurgaon')
     assert draft['delivery_area'] == 'Gurgaon'
     assert draft['item'] is None and draft['delivery_address'] is None
-    assert 'Item: Not provided' in unquote(text.split('?text=',1)[1])
+    assert 'Items & quantity: Not provided' in unquote(text.split('?text=',1)[1])
 
 
 def test_day_slot_and_bare_quantity_are_captured_in_separate_messages(one_shot_customer):
@@ -542,7 +537,7 @@ def test_numbered_quantity_only_preserves_existing_item(one_shot_customer):
     text, draft = one_shot_customer('1. 3 boxes')
     assert draft['item'] == 'Sondesh' and draft['quantity'] == '3 boxes'
     assert draft['delivery_area'] == 'Gurgaon' and draft['delivery_slot'] == 'Friday Dinner'
-    assert 'Item: Sondesh' in unquote(text.split('?text=',1)[1])
+    assert 'Items & quantity: 3 boxes Sondesh' in unquote(text.split('?text=',1)[1])
 
 
 def test_area_only_completes_explicit_address_edit_without_repeated_question(one_shot_customer):
@@ -552,3 +547,206 @@ def test_area_only_completes_explicit_address_edit_without_repeated_question(one
     one_shot_customer('Noida')
     assert draft['delivery_area'] == 'Noida' and draft['edit_field'] is None
     assert draft['delivery_address'] is None and draft['item'] == 'Sondesh'
+
+
+# QA-O2: messy customer data remains a draft for a human to validate.
+@pytest.mark.parametrize("message,item,quantity,area,slot,phone,address", [
+    ("2 boxes sondesh gurgaon friday dinner 9876543210", "Sondesh", "2 boxes", "Gurgaon", "Friday Dinner", "9876543210", None),
+    ("need 2 boxes sondesh for friday dinner gurgaon ph 9876543210", "Sondesh", "2 boxes", "Gurgaon", "Friday Dinner", "9876543210", None),
+    ("sondesh 2 boxes saturday lunch gurugram 98765 43210", "Sondesh", "2 boxes", "Gurugram", "Saturday Lunch", "9876543210", None),
+    ("chicken bento 3 boxes noida sunday dinner 9812345678", "Chicken Bento", "3 boxes", "Noida", "Sunday Dinner", "9812345678", None),
+    ("need 2 portions chicken kosha Gurgaon tomorrow lunch", "Chicken Kosha", "2 portions", "Gurgaon", "Tomorrow Lunch", None, None),
+    ("need kanchagolla 250g sector 56 gurgaon friday lunch", "Kanchagolla", "250g", "Gurgaon", "Friday Lunch", None, "sector 56 gurgaon"),
+    ("Friday dinner Gurgaon 2 boxes Sondesh", "Sondesh", "2 boxes", "Gurgaon", "Friday Dinner", None, None),
+    ("I want 2 portions chicken kosha", "Chicken Kosha", "2 portions", None, None, None, None),
+    ("Need 1 Bengali meal", "Bengali meal", "1", None, None, None, None),
+    ("I'd like 2 plates luchi and aloo dom", "luchi and aloo dom", "2 plates", None, None, None, None),
+    ("I want 2 fish curry", "fish curry", "2", None, None, None, None),
+    ("Need 2 boxes Sondesh and 1 portion chicken kosha", "Sondesh and chicken kosha", "2 boxes + 1 portion", None, None, None, None),
+])
+def test_messy_customer_orders_have_literal_fields_and_manual_link(one_shot_customer, message, item, quantity, area, slot, phone, address):
+    text, draft = one_shot_customer(message)
+    assert {key: draft[key] for key in ("item", "quantity", "delivery_area", "delivery_slot", "receiver_phone", "delivery_address")} == {
+        "item": item, "quantity": quantity, "delivery_area": area, "delivery_slot": slot, "receiver_phone": phone, "delivery_address": address,
+    }
+    assert not any(claim in text.casefold() for claim in ("is available", "confirmed", "booked", "reserved"))
+
+
+@pytest.mark.parametrize("quantity", ["1 box", "2 boxes", "1 pack", "2 packs", "1 piece", "2 pieces", "2 pcs", "1 portion", "2 portions", "1 serving", "2 servings", "1 plate", "2 plates", "1kg", "0.5 kg", "250g", "250 gm", "250 grams", "2"])
+def test_quantity_units_accumulate_without_changing_existing_item(one_shot_customer, quantity):
+    one_shot_customer("Chicken Kosha")
+    text, draft = one_shot_customer(quantity)
+    assert draft["item"] == "Chicken Kosha" and draft["quantity"] == quantity
+    assert "Items & quantity: " + quantity + " Chicken Kosha" in unquote(text)
+
+
+@pytest.mark.parametrize("message,field,value", [
+    ("actually make it 3 boxes", "quantity", "3 boxes"),
+    ("change quantity to 3 boxes", "quantity", "3 boxes"),
+    ("Saturday dinner instead", "delivery_slot", "Saturday Dinner"),
+    ("actually Sunday lunch", "delivery_slot", "Sunday Lunch"),
+    ("make it Friday dinner", "delivery_slot", "Friday Dinner"),
+    ("change slot to tomorrow lunch", "delivery_slot", "Tomorrow Lunch"),
+    ("not Friday, Saturday dinner", "delivery_slot", "Saturday Dinner"),
+    ("not Friday lunch, Saturday dinner", "delivery_slot", "Saturday Dinner"),
+    ("lunch Friday", "delivery_slot", "Lunch Friday"),
+    ("dinner Saturday", "delivery_slot", "Dinner Saturday"),
+    ("next week", "delivery_slot", "Next Week"),
+    ("phone is 9811111111 instead", "receiver_phone", "9811111111"),
+    ("use 9811111111", "receiver_phone", "9811111111"),
+    ("actually Noida", "delivery_area", "Noida"),
+    ("not Gurgaon, Noida", "delivery_area", "Noida"),
+    ("change delivery to Noida", "delivery_area", "Noida"),
+    ("address is DLF Phase 4 Gurgaon", "delivery_address", "DLF Phase 4 Gurgaon"),
+    ("change address to Sector 56 Gurgaon", "delivery_address", "Sector 56 Gurgaon"),
+])
+def test_natural_corrections_change_only_the_intended_field(one_shot_customer, message, field, value):
+    _, draft = one_shot_customer("2 boxes Sondesh Gurgaon Friday dinner 9876543210")
+    before = draft.copy()
+    text, _ = one_shot_customer(message)
+    assert draft[field] == value
+    for key in ("item", "quantity", "delivery_area", "delivery_slot", "receiver_phone", "delivery_address"):
+        if key != field:
+            assert draft[key] == before[key]
+    assert value in unquote(text)
+
+
+@pytest.mark.parametrize("correction", ["actually Noida", "not Gurgaon, Noida", "change delivery to Noida"])
+def test_area_corrections_clear_only_incompatible_address_and_pin(one_shot_customer, correction):
+    one_shot_customer("2 boxes Sondesh Gurgaon Friday dinner 9876543210")
+    _, draft = one_shot_customer("DLF Phase 4, Gurgaon")
+    draft["location_pin"] = "https://maps.app.goo.gl/oldGurgaonPin"
+    one_shot_customer(correction)
+    assert draft["delivery_area"] == "Noida" and draft["delivery_address"] is None
+    assert draft["location_pin"] is None
+    assert (draft["item"], draft["quantity"], draft["delivery_slot"], draft["receiver_phone"]) == ("Sondesh", "2 boxes", "Friday Dinner", "9876543210")
+
+
+@pytest.mark.parametrize("message", ["Gurgaon", "Friday dinner", "9876543210", "okay thanks"])
+def test_repeated_or_unrecognized_details_do_not_erase_existing_values(one_shot_customer, message):
+    one_shot_customer("2 boxes Sondesh Gurgaon Friday dinner 9876543210")
+    _, draft = one_shot_customer("DLF Phase 4, Gurgaon")
+    before = draft.copy()
+    first, _ = one_shot_customer(message)
+    second, _ = one_shot_customer(message)
+    assert draft == before
+    assert first == second
+
+
+@pytest.mark.parametrize("message", [
+    "what is chicken kosha price?", "how much is 2 boxes sondesh?", "tell me about Bengali Bento",
+    "is sondesh available?", "what is minimum order?", "do you deliver to Noida?", "how do I pay?",
+    "what is the weather?", "do you have bento?", "can you deliver bento to Noida?", "what is the minimum quantity?",
+])
+@pytest.mark.parametrize("active", [False, True])
+def test_questions_never_start_or_mutate_order_data(monkeypatch, message, active):
+    monkeypatch.setattr(config, "BYPASS_AD_GATE", True)
+    uid = "question-draft-" + uuid.uuid4().hex
+    session_memory.clear_session(uid, "instagram")
+    facts = session_memory.get_facts(uid, "instagram")
+    if active:
+        facts["order_intake_draft"] = new_order_draft()
+        update_order_draft(facts["order_intake_draft"], "2 boxes Sondesh Gurgaon Friday dinner 9876543210")
+    before = facts["order_intake_draft"].copy() if active else None
+    assert not is_order_request(message)
+    if active:
+        update_order_draft(facts["order_intake_draft"], message)
+        assert facts["order_intake_draft"] == before
+    with patch("camellia.ai_responder.ai_responder._query_groq", side_effect=AssertionError("LLM called")):
+        _text, _matched, template, _images = _respond(uid, message)
+    assert template != "order_intake_draft"
+    assert facts["order_intake_draft"] == before
+
+
+def test_four_field_template_roundtrips_and_optional_pin_is_not_internal_clutter(monkeypatch):
+    from urllib.parse import parse_qs, urlsplit
+    monkeypatch.setattr(config, "WHATSAPP_BUSINESS_NUMBER", "918796551990")
+    draft = new_order_draft()
+    update_order_draft(draft, "2 boxes Sondesh Gurgaon Friday dinner")
+    link = whatsapp_draft_link(draft)
+    assert urlsplit(link).netloc == "wa.me" and urlsplit(link).path == "/918796551990"
+    body = parse_qs(urlsplit(link).query)["text"][0]
+    assert body == (
+        "Hi, I'd like to place a pre-order with Camellia Artisanal.\n\n"
+        "ORDER DRAFT\n\n"
+        "1. Items & quantity: 2 boxes Sondesh\n"
+        "2. Delivery address/area: Gurgaon\n"
+        "3. Receiver phone: Not provided\n"
+        "4. Preferred slot: Friday Dinner\n\n"
+        "Please help me complete any missing details and confirm this order."
+    )
+    draft["location_pin"] = "https://maps.app.goo.gl/CustomerPin"
+    assert "Location pin: https://maps.app.goo.gl/CustomerPin" in unquote(whatsapp_draft_link(draft))
+
+
+def test_explicit_empty_phone_edit_is_the_only_reason_to_ask_for_phone(monkeypatch):
+    monkeypatch.setattr(config, "BYPASS_AD_GATE", True)
+    uid = "phone-edit-" + uuid.uuid4().hex
+    session_memory.clear_session(uid, "instagram")
+    _respond(uid, "2 boxes Sondesh Gurgaon Friday dinner")
+    text, matched, template, _images = _respond(uid, "change my phone number")
+    assert matched and template == "order_intake_draft"
+    assert text == "What receiver phone number should I use?"
+    text, *_ = _respond(uid, "9876543210")
+    assert "https://wa.me/" in text and "Receiver phone: 9876543210" in text
+
+
+@pytest.mark.parametrize("message", ["how do I order?", "how can I place an order?", "how can I pre-book?", "I want to order", "what are the next steps to order?"])
+def test_process_question_scaffolding_is_never_recorded_as_an_item(one_shot_customer, message):
+    _, draft = one_shot_customer(message)
+    assert draft["item"] is None and draft["quantity"] is None
+
+
+def test_unknown_item_in_explicit_process_question_is_customer_data(one_shot_customer):
+    _, draft = one_shot_customer("How do I order 2 plates luchi and aloo dom?")
+    assert draft["item"] == "luchi and aloo dom" and draft["quantity"] == "2 plates"
+
+
+def test_plain_numeric_item_order_does_not_invent_a_full_address(one_shot_customer):
+    _, draft = one_shot_customer("I want 2 fish curry Gurgaon")
+    assert draft["item"] == "fish curry" and draft["quantity"] == "2"
+    assert draft["delivery_area"] == "Gurgaon" and draft["delivery_address"] is None
+
+
+def test_voluntary_location_pin_is_captured_and_included_in_manual_link(one_shot_customer):
+    one_shot_customer("2 boxes Sondesh Gurgaon Friday dinner")
+    text, draft = one_shot_customer("https://maps.app.goo.gl/CustomerPin")
+    assert draft["location_pin"] == "https://maps.app.goo.gl/CustomerPin"
+    assert "Location pin: https://maps.app.goo.gl/CustomerPin" in unquote(text)
+
+
+@pytest.mark.parametrize("message", ["Friday lunch or Saturday dinner", "Gurgaon or Noida"])
+def test_ambiguous_multiple_values_preserve_existing_fields(one_shot_customer, message):
+    _, draft = one_shot_customer("2 boxes Sondesh Gurgaon Friday dinner 9876543210")
+    before = draft.copy()
+    one_shot_customer(message)
+    assert draft == before
+
+
+def test_address_first_order_keeps_address_separate_from_item_and_slot(one_shot_customer):
+    _, draft = one_shot_customer("Sector 56 Gurgaon Friday dinner 2 boxes Sondesh")
+    assert draft["item"] == "Sondesh" and draft["quantity"] == "2 boxes"
+    assert draft["delivery_address"] == "Sector 56 Gurgaon"
+    assert draft["delivery_area"] == "Gurgaon" and draft["delivery_slot"] == "Friday Dinner"
+
+
+def test_gurugram_alias_does_not_clear_a_gurgaon_address(one_shot_customer):
+    one_shot_customer("2 boxes Sondesh Gurgaon Friday dinner")
+    _, draft = one_shot_customer("DLF Phase 4, Gurgaon")
+    one_shot_customer("Gurugram")
+    assert draft["delivery_area"] == "Gurugram" and draft["delivery_address"] == "DLF Phase 4, Gurgaon"
+
+
+@pytest.mark.parametrize("message", ["use 9876543210 or 9811111111", "9876543210 9811111111"])
+def test_ambiguous_phone_values_do_not_overwrite_the_receiver(one_shot_customer, message):
+    _, draft = one_shot_customer("2 boxes Sondesh Gurgaon Friday dinner 9800000000")
+    before = draft.copy()
+    one_shot_customer(message)
+    assert draft == before
+
+
+def test_new_explicit_plain_count_updates_existing_quantity(one_shot_customer):
+    one_shot_customer("2 boxes Sondesh Gurgaon Friday dinner")
+    _, draft = one_shot_customer("I want 3 fish curry")
+    assert draft["item"] == "fish curry" and draft["quantity"] == "3"
+    assert draft["delivery_area"] == "Gurgaon" and draft["delivery_slot"] == "Friday Dinner"

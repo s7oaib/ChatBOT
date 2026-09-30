@@ -174,9 +174,9 @@ def test_order_request_opens_a_draft_without_inventing_price():
     )
     reply_text = send_reply.call_args.args[1]
     assert not escalate.called
-    assert "delivery area" in reply_text.lower()
+    assert "delivery address/area" in reply_text.lower()
     assert "ORDER DRAFT" in reply_text
-    assert "Delivery area: Not provided\n" in reply_text
+    assert "Delivery address/area: Not provided\n" in reply_text
     assert "Receiver phone: Not provided\n" in reply_text
     assert "₹" not in reply_text
     assert "CAM-" not in reply_text

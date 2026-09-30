@@ -17,28 +17,28 @@ _HOW_TO_ORDER_RE = re.compile(
     r"how\s+(?:do\s+i|can\s+i)\s+(?:pre\s*[- ]?book|pre\s*[- ]?order))\b",
     re.I,
 )
-_QUANTITY_RE = re.compile(r"\b(\d+\s*(?:boxes?|packs?|pieces?|pcs)|\d+(?:\.\d+)?\s*(?:kg|g))\b", re.I)
+_QUANTITY_RE = re.compile(r"\b(\d+\s*(?:box(?:es)?|packs?|pieces?|pcs|portions?|servings?|plates?)|\d+(?:\.\d+)?\s*(?:kg|grams?|gm|g))\b", re.I)
 _SLOT_RE = re.compile(
     r"\b(?:(?:today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday)"
-    r"\s+(?:morning|afternoon|lunch|dinner)|"
+    r"\s+(?:morning|afternoon|lunch|dinner)|next\s+week|"
     r"(?:morning|afternoon|lunch|dinner)\s+(?:today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday))\b",
     re.I,
 )
 _AREA_RE = re.compile(r"\b(?:delhi\s+ncr|gurgaon|gurugram|delhi|noida|ghaziabad|faridabad|kolkata)\b", re.I)
 _PHONE_RE = re.compile(r"(?<!\w)(?:\+?\d[\d\s().-]{8,}\d)(?!\w)")
-_PIN_RE = re.compile(r"https?://[^\s]+(?:maps\.app\.goo\.gl|google\.[^/]+/maps|maps\.google\.[^/]+)[^\s]*", re.I)
+_PIN_RE = re.compile(r"https?://(?:maps\.app\.goo\.gl|(?:www\.)?google\.[^/]+/maps|maps\.google\.[^/]+)[^\s]*", re.I)
 _PRODUCT_RE = re.compile(
     r"\b(?:sondesh(?:\s+classic)?|jolbhora|kanchagolla|nolen\s+gur|"
-    r"chicken\s+bento|bengali\s+bento|bento|subscription)\b",
+    r"chicken\s+bento|bengali\s+bento|bento|chicken\s+kosha|subscription)\b",
     re.I,
 )
 _ORDER_REQUEST_RE = re.compile(
-    r"\b(?:need|i\s+(?:want|would\s+like)|please\s+order)\b|"
-    r"\b\d+\s+(?:boxes?|packs?|pieces?|pcs)\b",
+    r"\b(?:need|i\s+(?:want|would\s+like)|i['’]d\s+like|please\s+order)\b|"
+    r"\b\d+\s+(?:box(?:es)?|packs?|pieces?|pcs)\b",
     re.I,
 )
 _EDIT_FIELD_RE = re.compile(
-    r"\bchange\s+(quantity|item|address|delivery area|area|slot|day|phone|receiver phone|location pin)\b",
+    r"\bchange\s+(?:my\s+)?(quantity|item|address|delivery area|area|slot|day|receiver phone(?: number)?|phone(?: number)?|location pin)\b",
     re.I,
 )
 
@@ -64,18 +64,30 @@ def is_order_process_question(message: str) -> bool:
 
 def is_order_request(message: str, active_product_context=None) -> bool:
     text = str(message or "")
-    has_product = bool(_PRODUCT_RE.search(text))
+    if _structured_fields(text):
+        return True
+    if is_order_information_question(text):
+        return False
     has_quantity = bool(_QUANTITY_RE.search(text) or re.match(r"\s*\d+\s+(?=(?:chicken|bengali|sondesh|bento)\b)", text, re.I))
     context_known = str(active_product_context or "").casefold() in {
         "sondesh", "sondesh_general", "bento", "subscription",
     }
     return bool(
-        _structured_fields(text)
-        or _PRODUCT_RE.fullmatch(text.strip())
-        or (has_product and has_quantity)
+        _PRODUCT_RE.fullmatch(text.strip())
+        or (has_quantity and _extract_customer_item(text))
         or (_ORDER_REQUEST_RE.search(text) and (_extract_customer_item(text) or context_known))
-        or (has_quantity and _AREA_RE.search(text) and _extract_customer_item(text))
         or (context_known and has_quantity and re.search(r"\b(?:i\s+want|need|make\s+it)\b", text, re.I))
+    )
+
+
+def is_order_information_question(message: str) -> bool:
+    """Keep business/product questions out of customer-provided draft data."""
+    text = str(message or "").strip()
+    if is_order_process_question(text):
+        return False
+    return bool(
+        is_price_or_payment(text) or is_unsupported_question(text)
+        or re.match(r"^(?:what|why|when|where|how|do you|does|is|are|can you|could you|tell me|i want to (?:know|see|learn))\b", text, re.I)
     )
 
 
@@ -100,6 +112,8 @@ def update_order_draft(draft: dict, message: str, active_product_context=None) -
     if not text:
         return draft
     supplied = _structured_fields(text)
+    if not supplied and is_order_information_question(text):
+        return draft
     text = re.sub(r"(?m)^\s*[1-4][.)]\s*", "", text)
     edit = draft.get("edit_field")
     requested_edit = _EDIT_FIELD_RE.search(text)
@@ -108,7 +122,7 @@ def update_order_draft(draft: dict, message: str, active_product_context=None) -
         draft["edit_field"] = {
             "area": "delivery_area", "delivery area": "delivery_area", "address": "delivery_address",
             "day": "delivery_slot", "slot": "delivery_slot",
-            "phone": "receiver_phone", "receiver phone": "receiver_phone",
+            "phone": "receiver_phone", "phone number": "receiver_phone", "receiver phone": "receiver_phone", "receiver phone number": "receiver_phone",
         }.get(target, target)
         draft["status"] = ORDER_DRAFT_INCOMPLETE
         return draft
@@ -116,29 +130,27 @@ def update_order_draft(draft: dict, message: str, active_product_context=None) -
     quantity_match = _QUANTITY_RE.search(text)
     updated_fields = set()
     if quantity_match:
-        draft["quantity"] = " ".join(quantity_match.group(1).split())
+        draft["quantity"] = " + ".join(" ".join(match.group(1).split()) for match in _QUANTITY_RE.finditer(text))
         updated_fields.add("quantity")
     elif draft.get("item") and (not edit or edit == "quantity") and re.fullmatch(r"\d{1,4}(?:\.\d+)?", text):
         draft["quantity"] = text
         updated_fields.add("quantity")
-    elif not draft.get("quantity"):
-        leading_count = re.match(r"\s*(\d+)\s+(?=(?:chicken|bengali|sondesh|bento)\b)", text, re.I)
+    elif _ORDER_REQUEST_RE.search(text) or _PRODUCT_RE.search(text):
+        count_text = re.sub(r"^\s*(?:need|i\s+want|i\s+would\s+like|i['’]d\s+like|please\s+order)\s+", "", text, flags=re.I)
+        leading_count = re.match(r"\s*(\d+)\s+(?=[a-z])", count_text, re.I)
         if leading_count:
             draft["quantity"] = leading_count.group(1)
             updated_fields.add("quantity")
 
     product_match = _PRODUCT_RE.search(text)
-    if product_match:
-        draft["item"] = " ".join(product_match.group(0).split()).title()
-        updated_fields.add("item")
-    elif not is_order_process_question(text) and (not draft.get("item") or edit == "item") and (
+    if product_match or is_order_process_question(text) or (
         _ORDER_REQUEST_RE.search(text) or quantity_match or edit == "item"
     ):
         extracted_item = _extract_customer_item(text)
         if extracted_item:
             draft["item"] = extracted_item
             updated_fields.add("item")
-        elif _QUANTITY_RE.search(text):
+        elif not draft.get("item") and quantity_match:
             context_products = {
                 "sondesh": "Sondesh", "sondesh_general": "Sondesh",
                 "bento": "Bengali Bento", "subscription": "Subscription",
@@ -148,7 +160,9 @@ def update_order_draft(draft: dict, message: str, active_product_context=None) -
                 draft["item"] = contextual_item
                 updated_fields.add("item")
 
-    slot_match = _SLOT_RE.search(text)
+    slot_matches = list(_SLOT_RE.finditer(text))
+    correcting = bool(re.search(r"\b(?:actually|instead|not|change|make it)\b", text, re.I))
+    slot_match = slot_matches[-1] if slot_matches and (correcting or len({m[0].casefold() for m in slot_matches}) == 1) else None
     if slot_match:
         draft["delivery_slot"] = " ".join(slot_match.group(0).split()).title()
         updated_fields.add("delivery_slot")
@@ -160,19 +174,23 @@ def update_order_draft(draft: dict, message: str, active_product_context=None) -
         draft["delivery_slot"] = re.sub(r"^(?:make it |change (?:slot|day) to )", "", text, flags=re.I).removesuffix(" please").title()
         updated_fields.add("delivery_slot")
 
-    area_match = _AREA_RE.search(text)
+    area_matches = list(_AREA_RE.finditer(text))
+    area_match = area_matches[-1] if area_matches and (correcting or len({m[0].casefold() for m in area_matches}) == 1) else None
     if area_match:
         area = " ".join(area_match.group(0).split()).title()
-        if draft.get("delivery_area") and area.casefold() != str(draft["delivery_area"]).casefold() and re.search(r"\bchange\s+(?:delivery|area|address)\b", text, re.I):
+        old_area = str(draft.get("delivery_area") or "").casefold()
+        same_area = area.casefold() == old_area or {area.casefold(), old_area} <= {"gurgaon", "gurugram"}
+        if old_area and not same_area:
             draft["delivery_address"] = None
             draft["location_pin"] = None
             draft["location_pin_required"] = False
         draft["delivery_area"] = "Delhi NCR" if area.casefold() == "delhi ncr" else area
         updated_fields.add("delivery_area")
 
-    phone_match = _PHONE_RE.search(text)
-    if phone_match and len(re.sub(r"\D", "", phone_match.group(0))) >= 10:
-        draft["receiver_phone"] = phone_match.group(0).strip()
+    phone_matches = list(_PHONE_RE.finditer(text))
+    phone_match = phone_matches[-1] if phone_matches and (correcting or len({re.sub(r"\D", "", m[0]) for m in phone_matches}) == 1) else None
+    if phone_match and 10 <= len(re.sub(r"\D", "", phone_match.group(0))) <= 15:
+        draft["receiver_phone"] = re.sub(r"[\s().-]", "", phone_match.group(0))
         updated_fields.add("receiver_phone")
 
     pin_match = _PIN_RE.search(text)
@@ -207,7 +225,7 @@ def update_order_draft(draft: dict, message: str, active_product_context=None) -
         updated_fields.add(field)
 
     if edit:
-        field = {"area": "delivery_area", "day": "delivery_slot", "slot": "delivery_slot", "phone": "receiver_phone", "receiver phone": "receiver_phone", "location pin": "location_pin"}.get(edit, edit)
+        field = {"area": "delivery_area", "day": "delivery_slot", "slot": "delivery_slot", "phone": "receiver_phone", "phone number": "receiver_phone", "receiver phone": "receiver_phone", "receiver phone number": "receiver_phone", "location pin": "location_pin"}.get(edit, edit)
         if field == "delivery_address" and "delivery_area" in updated_fields and "delivery_address" not in updated_fields:
             draft["delivery_address"] = None
             updated_fields.add("delivery_address")
@@ -249,28 +267,35 @@ def _structured_fields(text: str) -> dict:
 
 
 def _extract_customer_item(text: str) -> str | None:
-    known = _PRODUCT_RE.search(text)
-    if known:
-        return " ".join(known.group(0).split()).title()
     candidate = str(text or "")
+    process_prefix = _HOW_TO_ORDER_RE.match(candidate.strip())
+    if process_prefix:
+        candidate = candidate.strip()[process_prefix.end():]
     candidate = re.sub(
         r"^\s*how\s+(?:do\s+i|can\s+i|to)\s+(?:place\s+)?(?:an?\s+)?order\s*",
         "", candidate, flags=re.I,
     )
-    candidate = re.sub(r"^\s*(?:need|i\s+want|i\s+would\s+like|please\s+order)\s+", "", candidate, flags=re.I)
+    candidate = re.sub(r"^\s*(?:need|i\s+want|i\s+would\s+like|i['’]d\s+like|please\s+order)\s+(?:to\s+order\s+)?", "", candidate, flags=re.I)
     candidate = _QUANTITY_RE.sub(" ", candidate)
     candidate = _SLOT_RE.sub(" ", candidate)
-    candidate = _AREA_RE.sub(" ", candidate)
     candidate = _PHONE_RE.sub(" ", candidate)
     candidate = _PIN_RE.sub(" ", candidate)
-    candidate = re.sub(r"\b(?:for|in|to|at)\b", " ", candidate, flags=re.I)
-    candidate = re.sub(r"\s+", " ", candidate).strip(" ,.-")
+    # A volunteered address is a separate field, not part of an item name.
+    candidate = re.split(r"\b(?:flat|apartment|tower|sector|phase|block|floor|road|street|lane|dlf|standalone house|independent house)\b", candidate, maxsplit=1, flags=re.I)[0]
+    candidate = _AREA_RE.sub(" ", candidate)
+    candidate = re.sub(r"\b(?:for|in|to|at|of|delivery|ph|phone)\b", " ", candidate, flags=re.I)
+    candidate = re.sub(r"^\s*\d+\s+(?=[a-z])", "", candidate, flags=re.I)
+    candidate = re.sub(r"\s+", " ", candidate).strip(" ,.-?!")
+    if not candidate and _QUANTITY_RE.search(text) and (known_in_message := _PRODUCT_RE.search(text)):
+        return known_in_message[0].title()
     if (
-        candidate.casefold() in {"a", "an", "order", "place an order", "place order"}
-        or re.match(r"^(?:know|learn|see|ask|talk|speak|information|more)\b", candidate, re.I)
+        not candidate
+        or candidate.casefold() in {"a", "an", "order", "place an order", "place order", "next week"}
+        or re.match(r"^(?:know|learn|see|ask|talk|speak|information|more|actually|make it|change|not|use)\b", candidate, re.I)
     ):
         return None
-    return candidate or None
+    known = _PRODUCT_RE.fullmatch(candidate)
+    return candidate.title() if known else candidate
 
 
 def _looks_like_address(text, area_match, phone_match, slot_match, quantity_match, product_match) -> bool:
@@ -279,11 +304,17 @@ def _looks_like_address(text, area_match, phone_match, slot_match, quantity_matc
         return False
     if re.search(r"\b(?:flat|apartment|tower|sector|phase|block|floor|road|street|lane|standalone\s+house|independent\s+house|dlf)\b", candidate, re.I):
         return True
-    return bool(area_match and ("," in candidate or re.search(r"\d", candidate)))
+    return bool(area_match and "," in candidate)
 
 
 def _extract_address_text(text: str) -> str:
     candidate = str(text or "")
+    address_start = re.search(r"\b(?:flat|apartment|tower|sector|phase|block|floor|road|street|lane|dlf|standalone house|independent house)\b", candidate, re.I)
+    if address_start:
+        candidate = candidate[address_start.start():]
+        boundaries = [match.start() for pattern in (_QUANTITY_RE, _SLOT_RE, _PHONE_RE, _PIN_RE) if (match := pattern.search(candidate))]
+        if boundaries:
+            candidate = candidate[:min(boundaries)]
     preserve_area = bool(re.search(
         r"\b(?:flat|apartment|tower|sector|phase|block|floor|road|street|lane|standalone\s+house|independent\s+house|dlf)\b",
         candidate, re.I,
@@ -292,10 +323,11 @@ def _extract_address_text(text: str) -> str:
     candidate = _PIN_RE.sub(" ", candidate)
     candidate = _SLOT_RE.sub(" ", candidate)
     candidate = _QUANTITY_RE.sub(" ", candidate)
-    candidate = _PRODUCT_RE.sub(" ", candidate)
+    if not address_start:
+        candidate = _PRODUCT_RE.sub(" ", candidate)
     if not preserve_area:
         candidate = _AREA_RE.sub(" ", candidate)
-    candidate = re.sub(r"\b(?:need|i\s+want|i\s+would\s+like|please|order|for|in|to|at|delivery|address)\b", " ", candidate, flags=re.I)
+    candidate = re.sub(r"\b(?:need|i\s+want|i\s+would\s+like|please|order|for|in|to|at|delivery|address|is|change|actually|instead|ph|phone)\b", " ", candidate, flags=re.I)
     candidate = re.sub(r"\s+", " ", candidate).strip(" ,.-")
     return candidate
 
@@ -367,22 +399,26 @@ def next_question(draft: dict) -> str:
 
 
 def request_summary(draft: dict) -> str:
-    return (
+    item_quantity = " ".join((draft.get(field) or "Not provided") for field in ("quantity", "item"))
+    if not draft.get("quantity") and not draft.get("item"):
+        item_quantity = "Not provided"
+    address = draft.get("delivery_address") or draft.get("delivery_area") or "Not provided"
+    summary = (
         "ORDER DRAFT\n\n"
-        f"Item: {draft.get('item') or 'Not provided'}\n"
-        f"Quantity: {draft.get('quantity') or 'Not provided'}\n"
-        f"Delivery area: {draft.get('delivery_area') or 'Not provided'}\n"
-        f"Preferred day/slot: {draft.get('delivery_slot') or 'Not provided'}\n"
-        f"Delivery address: {draft.get('delivery_address') or 'Not provided'}\n"
-        f"Receiver phone: {draft.get('receiver_phone') or 'Not provided'}\n"
-        f"Location pin: {draft.get('location_pin') or 'Not provided'}"
+        f"1. Items & quantity: {item_quantity}\n"
+        f"2. Delivery address/area: {address}\n"
+        f"3. Receiver phone: {draft.get('receiver_phone') or 'Not provided'}\n"
+        f"4. Preferred slot: {draft.get('delivery_slot') or 'Not provided'}"
     )
+    if draft.get("location_pin"):
+        summary += f"\nLocation pin: {draft['location_pin']}"
+    return summary
 
 
 def whatsapp_draft_link(draft: dict) -> str:
     number = re.sub(r"\D", "", config.WHATSAPP_BUSINESS_NUMBER or "") or "918796551990"
     lines = [
-        "Hi, I'd like to place an order with Camellia Artisanal.",
+        "Hi, I'd like to place a pre-order with Camellia Artisanal.",
         "",
         request_summary(draft),
         "",
