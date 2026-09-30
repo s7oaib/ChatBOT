@@ -1,10 +1,10 @@
 {
   "known_good_sha": "cfba04404e4b6e09c8b1d877af569b016fd86798",
   "full_regression_passed": true,
-  "full_regression_test_count": 2673,
+  "full_regression_test_count": 2686,
   "production_validated": true,
   "production_deployment_id": "24262558-f874-4b02-93d1-0e7ff66c0ccf",
-  "evidence_source": "Explicit operator-approved testing baseline; exact infrastructure contents passed 2,673 tests before commit, main CI passed, and production deployment 24262558-f874-4b02-93d1-0e7ff66c0ccf succeeded",
-  "promoted_at_utc": "2026-09-30T11:12:29+00:00",
+  "evidence_source": "Exact SHA cfba04404e4b6e09c8b1d877af569b016fd86798 passed GitHub full regression: 2686 passed, 1 existing warning; production deployment 24262558-f874-4b02-93d1-0e7ff66c0ccf succeeded",
+  "promoted_at_utc": "2026-09-30T11:34:41+00:00",
   "previous_known_good_sha": "1d19a97bef4967bff806b14ac58c9328cd0aaa74"
 }
