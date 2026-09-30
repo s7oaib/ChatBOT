@@ -3358,6 +3358,10 @@ class DeterministicResponder:
             or (
                 facts.get("active_product_context")
                 and not explicit_client_subject
+                and not (
+                    client_qa_candidate
+                    and contextual_topic == facts.get("active_product_context")
+                )
             )
             or (
                 facts.get("ad_product")

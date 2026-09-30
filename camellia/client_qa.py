@@ -244,7 +244,7 @@ def _find(entry_id: str) -> Optional[ApprovedQA]:
     return REGISTRY_BY_ID.get(entry_id)
 
 
-def match(message: str, facts: Optional[Dict[str, Any]] = None) -> Optional[ApprovedMatch]:
+def _match_existing(message: str, facts: Optional[Dict[str, Any]] = None) -> Optional[ApprovedMatch]:
     """Return only a canonical source entry; never generate approved copy."""
     text = " ".join(str(message or "").split()).strip()
     normalized = _normalise_question(text)
@@ -352,6 +352,154 @@ def match(message: str, facts: Optional[Dict[str, Any]] = None) -> Optional[Appr
     if re.search(r"\b(?:how\s+do\s+i\s+pay|payment)\b", text, re.I):
         return result("general_payment_client")
     return None
+
+
+# Matching examples only: all copy, blocks and assets still come from REGISTRY.
+_PARAPHRASE_ALIASES = {
+    "general_price": ("menu prices please", "what does your food cost", "what are your rates", "show me your prices"),
+    "general_details": ("what food do you offer", "what are your food options", "describe your menu", "tell me about your food"),
+    "general_payment_client": ("how can i pay", "payment options please", "can i pay by upi", "do you accept bank transfer"),
+    "best_time_to_book": ("when should i book", "when should i reserve", "best booking time", "how early should i book"),
+    "alacarte_prebook": ("how to prebook a la carte", "a la carte booking steps", "preorder from the menu", "prebook menu items"),
+    "order_prebook": ("how can i order", "how do i prebook", "what details do you need to place my order", "steps to place an order"),
+    "order_ready_handoff": ("i am ready to order", "my order is finalized", "i have placed my order", "i want to confirm my order"),
+    "subscription_price": ("subscription price", "monthly meal subscription cost", "meal plan rates", "home food away from home price"),
+    "subscription_details_client": ("tell me about meal plan", "what is the subscription", "monthly meal plan details", "home food away from home details"),
+    "bento_details_client": ("tell me about bento", "what is bengali bento", "bento details please", "explain the meal box"),
+    "bento_price_client": ("bento price", "how much for bento", "price of bengali bento", "meal box rate"),
+    "savoury_delivery_time": ("savoury delivery time", "when will my savoury meal arrive", "how long for savoury delivery", "when do you deliver meals"),
+    "chicken_kosha_price_client": ("chicken kosha price", "how much is chicken kosha", "chicken kosha rate", "cost of chicken kosha"),
+    "sondesh_delivery_time": ("how long for sondesh", "when can sondesh reach", "sondesh shipping time", "when will sondesh arrive"),
+    "sondesh_price_client": ("sondesh price", "sandesh price", "how much for sondesh", "mishti price please"),
+    "sondesh_details_client": ("tell me about sondesh", "sondesh details please", "describe sondesh", "more information about sondesh"),
+    "sondesh_unfamiliar_client": ("what is sondesh", "i have never tried sondesh", "sondesh is new to me", "i am unfamiliar with sandesh"),
+    "minimum_sondesh_quantity_client": ("why minimum 9", "why do i need 9 pieces", "why minimum 250g", "why multiples of nine for sondesh"),
+    "delivery_out_of_area_client": ("delivery to mumbai", "shipping to bangalore", "can you send to chennai", "do you deliver outside ncr"),
+    "home_table_details": ("what is the home table", "home table details please", "tell me about the bengali home table", "explain the home table"),
+    "home_table_price": ("home table price", "home table rate", "cost of bengali home table", "how much for the home table"),
+    "home_table_payment": ("how can i pay for home table", "home table payment options", "home table upi payment", "how to pay for bengali home table"),
+    "price_is_high": ("too pricey", "that is expensive", "your prices are high", "the cost is too high"),
+}
+
+_MATCH_TERMS = {
+    "prise": "price", "pirce": "price", "prce": "price", "prices": "price",
+    "rates": "rate", "costs": "cost", "sandesh": "sondesh", "mishti": "sondesh",
+    "payments": "payment", "deliveries": "delivery", "pieces": "piece",
+    "pls": "please", "plz": "please", "hw": "how", "mch": "much",
+    "u": "you", "ur": "your", "wats": "whats",
+}
+
+
+def _normalise_match_text(message: str) -> str:
+    # Bounded matching vocabulary, never arbitrary customer autocorrection.
+    value = unicodedata.normalize("NFKC", str(message or "")).casefold()
+    value = re.sub(r"['’]", "", value)
+    value = _normalise_question(value)
+    value = " ".join(_MATCH_TERMS.get(word, word) for word in value.split())
+    value = re.sub(r"\bmeal (?:box|boxes)\b", "bento", value)
+    value = re.sub(r"\bhome food away from home\b", "subscription", value)
+    return re.sub(r"\bpre\s*(?:book|order)\b|\bpreorder\b", "prebook", value)
+
+
+_ALIAS_IDS: Dict[str, set[str]] = {}
+for _qa_id, _aliases in _PARAPHRASE_ALIASES.items():
+    for _alias in _aliases:
+        _ALIAS_IDS.setdefault(_normalise_match_text(_alias), set()).add(_qa_id)
+
+
+def _match_subjects(text: str) -> set[str]:
+    patterns = {
+        "home_table": r"\b(?:home table|kolkata home lunch|bengali home lunch)\b",
+        "bento": r"\bbento\b",
+        "sondesh": r"\b(?:sondesh|jolbhora|kanchagolla|aamar|signature|mithai|nolen gur)\b",
+        "subscription": r"\b(?:subscriptions?|meal plan|everyday meal|home food away from home)\b",
+        "chicken_kosha": r"\bchicken kosha\b",
+        "savoury": r"\b(?:savoury|a la carte|alacarte)\b",
+    }
+    return {subject for subject, pattern in patterns.items() if re.search(pattern, text)}
+
+
+def _followup_subject(state: Dict[str, Any]) -> str:
+    if _has_home_table_context(state):
+        return "home_table"
+    topic = str(state.get("last_topic") or "").casefold()
+    if topic.startswith("sondesh"):
+        return "sondesh"
+    return {"bento": "bento", "subscription": "subscription", "savoury": "savoury"}.get(topic, "")
+
+
+def match(message: str, facts: Optional[Dict[str, Any]] = None) -> Optional[ApprovedMatch]:
+    """Extend existing matching with bounded aliases; return source entries only."""
+    state = facts or {}
+    text = _normalise_match_text(message)
+    subjects = _match_subjects(text)
+    if len(subjects) > 1:
+        return None
+    if re.search(r"\b(?:vegan|allerg\w*|gluten|shelf life|discount)\b", text):
+        return None
+    # A chicken price is ambiguous; a named unsupported price must not inherit
+    # an old Home Table context or fall into the broad general-price pattern.
+    if re.search(r"\bchicken\b", text) and "chicken_kosha" not in subjects and "bento" not in subjects:
+        return None
+    price = bool(re.search(r"\b(?:price|cost|rate|how much)\b", text))
+    timing = bool(re.search(r"\b(?:time|how long|when|arrive|reach|dispatch)\b", text))
+    objection = bool(re.search(r"\b(?:high|expensive|pricey)\b", text))
+    if price and re.search(r"\b(?:paneer|fish|mutton|curry)\b", text):
+        return None
+    if price and not timing and not objection and not subjects:
+        generic_words = set("what whats is are the a an price cost rate how much do does your you food meal menu options for please tell me can show give it this that of".split())
+        if set(text.split()) - generic_words:
+            return None
+    subject = next(iter(subjects), "") or _followup_subject(state)
+    # Only genuine short follow-ups use session context. Explicit named
+    # subjects always win. Canonical generic questions retain their old route.
+    short_price = bool(re.fullmatch(r"(?:how much|price|cost|rate)(?: please)?", text))
+    short_details = text in {"tell me more", "more details", "tell me about it"}
+    short_time = bool(re.fullmatch(r"(?:how long|how long (?:will |does )?delivery take|delivery time|when will it arrive)", text))
+    context_ids = {
+        "home_table": ("home_table_price", "home_table_details", None),
+        "bento": ("bento_price_client", "bento_details_client", None),
+        "sondesh": ("sondesh_price_client", "sondesh_details_client", "sondesh_delivery_time"),
+        "subscription": ("subscription_price", "subscription_details_client", None),
+        "savoury": (None, None, "savoury_delivery_time"),
+    }
+    if not subjects and subject in context_ids and (short_price or short_details or short_time):
+        entry_id = context_ids[subject][0 if short_price else 1 if short_details else 2]
+        if entry_id:
+            entry = REGISTRY_BY_ID[entry_id]
+            return ApprovedMatch(entry, "context", entry.asset_keys)
+        return None
+    if not subjects and (short_price or short_details):
+        return None
+
+    candidates = set(_ALIAS_IDS.get(text, ()))
+    existing = _match_existing(text, state)
+    if not existing:
+        existing = _match_existing(message, state)
+    if existing and (not candidates or existing.entry.qa_id in candidates):
+        return existing
+    # Exact canonical blocks not covered by the older intent regexes.
+    for entry in REGISTRY:
+        if text == _normalise_match_text(entry.question):
+            return ApprovedMatch(entry, "exact", entry.asset_keys)
+
+    if not candidates and subject:
+        if subject == "sondesh" and re.search(
+            r"\b(?:delivery time|shipping time|arrive|reach|how long for (?:the )?sondesh)\b", text,
+        ) and not re.search(r"\b(?:invented|created|started|founded|history)\b", text):
+            candidates.add("sondesh_delivery_time")
+        elif subject == "sondesh" and re.search(r"\b(?:minimum|multiples?)\b", text):
+            candidates.add("minimum_sondesh_quantity_client")
+        elif subject == "subscription" and price:
+            candidates.add("subscription_price")
+    if not candidates and re.fullmatch(r"why (?:minimum |do i need )?(?:9|nine)(?: piece)?(?: please)?", text):
+        candidates.add("minimum_sondesh_quantity_client")
+    if not candidates and re.fullmatch(r"(?:how (?:can|do) i pay|can i pay)(?: by (?:upi|bank transfer|card))?", text):
+        candidates.add("home_table_payment" if subject == "home_table" else "general_payment_client")
+    if len(candidates) != 1:
+        return None
+    entry = REGISTRY_BY_ID[candidates.pop()]
+    return ApprovedMatch(entry, "semantic_alias", entry.asset_keys)
 
 
 def source_fingerprint() -> str:
