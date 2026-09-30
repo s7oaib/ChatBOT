@@ -1,0 +1,8 @@
+{
+  "known_good_sha": "1d19a97bef4967bff806b14ac58c9328cd0aaa74",
+  "full_regression_passed": true,
+  "full_regression_test_count": 2597,
+  "production_validated": true,
+  "production_deployment_id": "a784414d-d8db-48b8-9a31-11c1083338fe",
+  "evidence_source": "Explicit operator-approved frozen release baseline, 2026-09-30"
+}
