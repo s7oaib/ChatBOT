@@ -31,7 +31,7 @@ def test_menu_catalogue_and_selected_menu_are_the_only_primary_views():
     assert 'id="mrFile" class="mr-visually-hidden"' in REVIEW_HTML
     assert 'aria-labelledby="mrFileLabel"' in REVIEW_HTML
     assert 'id="wsChooseFile"' in WEEKLY_HTML
-    assert '<div id="wsTimelineHistory"><div id="wsHistory">' in WEEKLY_HTML
+    assert 'id="wsTimelineHistory"' not in WEEKLY_HTML
     assert 'id="wsFileLabel"' in WEEKLY_HTML
     assert 'id="wsFile" class="ws-visually-hidden"' in WEEKLY_HTML
     assert 'aria-labelledby="wsFileLabel"' in WEEKLY_HTML

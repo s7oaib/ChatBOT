@@ -55,8 +55,9 @@ def test_comparison_records_section_change_without_fuzzy_matching():
 
 
 def test_weekly_tabs_and_quantities_are_explicit_in_ui():
-    for pane in ("current", "upcoming", "history"):
+    for pane in ("current", "upcoming"):
         assert f'data-ws-pane="{pane}"' in WEEKLY_HTML
+    assert 'data-ws-pane="history"' not in WEEKLY_HTML
     assert "wsShowTimeline" in WEEKLY_SCRIPT
     assert "item.before.quantity" in WEEKLY_SCRIPT and "item.after.quantity" in WEEKLY_SCRIPT
     for label in ("UNCHANGED", "NEW", "REMOVED", "PRICE CHANGED", "QUANTITY CHANGED", "SECTION CHANGED", "SUSPICIOUS PRICE", "SUSPICIOUS QUANTITY"):

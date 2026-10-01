@@ -115,10 +115,11 @@ function box(id){return element(id).children.map(n=>n.textContent||n.children.ma
   const whilePending={disabled:element('wsConfirmPublishButton').disabled,
     publishRequests:requests.filter(p=>p.endsWith('/publish')).length};
   finishPublish({});await Promise.all([one,two]);
-  const success={open:element('wsPublishDialog').open,loads,panes,banner:element('wsSuccess').textContent,
+  const success={open:element('wsPublishDialog').open,loads,panes:[...panes],banner:element('wsSuccess').textContent,
     publishRequests:requests.filter(p=>p.endsWith('/publish')).length};
   analysis={...analysis,valid_from:'2026-10-01',display_date_range:'1 Oct - 7 Oct 2026'};
   await wsPublish();const future={title:element('wsPublishDialogTitle').textContent,button:element('wsConfirmPublishButton').textContent};
+  pending=null;wsLoad=async()=>{wsAnalysis=null;wsDraft=null;};await wsConfirmPublish();future.banner=element('wsSuccess').textContent;
   console.log(JSON.stringify({invalid,previewBlocked,previewServer,opened,cancelled,failed,whilePending,success,future,nativeConfirms}));
 })().catch(error=>{console.error(error);process.exitCode=1;});
 """
@@ -138,8 +139,8 @@ function box(id){return element(id).children.map(n=>n.textContent||n.children.ma
     assert "currently published menu has not changed" in result["failed"]["nearButton"]
     assert result["whilePending"] == {"disabled": True, "publishRequests": 2}
     assert result["success"] == {"open": False, "loads": 1, "panes": ["current"],
-                                 "banner": "Weekly Savoury menu updated", "publishRequests": 2}
-    assert result["future"] == {"title": "Schedule Weekly Savoury Menu", "button": "Schedule Menu"}
+                                 "banner": "LIVE / CURRENT — Weekly menu updated.", "publishRequests": 2}
+    assert result["future"] == {"title": "Schedule Weekly Savoury Menu", "button": "Schedule Menu", "banner": "PUBLISHED — UPCOMING. Customer-visible from 2026-10-01"}
     assert result["nativeConfirms"] == 0
 
 
