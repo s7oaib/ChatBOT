@@ -83,6 +83,7 @@ from camellia import menu_catalogue
 from camellia.menu_catalogue import MenuCatalogueError
 from camellia.session_memory import session_memory
 from camellia.monitoring import get_logger, delivery_monitor, latency_monitor, classify_instagram_delivery
+from camellia import instagram_chatbot_control
 from camellia.admin_security import (
     digest as security_digest,
     new_token,
@@ -743,6 +744,8 @@ def _process_instagram_event(
     Starlette runs a sync background function in a worker thread, so this both
     frees the loop and lets several customers be handled at once.
     """
+    if not instagram_chatbot_control.is_sender_allowed(sender_id, database=db):
+        return
     try:
         supplied_identity = dict(customer_identity or {})
         if not supplied_identity.get("customer_username") and instagram_username:
@@ -1148,6 +1151,8 @@ def _reply_to_unreadable_attachment(
     less annoying than a bot repeating itself, and the message already told
     them how to reach a human.
     """
+    if not instagram_chatbot_control.is_sender_allowed(sender_id, database=db):
+        return
     try:
         facts = session_memory.get_facts(sender_id, "instagram")
         if facts.get("attachment_notice_sent"):
@@ -1315,6 +1320,8 @@ def _handle_shared_attachment(
     understand what was shared, and the source-aware responder can answer it.
     An unconfigured or unsupported attachment keeps the existing fallback.
     """
+    if not instagram_chatbot_control.is_sender_allowed(sender_id, database=db):
+        return
     if reel_identity or post_media_id:
         # Use the same route/responder path as a share with accompanying text.
         # A mapped source gets its approved default response; only an
@@ -1733,6 +1740,8 @@ class _DurableInstagramTasks:
 
 
 def _send_or_queue_instagram_reply(recipient_id: str, text: str, image_url=None, **kwargs) -> Dict[str, Any]:
+    if not instagram_chatbot_control.is_sender_allowed(recipient_id, database=db):
+        return {"status": "blocked", "reason": "chatbot_test_only"}
     context = _instagram_job_context.get()
     if context is None:
         return send_instagram_reply(recipient_id, text, image_url=image_url, **kwargs)
@@ -1751,6 +1760,11 @@ def _process_instagram_outbound_jobs(*, inbound_job_id: Optional[int] = None) ->
             return
         job = jobs[0]
         try:
+            if not instagram_chatbot_control.is_sender_allowed(job["recipient_id"], database=db):
+                # Suppress a previously queued bot reply rather than releasing
+                # it to customers after the operator has switched modes.
+                db.complete_instagram_outbound_job(int(job["id"]), success=True)
+                continue
             payload = json.loads(job["payload"])
             result = send_instagram_reply(
                 job["recipient_id"], payload.pop("text"),
@@ -1855,6 +1869,13 @@ def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks
             if isinstance(background_tasks, _DurableInstagramTasks):
                 background_tasks.set_event(entry_id, messaging_event)
             is_ad_qualified, sender_id, message_text, ad_id = ad_gate.inspect_and_gate_message(messaging_event)
+            message = messaging_event.get("message") or messaging_event.get("message_edit") or {}
+            customer_event = bool(message or messaging_event.get("postback")) and not message.get("is_echo")
+            if sender_id and customer_event and not instagram_chatbot_control.is_sender_allowed(sender_id, database=db):
+                # Only minimal identity observation is permitted for blocked
+                # customer DMs; skip Story, attachment and conversation work.
+                results.append({"sender_id": sender_id, "action": "ignored_test_only"})
+                continue
             entry_point = describe_entry_point(messaging_event)
             message = messaging_event.get("message") or {}
             log.info(

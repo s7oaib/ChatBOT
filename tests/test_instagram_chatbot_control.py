@@ -1,5 +1,9 @@
 """QA-C1: production-safe Instagram LIVE / TEST_ONLY channel control."""
 from unittest.mock import patch
+import hashlib
+import hmac
+import json
+import logging
 
 import pytest
 from fastapi.testclient import TestClient
@@ -8,6 +12,8 @@ from camellia import app as app_module
 from camellia import instagram_chatbot_control as control
 from camellia.config import config
 from camellia.database import Database
+from camellia.session_memory import session_memory
+from camellia.admin_security import hash_password
 
 
 client = TestClient(app_module.app)
@@ -48,6 +54,7 @@ def store(tmp_path, monkeypatch):
     monkeypatch.setattr(control, "_database", lambda: database)
     monkeypatch.setattr("camellia.ad_gate.db", database)
     monkeypatch.setattr(app_module, "db", database)
+    monkeypatch.setattr("camellia.handoff.db", database)
     monkeypatch.setattr(config, "BYPASS_AD_GATE", True)
     monkeypatch.setattr(config, "INSTAGRAM_ACCOUNT_ID", "")
     monkeypatch.setattr(config, "ADMIN_API_KEY", "qa-c1-admin-key")
@@ -84,7 +91,7 @@ def test_test_only_blocked_customer_never_reaches_chatbot_business_logic(store):
     result = app_module._dispatch_instagram_payload(_payload(_event()), MustRemainSilent())
     after = _counts(store)
 
-    assert result["results"][0]["action"] == "ignored_organic_dm"
+    assert result["results"][0]["action"] == "ignored_test_only"
     assert before == after
     identity = store.get_instagram_customer_identity("REALCUSTOMER")
     assert identity and identity["customer_username"] == "real_customer"
@@ -259,3 +266,132 @@ def test_live_mode_does_not_change_existing_ad_gate_when_bypass_is_off(store, mo
     ad["message"]["referral"] = {"source": "ADS", "ad_id": "ad-1"}
     ok, sender, _, ad_id = app_module.ad_gate.inspect_and_gate_message(ad)
     assert ok is True and sender == "ADUSER" and ad_id == "ad-1"
+
+
+@pytest.mark.parametrize("boundary", ["message", "shared", "unreadable", "reply"])
+def test_direct_processing_and_reply_boundaries_cannot_bypass_test_only(store, boundary):
+    control.set_mode(control.TEST_ONLY, "owner", database=store)
+    before = _counts(store)
+    with patch.object(session_memory, "get_facts", side_effect=AssertionError("session mutated")), \
+         patch.object(app_module.responder, "match_and_respond", side_effect=AssertionError("responder called")), \
+         patch.object(app_module, "send_instagram_reply", side_effect=AssertionError("bot replied")), \
+         patch.object(app_module, "_cached_instagram_identity", side_effect=AssertionError("identity lookup called")):
+        if boundary == "message":
+            app_module._process_instagram_event("REALCUSTOMER", "human please", None)
+        elif boundary == "shared":
+            app_module._handle_shared_attachment("REALCUSTOMER", {"shortcode": "shared"})
+        elif boundary == "unreadable":
+            app_module._reply_to_unreadable_attachment("REALCUSTOMER")
+        else:
+            assert app_module._send_or_queue_instagram_reply("REALCUSTOMER", "test")["status"] == "blocked"
+    assert before == _counts(store)
+
+
+def test_previously_queued_inbound_and_outbound_are_suppressed_after_switch(store):
+    job_id, _ = store.enqueue_instagram_inbound_job("queue-event", "REALCUSTOMER", "_process_instagram_event", {"args": ["REALCUSTOMER", "Tell me about Sondesh", None], "kwargs": {}})
+    store.enqueue_instagram_outbound_job(job_id, 1, "REALCUSTOMER", {"text": "old queued reply"})
+    control.set_mode(control.TEST_ONLY, "owner", database=store)
+    with patch.object(session_memory, "get_facts", side_effect=AssertionError("session mutated")), patch.object(app_module, "send_instagram_reply", side_effect=AssertionError("bot replied")):
+        app_module._process_instagram_inbound_jobs(job_id=job_id)
+    assert not store.claim_instagram_inbound_jobs(limit=1)
+    assert not store.claim_instagram_outbound_jobs(limit=1)
+    assert _counts(store)["conversations"] == 0
+
+
+def test_failed_commit_preserves_previous_live_state_and_cache(store, monkeypatch):
+    assert control.get_state(database=store)["mode"] == control.LIVE
+    original = store.get_connection
+    class FailingCommit:
+        def __init__(self):
+            self.conn = original()
+        def __enter__(self):
+            return self
+        def __exit__(self, exc_type, exc, traceback):
+            self.conn.rollback()
+            self.conn.close()
+        def execute(self, *args):
+            return self.conn.execute(*args)
+        def commit(self):
+            raise OSError("commit failed")
+    monkeypatch.setattr(store, "get_connection", FailingCommit)
+    with pytest.raises(OSError):
+        control.set_mode(control.TEST_ONLY, "owner", database=store)
+    assert control.get_state(database=store)["mode"] == control.LIVE
+    monkeypatch.setattr(store, "get_connection", original)
+    assert control.get_state(database=store, strict=True)["mode"] == control.LIVE
+    assert not control.audit_log(database=store)
+
+
+def test_blocked_webhook_returns_200_and_logs_only_hash(store, monkeypatch, caplog):
+    control.set_mode(control.TEST_ONLY, "owner", database=store)
+    monkeypatch.setattr(config, "META_APP_SECRET", "qa-c1-signature-secret")
+    caplog.set_level(logging.INFO)
+    event = _event("1784000987654321", "private_username", "private message human please")
+    raw = json.dumps(_payload(event)).encode()
+    signature = "sha256=" + hmac.new(b"qa-c1-signature-secret", raw, hashlib.sha256).hexdigest()
+    with patch.object(app_module.responder, "match_and_respond", side_effect=AssertionError("responder called")), patch.object(app_module, "send_instagram_reply", side_effect=AssertionError("bot replied")):
+        response = client.post("/webhook/instagram", content=raw, headers={"X-Hub-Signature-256": signature})
+    assert response.status_code == 200
+    assert response.json()["results"][0]["action"] == "ignored_test_only"
+    assert "1784000987654321" not in caplog.text
+    assert "private_username" not in caplog.text and "private message" not in caplog.text
+
+
+@pytest.mark.parametrize("event", [
+    {"sender": {"id": "REALCUSTOMER"}, "message": {"is_echo": True, "text": "echo"}},
+    {"sender": {"id": "REALCUSTOMER"}, "read": {"watermark": 123}},
+    {"sender": {"id": "REALCUSTOMER"}, "delivery": {"mids": ["delivery-id"]}},
+])
+def test_meta_receipts_and_echoes_do_not_enter_business_logic(store, event):
+    control.set_mode(control.TEST_ONLY, "owner", database=store)
+    before = _counts(store)
+    app_module._dispatch_instagram_payload(_payload(event), MustRemainSilent())
+    assert before == _counts(store)
+
+
+def test_allowed_tester_retains_exact_qa_order_and_handoff_flow(store):
+    control.set_mode(control.TEST_ONLY, "owner", database=store)
+    control.add_test_account(sender_id="TEST123", actor="owner", database=store)
+    sent = []
+    with patch.object(app_module, "send_instagram_reply", side_effect=lambda recipient, text, **kwargs: sent.append(text)), patch.object(app_module.escalator, "handle_escalation", return_value={"escalation_id": 1}), patch("camellia.ai_responder.ai_responder._query_groq", side_effect=AssertionError("LLM called")):
+        app_module._process_instagram_event("TEST123", "How do I order?", None)
+        assert "https://wa.me/" in " ".join(sent)
+        sent.clear()
+        app_module._process_instagram_event("TEST123", "human please", None)
+    assert store.get_active_handoff("instagram", "TEST123") is not None
+
+
+def test_username_resolution_limit_and_restart_reinitialization(store):
+    with pytest.raises(ValueError, match="not found"):
+        control.add_test_account(username="missing", actor="owner", database=store)
+    control.observe_sender("111", username="duplicate", database=store)
+    control.observe_sender("222", username="duplicate", database=store)
+    with pytest.raises(ValueError, match="more than one"):
+        control.add_test_account(username="duplicate", actor="owner", database=store)
+    for number in range(20):
+        control.add_test_account(sender_id=f"tester{number}", actor="owner", database=store)
+    with pytest.raises(ValueError, match="At most 20"):
+        control.add_test_account(sender_id="tester21", actor="owner", database=store)
+    control.set_mode(control.TEST_ONLY, "owner", database=store)
+    reopened = Database(store.db_path)
+    state = control.get_state(database=reopened)
+    assert state["mode"] == control.TEST_ONLY and state["tester_count"] == 20
+
+
+def test_browser_csrf_and_authenticated_actor(store, monkeypatch):
+    monkeypatch.setattr(config, "ADMIN_USERNAME", "control-owner")
+    monkeypatch.setattr(config, "ADMIN_PASSWORD_HASH", hash_password("qa-c1-test-passphrase"))
+    monkeypatch.setattr(config, "ADMIN_REQUIRE_HTTPS", True)
+    with TestClient(app_module.app, base_url="https://testserver") as browser:
+        assert browser.post("/admin/login", json={"username": "control-owner", "password": "qa-c1-test-passphrase"}).status_code == 200
+        assert browser.post("/admin/chatbot-control/mode", json={"mode": "TEST_ONLY"}).status_code == 403
+        csrf = {"X-CSRF-Token": browser.cookies.get("camellia_admin_csrf")}
+        result = browser.post("/admin/chatbot-control/mode", json={"mode": "TEST_ONLY"}, headers=csrf)
+        assert result.status_code == 200 and result.json()["updated_by"] == "control-owner"
+        assert browser.post("/admin/chatbot-control/test-accounts", json={"sender_id": "111"}).status_code == 403
+        assert browser.post("/admin/chatbot-control/test-accounts/remove", json={"sender_id": "111"}).status_code == 403
+
+
+@pytest.mark.parametrize("path", ["/mode", "/test-accounts", "/test-accounts/remove"])
+def test_unauthenticated_writes_fail_closed(store, path):
+    assert client.post("/admin/chatbot-control" + path, json={}).status_code == 403

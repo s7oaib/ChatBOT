@@ -11,6 +11,11 @@ log = logging.getLogger(__name__)
 
 def create_router(require_admin, actor):
     router = APIRouter(prefix="/admin/chatbot-control")
+    existing_actor = actor
+
+    def actor():
+        from camellia.app import _admin_context
+        return (_admin_context.get() or {}).get("username") or existing_actor()
 
     def call(function, *args, **kwargs):
         try:
@@ -137,6 +142,8 @@ async function ccApi(path='',method='GET',payload) {
 function ccRender() {
  ensureChatbotControlCard(); const card=document.getElementById('instagramChatbotControlCard'); if(!card||!ccState)return;
  const live=ccState.mode==='LIVE';
+ card.style.borderColor=live?'#2e7d32':'#b45309'; card.style.background=live?'#f0f8f1':'#fff7e8';
+ document.getElementById('ccMode').style.color=live?'#216329':'#984706';
  document.getElementById('ccMode').textContent=live?'● ON — LIVE':'● OFF — TEST ACCOUNTS ONLY';
  document.getElementById('ccDescription').textContent=live?'Chatbot can respond to all Instagram customers.':'Only explicitly allowed test accounts can receive chatbot replies. Other Instagram customers receive no bot response.';
  document.getElementById('ccMeta').textContent=`Allowed testers: ${ccState.tester_count||0} · Last changed: ${ccDate(ccState.updated_at)} · By: ${ccState.updated_by||'—'}`;
@@ -162,9 +169,9 @@ async function ccLoadManager() {
  const msg=document.getElementById('ccManagerMessage'); msg.textContent='';
  try{
   const [accounts,recent,audit]=await Promise.all([ccApi('/test-accounts'),ccApi('/recent-accounts'),ccApi('/audit')]);
-  document.getElementById('ccAllowed').innerHTML=accounts.items.length?accounts.items.map(a=>`<div style="border:1px solid var(--border);border-radius:8px;padding:10px;margin:6px 0;display:flex;justify-content:space-between;gap:12px"><div><strong>${escapeHtml(a.username?'@'+a.username:(a.display_name||'Test account'))}</strong><br><small>Meta sender ID: ${escapeHtml(ccMask(a.sender_id))}</small></div><button class="btn-secondary" type="button" data-cc-remove="${escapeHtml(a.sender_id)}">Remove</button></div>`).join(''):'<p>No test accounts allowed.</p>';
+  document.getElementById('ccAllowed').innerHTML=accounts.items.length?accounts.items.map(a=>`<div style="border:1px solid var(--border);border-radius:8px;padding:10px;margin:6px 0;display:flex;justify-content:space-between;gap:12px"><div><strong>${escapeHtml(a.username?'@'+a.username:(a.display_name||'Test account'))}</strong><br><small>Meta sender ID: ${escapeHtml(ccMask(a.sender_id))} · Added ${escapeHtml(ccDate(a.created_at))}</small></div><button class="btn-secondary" type="button" data-cc-remove="${escapeHtml(a.sender_id)}">Remove</button></div>`).join(''):'<p>No test accounts allowed.</p>';
   document.querySelectorAll('[data-cc-remove]').forEach(b=>b.onclick=()=>ccRemove(b.dataset.ccRemove));
-  document.getElementById('ccRecent').innerHTML=recent.items.length?recent.items.map(a=>`<div style="border-bottom:1px solid var(--border);padding:9px 0;display:flex;justify-content:space-between;gap:12px"><div><strong>${escapeHtml(a.username?'@'+a.username:(a.display_name||'Instagram account'))}</strong><br><small>${escapeHtml(ccMask(a.sender_id))} · Last seen ${escapeHtml(ccDate(a.last_seen_at))}</small></div>${a.allowed?'<span>Allowed ✓</span>':`<button class="btn-secondary" type="button" data-cc-allow="${escapeHtml(a.sender_id)}" data-cc-user="${escapeHtml(a.username||'')}">Allow for Testing</button>`}</div>`).join(''):'<p>No recent Instagram accounts yet. Send a DM to the connected business account; in Test Only mode the bot stays silent while the sender identity can appear here.</p>';
+  document.getElementById('ccRecent').innerHTML=recent.items.length?recent.items.map(a=>`<div style="border-bottom:1px solid var(--border);padding:9px 0;display:flex;justify-content:space-between;gap:12px"><div><strong>${escapeHtml(a.username?'@'+a.username:(a.display_name||'Instagram account'))}</strong>${a.username&&a.display_name?`<br><small>${escapeHtml(a.display_name)}</small>`:''}<br><small>${escapeHtml(ccMask(a.sender_id))} · Last seen ${escapeHtml(ccDate(a.last_seen_at))}</small></div>${a.allowed?'<span>Allowed ✓</span>':`<button class="btn-secondary" type="button" data-cc-allow="${escapeHtml(a.sender_id)}" data-cc-user="${escapeHtml(a.username||'')}">Allow for Testing</button>`}</div>`).join(''):'<p>No recent Instagram accounts yet. Send a DM to the connected business account; in Test Only mode the bot stays silent while the sender identity can appear here.</p>';
   document.querySelectorAll('[data-cc-allow]').forEach(b=>b.onclick=()=>ccAdd(b.dataset.ccAllow,b.dataset.ccUser));
   document.getElementById('ccAudit').innerHTML=audit.items.length?audit.items.map(a=>`<p><strong>${escapeHtml(a.action)}</strong> · ${escapeHtml(ccDate(a.created_at))} · ${escapeHtml(a.actor||'Admin')}${a.previous_value||a.new_value?`<br><small>${escapeHtml(a.previous_value||'')} → ${escapeHtml(a.new_value||'')}</small>`:''}${a.subject_label?`<br><small>@${escapeHtml(a.subject_label)}</small>`:''}</p>`).join(''):'<p>No control changes yet.</p>';
  }catch(e){msg.textContent=e.message;}
@@ -176,7 +183,9 @@ function ccSyncAuth() {
  ensureChatbotControlCard(); const card=document.getElementById('instagramChatbotControlCard');
  const authenticated=(typeof adminAuthenticated!=='undefined'&&adminAuthenticated);
  if(card)card.style.display=authenticated?'block':'none';
- if(authenticated&&!ccWasAuthenticated)loadChatbotControl(); ccWasAuthenticated=authenticated;
+ if(authenticated&&!ccWasAuthenticated)loadChatbotControl();
+ if(!authenticated){ccState=null;document.getElementById('ccDialog')?.close();}
+ ccWasAuthenticated=authenticated;
 }
 ensureChatbotControlCard(); ccSyncAuth(); setInterval(ccSyncAuth,1000);
 </script>

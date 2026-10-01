@@ -316,10 +316,6 @@ def add_test_account(
             username = username or _normalize_username(identity.get("customer_username"))
             display_name = display_name or (str(identity.get("customer_display_name") or "").strip() or None)
             now = _now()
-            existing = conn.execute(
-                "SELECT sender_id FROM instagram_chatbot_test_accounts WHERE sender_id = ?",
-                (sender,),
-            ).fetchone()
             conn.execute("""
                 INSERT INTO instagram_chatbot_test_accounts (
                     sender_id, username, display_name, enabled,
@@ -332,10 +328,6 @@ def add_test_account(
                     updated_at = excluded.updated_at,
                     updated_by = excluded.updated_by
             """, (sender, username, display_name, now, str(actor or "admin")[:200], now, str(actor or "admin")[:200]))
-            if not existing or not conn.execute(
-                "SELECT enabled FROM instagram_chatbot_test_accounts WHERE sender_id = ?", (sender,)
-            ).fetchone()["enabled"] == 0:
-                pass
             _audit(conn, "TEST_ACCOUNT_ADDED", actor, sender_id=sender, label=username)
             return _commit_and_remember(conn, database)
 
