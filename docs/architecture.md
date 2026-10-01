@@ -26,7 +26,11 @@ external notification as `SKIPPED`; no provider credential or network send is
 involved. Explicit admin resume remains idempotent and restores Instagram AI
 only after the handoff is closed.
 
-`INSTAGRAM_CHATBOT_ENABLED` is the only channel automation control. The
+`INSTAGRAM_CHATBOT_ENABLED` controls Instagram channel capability. Durable Admin
+LIVE / TEST_ONLY independently controls customer access; accepted production
+is TEST_ONLY. Exact allowlisted Meta sender IDs alone may reach business
+processing and customer sending in TEST_ONLY. See [CLIENT_HANDOVER.md](CLIENT_HANDOVER.md)
+for the current Approved Q&A, Weekly Savoury and source-mapping authority. The
 WhatsApp business number is retained solely for the manual `wa.me` link.
 
 ## Runtime boundaries

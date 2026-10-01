@@ -1,5 +1,24 @@
 # Camellia Artisanal production runbook
 
+## Current handover operating state
+
+Accepted runtime `b2d2b485c6c4e8b7c35d6908b75ce489a251d4bd`, deployment
+`10a13e8e-d96f-43ad-9aa0-8dff2e5f82b4`, verified 2 October 2026 IST.
+See [CLIENT_HANDOVER.md](CLIENT_HANDOVER.md) for dated knowledge/menu counts and
+checklists. Production remains **TEST_ONLY**, two testers; confirm the global
+Admin card and exact allowlist before any authorized smoke. Channel capability
+and durable LIVE/TEST_ONLY are separate. Do not enable LIVE as a health remedy.
+Only explicit operator resume clears WAITING_FOR_HUMAN; deploy/restart does not.
+
+Both Bento QA entries expire 11 October 2026 at 23:59:59 Asia/Kolkata.
+Review whether they should expire or receive deliberate Admin preview/publish
+validity extensions before then; do not silently extend them.
+
+Weekly Savoury CURRENT reviewed data alone is customer authority; catalogue
+Savoury is its projection. Upcoming and unverified OCR are not current facts.
+Approved Q&A preview/publish controls exact copy and validity; SYSTEM response
+dependencies must not be deleted. CLEAN2 retired zero templates.
+
 ## Health and safety checks
 
 Production: `https://web-production-0cad70.up.railway.app`, ChatBOT in production.
