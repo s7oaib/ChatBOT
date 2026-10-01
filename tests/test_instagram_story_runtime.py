@@ -195,6 +195,24 @@ def test_response_library_type_filters_and_protected_lifecycle_controls():
     assert result['systemHidden'] == 'none'
 
 
+def test_custom_csv_empty_notice_uses_total_count_instead_of_filtered_items():
+    result = _run_node(r'''
+        const notices = [];
+        global.alert = message => notices.push(message);
+        downloadBlobFrom = async () => true;
+        customQaItems = []; // a source/status/search filter can hide existing rows
+        document.getElementById('responseLibraryCounts').dataset.custom = '3';
+        exportCustomQaCsv().then(async () => {
+            const filteredNoticeCount = notices.length;
+            document.getElementById('responseLibraryCounts').dataset.custom = '0';
+            await exportCustomQaCsv();
+            console.log('RESULT::' + JSON.stringify({filteredNoticeCount, notices}));
+        });
+    ''')
+    assert result['filteredNoticeCount'] == 0
+    assert result['notices'] == ['0 Custom Q&A records — exported file contains headers only.']
+
+
 def _seed_common_pickers():
     return textwrap.dedent("""
         igTopics = [{ topic_id: 't1', name: 'Topic One', priority_products: [], default_menu_id: 'm1' }];

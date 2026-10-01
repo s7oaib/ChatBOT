@@ -12114,6 +12114,7 @@ Non-Veg:
                 systemResponseItems = (systemData.items || []).filter(i => i.kind === 'system_template');
                 const counts = systemData.counts;
                 document.getElementById('responseLibraryCounts').innerText = `All: ${counts.all} · System Templates: ${counts.system} · Custom Q&A: ${counts.custom}`;
+                document.getElementById('responseLibraryCounts').dataset.custom = String(counts.custom);
 
                 const topicSelect = document.getElementById('cqaTopicFilter');
                 const currentTopic = topicSelect.value;
@@ -12715,8 +12716,9 @@ Non-Veg:
             a.href = objectUrl; a.download = filename;
             document.body.appendChild(a); a.click(); a.remove();
             URL.revokeObjectURL(objectUrl);
+            return true;
         }
-        async function exportCustomQaCsv() { await downloadBlobFrom('/admin/custom-qa/export.csv?status=ALL', 'custom_qa_export.csv'); if (!customQaItems.length && customQaStatusFilter === 'ALL') alert('0 Custom Q&A records — exported file contains headers only.'); }
+        async function exportCustomQaCsv() { const downloaded = await downloadBlobFrom('/admin/custom-qa/export.csv?status=ALL', 'custom_qa_export.csv'); if (downloaded && document.getElementById('responseLibraryCounts').dataset.custom === '0') alert('0 Custom Q&A records — exported file contains headers only.'); }
         function downloadCustomQaTemplate() { downloadBlobFrom('/admin/custom-qa/csv-template', 'custom_qa_template.csv'); }
 
         function openCustomQaImportModal() {
