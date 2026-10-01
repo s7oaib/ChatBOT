@@ -330,6 +330,19 @@ def product_ids() -> set[str]:
     return {item["id"] for item in product_catalogue()}
 
 
+
+def prepare_source_response(payload, existing=None):
+    """Keep historical custom content when selecting an effective QA reference."""
+    merged = {**(decode_route(existing) if existing else {}), **payload}
+    mode = str(merged.get("response_mode") or "CUSTOM").strip().upper()
+    if mode == "APPROVED_QA":
+        # The mapping never accepts a copied QA answer, even from a stale client.
+        merged["source_description"] = (existing or {}).get("source_description") or ""
+    elif mode == "CUSTOM" and not str(merged.get("source_description") or "").strip():
+        raise ValueError("Source Description is required.")
+    return merged
+
+
 def validate_route_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     """
     Normalize an admin route without accepting copied product facts.
@@ -345,6 +358,16 @@ def validate_route_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     """
     from camellia.database import db
 
+    response_mode = str(payload.get("response_mode") or "CUSTOM").strip().upper()
+    if response_mode not in {"CUSTOM", "APPROVED_QA"}:
+        raise ValueError("response_mode must be CUSTOM or APPROVED_QA.")
+    approved_qa_id = None
+    if response_mode == "APPROVED_QA":
+        from camellia import client_qa
+        approved_qa_id = str(payload.get("approved_qa_id") or "").strip()
+        if not approved_qa_id or client_qa.resolve_effective_approved_qa_by_id(approved_qa_id) is None:
+            raise ValueError("Choose a currently active/effective Approved Q&A.")
+
     raw_url = str(payload.get("canonical_url") or payload.get("url") or "").strip()
     requested_source_type = str(payload.get("source_type") or "").strip().lower()
     if requested_source_type == "story" and raw_url:
@@ -356,7 +379,7 @@ def validate_route_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     topic_id = str(payload.get("topic_id") or "").strip() or None
     topic = db.get_instagram_topic(topic_id) if topic_id else None
-    if topic_id and not topic:
+    if topic_id and not topic and response_mode == "CUSTOM":
         raise ValueError("Unknown topic.")
 
     raw_menu_id = str(payload.get("menu_id") or "").strip()
@@ -382,12 +405,12 @@ def validate_route_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         menu_id = topic.get("default_menu_id") or None if topic else None
     if menu_mode == "INHERIT" and topic:
         menu_id = topic.get("default_menu_id") or None
-    if menu_mode == "SELECTED" and not menu_id:
+    if response_mode == "CUSTOM" and menu_mode == "SELECTED" and not menu_id:
         raise ValueError("A selected menu is required when menu_mode is SELECTED.")
     selected_menu = db.get_menu_catalogue_entry(menu_id) if menu_id else None
-    if menu_id and not selected_menu:
+    if response_mode == "CUSTOM" and menu_id and not selected_menu:
         raise ValueError("Unknown menu.")
-    if selected_menu and not bool(selected_menu.get("active")):
+    if response_mode == "CUSTOM" and selected_menu and not bool(selected_menu.get("active")):
         raise ValueError("That menu is inactive. Choose an active menu or No menu.")
 
     priority = payload.get("priority_products", [])
@@ -450,6 +473,8 @@ def validate_route_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
             raise ValueError("A Story route requires a Story media ID.")
     clean = {
         "source_type": source_type,
+        "response_mode": response_mode,
+        "approved_qa_id": approved_qa_id,
         "canonical_url": normalized.get("canonical_url"),
         "shortcode": normalized.get("shortcode") or (str(payload.get("shortcode") or "").strip() or None if media_id else None),
         "media_id": media_id,
@@ -482,6 +507,8 @@ def decode_route(row: Dict[str, Any]) -> Dict[str, Any]:
             route[field] = json.loads(value) if isinstance(value, str) else list(value or [])
         except (json.JSONDecodeError, TypeError):
             route[field] = []
+    route["response_mode"] = route.get("response_mode") or "CUSTOM"
+    route["approved_qa_id"] = route.get("approved_qa_id")
     route["active"] = bool(route.get("active"))
     route["menu_mode"] = str(route.get("menu_mode") or "").strip().upper()
     if route["menu_mode"] not in _MENU_MODES:

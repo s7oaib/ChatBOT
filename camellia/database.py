@@ -1120,6 +1120,8 @@ class Database:
             cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_topics_normalized_name ON instagram_topics(name COLLATE NOCASE)")
 
             self._ensure_column(cursor, "instagram_source_routes", "topic_id", "TEXT")
+            self._ensure_column(cursor, "instagram_source_routes", "response_mode", "TEXT NOT NULL DEFAULT 'CUSTOM'")
+            self._ensure_column(cursor, "instagram_source_routes", "approved_qa_id", "TEXT")
             self._ensure_column(cursor, "instagram_source_routes", "source_description", "TEXT NOT NULL DEFAULT ''")
             # The menu shown for this route. Defaults from the selected
             # Topic's default_menu_id at save time (see validate_route_payload)
@@ -1617,7 +1619,8 @@ class Database:
             route.get("escalation_policy", "human_if_unsupported"),
             json.dumps(route.get("priority_products", [])), int(bool(route.get("active", True))),
             route.get("topic_id"), route.get("menu_id"), menu_mode,
-            route.get("preview_url"), route.get("media_type"), now,
+            route.get("preview_url"), route.get("media_type"),
+            route.get("response_mode") or "CUSTOM", route.get("approved_qa_id"), now,
         )
         with self.get_connection() as conn:
             if routing_id is None:
@@ -1636,8 +1639,8 @@ class Database:
                     """INSERT INTO instagram_source_routes
                     (source_type, canonical_url, shortcode, media_id, ad_id, campaign_id,
                      routing_topic, source_description, knowledge_scope, escalation_policy, priority_products,
-                    active, topic_id, menu_id, menu_mode, preview_url, media_type, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    active, topic_id, menu_id, menu_mode, preview_url, media_type, response_mode, approved_qa_id, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     values[:-1] + (now, now),
                 )
                 routing_id = int(cursor.lastrowid)
@@ -1646,7 +1649,7 @@ class Database:
                     """UPDATE instagram_source_routes SET source_type=?, canonical_url=?, shortcode=?,
                     media_id=?, ad_id=?, campaign_id=?, routing_topic=?, source_description=?, knowledge_scope=?,
                     escalation_policy=?, priority_products=?, active=?, topic_id=?, menu_id=?, menu_mode=?,
-                    preview_url=?, media_type=?, updated_at=?, archived_at=NULL
+                    preview_url=?, media_type=?, response_mode=?, approved_qa_id=?, updated_at=?, archived_at=NULL
                     WHERE routing_id=?""",
                     values + (routing_id,),
                 )
@@ -2128,7 +2131,7 @@ class Database:
         with self.get_connection() as conn:
             join = "LEFT JOIN instagram_source_routes r ON r.routing_id=(SELECT rr.routing_id FROM instagram_source_routes rr WHERE rr.source_type='story' AND rr.media_id=s.story_media_id ORDER BY rr.updated_at DESC, rr.routing_id DESC LIMIT 1)"
             total = int(conn.execute(f"SELECT COUNT(*) AS n FROM instagram_story_sources s {join} WHERE {where}", params).fetchone()["n"])
-            sql = f"SELECT s.story_media_id, s.temporary_url, s.story_status, s.first_seen, s.last_seen, s.last_sender_id, s.last_event_metadata, s.media_type, s.permalink, s.published_at, s.source, s.sync_miss_count, s.last_confirmed_active_at, s.story_sequence_number, s.story_sequence_date, r.routing_id, r.topic_id, r.routing_topic, r.source_description, r.menu_id, r.menu_mode, r.active AS route_active, r.archived_at AS route_archived_at FROM instagram_story_sources s {join} WHERE {where} ORDER BY {sort_column} {direction}, s.story_media_id"
+            sql = f"SELECT s.story_media_id, s.temporary_url, s.story_status, s.first_seen, s.last_seen, s.last_sender_id, s.last_event_metadata, s.media_type, s.permalink, s.published_at, s.source, s.sync_miss_count, s.last_confirmed_active_at, s.story_sequence_number, s.story_sequence_date, r.routing_id, r.topic_id, r.routing_topic, r.source_description, r.response_mode, r.approved_qa_id, r.menu_id, r.menu_mode, r.active AS route_active, r.archived_at AS route_archived_at FROM instagram_story_sources s {join} WHERE {where} ORDER BY {sort_column} {direction}, s.story_media_id"
             if page_size is not None:
                 sql += " LIMIT ? OFFSET ?"
                 params = [*params, page_size, (page - 1) * page_size]

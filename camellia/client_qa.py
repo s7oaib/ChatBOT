@@ -543,6 +543,18 @@ def effective_entry(qa_id):
     return approved_qa.get(qa_id)
 
 
+
+def resolve_effective_approved_qa_by_id(qa_id):
+    """Resolve a source reference directly, failing closed on invalid lifecycle/storage."""
+    from camellia import approved_qa
+    try:
+        entry = next((entry for entry in approved_qa.registry(approved_qa.overlays(strict=True))
+                      if entry.qa_id == qa_id), None)
+    except Exception:
+        return None
+    return ApprovedMatch(entry, "source_qa_id", entry.asset_keys) if entry else None
+
+
 def source_fingerprint() -> str:
     import hashlib
 
