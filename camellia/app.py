@@ -85,6 +85,7 @@ from camellia.menu_catalogue import MenuCatalogueError
 from camellia.session_memory import session_memory
 from camellia.monitoring import get_logger, delivery_monitor, latency_monitor, classify_instagram_delivery
 from camellia import instagram_chatbot_control
+from camellia import home_table_native_reels
 from camellia.admin_security import (
     digest as security_digest,
     new_token,
@@ -1757,6 +1758,7 @@ def _send_or_queue_instagram_reply(recipient_id: str, text: str, image_url=None,
         if delivery and _instagram_reel_accepted(result):
             db.record_home_table_reel_receipt({
                 **delivery, "recipient_id": recipient_id,
+                "delivery_mode": result.get("delivery_mode", "URL_FALLBACK"),
                 "inbound_message_id": kwargs.get("inbound_message_id"),
                 "meta_message_id": str(result["message_id"]),
             })
@@ -1806,6 +1808,7 @@ def _process_instagram_outbound_jobs(*, inbound_job_id: Optional[int] = None) ->
                 return
             receipt = {
                 **delivery, "recipient_id": job["recipient_id"],
+                "delivery_mode": result.get("delivery_mode", "URL_FALLBACK"),
                 "inbound_message_id": correlation, "meta_message_id": str(result["message_id"]),
             } if delivery else None
             db.complete_instagram_outbound_job(int(job["id"]), success=True, reel_receipt=receipt)
@@ -2262,6 +2265,7 @@ def send_instagram_response_blocks(recipient_id: str, blocks: list, *, inbound_m
                 delivery = {
                     "family": "HOME_TABLE_REELS", "delivery_id": delivery_id,
                     "url": url, "link_index": client_qa.HOME_TABLE_REEL_URLS.index(url) + 1,
+                    "verified_media_id": home_table_native_reels.verified_media_id(url),
                 }
                 # Keep original queue positions on inbound retries. The outbound
                 # worker skips confirmed receipts; INSERT OR IGNORE keeps text too.
@@ -2270,6 +2274,7 @@ def send_instagram_response_blocks(recipient_id: str, blocks: list, *, inbound_m
                     continue
             result = _send_or_queue_instagram_reply(
                 recipient_id, url, inbound_message_id=inbound_message_id, response_type="reply",
+                **({"native_media_id": delivery["verified_media_id"]} if delivery and delivery["verified_media_id"] else {}),
                 **({"_response_delivery": delivery} if delivery else {}),
             )
         elif block.get("kind") == "TEXT":
@@ -2297,6 +2302,7 @@ def send_instagram_reply(
     inbound_message_id: Optional[int] = None,
     response_type: str = "text",
     retry_count: int = 0,
+    native_media_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Sends text plus zero or more image cards via Meta Graph API to Instagram user."""
     # Instagram has no caption field on attachments, so a captioned card is sent
@@ -2363,6 +2369,9 @@ def send_instagram_reply(
 
     if auth_mode == "instagram_login":
         url = f"https://graph.instagram.com/{config.INSTAGRAM_API_VERSION}/me/messages"
+        if native_media_id:
+            # Use the exact official endpoint proven by the live capability probe.
+            url = f"https://graph.instagram.com/{config.INSTAGRAM_API_VERSION}/{home_table_native_reels.VERIFIED_ACCOUNT_ID}/messages"
     else:
         page_id = config.INSTAGRAM_PAGE_ID or "me"
         url = f"https://graph.facebook.com/{config.INSTAGRAM_API_VERSION}/{page_id}/messages"
@@ -2374,6 +2383,7 @@ def send_instagram_reply(
     parent_send_id = uuid.uuid4().hex
     failed_chunk_number = None
     failure_classification = None
+    delivery_mode = "URL_FALLBACK" if text in client_qa.HOME_TABLE_REEL_URLS else None
 
     try:
         with httpx.Client(timeout=10.0) as client:
@@ -2523,7 +2533,23 @@ def send_instagram_reply(
                         failed_chunk_number = next_chunk_number
                         raise
 
-            if text and not cards_first:
+            if native_media_id:
+                if native_media_id != home_table_native_reels.verified_media_id(text) or image_url:
+                    return {"status": "failed", "delivery_status": "AUTH_FAILURE"}
+                try:
+                    send_request({
+                        "recipient": {"id": recipient_id},
+                        "message": {"attachment": {"type": "MEDIA_SHARE", "payload": {"id": native_media_id}}},
+                    }, kind="MEDIA_SHARE")
+                except Exception:
+                    if not home_table_native_reels.explicitly_unavailable(last):
+                        raise
+                    send_text_body(text)
+                else:
+                    if not last.json().get("message_id"):
+                        raise RuntimeError("Native acceptance uncertain: message ID missing")
+                    delivery_mode = "MEDIA_SHARE"
+            elif text and not cards_first:
                 send_text_body(text)
 
             for img, caption in captioned:
@@ -2558,7 +2584,10 @@ def send_instagram_reply(
                     parent_send_id, _safe_outbound_exception(audit_error),
                 )
             delivery_monitor.record_success("instagram")
-            return last.json() if last is not None else {"status": "no_content"}
+            result = last.json() if last is not None else {"status": "no_content"}
+            if delivery_mode:
+                result = {**result, "delivery_mode": delivery_mode}
+            return result
     except Exception as e:
         try:
             db.finalize_instagram_outbound_audit(

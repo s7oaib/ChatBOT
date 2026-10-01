@@ -802,6 +802,7 @@ class Database:
                 PRIMARY KEY (recipient_id, delivery_id, url)
             )
             """)
+            self._ensure_column(cursor, "home_table_reel_receipts", "delivery_metadata", "TEXT")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_ig_inbound_jobs_due ON instagram_inbound_jobs(status, next_attempt_at, id)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_ig_outbound_jobs_due ON instagram_outbound_jobs(status, next_attempt_at, id)")
 
@@ -5162,10 +5163,14 @@ class Database:
     def _insert_home_table_reel_receipt(conn, receipt, job_id=None):
         conn.execute(
             "INSERT OR IGNORE INTO home_table_reel_receipts "
-            "(recipient_id, delivery_id, url, outbound_job_id, inbound_message_id, meta_message_id) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
+            "(recipient_id, delivery_id, url, outbound_job_id, inbound_message_id, meta_message_id, delivery_metadata) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (receipt["recipient_id"], receipt["delivery_id"], receipt["url"], job_id,
-             receipt.get("inbound_message_id"), receipt["meta_message_id"]),
+             receipt.get("inbound_message_id"), receipt["meta_message_id"], json.dumps({
+                 "verified_media_id": receipt.get("verified_media_id"),
+                 "link_index": receipt.get("link_index"),
+                 "delivery_mode": receipt.get("delivery_mode", "URL_FALLBACK"),
+             })),
         )
 
     def record_home_table_reel_receipt(self, receipt):
@@ -5176,7 +5181,7 @@ class Database:
     def home_table_reel_receipts(self, recipient_id, delivery_id):
         with self.get_connection() as conn:
             return [dict(row) for row in conn.execute(
-                "SELECT url, outbound_job_id, inbound_message_id, meta_message_id, confirmed_at "
+                "SELECT url, outbound_job_id, inbound_message_id, meta_message_id, confirmed_at, delivery_metadata "
                 "FROM home_table_reel_receipts WHERE recipient_id = ? AND delivery_id = ?",
                 (recipient_id, delivery_id),
             )]
