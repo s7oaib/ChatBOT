@@ -8,10 +8,10 @@ Before changing code, production diagnostics showed Home Table details conversat
 
 ## Durable delivery
 
-- Home Table LINK jobs carry `_response_delivery`: family `HOME_TABLE_REELS`, a conversation delivery UUID, the exact URL, and its one-based index. Existing job recipient, inbound job ID and conversation ID provide correlation.
-- `home_table_reel_receipts` records each accepted URL against recipient and delivery UUID, with Meta message ID, job/conversation correlation and timestamp. Queue completion and receipt insertion share a transaction.
+- Home Table LINK jobs carry `_response_delivery`: family `HOME_TABLE_REELS`, a deterministic inbound-request delivery ID, the exact URL, and its one-based index. Existing job recipient, inbound job ID and conversation ID provide correlation.
+- `home_table_reel_receipts` records each accepted URL against recipient and delivery ID, with Meta message ID, job/conversation correlation and timestamp. Queue completion and receipt insertion share a transaction.
 - A queued, blocked, failed, or unacknowledged send never creates a receipt. `home_table_videos_sent` becomes true only after receipts exist for all four exact URLs in the current conversation generation.
-- Retry skips confirmed URLs, including duplicate queued answers. Receipts survive restart. A terminal Reel failure cancels the remaining blocks of that answer so later customer retries can reach only missing URLs.
+- Retry skips confirmed URLs, including duplicate queued answers. Receipts survive restart. A terminal Reel failure cancels the remaining blocks of that answer so later independent requests can start a new full delivery.
 - QA-C1 is checked before queueing and again before sending. Suppressed jobs create no receipt. A late job cannot complete a newer or expired conversation.
 - Conversation expiration resets the delivery generation along with the existing flag. Receipt retention and customer erasure follow existing database policies.
 - As with the existing durable queue, a process crash between Meta acceptance and the local receipt commit is an uncertain send; Meta does not offer this path an exactly-once transaction. Already committed receipts are never deliberately resent.
@@ -27,3 +27,10 @@ Authenticated POST `/admin/home-table-reel-delivery/repair` accepts the selected
 `tests/test_home_table_reel_delivery.py` covers enqueue versus each successful completion, partial failure, retry, restart, terminal failure recovery, tester removal before execution, duplicate queued answers, unacknowledged synchronous results, old-generation completion, authenticated one-time repair and refusal guards, and customer erasure. Existing ordered-response and live-output tests verify exact approved copy, URLs and order. Their success mocks return Meta message IDs rather than assuming a missing result proves delivery.
 
 Release verification must include the impact-selected full regression, branch and main CI, exact deployed SHA, healthy startup/HTTP checks, unchanged TEST_ONLY/allowlist/configuration/Approved QA, and a real allowed-tester Home Table request followed by price continuation.
+
+
+## QA-SM1.1: per-request delivery
+
+Session-wide suppression is retired. Every new response containing the exact video anchor gets TEXT / four LINK / TEXT, despite earlier completion. Price/payment continuation without the anchor gets no invented links. The flag describes only the latest delivery.
+
+Delivery identity hashes recipient, durable inbound job identity and HOME_TABLE_REELS. Rebuilding the same job retains its generation and original queue positions; unique inbound-job/sequence and durable receipts prevent confirmed sends from repeating. A new Meta message gets an independent generation. Direct synchronous callers may supply a stable inbound_message_id; an unidentified call represents a new request. No session reset, repair or TTL wait is required. Native MEDIA_SHARE remains unimplemented.

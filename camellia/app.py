@@ -2237,21 +2237,34 @@ def _refresh_home_table_reel_completion(recipient_id: str, delivery_id: str) -> 
 def send_instagram_response_blocks(recipient_id: str, blocks: list, *, inbound_message_id: Optional[int] = None) -> None:
     """Deliver approved blocks in order; queue acceptance is not delivery."""
     facts = session_memory.get_facts(recipient_id, "instagram")
+    context = _instagram_job_context.get()
+    delivery_id = None
+    if any(b.get("kind") == "LINK" and b.get("url") in client_qa.HOME_TABLE_REEL_URLS for b in blocks):
+        # Durable inbound jobs are the retry authority. Direct callers may supply
+        # their stable conversation identity; absent one, this is a new request.
+        request_identity = (f"job:{context['job_id']}" if context is not None else
+                            f"message:{inbound_message_id}" if inbound_message_id is not None else
+                            f"request:{uuid.uuid4().hex}")
+        delivery_id = hashlib.sha256(json.dumps(
+            [str(recipient_id), request_identity, "HOME_TABLE_REELS"],
+            separators=(",", ":"),
+        ).encode("utf-8")).hexdigest()
+        if facts.get("home_table_reel_delivery_id") != delivery_id:
+            facts["home_table_reel_delivery_id"] = delivery_id
+            facts["home_table_videos_sent"] = False
+            _persist_home_table_delivery(recipient_id)
     for index, block in enumerate(blocks):
         delivery = None
         if block.get("kind") == "LINK":
             url = block["url"]
             if url in client_qa.HOME_TABLE_REEL_URLS:
-                if facts.get("home_table_videos_sent"):
-                    continue
-                if not facts.get("home_table_reel_delivery_id"):
-                    facts["home_table_reel_delivery_id"] = uuid.uuid4().hex
-                    _persist_home_table_delivery(recipient_id)
                 delivery = {
-                    "family": "HOME_TABLE_REELS", "delivery_id": facts["home_table_reel_delivery_id"],
+                    "family": "HOME_TABLE_REELS", "delivery_id": delivery_id,
                     "url": url, "link_index": client_qa.HOME_TABLE_REEL_URLS.index(url) + 1,
                 }
-                if url in _delivered_home_table_urls(recipient_id, delivery["delivery_id"]):
+                # Keep original queue positions on inbound retries. The outbound
+                # worker skips confirmed receipts; INSERT OR IGNORE keeps text too.
+                if context is None and url in _delivered_home_table_urls(recipient_id, delivery["delivery_id"]):
                     _refresh_home_table_reel_completion(recipient_id, delivery["delivery_id"])
                     continue
             result = _send_or_queue_instagram_reply(
