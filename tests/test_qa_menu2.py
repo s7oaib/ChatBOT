@@ -15,7 +15,7 @@ from camellia.menu_dates import today_ist as real_today_ist
 from camellia.config import config
 from camellia.database import db
 from test_qa_menu1 import BROWSE, respond
-from test_weekly_savoury_lifecycle import weekly_env, _publish
+from test_weekly_savoury_lifecycle import weekly_env, _draft, _publish
 
 
 @pytest.fixture
@@ -72,7 +72,8 @@ def test_a_b_c_replacement_and_exact_midnight_without_restart(replacement_chain)
     assert after['upcoming'] == []
     for query in BROWSE:
         answer = respond(query)
-        assert '₹140' in answer[0] and '₹100' not in answer[0] and '₹120' not in answer[0]
+        assert answer[0] == ''
+        assert answer[2] == 'approved_menu'
         assert answer[3] == [flyer]
     for query in ['Dhokar Dalna price?', 'what is the price of dhokar dolna']:
         assert respond(query)[0] == 'Dhokar Dalna 250g is ₹140.'
@@ -110,6 +111,18 @@ def test_normal_weekly_workspace_excludes_history_and_restore():
         assert value not in WEEKLY_HTML + WEEKLY_SCRIPT
     assert 'wsRestore' not in WEEKLY_SCRIPT
     assert 'Restore previous' not in WEEKLY_HTML + WEEKLY_SCRIPT
+
+
+@pytest.mark.parametrize('item', ['Fixture Lentils', 'Fixture Fish', 'Fixture Meal'])
+def test_explicit_price_remains_generic_for_each_approved_item(replacement_chain, item):
+    clock, versions = replacement_chain
+    clock.instant = datetime(2026, 10, 1, 18, 30, tzinfo=timezone.utc)
+    published = _publish(_draft('2 Oct - 8 Oct 2026', 190, item),
+                         replace_version_id=versions[-1]['id'])
+    assert weekly_savoury.current_version()['id'] == published['version_id']
+    assert respond(f'what is the price of {item}')[0] == f'{item} 500g is ₹190.'
+    assert respond('give me savoury menu')[3] is None
+    assert '₹' not in respond('give me savoury menu')[0]
 
 
 @pytest.mark.skipif(shutil.which('node') is None, reason='Node.js needed for Admin UI harness')
