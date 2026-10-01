@@ -44,7 +44,7 @@ class TestNavigationConsolidation:
         page = client.get("/admin").text
         nav = page[page.index('<aside class="admin-sidebar"'):page.index('</aside>', page.index('<aside class="admin-sidebar"'))]
         assert "Dashboard" in nav
-        assert "QA Templates" in nav
+        assert "Response Library" in nav
 
     def test_legacy_panels_remain_compatible_but_are_not_promoted_in_the_ui(self):
         page = client.get("/admin").text

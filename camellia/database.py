@@ -4246,6 +4246,77 @@ class Database:
             conn.commit()
             return affected > 0
 
+    def delete_archived_custom_qa(self, knowledge_id: int, expected_question: str) -> bool:
+        """Serialized archive/reference guard for Admin permanent deletion."""
+        with self.get_connection() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            row = conn.execute('SELECT status, question_pattern FROM learned_knowledge WHERE id=?', (knowledge_id,)).fetchone()
+            if not row:
+                return False
+            if row['status'] != 'ARCHIVED':
+                raise ValueError('Archive this Custom Q&A before permanent deletion')
+            if row['question_pattern'] != expected_question:
+                raise ValueError('The record changed; review it and confirm deletion again')
+            # Alias/version rows belong to the record. Other recorded references are retained.
+            key = f'learned_knowledge#{knowledge_id}'
+            if conn.execute('SELECT 1 FROM conversations WHERE template_id IN (?, ?) LIMIT 1',
+                            (key, f'learned_{knowledge_id}')).fetchone():
+                raise ValueError('Deletion blocked: referenced by conversations')
+            for table in ('triage_shadow', 'assisted_resolution_suggestions', 'auto_resolve_decisions'):
+                if conn.execute(f'SELECT 1 FROM {table} WHERE matched_knowledge_id IN (?, ?) LIMIT 1',
+                                (knowledge_id, key)).fetchone():
+                    raise ValueError(f'Deletion blocked: referenced by {table}')
+            for table, column in (('message_route_audit', 'knowledge_ids'), ('rag_audit_logs', 'retrieved_sources')):
+                for reference in conn.execute(f'SELECT {column} FROM {table} WHERE {column} IS NOT NULL'):
+                    try:
+                        values = json.loads(reference[0])
+                    except (TypeError, ValueError):
+                        values = [reference[0]]
+                    if not isinstance(values, list):
+                        values = [values]
+                    if any(str(value) in {key, str(knowledge_id), f'learned_{knowledge_id}'} for value in values):
+                        raise ValueError(f'Deletion blocked: referenced by {table}')
+            conn.execute('DELETE FROM learned_knowledge_aliases WHERE learned_knowledge_id=?', (knowledge_id,))
+            conn.execute('DELETE FROM learned_knowledge_versions WHERE learned_knowledge_id=?', (knowledge_id,))
+            conn.execute('DELETE FROM learned_knowledge WHERE id=?', (knowledge_id,))
+            return True
+
+    def apply_custom_qa_import(self, build_plan):
+        """Revalidate under a write lock; commit the complete CSV or no rows."""
+        with self.get_connection() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            plan = build_plan()
+            if not plan['can_confirm']:
+                return plan, []
+            imported = []
+            for row in plan['rows']:
+                if row['operation'] == 'UNCHANGED':
+                    continue
+                data = row['data']
+                now = datetime.utcnow().isoformat()
+                values = (data['topic'], data['primary_question'].lower(), data['approved_answer'],
+                          data['priority'], data['status'], normalize_question(data['primary_question']), now)
+                if row['operation'] == 'UPDATE':
+                    kid = row['target_id']
+                    current = dict(conn.execute('SELECT * FROM learned_knowledge WHERE id=?', (kid,)).fetchone())
+                    self._snapshot_version(conn, kid, current, 'csv_import', 'csv_import')
+                    conn.execute('''UPDATE learned_knowledge SET topic=?, question_pattern=?, verified_answer=?,
+                        priority=?, status=?, normalized_question=?, updated_at=?, updated_by='csv_import' WHERE id=?''',
+                        (*values, kid))
+                    conn.execute('DELETE FROM learned_knowledge_aliases WHERE learned_knowledge_id=?', (kid,))
+                else:
+                    cursor = conn.execute('''INSERT INTO learned_knowledge
+                        (topic, question_pattern, verified_answer, priority, status, normalized_question, updated_at,
+                         created_at, source, confidence, created_by, updated_by)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'csv_import', 1.0, 'csv_import', 'csv_import')''', (*values, now))
+                    kid = cursor.lastrowid
+                for alias in data['aliases']:
+                    conn.execute('''INSERT INTO learned_knowledge_aliases
+                        (learned_knowledge_id, alias_text, normalized_alias, created_at, created_by)
+                        VALUES (?, ?, ?, ?, 'csv_import')''', (kid, alias, normalize_question(alias), now))
+                imported.append(kid)
+            return plan, imported
+
     # -- Response Library: safe overrides for protected system templates --
 
     def get_response_template_override(self, template_id: str) -> Optional[Dict[str, Any]]:

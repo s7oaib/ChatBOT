@@ -265,7 +265,10 @@ def test_admin_learned_knowledge_crud_and_live_bot_matching():
     assert "customized artisanal Bengal sweet hampers" in bot_resp.text
 
     # 4. Delete learned knowledge item
-    resp_del = client.delete(f"/admin/learned-knowledge/{knowledge_id}", headers=ADMIN_HEADERS)
+    assert client.delete(f"/admin/learned-knowledge/{knowledge_id}", headers=ADMIN_HEADERS).status_code == 400
+    assert client.post(f"/admin/custom-qa/{knowledge_id}/status", json={"status": "ARCHIVED"}, headers=ADMIN_HEADERS).status_code == 200
+    resp_del = client.request("DELETE", f"/admin/learned-knowledge/{knowledge_id}", headers=ADMIN_HEADERS,
+                              json={"confirm_permanent_delete": True, "confirm_question": payload["question_pattern"]})
     assert resp_del.status_code == 200
     assert resp_del.json().get("status") == "deleted"
 

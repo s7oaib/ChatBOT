@@ -167,6 +167,34 @@ def _run_node(scenario_js: str) -> dict:
     raise AssertionError(f"no RESULT:: line in node output:\n{proc.stdout}\nSTDERR:\n{proc.stderr}")
 
 
+def test_response_library_type_filters_and_protected_lifecycle_controls():
+    result = _run_node(r'''
+        customQaItems = [{id: 101, topic: 'Packing', primary_question: 'carry bag', aliases: ['own bag'],
+            approved_answer: 'Ask the kitchen.', priority: 'NORMAL', status: 'ACTIVE'}];
+        systemResponseItems = [{kind: 'system_template', template_id: 'greeting', title: 'Greeting', topic: 'System',
+            primary_question: 'hi', aliases: ['hello'], approved_answer: 'Hello there.', status: 'ACTIVE', editable: true}];
+        setLibraryType('ALL');
+        const custom = document.getElementById('customQaTableBody').innerHTML;
+        const system = document.getElementById('systemResponseLibraryCards').innerHTML;
+        customQaItems[0].status = 'ARCHIVED';
+        renderCustomQaList();
+        const archived = document.getElementById('customQaTableBody').innerHTML;
+        setLibraryType('SYSTEM');
+        const onlySystem = document.getElementById('customQaTableBody').innerHTML;
+        setLibraryType('CUSTOM');
+        console.log('RESULT::' + JSON.stringify({custom, system, archived, onlySystem,
+            systemHidden: document.getElementById('systemResponseLibrary').style.display}));
+    ''')
+    assert 'CUSTOM' in result['custom'] and 'Archive' in result['custom']
+    assert 'Delete Permanently' not in result['custom']
+    assert 'SYSTEM · PROTECTED' in result['system'] and 'Edit Response' in result['system']
+    assert 'Delete' not in result['system'] and 'Archive' not in result['system']
+    assert 'Restore' in result['archived'] and 'Delete Permanently' in result['archived']
+    assert 'cqaOpenEdit' not in result['archived']
+    assert 'carry bag' not in result['onlySystem']
+    assert result['systemHidden'] == 'none'
+
+
 def _seed_common_pickers():
     return textwrap.dedent("""
         igTopics = [{ topic_id: 't1', name: 'Topic One', priority_products: [], default_menu_id: 'm1' }];

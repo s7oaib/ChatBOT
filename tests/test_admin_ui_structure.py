@@ -82,7 +82,7 @@ def test_the_dashboard_has_a_coherent_sidebar_navigation(page):
     knowledge library, on the same learned_knowledge table.
     """
     nav = page[page.index('<aside class="admin-sidebar"'):page.index('</aside>', page.index('<aside class="admin-sidebar"'))]
-    for label in ("Dashboard", "Menu", "Instagram Stories", "Posts &amp; Reels", "Handoffs", "QA Templates", "Analytics", "Candidates", "Settings / Health"):
+    for label in ("Dashboard", "Menu", "Instagram Stories", "Posts &amp; Reels", "Handoffs", "Response Library", "Analytics", "Candidates", "Settings / Health"):
         assert label in nav
     assert "handoffSidebarBadge" in nav
 
@@ -655,7 +655,7 @@ def test_custom_qa_tab_exists_and_reuses_the_same_learned_knowledge_endpoints(pa
 
 def test_custom_qa_lifecycle_and_delete_confirmation_are_present(page):
     assert "Delete this Custom Q&amp;A permanently?" in page
-    assert "This permanently removes this Q&amp;A and it will no longer be available to the chatbot." in page
+    assert "Only archived Custom Q&amp;A can be permanently deleted; referenced records are blocked." in page
     assert "cqaSetStatus" in page
     assert "customQaHistoryModal" in page
 
