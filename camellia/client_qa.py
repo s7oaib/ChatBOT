@@ -326,9 +326,9 @@ def _match_existing(message: str, facts: Optional[Dict[str, Any]] = None) -> Opt
 
     if re.search(r"\b(?:price\s+(?:is\s+)?high|high\s+price|too\s+expensive|quite\s+expensive|why\s+is\s+it\s+so\s+expensive)\b", text, re.I):
         return result("price_is_high")
-    if re.search(r"\b(?:best\s+time|when)\s+to\s+(?:book|reserve)\b|\bwhen\s+is\s+the\s+best\s+time\b", text, re.I):
+    if re.search(r"\b(?:best\s+time|when)\s+to\s+(?:book|reserve|pre[- ]?order|prebook)\b|\bwhen\s+is\s+the\s+best\s+time\b", text, re.I):
         return result("best_time_to_book")
-    if re.search(r"\bdelivery\s+time\b|\bhow\s+long\b.*\bdeliver(?:y)?\b", text, re.I):
+    if re.search(r"\bdelivery\s+time\b|\bhow\s+(?:long|much\s+time)\b.*\bdeliver(?:y)?\b", text, re.I):
         return result("savoury_delivery_time")
 
     # The general two-line question variants are intentionally separate from
@@ -349,6 +349,7 @@ def _match_existing(message: str, facts: Optional[Dict[str, Any]] = None) -> Opt
         return result("home_table_payment" if home else "general_payment_client")
     if re.search(
         r"\b(?:how\s+(?:do\s+i|can\s+i|to)\s+(?:place\s+)?(?:an?\s+)?order|"
+        r"(?:steps\s+to\s+place\s+(?:an?\s+)?order|what\s+details\s+do\s+you\s+need\s+to\s+place\s+my\s+order)|"
         r"how\s+can\s+i\s+place\s+(?:an?\s+)?order|"
         r"i\s+(?:want|would\s+like)\s+to\s+(?:place\s+)?(?:an?\s+)?order|"
         r"what\s+are\s+the\s+next\s+steps\s+to\s+(?:order|place\s+(?:an?\s+)?order)|"
@@ -492,6 +493,8 @@ def _match_base(message: str, facts: Optional[Dict[str, Any]] = None) -> Optiona
         if entry_id:
             entry = REGISTRY_BY_ID[entry_id]
             return ApprovedMatch(entry, "context", entry.asset_keys)
+        if subject == "bento" and re.search(r"\bdelivery\b", text):
+            return _match_existing(message, {})
         return None
     if not subjects and (short_price or short_details):
         return None

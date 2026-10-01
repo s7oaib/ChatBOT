@@ -276,6 +276,8 @@ def _pdf_extract(data, weekly=False):
 
 def extract(key, actor, *, text=None, data=None, mime=None, filename="", weekly=False, retry_from=None):
     key = _key(key)
+    if key == "bento":
+        raise ReviewConflict("Savoury Meal Menu is read-only. Use Weekly Savoury.")
     if weekly and key != weekly_savoury.WEEKLY_KEY:
         raise ValueError("Weekly Savoury uses the existing weekly menu identity.")
     if not weekly and key == weekly_savoury.WEEKLY_KEY and not db.get_menu_catalogue_entry(key):
@@ -491,7 +493,8 @@ def customer_versions():
     # retired catalogue row; tombstoning that old row must not hide the week.
     linked.add(weekly_savoury.WEEKLY_KEY)
     return [version for version in current_versions()
-            if version["menu_key"] not in pending and version["menu_key"] in linked]
+            if version["menu_key"] != "bento"
+            and version["menu_key"] not in pending and version["menu_key"] in linked]
 
 
 def customer_blocked_keys():
@@ -510,6 +513,9 @@ def customer_blocked_keys():
     else:
         blocked |= weekly_keys
     return blocked
+
+
+WEEKLY_SAVOURY_BROWSE = "WEEKLY_SAVOURY_BROWSE"
 
 
 def weekly_menu_browsing(message):
@@ -742,6 +748,8 @@ def weekly_analysis(draft, options=None, conn=None):
 
 def publish_approved_menu(key, draft_id, revision, actor, weekly_options=None):
     key = _key(key)
+    if key == "bento":
+        raise ReviewConflict("Savoury Meal Menu is read-only. Use Weekly Savoury.")
     with db.get_connection() as conn:
         conn.execute("BEGIN IMMEDIATE")
         draft = get_draft(key, conn)
