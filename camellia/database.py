@@ -779,6 +779,18 @@ class Database:
                 UNIQUE(inbound_job_id, sequence_number)
             )
             """)
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS home_table_reel_receipts (
+                recipient_id TEXT NOT NULL,
+                delivery_id TEXT NOT NULL,
+                url TEXT NOT NULL,
+                outbound_job_id INTEGER,
+                inbound_message_id INTEGER,
+                meta_message_id TEXT NOT NULL,
+                confirmed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (recipient_id, delivery_id, url)
+            )
+            """)
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_ig_inbound_jobs_due ON instagram_inbound_jobs(status, next_attempt_at, id)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_ig_outbound_jobs_due ON instagram_outbound_jobs(status, next_attempt_at, id)")
 
@@ -4643,6 +4655,7 @@ class Database:
 
         with self.get_connection() as conn:
             cursor = conn.cursor()
+            cursor.execute("DELETE FROM home_table_reel_receipts WHERE " + older_than("confirmed_at"), (cutoff,))
             cursor.execute(
                 "DELETE FROM instagram_outbound_jobs WHERE " + older_than("created_at"), (cutoff,)
             )
@@ -4675,6 +4688,7 @@ class Database:
         """
         with self.get_connection() as conn:
             cursor = conn.cursor()
+            cursor.execute("DELETE FROM home_table_reel_receipts WHERE recipient_id = ?", (user_id,))
             cursor.execute("DELETE FROM instagram_outbound_jobs WHERE recipient_id = ?", (user_id,))
             cursor.execute("DELETE FROM instagram_inbound_jobs WHERE sender_id = ?", (user_id,))
             cursor.execute("DELETE FROM conversations WHERE user_id = ?", (user_id,))
@@ -5006,11 +5020,12 @@ class Database:
             return claimed
 
     def complete_instagram_outbound_job(
-        self, job_id: int, *, success: bool, error: str = "", retryable: bool = True
+        self, job_id: int, *, success: bool, error: str = "", retryable: bool = True,
+        reel_receipt: Optional[Dict[str, Any]] = None, abandon_batch: bool = False,
     ) -> None:
         with self.get_connection() as conn:
             row = conn.execute(
-                "SELECT attempts FROM instagram_outbound_jobs WHERE id = ?", (job_id,)
+                "SELECT attempts, inbound_job_id FROM instagram_outbound_jobs WHERE id = ?", (job_id,)
             ).fetchone()
             if not row:
                 return
@@ -5023,7 +5038,41 @@ class Database:
                 "last_error = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                 (status, f"+{delay} seconds", str(error)[:300] or None, job_id),
             )
+            if not success and not retryable and abandon_batch:
+                # A terminal failure stops this answer's remaining blocks, but
+                # must not strand them ahead of a later missing-link retry.
+                conn.execute(
+                    "UPDATE instagram_outbound_jobs SET status = 'FAILED', locked_until = NULL, "
+                    "last_error = 'prior_reel_terminal_failure', updated_at = CURRENT_TIMESTAMP "
+                    "WHERE inbound_job_id = ? AND id > ? AND status IN ('PENDING', 'RETRY')",
+                    (row["inbound_job_id"], job_id),
+                )
+            if success and reel_receipt:
+                self._insert_home_table_reel_receipt(conn, reel_receipt, job_id)
             conn.commit()
+
+    @staticmethod
+    def _insert_home_table_reel_receipt(conn, receipt, job_id=None):
+        conn.execute(
+            "INSERT OR IGNORE INTO home_table_reel_receipts "
+            "(recipient_id, delivery_id, url, outbound_job_id, inbound_message_id, meta_message_id) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (receipt["recipient_id"], receipt["delivery_id"], receipt["url"], job_id,
+             receipt.get("inbound_message_id"), receipt["meta_message_id"]),
+        )
+
+    def record_home_table_reel_receipt(self, receipt):
+        with self.get_connection() as conn:
+            self._insert_home_table_reel_receipt(conn, receipt)
+            conn.commit()
+
+    def home_table_reel_receipts(self, recipient_id, delivery_id):
+        with self.get_connection() as conn:
+            return [dict(row) for row in conn.execute(
+                "SELECT url, outbound_job_id, inbound_message_id, meta_message_id, confirmed_at "
+                "FROM home_table_reel_receipts WHERE recipient_id = ? AND delivery_id = ?",
+                (recipient_id, delivery_id),
+            )]
 
     def instagram_job_counts(self) -> Dict[str, Dict[str, int]]:
         with self.get_connection() as conn:

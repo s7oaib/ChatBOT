@@ -1739,12 +1739,28 @@ class _DurableInstagramTasks:
         self.background_tasks.add_task(_process_instagram_inbound_jobs, job_id=job_id)
 
 
+def _instagram_reel_accepted(result: Any) -> bool:
+    return bool(
+        isinstance(result, dict) and result.get("message_id")
+        and result.get("status") not in {"failed", "blocked", "queued", "no_content"}
+    )
+
+
 def _send_or_queue_instagram_reply(recipient_id: str, text: str, image_url=None, **kwargs) -> Dict[str, Any]:
     if not instagram_chatbot_control.is_sender_allowed(recipient_id, database=db):
         return {"status": "blocked", "reason": "chatbot_test_only"}
     context = _instagram_job_context.get()
     if context is None:
-        return send_instagram_reply(recipient_id, text, image_url=image_url, **kwargs)
+        delivery = kwargs.pop("_response_delivery", None)
+        result = send_instagram_reply(recipient_id, text, image_url=image_url, **kwargs)
+        if delivery and _instagram_reel_accepted(result):
+            db.record_home_table_reel_receipt({
+                **delivery, "recipient_id": recipient_id,
+                "inbound_message_id": kwargs.get("inbound_message_id"),
+                "meta_message_id": str(result["message_id"]),
+            })
+            _refresh_home_table_reel_completion(recipient_id, delivery["delivery_id"])
+        return result
     context["sequence"] += 1
     db.enqueue_instagram_outbound_job(
         context["job_id"], context["sequence"], recipient_id,
@@ -1763,21 +1779,37 @@ def _process_instagram_outbound_jobs(*, inbound_job_id: Optional[int] = None) ->
             if not instagram_chatbot_control.is_sender_allowed(job["recipient_id"], database=db):
                 # Suppress a previously queued bot reply rather than releasing
                 # it to customers after the operator has switched modes.
-                db.complete_instagram_outbound_job(int(job["id"]), success=True)
+                db.complete_instagram_outbound_job(int(job["id"]), success=True, error="chatbot_test_only")
                 continue
             payload = json.loads(job["payload"])
+            delivery = payload.pop("_response_delivery", None)
+            if delivery and delivery["url"] in _delivered_home_table_urls(job["recipient_id"], delivery["delivery_id"]):
+                db.complete_instagram_outbound_job(int(job["id"]), success=True, error="already_delivered")
+                _refresh_home_table_reel_completion(job["recipient_id"], delivery["delivery_id"])
+                continue
+            correlation = payload.get("inbound_message_id")
             result = send_instagram_reply(
                 job["recipient_id"], payload.pop("text"),
                 retry_count=max(0, int(job["attempts"]) - 1), **payload,
             )
-            if isinstance(result, dict) and result.get("status") == "failed":
+            if (isinstance(result, dict) and result.get("status") == "failed") or (
+                delivery and not _instagram_reel_accepted(result)
+            ):
+                result = result if isinstance(result, dict) else {}
                 db.complete_instagram_outbound_job(
                     int(job["id"]), success=False,
                     retryable=result.get("delivery_status") != "PERMANENT_RECIPIENT_FAILURE",
                     error=str(result.get("delivery_status") or "Meta send failed"),
+                    abandon_batch=bool(delivery),
                 )
                 return
-            db.complete_instagram_outbound_job(int(job["id"]), success=True)
+            receipt = {
+                **delivery, "recipient_id": job["recipient_id"],
+                "inbound_message_id": correlation, "meta_message_id": str(result["message_id"]),
+            } if delivery else None
+            db.complete_instagram_outbound_job(int(job["id"]), success=True, reel_receipt=receipt)
+            if delivery:
+                _refresh_home_table_reel_completion(job["recipient_id"], delivery["delivery_id"])
         except Exception as exc:
             db.complete_instagram_outbound_job(
                 int(job["id"]), success=False, error=type(exc).__name__,
@@ -2177,17 +2209,54 @@ def _public_url(path: str) -> str:
     return base + path if base else path
 
 
-def send_instagram_response_blocks(recipient_id: str, blocks: list, *, inbound_message_id: Optional[int] = None) -> None:
-    """Deliver one approved answer in its client-authored text/asset order."""
+def _delivered_home_table_urls(recipient_id: str, delivery_id: str) -> set:
+    return {row["url"] for row in db.home_table_reel_receipts(recipient_id, delivery_id)}
+
+
+def _persist_home_table_delivery(recipient_id: str) -> None:
+    # Unlike best-effort conversational memory, a delivery generation must be
+    # committed before enqueueing and persistence errors must reach the retry path.
+    if session_memory.persistence_enabled:
+        session = session_memory.get_session(recipient_id, "instagram")
+        session_memory._database().save_active_session(
+            recipient_id, "instagram", session, session["last_updated"]
+        )
+
+
+def _refresh_home_table_reel_completion(recipient_id: str, delivery_id: str) -> None:
     facts = session_memory.get_facts(recipient_id, "instagram")
-    home_table_links = []
+    # A delayed job must not complete a newer or expired conversation.
+    if facts.get("home_table_reel_delivery_id") != delivery_id:
+        return
+    facts["home_table_videos_sent"] = set(client_qa.HOME_TABLE_REEL_URLS).issubset(
+        _delivered_home_table_urls(recipient_id, delivery_id)
+    )
+    _persist_home_table_delivery(recipient_id)
+
+
+def send_instagram_response_blocks(recipient_id: str, blocks: list, *, inbound_message_id: Optional[int] = None) -> None:
+    """Deliver approved blocks in order; queue acceptance is not delivery."""
+    facts = session_memory.get_facts(recipient_id, "instagram")
     for index, block in enumerate(blocks):
+        delivery = None
         if block.get("kind") == "LINK":
-            if facts.get("home_table_videos_sent") and block.get("url") in client_qa.HOME_TABLE_REEL_URLS:
-                continue
+            url = block["url"]
+            if url in client_qa.HOME_TABLE_REEL_URLS:
+                if facts.get("home_table_videos_sent"):
+                    continue
+                if not facts.get("home_table_reel_delivery_id"):
+                    facts["home_table_reel_delivery_id"] = uuid.uuid4().hex
+                    _persist_home_table_delivery(recipient_id)
+                delivery = {
+                    "family": "HOME_TABLE_REELS", "delivery_id": facts["home_table_reel_delivery_id"],
+                    "url": url, "link_index": client_qa.HOME_TABLE_REEL_URLS.index(url) + 1,
+                }
+                if url in _delivered_home_table_urls(recipient_id, delivery["delivery_id"]):
+                    _refresh_home_table_reel_completion(recipient_id, delivery["delivery_id"])
+                    continue
             result = _send_or_queue_instagram_reply(
-                recipient_id, block["url"],
-                inbound_message_id=inbound_message_id, response_type="reply",
+                recipient_id, url, inbound_message_id=inbound_message_id, response_type="reply",
+                **({"_response_delivery": delivery} if delivery else {}),
             )
         elif block.get("kind") == "TEXT":
             result = _send_or_queue_instagram_reply(
@@ -2199,14 +2268,11 @@ def send_instagram_response_blocks(recipient_id: str, blocks: list, *, inbound_m
                 recipient_id, "", image_url=block.get("urls") or [],
                 inbound_message_id=inbound_message_id, response_type="reply",
             )
-        if isinstance(result, dict) and result.get("status") == "failed":
-            log.warning("Instagram approved response stopped after failed block %s (%s).", index + 1, block.get("kind"))
+        if (isinstance(result, dict) and result.get("status") in {"failed", "blocked"}) or (
+            delivery and not (_instagram_reel_accepted(result) or (isinstance(result, dict) and result.get("status") == "queued"))
+        ):
+            log.warning("Instagram approved response stopped after unsuccessful block %s (%s).", index + 1, block.get("kind"))
             break
-        if block.get("kind") == "LINK":
-            home_table_links.append(block["url"])
-            if tuple(home_table_links) == client_qa.HOME_TABLE_REEL_URLS:
-                facts["home_table_videos_sent"] = True
-                session_memory._persist(recipient_id, "instagram")
 
 
 def send_instagram_reply(
@@ -4595,6 +4661,92 @@ def get_instagram_outbound_audit(
         since=since,
     )
     return {"count": len(audits), "audits": audits}
+
+@app.get("/admin/home-table-reel-delivery")
+def get_home_table_reel_delivery(
+    recipient_id: str,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """Scoped diagnostics without customer text or raw sender identity."""
+    require_admin(x_admin_key, x_admin_pin)
+    stored = db.load_active_session(recipient_id, "instagram") or {}
+    facts = stored.get("facts", {})
+    delivery_id = facts.get("home_table_reel_delivery_id")
+    jobs = []
+    with db.get_connection() as conn:
+        rows = conn.execute(
+            "SELECT id, inbound_job_id, sequence_number, payload, status, attempts, last_error, created_at "
+            "FROM instagram_outbound_jobs WHERE recipient_id = ? ORDER BY id DESC LIMIT 200",
+            (recipient_id,),
+        ).fetchall()
+    for row in reversed(rows):
+        payload = json.loads(row["payload"])
+        if payload.get("text") not in client_qa.HOME_TABLE_REEL_URLS:
+            continue
+        jobs.append({key: row[key] for key in (
+            "id", "inbound_job_id", "sequence_number", "status", "attempts", "created_at"
+        )} | {
+            "url": payload["text"], "inbound_message_id": payload.get("inbound_message_id"),
+            "delivery": payload.get("_response_delivery"),
+            "blocked": row["last_error"] == "chatbot_test_only",
+        })
+    return {
+        "recipient_hash": hashlib.sha256(recipient_id.encode()).hexdigest()[:16],
+        "home_table_videos_sent": bool(facts.get("home_table_videos_sent")),
+        "delivery_id": delivery_id, "repair": facts.get("home_table_reel_repair"),
+        "receipts": db.home_table_reel_receipts(recipient_id, delivery_id) if delivery_id else [],
+        "jobs": jobs,
+    }
+
+
+@app.post("/admin/home-table-reel-delivery/repair")
+async def repair_legacy_home_table_reel_delivery(
+    request: Request,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """One-time, audited repair of an allowed tester's legacy queue-only flag."""
+    require_admin(x_admin_key, x_admin_pin)
+    body = await request.json()
+    recipient_id = str(body.get("recipient_id") or "").strip()
+    state = instagram_chatbot_control.get_state(database=db, strict=True)
+    if state["mode"] != instagram_chatbot_control.TEST_ONLY or not instagram_chatbot_control.is_sender_allowed(recipient_id, database=db):
+        raise HTTPException(409, "Repair requires a currently allowed TEST_ONLY tester")
+    # Refuse to interfere with work still in flight or overwrite a newer state.
+    with db.get_connection() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT payload FROM active_conversation_sessions WHERE user_id = ? AND channel = 'instagram'",
+            (recipient_id,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(409, "No persisted session to repair")
+        session = json.loads(row["payload"])
+        facts = session.get("facts", {})
+        if not facts.get("home_table_videos_sent") or facts.get("home_table_reel_delivery_id") or facts.get("home_table_reel_repair"):
+            raise HTTPException(409, "Only an unrepaired legacy completion flag may be repaired")
+        pending = conn.execute(
+            "SELECT payload FROM instagram_outbound_jobs WHERE recipient_id = ? "
+            "AND status IN ('PENDING', 'RETRY', 'SENDING')", (recipient_id,),
+        ).fetchall()
+        if any(json.loads(row["payload"]).get("text") in client_qa.HOME_TABLE_REEL_URLS for row in pending):
+            raise HTTPException(409, "Reel delivery is still in flight")
+        facts["home_table_videos_sent"] = False
+        facts["home_table_reel_delivery_id"] = uuid.uuid4().hex
+        facts["home_table_reel_repair"] = {"previous_value": True, "reason": "legacy_enqueue_completion", "actor": "authenticated_admin"}
+        conn.execute(
+            "UPDATE active_conversation_sessions SET payload = ? WHERE user_id = ? AND channel = 'instagram'",
+            (json.dumps(session, ensure_ascii=False), recipient_id),
+        )
+        instagram_chatbot_control._audit(
+            conn, "HOME_TABLE_REEL_COMPLETION_REPAIRED", "authenticated_admin",
+            previous=True, new=False, sender_id=recipient_id,
+        )
+        conn.commit()
+    session_memory._sessions.pop((recipient_id, "instagram"), None)
+    return {"repaired": True, "recipient_hash": hashlib.sha256(recipient_id.encode()).hexdigest()[:16]}
+
 
 @app.get("/admin/sessions")
 def get_sessions_list(
