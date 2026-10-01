@@ -27,6 +27,7 @@ function sourceResponseFields(prefix) {
  return {response_mode:mode, approved_qa_id:mode==='APPROVED_QA' ? document.getElementById(prefix+'ApprovedQaId')?.value || '' : null};
 }
 function setSourceResponseMode(prefix) {
+ if(!sourceResponseState[prefix]){initSourceResponse(prefix,sourceResponseFields(prefix));return;}
  const approved=sourceResponseFields(prefix).response_mode==='APPROVED_QA';
  document.getElementById(prefix+'QaFields').hidden=!approved;
  const ids={ig:['igTopicPicker','igSourceDescription','igTopicDescription','igMenuPicker'],igStory:['igStoryTopicPicker','igStorySourceDescription','igStoryMenuPicker'],igMedia:['igMediaTopic','igMediaDescription','igMediaMenu']}[prefix];

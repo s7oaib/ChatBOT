@@ -43,7 +43,7 @@ def _extract_admin_script() -> str:
     page = resp.text
     blocks = re.findall(r"<script>(.*?)</script>", page, re.DOTALL)
     assert blocks, "no inline script in the dashboard"
-    return max(blocks, key=len)
+    return max(blocks, key=len) + "\n" + next(block for block in blocks if "const sourceResponseState" in block)
 
 
 _HARNESS_PRELUDE = r"""
@@ -56,10 +56,11 @@ function makeFakeElement(id) {
         disabled: false, className: '', style: {}, dataset: {}, options: [], selectedOptions: [],
     };
     const noop = new Set(['addEventListener', 'removeEventListener', 'removeChild',
-        'scrollIntoView', 'click', 'focus', 'blur', 'remove']);
+        'scrollIntoView', 'click', 'focus', 'blur', 'remove', 'replaceChildren', 'append', 'add', 'toggleAttribute']);
     const target = { __id: id };
     return new Proxy(target, {
         get(t, prop) {
+            if (prop === 'closest') return () => makeFakeElement('parent:' + id);
             if (prop === 'classList') return { add() {}, remove() {}, toggle() {}, contains() { return false; } };
             if (prop === 'querySelectorAll') return () => [];
             if (prop === 'querySelector') return () => null;
@@ -94,11 +95,19 @@ global.document = {
     createElement(tag) { return makeFakeElement('created:' + tag); },
     createTextNode(text) { return { nodeType: 3, textContent: text }; },
     querySelectorAll() { return []; },
-    querySelector() { return null; },
+    querySelector(selector) {
+        const match = selector.match(/input\[name="([^"]+)"\](?:\[value="([^"]+)"\])?/);
+        if (!match) return null;
+        const id = match[1] + ':' + (match[2] || 'CUSTOM');
+        if (!_elements.has(id)) _elements.set(id, makeFakeElement(id));
+        const element = _elements.get(id); element.value = match[2] || 'CUSTOM';
+        return element;
+    },
     addEventListener() {},
     body: makeFakeElement('body'),
 };
 global.window = { addEventListener() {}, location: { origin: 'http://localhost' } };
+global.Option = function(text, value) { return {textContent:text, value}; };
 global.confirm = () => true;
 global.alert = () => {};
 
@@ -762,3 +771,16 @@ class TestStoryDeleteActions:
         assert result["noCredentialQuery"] is True
         assert result["stoppedWhenHidden"] is True
         assert result["sourceVisible"] == "webhook-story"
+
+
+def test_fresh_mapping_selector_loads_effective_qa_without_editing_existing_route():
+    result = _run_node("""
+        queueFetch('/admin/instagram-routes/approved-qa-options', 'GET', () => okResponse({records:[{qa_id:'home_table_details',question:'Home Table',answer:'Approved text',ordered_blocks:[]}]}));
+        setSourceResponseMode('ig');
+        setImmediate(() => console.log('RESULT::' + JSON.stringify({
+            qaIds: sourceResponseState.ig.records.map(record => record.qa_id),
+            disabled: document.getElementById('igApprovedQaId').disabled,
+        })));
+    """)
+    assert result['qaIds'] == ['home_table_details']
+    assert result['disabled'] is False
