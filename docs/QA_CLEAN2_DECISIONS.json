@@ -1,0 +1,2816 @@
+{
+  "baseline_sha": "925d84147d94830bd323b276f2a280a698ad9ec7",
+  "audit_source": "Recovered QA-CLEAN1-inventory.json, rechecked against current code and authenticated read-only production GET snapshots",
+  "prior_inventory_sha256": "8f182faefb4d172b7a259b7b596bd67e846c51664863bc245fd76ff882ae8216",
+  "production_snapshot_sha256": {
+    "/admin/approved-qa": "a5a63f5af855deb8f3e140da65bf29cde189428b0cde4ee9cae276c25ad68550",
+    "/admin/response-library?status=ALL&limit=500": "bdc2e036802f3c9b8de8e6dc7dc57110873573be1b6b2f474f7c63e58e6fbeb9",
+    "/admin/custom-qa?status=ALL&limit=500": "efadd9da38a12f84f21df6228d93628041f305f605eb5b67a949a2facb219ae1",
+    "/admin/chatbot-control": "85e4ddf1b0e440c6210a0972ee651bc03d2b7c29753ead33864926a850bb46ea",
+    "/admin/chatbot-control/test-accounts": "87a0ff5243fd991471d86c4308f31134983c4188ccf21cc515e825c23af59e1b",
+    "/admin/instagram-routes": "2d6a9509a1d3f451b408d732b29d6f80521e682b4104e1abae01b5da43136be8",
+    "/admin/weekly-savoury": "6bf85f77045173ec753cbbb06b4d56326bf6ceac22086494e7a884c1e7e6f34a",
+    "/admin/menu-catalogue": "7c5522aaa16b0f2441e8636ba96ee359d786bbbf9f612417661f9280f57fecae"
+  },
+  "approved_count": 23,
+  "legacy_count": 67,
+  "custom_count": 0,
+  "duplicate_candidate_count": 16,
+  "decision_counts": {
+    "KEEP_NOT_DUPLICATE": 50,
+    "KEEP_DEPENDENCY": 16,
+    "KEEP_NEEDS_REVIEW": 1
+  },
+  "records": [
+    {
+      "legacy_id": "aamar_mishti_collection",
+      "classification": "UNIQUE_CUSTOM",
+      "matching_approved_qa_ids": [],
+      "equivalence": null,
+      "runtime_dependencies": [],
+      "source_mapping_references": [],
+      "special_actions_assets": [
+        "Reviewed collection rows, current card, order state"
+      ],
+      "retirement_safe": false,
+      "decision": "KEEP_NOT_DUPLICATE",
+      "reason": "Outside the duplicate retirement scope; preserve unchanged.",
+      "current_status": "ACTIVE",
+      "replacement_statuses": {},
+      "prior_matcher_target_coverage": {
+        "hits": 0,
+        "total": 28
+      }
+    },
+    {
+      "legacy_id": "alacarte_prebooking_steps",
+      "classification": "SYSTEM_OR_GUARD",
+      "matching_approved_qa_ids": [
+        "alacarte_prebook",
+        "order_prebook"
+      ],
+      "equivalence": null,
+      "runtime_dependencies": [],
+      "source_mapping_references": [],
+      "special_actions_assets": [
+        "Order draft/session intake and stable QA route ID"
+      ],
+      "retirement_safe": false,
+      "decision": "KEEP_NOT_DUPLICATE",
+      "reason": "Outside the duplicate retirement scope; preserve unchanged.",
+      "current_status": "ACTIVE",
+      "replacement_statuses": {
+        "alacarte_prebook": "ACTIVE",
+        "order_prebook": "ACTIVE"
+      },
+      "prior_matcher_target_coverage": {
+        "hits": 20,
+        "total": 23
+      }
+    },
+    {
+      "legacy_id": "artisanal_differentiation",
+      "classification": "UNIQUE_CUSTOM",
+      "matching_approved_qa_ids": [],
+      "equivalence": null,
+      "runtime_dependencies": [],
+      "source_mapping_references": [],
+      "special_actions_assets": [
+        "Legacy intent tier"
+      ],
+      "retirement_safe": false,
+      "decision": "KEEP_NOT_DUPLICATE",
+      "reason": "Outside the duplicate retirement scope; preserve unchanged.",
+      "current_status": "ACTIVE",
+      "replacement_statuses": {},
+      "prior_matcher_target_coverage": {
+        "hits": 0,
+        "total": 14
+      }
+    },
+    {
+      "legacy_id": "bengali_home_table_details",
+      "classification": "BUSINESS_DUPLICATE_SEMANTIC",
+      "matching_approved_qa_ids": [
+        "home_table_details"
+      ],
+      "equivalence": "SEMANTIC",
+      "runtime_dependencies": [
+        {
+          "path": "camellia/app.py",
+          "line": 942,
+          "code": "\"bengali_home_table_details\","
+        },
+        {
+          "path": "camellia/bootstrap.py",
+          "line": 52,
+          "code": "\"bengali_home_table_details\","
+        },
+        {
+          "path": "camellia/content_integrity.py",
+          "line": 86,
+          "code": "\"bengali_home_table_details\": ("
+        },
+        {
+          "path": "camellia/content_integrity.py",
+          "line": 150,
+          "code": "\"bengali_home_table_details\": ("
+        },
+        {
+          "path": "camellia/content_integrity.py",
+          "line": 260,
+          "code": "\"bengali_home_table_details\","
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 412,
+          "code": "\"home_table_details\": \"bengali_home_table_details\","
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 1229,
+          "code": "\"template_id\": \"bengali_home_table_details\","
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 3698,
+          "code": "if not mapped_qa_match and entry.qa_id == \"home_table_price\" and facts.get(\"last_answer_id\") == \"bengali_home_table_details\":"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 3965,
+          "code": "home_table_template_id = \"bengali_home_table_details\""
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 3969,
+          "code": "home_table_template_id = \"bengali_home_table_details\""
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 4313,
+          "code": "else \"bengali_home_table_details\""
+        }
+      ],
+      "source_mapping_references": [
+        {
+          "routing_id": 10,
+          "response_mode": "CUSTOM",
+          "topic_id": "bengali_home_table"
+        },
+        {
+          "routing_id": 9,
+          "response_mode": "CUSTOM",
+          "topic_id": "bengali_home_table"
+        }
+      ],
+      "special_actions_assets": [
+        "Stable ID, Home Table context/content integrity/Reels"
+      ],
+      "retirement_safe": false,
+      "decision": "KEEP_DEPENDENCY",
+      "reason": "Required live Stable ID, Home Table context/content integrity/Reels. Removing the ID would remove current fallback/routing behavior; no route migration is authorized.",
+      "current_status": "ACTIVE",
+      "replacement_statuses": {
+        "home_table_details": "ACTIVE"
+      },
+      "prior_matcher_target_coverage": {
+        "hits": 3,
+        "total": 9
+      }
+    },
+    {
+      "legacy_id": "bengali_home_table_payment",
+      "classification": "BUSINESS_DUPLICATE_EXACT",
+      "matching_approved_qa_ids": [
+        "home_table_payment"
+      ],
+      "equivalence": "EXACT",
+      "runtime_dependencies": [
+        {
+          "path": "camellia/app.py",
+          "line": 944,
+          "code": "\"bengali_home_table_payment\","
+        },
+        {
+          "path": "camellia/bootstrap.py",
+          "line": 54,
+          "code": "\"bengali_home_table_payment\","
+        },
+        {
+          "path": "camellia/content_integrity.py",
+          "line": 94,
+          "code": "\"bengali_home_table_payment\": ("
+        },
+        {
+          "path": "camellia/content_integrity.py",
+          "line": 174,
+          "code": "\"bengali_home_table_payment\": ("
+        },
+        {
+          "path": "camellia/content_integrity.py",
+          "line": 262,
+          "code": "\"bengali_home_table_payment\","
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 414,
+          "code": "\"home_table_payment\": \"bengali_home_table_payment\","
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 3963,
+          "code": "home_table_template_id = \"bengali_home_table_payment\""
+        }
+      ],
+      "source_mapping_references": [
+        {
+          "routing_id": 10,
+          "response_mode": "CUSTOM",
+          "topic_id": "bengali_home_table"
+        },
+        {
+          "routing_id": 9,
+          "response_mode": "CUSTOM",
+          "topic_id": "bengali_home_table"
+        }
+      ],
+      "special_actions_assets": [
+        "Stable QA route ID and Home Table payment context"
+      ],
+      "retirement_safe": false,
+      "decision": "KEEP_DEPENDENCY",
+      "reason": "Required live Stable QA route ID and Home Table payment context. Removing the ID would remove current fallback/routing behavior; no route migration is authorized.",
+      "current_status": "ACTIVE",
+      "replacement_statuses": {
+        "home_table_payment": "ACTIVE"
+      },
+      "prior_matcher_target_coverage": {
+        "hits": 5,
+        "total": 5
+      }
+    },
+    {
+      "legacy_id": "bengali_home_table_pricing",
+      "classification": "BUSINESS_DUPLICATE_SEMANTIC",
+      "matching_approved_qa_ids": [
+        "home_table_price"
+      ],
+      "equivalence": "SEMANTIC",
+      "runtime_dependencies": [
+        {
+          "path": "camellia/app.py",
+          "line": 943,
+          "code": "\"bengali_home_table_pricing\","
+        },
+        {
+          "path": "camellia/bootstrap.py",
+          "line": 53,
+          "code": "\"bengali_home_table_pricing\","
+        },
+        {
+          "path": "camellia/content_integrity.py",
+          "line": 90,
+          "code": "\"bengali_home_table_pricing\": ("
+        },
+        {
+          "path": "camellia/content_integrity.py",
+          "line": 163,
+          "code": "\"bengali_home_table_pricing\": ("
+        },
+        {
+          "path": "camellia/content_integrity.py",
+          "line": 261,
+          "code": "\"bengali_home_table_pricing\","
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 413,
+          "code": "\"home_table_price\": \"bengali_home_table_pricing\","
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 3967,
+          "code": "home_table_template_id = \"bengali_home_table_pricing\""
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 4311,
+          "code": "\"bengali_home_table_pricing\""
+        }
+      ],
+      "source_mapping_references": [
+        {
+          "routing_id": 10,
+          "response_mode": "CUSTOM",
+          "topic_id": "bengali_home_table"
+        },
+        {
+          "routing_id": 9,
+          "response_mode": "CUSTOM",
+          "topic_id": "bengali_home_table"
+        }
+      ],
+      "special_actions_assets": [
+        "Stable ID; contextual continuation/Reel sequencing"
+      ],
+      "retirement_safe": false,
+      "decision": "KEEP_DEPENDENCY",
+      "reason": "Required live Stable ID; contextual continuation/Reel sequencing. Removing the ID would remove current fallback/routing behavior; no route migration is authorized.",
+      "current_status": "ACTIVE",
+      "replacement_statuses": {
+        "home_table_price": "ACTIVE"
+      },
+      "prior_matcher_target_coverage": {
+        "hits": 3,
+        "total": 7
+      }
+    },
+    {
+      "legacy_id": "bento_details",
+      "classification": "BUSINESS_DUPLICATE_SEMANTIC",
+      "matching_approved_qa_ids": [
+        "bento_details_client",
+        "bento_price_client"
+      ],
+      "equivalence": "SEMANTIC",
+      "runtime_dependencies": [
+        {
+          "path": "camellia/approved_qa_schema.py",
+          "line": 23,
+          "code": "for qa_id in (\"bento_details_client\", \"bento_price_client\"):"
+        },
+        {
+          "path": "camellia/client_qa.py",
+          "line": 79,
+          "code": "(\"bento_details_client\", \"tell me about BENGALI BENTO\", \"bento\"),"
+        },
+        {
+          "path": "camellia/client_qa.py",
+          "line": 219,
+          "code": "if qa_id in {\"bento_details_client\", \"bento_price_client\"} and re.search("
+        },
+        {
+          "path": "camellia/client_qa.py",
+          "line": 314,
+          "code": "return result(\"bento_price_client\" if re.search(r\"\\b(?:price|cost|how\\s+much|rate|pirce)\\b\", text, re.I) else \"bento_details_client\")"
+        },
+        {
+          "path": "camellia/client_qa.py",
+          "line": 392,
+          "code": "\"bento_details_client\": (\"tell me about bento\", \"what is bengali bento\", \"bento details please\", \"explain the meal box\"),"
+        },
+        {
+          "path": "camellia/client_qa.py",
+          "line": 486,
+          "code": "\"bento\": (\"bento_price_client\", \"bento_details_client\", None),"
+        },
+        {
+          "path": "camellia/content_integrity.py",
+          "line": 491,
+          "code": "\"bento_details\": bento_text,"
+        },
+        {
+          "path": "camellia/grounded_answers.py",
+          "line": 12,
+          "code": "BENTO_SOURCE = \"bento_details_client\""
+        },
+        {
+          "path": "camellia/instagram_routing.py",
+          "line": 619,
+          "code": "\"bento\": \"bento_details\","
+        },
+        {
+          "path": "camellia/knowledge.py",
+          "line": 42,
+          "code": "\"bento\": {\"source\": \"data/qa_templates.json > bento_details\"},"
+        },
+        {
+          "path": "camellia/knowledge.py",
+          "line": 163,
+          "code": "\"bento_details\", (SEND,), _product(\"bento\", \"bengali bento\"), priority=20),"
+        },
+        {
+          "path": "camellia/knowledge.py",
+          "line": 204,
+          "code": "\"bento_details\", (PRICE,), _product(\"bento\"), priority=20),"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 421,
+          "code": "\"bento_details_client\": \"bento_details\","
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 422,
+          "code": "\"bento_price_client\": \"bento_details\","
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 1162,
+          "code": "\"bento_details\": \"bento\","
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 1174,
+          "code": "# menus, and every bento-worded hint lands on the bento_details guard, which is"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 1219,
+          "code": "\"template_id\": \"bento_details\","
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 1420,
+          "code": "if template_id == \"bento_details\":"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 1590,
+          "code": "template = self._template_by_id(\"bento_details\") or {}"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 1592,
+          "code": "\"bento_details\", template.get(\"response\") or \"\","
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 1595,
+          "code": "return text, True, \"bento_details\", images"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 2836,
+          "code": "bento_authority = client_qa.effective_entry(\"bento_details_client\")"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 2838,
+          "code": "\"bento_details_client\", \"bento_price_client\", \"best_time_to_book\","
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 3343,
+          "code": "bento_template_for_precedence = self._template_by_id(\"bento_details\") or {}"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 3652,
+          "code": "if entry.qa_id in {\"bento_details_client\", \"bento_price_client\"}:"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 4067,
+          "code": "bento_template = self._template_by_id(\"bento_details\") or {}"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 4074,
+          "code": "facts[\"last_knowledge_ids\"] = [\"approved:bento_details\"]"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 4080,
+          "code": "facts[\"last_source_ref\"] = \"qa_templates.json#bento_details\""
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 4214,
+          "code": "template_id = \"bento_details\""
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 4980,
+          "code": "# pricing is withheld by the bento_details guard pending the client"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 4995,
+          "code": "template = self._template_by_id(\"bento_details\") or {}"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 4997,
+          "code": "\"bento_details\", template.get(\"response\") or self._generic_fallback(),"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 5001,
+          "code": "return response_text, True, \"bento_details\", images"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 5154,
+          "code": "\"bento_details\""
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 5165,
+          "code": "\"recall_order_flavour\", \"savoury_food_intro\", \"bento_details\","
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 5396,
+          "code": "elif tmpl_id == \"bento_details\" and re.search(r'\\b(bento|bengali bento|bento box|bento details|bento tiers|bento prices|bento pricing|bento meal|bintow)\\b', lowered_text):"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 6355,
+          "code": "elif template_id in [\"savoury_food_intro\", \"sondesh_crosssell_savoury\", \"bento_details\"]:"
+        },
+        {
+          "path": "scripts/generalization_benchmark_v3.py",
+          "line": 633,
+          "code": "\"weekly_menu_nonveg\", \"bento_details\", \"know_more\","
+        }
+      ],
+      "source_mapping_references": [],
+      "special_actions_assets": [
+        "Tier-1 template, weekly menu card, Bento context"
+      ],
+      "retirement_safe": false,
+      "decision": "KEEP_DEPENDENCY",
+      "reason": "Required live Tier-1 template, weekly menu card, Bento context. Removing the ID would remove current fallback/routing behavior; no route migration is authorized.",
+      "current_status": "ACTIVE",
+      "replacement_statuses": {
+        "bento_details_client": "ACTIVE",
+        "bento_price_client": "ACTIVE"
+      },
+      "prior_matcher_target_coverage": {
+        "hits": 21,
+        "total": 25
+      }
+    },
+    {
+      "legacy_id": "bot_capabilities",
+      "classification": "SYSTEM_OR_GUARD",
+      "matching_approved_qa_ids": [],
+      "equivalence": null,
+      "runtime_dependencies": [],
+      "source_mapping_references": [],
+      "special_actions_assets": [
+        "Assistant capability/help routing"
+      ],
+      "retirement_safe": false,
+      "decision": "KEEP_NOT_DUPLICATE",
+      "reason": "Outside the duplicate retirement scope; preserve unchanged.",
+      "current_status": "ACTIVE",
+      "replacement_statuses": {},
+      "prior_matcher_target_coverage": {
+        "hits": 0,
+        "total": 20
+      }
+    },
+    {
+      "legacy_id": "bot_identity",
+      "classification": "SYSTEM_OR_GUARD",
+      "matching_approved_qa_ids": [],
+      "equivalence": null,
+      "runtime_dependencies": [],
+      "source_mapping_references": [],
+      "special_actions_assets": [
+        "Bot identity disclosure routing"
+      ],
+      "retirement_safe": false,
+      "decision": "KEEP_NOT_DUPLICATE",
+      "reason": "Outside the duplicate retirement scope; preserve unchanged.",
+      "current_status": "ACTIVE",
+      "replacement_statuses": {},
+      "prior_matcher_target_coverage": {
+        "hits": 0,
+        "total": 23
+      }
+    },
+    {
+      "legacy_id": "chicken_kosha_price",
+      "classification": "BUSINESS_DUPLICATE_EXACT",
+      "matching_approved_qa_ids": [
+        "chicken_kosha_price_client"
+      ],
+      "equivalence": "EXACT",
+      "runtime_dependencies": [
+        {
+          "path": "camellia/client_qa.py",
+          "line": 83,
+          "code": "(\"chicken_kosha_price_client\", \"WHATS THE PRICE OF CHICKEN KOSHA\", \"savoury\"),"
+        },
+        {
+          "path": "camellia/client_qa.py",
+          "line": 316,
+          "code": "return result(\"chicken_kosha_price_client\")"
+        },
+        {
+          "path": "camellia/client_qa.py",
+          "line": 395,
+          "code": "\"chicken_kosha_price_client\": (\"chicken kosha price\", \"how much is chicken kosha\", \"chicken kosha rate\", \"cost of chicken kosha\"),"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 140,
+          "code": "def _approved_chicken_kosha_price_question(message: str, facts: Dict[str, Any]) -> bool:"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 148,
+          "code": "return bool(candidate and candidate.entry.qa_id == \"chicken_kosha_price_client\")"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 425,
+          "code": "\"chicken_kosha_price_client\": \"chicken_kosha_price\","
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 1830,
+          "code": "special_template_ids.append(\"chicken_kosha_price\")"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 2844,
+          "code": "and not _approved_chicken_kosha_price_question(user_message, facts)"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 3221,
+          "code": "if channel == \"instagram\" and not stable_primary_answer and not _approved_chicken_kosha_price_question(user_message, facts):"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 5171,
+          "code": "\"pricing_value_context\", \"chicken_kosha_price\","
+        }
+      ],
+      "source_mapping_references": [],
+      "special_actions_assets": [
+        "Stable QA ID, weekly menu plus Bento media path"
+      ],
+      "retirement_safe": false,
+      "decision": "KEEP_DEPENDENCY",
+      "reason": "Required live Stable QA ID, weekly menu plus Bento media path. Removing the ID would remove current fallback/routing behavior; no route migration is authorized.",
+      "current_status": "ACTIVE",
+      "replacement_statuses": {
+        "chicken_kosha_price_client": "ACTIVE"
+      },
+      "prior_matcher_target_coverage": {
+        "hits": 4,
+        "total": 4
+      }
+    },
+    {
+      "legacy_id": "combo_bento",
+      "classification": "NEEDS_REVIEW",
+      "matching_approved_qa_ids": [
+        "bento_details_client",
+        "bento_price_client"
+      ],
+      "equivalence": null,
+      "runtime_dependencies": [
+        {
+          "path": "camellia/content_integrity.py",
+          "line": 490,
+          "code": "\"combo_bento\": bento_text,"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 1161,
+          "code": "\"combo_bento\": \"savoury\","
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 5162,
+          "code": "\"combo_bento\", \"delivery_area\", \"delivery_out_of_area\", \"delivery_time\","
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 5360,
+          "code": "elif tmpl_id == \"combo_bento\" and any(b in lowered_text for b in [\"bento\", \"combo\"]):"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 6362,
+          "code": "elif template_id in [\"weekly_menu_veg\", \"weekly_menu_nonveg\", \"combo_bento\"]:"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 6366,
+          "code": "\"combo_bento\": \"bento\","
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 6373,
+          "code": "if template_id != \"combo_bento\" and (self._weekly_menu_expired() or not current_weekly_img):"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 6376,
+          "code": "target_images = current_menu_image(\"bento\") if template_id == \"combo_bento\" else current_weekly_img"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 6439,
+          "code": "elif template_id == \"combo_bento\":"
+        }
+      ],
+      "source_mapping_references": [],
+      "special_actions_assets": [
+        "Live menu renderer, deleted-menu guard and Bento image"
+      ],
+      "retirement_safe": false,
+      "decision": "KEEP_NEEDS_REVIEW",
+      "reason": "Price conflict and dynamic menu dependency; owner explicitly requires no change.",
+      "current_status": "ACTIVE",
+      "replacement_statuses": {
+        "bento_details_client": "ACTIVE",
+        "bento_price_client": "ACTIVE"
+      },
+      "prior_matcher_target_coverage": {
+        "hits": 14,
+        "total": 16
+      }
+    },
+    {
+      "legacy_id": "contact_social",
+      "classification": "SYSTEM_OR_GUARD",
+      "matching_approved_qa_ids": [],
+      "equivalence": null,
+      "runtime_dependencies": [],
+      "source_mapping_references": [],
+      "special_actions_assets": [
+        "escalate=true; manual WhatsApp support"
+      ],
+      "retirement_safe": false,
+      "decision": "KEEP_NOT_DUPLICATE",
+      "reason": "Outside the duplicate retirement scope; preserve unchanged.",
+      "current_status": "ACTIVE",
+      "replacement_statuses": {},
+      "prior_matcher_target_coverage": {
+        "hits": 0,
+        "total": 4
+      }
+    },
+    {
+      "legacy_id": "delivery_area",
+      "classification": "SYSTEM_OR_GUARD",
+      "matching_approved_qa_ids": [],
+      "equivalence": null,
+      "runtime_dependencies": [],
+      "source_mapping_references": [],
+      "special_actions_assets": [
+        "Area validation, session area confirmation"
+      ],
+      "retirement_safe": false,
+      "decision": "KEEP_NOT_DUPLICATE",
+      "reason": "Outside the duplicate retirement scope; preserve unchanged.",
+      "current_status": "ACTIVE",
+      "replacement_statuses": {},
+      "prior_matcher_target_coverage": {
+        "hits": 0,
+        "total": 34
+      }
+    },
+    {
+      "legacy_id": "delivery_out_of_area",
+      "classification": "BUSINESS_DUPLICATE_SEMANTIC",
+      "matching_approved_qa_ids": [
+        "delivery_out_of_area_client"
+      ],
+      "equivalence": "SEMANTIC",
+      "runtime_dependencies": [
+        {
+          "path": "camellia/client_qa.py",
+          "line": 88,
+          "code": "(\"delivery_out_of_area_client\", \"Do you deliver to xyz city? ( any city other than delhi gurgaon faridabad ghaziabad noida, kolkata)\", \"delivery\"),"
+        },
+        {
+          "path": "camellia/client_qa.py",
+          "line": 306,
+          "code": "return result(\"delivery_out_of_area_client\")"
+        },
+        {
+          "path": "camellia/client_qa.py",
+          "line": 401,
+          "code": "\"delivery_out_of_area_client\": (\"delivery to mumbai\", \"shipping to bangalore\", \"can you send to chennai\", \"do you deliver outside ncr\"),"
+        },
+        {
+          "path": "camellia/content_integrity.py",
+          "line": 102,
+          "code": "\"delivery_out_of_area\": ("
+        },
+        {
+          "path": "camellia/content_integrity.py",
+          "line": 188,
+          "code": "\"delivery_out_of_area\": ("
+        },
+        {
+          "path": "camellia/knowledge.py",
+          "line": 43,
+          "code": "\"delivery\": {\"source\": \"data/qa_templates.json > delivery_area / delivery_out_of_area\"},"
+        },
+        {
+          "path": "camellia/knowledge.py",
+          "line": 400,
+          "code": "template_id = \"delivery_out_of_area\" if serviceable_location is False else \"delivery_area\""
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 430,
+          "code": "\"delivery_out_of_area_client\": \"delivery_out_of_area\","
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 1029,
+          "code": "# keyword for delivery_out_of_area's own triggers to catch, so it fell to"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 4092,
+          "code": "template = self._template_by_id(\"delivery_out_of_area\") or {}"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 4094,
+          "code": "facts[\"last_route_source\"] = \"canonical_delivery_out_of_area\""
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 4096,
+          "code": "facts[\"last_knowledge_ids\"] = [\"approved:delivery_out_of_area\"]"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 4103,
+          "code": "return response_text, True, \"delivery_out_of_area\", None"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 4549,
+          "code": "if template.get(\"id\") == \"delivery_out_of_area\"),"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 4553,
+          "code": "template_id = \"delivery_out_of_area\""
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 4784,
+          "code": "tmpl = self._template_by_id(\"delivery_out_of_area\")"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 4790,
+          "code": "return response_text, True, \"delivery_out_of_area\", None"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 5162,
+          "code": "\"combo_bento\", \"delivery_area\", \"delivery_out_of_area\", \"delivery_time\","
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 5335,
+          "code": "elif tmpl_id == \"delivery_out_of_area\" and ("
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 5349,
+          "code": "elif tmpl_id == \"delivery_out_of_area\" and any("
+        }
+      ],
+      "source_mapping_references": [],
+      "special_actions_assets": [
+        "City recognition, stable QA route ID"
+      ],
+      "retirement_safe": false,
+      "decision": "KEEP_DEPENDENCY",
+      "reason": "Required live City recognition, stable QA route ID. Removing the ID would remove current fallback/routing behavior; no route migration is authorized.",
+      "current_status": "ACTIVE",
+      "replacement_statuses": {
+        "delivery_out_of_area_client": "ACTIVE"
+      },
+      "prior_matcher_target_coverage": {
+        "hits": 10,
+        "total": 48
+      }
+    },
+    {
+      "legacy_id": "delivery_time",
+      "classification": "SYSTEM_OR_GUARD",
+      "matching_approved_qa_ids": [],
+      "equivalence": null,
+      "runtime_dependencies": [],
+      "source_mapping_references": [],
+      "special_actions_assets": [
+        "Dispatch disambiguation/support helper"
+      ],
+      "retirement_safe": false,
+      "decision": "KEEP_NOT_DUPLICATE",
+      "reason": "Outside the duplicate retirement scope; preserve unchanged.",
+      "current_status": "ACTIVE",
+      "replacement_statuses": {},
+      "prior_matcher_target_coverage": {
+        "hits": 0,
+        "total": 30
+      }
+    },
+    {
+      "legacy_id": "freshness_ingredients",
+      "classification": "SYSTEM_OR_GUARD",
+      "matching_approved_qa_ids": [],
+      "equivalence": null,
+      "runtime_dependencies": [],
+      "source_mapping_references": [],
+      "special_actions_assets": [
+        "Ingredient confirmation helper"
+      ],
+      "retirement_safe": false,
+      "decision": "KEEP_NOT_DUPLICATE",
+      "reason": "Outside the duplicate retirement scope; preserve unchanged.",
+      "current_status": "ACTIVE",
+      "replacement_statuses": {},
+      "prior_matcher_target_coverage": {
+        "hits": 0,
+        "total": 18
+      }
+    },
+    {
+      "legacy_id": "greeting",
+      "classification": "CONVERSATIONAL",
+      "matching_approved_qa_ids": [],
+      "equivalence": null,
+      "runtime_dependencies": [],
+      "source_mapping_references": [],
+      "special_actions_assets": [
+        "Response bank/Instagram canonical greeting/rotation"
+      ],
+      "retirement_safe": false,
+      "decision": "KEEP_NOT_DUPLICATE",
+      "reason": "Outside the duplicate retirement scope; preserve unchanged.",
+      "current_status": "ACTIVE",
+      "replacement_statuses": {},
+      "prior_matcher_target_coverage": {
+        "hits": 0,
+        "total": 6
+      }
+    },
+    {
+      "legacy_id": "GUARD_allergen_nutfree_glutenfree",
+      "classification": "SYSTEM_OR_GUARD",
+      "matching_approved_qa_ids": [],
+      "equivalence": null,
+      "runtime_dependencies": [],
+      "source_mapping_references": [],
+      "special_actions_assets": [
+        "Allergen/nut/gluten guard and protected matching"
+      ],
+      "retirement_safe": false,
+      "decision": "KEEP_NOT_DUPLICATE",
+      "reason": "Outside the duplicate retirement scope; preserve unchanged.",
+      "current_status": "ACTIVE",
+      "replacement_statuses": {},
+      "prior_matcher_target_coverage": {
+        "hits": 0,
+        "total": 40
+      }
+    },
+    {
+      "legacy_id": "GUARD_collection_differentiation",
+      "classification": "SYSTEM_OR_GUARD",
+      "matching_approved_qa_ids": [],
+      "equivalence": null,
+      "runtime_dependencies": [],
+      "source_mapping_references": [],
+      "special_actions_assets": [
+        "Tier-1 comparison guard"
+      ],
+      "retirement_safe": false,
+      "decision": "KEEP_NOT_DUPLICATE",
+      "reason": "Outside the duplicate retirement scope; preserve unchanged.",
+      "current_status": "ACTIVE",
+      "replacement_statuses": {},
+      "prior_matcher_target_coverage": {
+        "hits": 0,
+        "total": 12
+      }
+    },
+    {
+      "legacy_id": "GUARD_customization_flavour_mixing",
+      "classification": "SYSTEM_OR_GUARD",
+      "matching_approved_qa_ids": [],
+      "equivalence": null,
+      "runtime_dependencies": [],
+      "source_mapping_references": [],
+      "special_actions_assets": [
+        "escalate=true; empty answer forces handoff"
+      ],
+      "retirement_safe": false,
+      "decision": "KEEP_NOT_DUPLICATE",
+      "reason": "Outside the duplicate retirement scope; preserve unchanged.",
+      "current_status": "ACTIVE",
+      "replacement_statuses": {},
+      "prior_matcher_target_coverage": {
+        "hits": 0,
+        "total": 22
+      }
+    },
+    {
+      "legacy_id": "GUARD_dietary_suitability",
+      "classification": "SYSTEM_OR_GUARD",
+      "matching_approved_qa_ids": [],
+      "equivalence": null,
+      "runtime_dependencies": [],
+      "source_mapping_references": [],
+      "special_actions_assets": [
+        "Vegan/vegetarian/eggless/dietary safety guard"
+      ],
+      "retirement_safe": false,
+      "decision": "KEEP_NOT_DUPLICATE",
+      "reason": "Outside the duplicate retirement scope; preserve unchanged.",
+      "current_status": "ACTIVE",
+      "replacement_statuses": {},
+      "prior_matcher_target_coverage": {
+        "hits": 0,
+        "total": 43
+      }
+    },
+    {
+      "legacy_id": "GUARD_halal_ingredients_oil",
+      "classification": "SYSTEM_OR_GUARD",
+      "matching_approved_qa_ids": [],
+      "equivalence": null,
+      "runtime_dependencies": [],
+      "source_mapping_references": [],
+      "special_actions_assets": [
+        "Tier-1 halal/ingredients/oil guard"
+      ],
+      "retirement_safe": false,
+      "decision": "KEEP_NOT_DUPLICATE",
+      "reason": "Outside the duplicate retirement scope; preserve unchanged.",
+      "current_status": "ACTIVE",
+      "replacement_statuses": {},
+      "prior_matcher_target_coverage": {
+        "hits": 0,
+        "total": 20
+      }
+    },
+    {
+      "legacy_id": "GUARD_payment_method",
+      "classification": "SYSTEM_OR_GUARD",
+      "matching_approved_qa_ids": [
+        "general_payment_client"
+      ],
+      "equivalence": null,
+      "runtime_dependencies": [],
+      "source_mapping_references": [],
+      "special_actions_assets": [
+        "Tier-1 payment/COD guard; stable QA route ID"
+      ],
+      "retirement_safe": false,
+      "decision": "KEEP_NOT_DUPLICATE",
+      "reason": "Outside the duplicate retirement scope; preserve unchanged.",
+      "current_status": "ACTIVE",
+      "replacement_statuses": {
+        "general_payment_client": "ACTIVE"
+      },
+      "prior_matcher_target_coverage": {
+        "hits": 10,
+        "total": 27
+      }
+    },
+    {
+      "legacy_id": "GUARD_pickup_address_hours",
+      "classification": "SYSTEM_OR_GUARD",
+      "matching_approved_qa_ids": [],
+      "equivalence": null,
+      "runtime_dependencies": [],
+      "source_mapping_references": [],
+      "special_actions_assets": [
+        "Explicit pickup/address branch and Tier-1 guard"
+      ],
+      "retirement_safe": false,
+      "decision": "KEEP_NOT_DUPLICATE",
+      "reason": "Outside the duplicate retirement scope; preserve unchanged.",
+      "current_status": "ACTIVE",
+      "replacement_statuses": {},
+      "prior_matcher_target_coverage": {
+        "hits": 0,
+        "total": 25
+      }
+    },
+    {
+      "legacy_id": "GUARD_shelf_life_storage",
+      "classification": "SYSTEM_OR_GUARD",
+      "matching_approved_qa_ids": [],
+      "equivalence": null,
+      "runtime_dependencies": [],
+      "source_mapping_references": [],
+      "special_actions_assets": [
+        "Storage/Jolbhora exception guard"
+      ],
+      "retirement_safe": false,
+      "decision": "KEEP_NOT_DUPLICATE",
+      "reason": "Outside the duplicate retirement scope; preserve unchanged.",
+      "current_status": "ACTIVE",
+      "replacement_statuses": {},
+      "prior_matcher_target_coverage": {
+        "hits": 0,
+        "total": 22
+      }
+    },
+    {
+      "legacy_id": "GUARD_staff_names_manager_contact",
+      "classification": "SYSTEM_OR_GUARD",
+      "matching_approved_qa_ids": [],
+      "equivalence": null,
+      "runtime_dependencies": [],
+      "source_mapping_references": [],
+      "special_actions_assets": [
+        "Protected staff/owner/contact intent handling"
+      ],
+      "retirement_safe": false,
+      "decision": "KEEP_NOT_DUPLICATE",
+      "reason": "Outside the duplicate retirement scope; preserve unchanged.",
+      "current_status": "ACTIVE",
+      "replacement_statuses": {},
+      "prior_matcher_target_coverage": {
+        "hits": 0,
+        "total": 41
+      }
+    },
+    {
+      "legacy_id": "how_to_order",
+      "classification": "SYSTEM_OR_GUARD",
+      "matching_approved_qa_ids": [
+        "order_prebook"
+      ],
+      "equivalence": null,
+      "runtime_dependencies": [],
+      "source_mapping_references": [],
+      "special_actions_assets": [
+        "Order intake/session draft helper"
+      ],
+      "retirement_safe": false,
+      "decision": "KEEP_NOT_DUPLICATE",
+      "reason": "Outside the duplicate retirement scope; preserve unchanged.",
+      "current_status": "ACTIVE",
+      "replacement_statuses": {
+        "order_prebook": "ACTIVE"
+      },
+      "prior_matcher_target_coverage": {
+        "hits": 6,
+        "total": 8
+      }
+    },
+    {
+      "legacy_id": "jolbhora",
+      "classification": "UNIQUE_CUSTOM",
+      "matching_approved_qa_ids": [],
+      "equivalence": null,
+      "runtime_dependencies": [],
+      "source_mapping_references": [],
+      "special_actions_assets": [
+        "Product context, price/pack calculation, collection cards"
+      ],
+      "retirement_safe": false,
+      "decision": "KEEP_NOT_DUPLICATE",
+      "reason": "Outside the duplicate retirement scope; preserve unchanged.",
+      "current_status": "ACTIVE",
+      "replacement_statuses": {},
+      "prior_matcher_target_coverage": {
+        "hits": 0,
+        "total": 12
+      }
+    },
+    {
+      "legacy_id": "jolbhora_talgash_details",
+      "classification": "UNIQUE_CUSTOM",
+      "matching_approved_qa_ids": [],
+      "equivalence": null,
+      "runtime_dependencies": [],
+      "source_mapping_references": [],
+      "special_actions_assets": [
+        "Product-specific formatter and menu cards"
+      ],
+      "retirement_safe": false,
+      "decision": "KEEP_NOT_DUPLICATE",
+      "reason": "Outside the duplicate retirement scope; preserve unchanged.",
+      "current_status": "ACTIVE",
+      "replacement_statuses": {},
+      "prior_matcher_target_coverage": {
+        "hits": 0,
+        "total": 10
+      }
+    },
+    {
+      "legacy_id": "kanchagolla",
+      "classification": "UNIQUE_CUSTOM",
+      "matching_approved_qa_ids": [],
+      "equivalence": null,
+      "runtime_dependencies": [],
+      "source_mapping_references": [],
+      "special_actions_assets": [
+        "Dedicated Kanchagolla context/price logic/cards"
+      ],
+      "retirement_safe": false,
+      "decision": "KEEP_NOT_DUPLICATE",
+      "reason": "Outside the duplicate retirement scope; preserve unchanged.",
+      "current_status": "ACTIVE",
+      "replacement_statuses": {},
+      "prior_matcher_target_coverage": {
+        "hits": 0,
+        "total": 9
+      }
+    },
+    {
+      "legacy_id": "know_more",
+      "classification": "SYSTEM_OR_GUARD",
+      "matching_approved_qa_ids": [],
+      "equivalence": null,
+      "runtime_dependencies": [],
+      "source_mapping_references": [],
+      "special_actions_assets": [
+        "Three sequential cards/captions and menu discovery"
+      ],
+      "retirement_safe": false,
+      "decision": "KEEP_NOT_DUPLICATE",
+      "reason": "Outside the duplicate retirement scope; preserve unchanged.",
+      "current_status": "ACTIVE",
+      "replacement_statuses": {},
+      "prior_matcher_target_coverage": {
+        "hits": 0,
+        "total": 27
+      }
+    },
+    {
+      "legacy_id": "kolkata_expansion_info",
+      "classification": "UNIQUE_CUSTOM",
+      "matching_approved_qa_ids": [],
+      "equivalence": null,
+      "runtime_dependencies": [],
+      "source_mapping_references": [],
+      "special_actions_assets": [
+        "Kolkata expansion intent and locality distinction"
+      ],
+      "retirement_safe": false,
+      "decision": "KEEP_NOT_DUPLICATE",
+      "reason": "Outside the duplicate retirement scope; preserve unchanged.",
+      "current_status": "ACTIVE",
+      "replacement_statuses": {},
+      "prior_matcher_target_coverage": {
+        "hits": 0,
+        "total": 12
+      }
+    },
+    {
+      "legacy_id": "mahua_signature_special",
+      "classification": "UNIQUE_CUSTOM",
+      "matching_approved_qa_ids": [],
+      "equivalence": null,
+      "runtime_dependencies": [],
+      "source_mapping_references": [],
+      "special_actions_assets": [
+        "Signature-only card and product/pack lookup"
+      ],
+      "retirement_safe": false,
+      "decision": "KEEP_NOT_DUPLICATE",
+      "reason": "Outside the duplicate retirement scope; preserve unchanged.",
+      "current_status": "ACTIVE",
+      "replacement_statuses": {},
+      "prior_matcher_target_coverage": {
+        "hits": 0,
+        "total": 10
+      }
+    },
+    {
+      "legacy_id": "minimum_sondesh_quantity",
+      "classification": "BUSINESS_DUPLICATE_SEMANTIC",
+      "matching_approved_qa_ids": [
+        "minimum_sondesh_quantity_client"
+      ],
+      "equivalence": "SEMANTIC",
+      "runtime_dependencies": [
+        {
+          "path": "camellia/client_qa.py",
+          "line": 91,
+          "code": "(\"minimum_sondesh_quantity_client\", \"Why is the Minimum order 9 pieces 250g for some flavours\", \"sondesh\"),"
+        },
+        {
+          "path": "camellia/client_qa.py",
+          "line": 304,
+          "code": "return result(\"minimum_sondesh_quantity_client\")"
+        },
+        {
+          "path": "camellia/client_qa.py",
+          "line": 400,
+          "code": "\"minimum_sondesh_quantity_client\": (\"why minimum 9\", \"why do i need 9 pieces\", \"why minimum 250g\", \"why multiples of nine for sondesh\"),"
+        },
+        {
+          "path": "camellia/client_qa.py",
+          "line": 521,
+          "code": "candidates.add(\"minimum_sondesh_quantity_client\")"
+        },
+        {
+          "path": "camellia/client_qa.py",
+          "line": 525,
+          "code": "candidates.add(\"minimum_sondesh_quantity_client\")"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 433,
+          "code": "\"minimum_sondesh_quantity_client\": \"minimum_sondesh_quantity\","
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 1838,
+          "code": "special_template_ids.append(\"minimum_sondesh_quantity\")"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 5172,
+          "code": "\"minimum_sondesh_quantity\""
+        }
+      ],
+      "source_mapping_references": [],
+      "special_actions_assets": [
+        "Stable QA route ID/intent shortcut"
+      ],
+      "retirement_safe": false,
+      "decision": "KEEP_DEPENDENCY",
+      "reason": "Required live Stable QA route ID/intent shortcut. Removing the ID would remove current fallback/routing behavior; no route migration is authorized.",
+      "current_status": "ACTIVE",
+      "replacement_statuses": {
+        "minimum_sondesh_quantity_client": "ACTIVE"
+      },
+      "prior_matcher_target_coverage": {
+        "hits": 5,
+        "total": 5
+      }
+    },
+    {
+      "legacy_id": "name_introduction",
+      "classification": "CONVERSATIONAL",
+      "matching_approved_qa_ids": [],
+      "equivalence": null,
+      "runtime_dependencies": [],
+      "source_mapping_references": [],
+      "special_actions_assets": [
+        "Name memory and greeting personalization"
+      ],
+      "retirement_safe": false,
+      "decision": "KEEP_NOT_DUPLICATE",
+      "reason": "Outside the duplicate retirement scope; preserve unchanged.",
+      "current_status": "ACTIVE",
+      "replacement_statuses": {},
+      "prior_matcher_target_coverage": {
+        "hits": 0,
+        "total": 11
+      }
+    },
+    {
+      "legacy_id": "nolen_gur_aamar",
+      "classification": "UNIQUE_CUSTOM",
+      "matching_approved_qa_ids": [],
+      "equivalence": null,
+      "runtime_dependencies": [],
+      "source_mapping_references": [],
+      "special_actions_assets": [
+        "Aamar-only image and flavour-specific lookup"
+      ],
+      "retirement_safe": false,
+      "decision": "KEEP_NOT_DUPLICATE",
+      "reason": "Outside the duplicate retirement scope; preserve unchanged.",
+      "current_status": "ACTIVE",
+      "replacement_statuses": {},
+      "prior_matcher_target_coverage": {
+        "hits": 0,
+        "total": 7
+      }
+    },
+    {
+      "legacy_id": "opening_hours",
+      "classification": "UNIQUE_CUSTOM",
+      "matching_approved_qa_ids": [],
+      "equivalence": null,
+      "runtime_dependencies": [],
+      "source_mapping_references": [],
+      "special_actions_assets": [
+        "Explicit hours branch; open-now/day reasoning"
+      ],
+      "retirement_safe": false,
+      "decision": "KEEP_NOT_DUPLICATE",
+      "reason": "Outside the duplicate retirement scope; preserve unchanged.",
+      "current_status": "ACTIVE",
+      "replacement_statuses": {},
+      "prior_matcher_target_coverage": {
+        "hits": 0,
+        "total": 10
+      }
+    },
+    {
+      "legacy_id": "order_next_steps",
+      "classification": "SYSTEM_OR_GUARD",
+      "matching_approved_qa_ids": [
+        "order_ready_handoff"
+      ],
+      "equivalence": null,
+      "runtime_dependencies": [],
+      "source_mapping_references": [],
+      "special_actions_assets": [
+        "escalate=true; order draft clearing/human escalation"
+      ],
+      "retirement_safe": false,
+      "decision": "KEEP_NOT_DUPLICATE",
+      "reason": "Outside the duplicate retirement scope; preserve unchanged.",
+      "current_status": "ACTIVE",
+      "replacement_statuses": {
+        "order_ready_handoff": "ACTIVE"
+      },
+      "prior_matcher_target_coverage": {
+        "hits": 6,
+        "total": 23
+      }
+    },
+    {
+      "legacy_id": "order_status_tracking",
+      "classification": "SYSTEM_OR_GUARD",
+      "matching_approved_qa_ids": [],
+      "equivalence": null,
+      "runtime_dependencies": [],
+      "source_mapping_references": [],
+      "special_actions_assets": [
+        "Order-status support/manual WhatsApp path"
+      ],
+      "retirement_safe": false,
+      "decision": "KEEP_NOT_DUPLICATE",
+      "reason": "Outside the duplicate retirement scope; preserve unchanged.",
+      "current_status": "ACTIVE",
+      "replacement_statuses": {},
+      "prior_matcher_target_coverage": {
+        "hits": 0,
+        "total": 17
+      }
+    },
+    {
+      "legacy_id": "pack_size_1kg",
+      "classification": "UNIQUE_CUSTOM",
+      "matching_approved_qa_ids": [],
+      "equivalence": null,
+      "runtime_dependencies": [],
+      "source_mapping_references": [],
+      "special_actions_assets": [
+        "Pack-specific price table and collection cards"
+      ],
+      "retirement_safe": false,
+      "decision": "KEEP_NOT_DUPLICATE",
+      "reason": "Outside the duplicate retirement scope; preserve unchanged.",
+      "current_status": "ACTIVE",
+      "replacement_statuses": {},
+      "prior_matcher_target_coverage": {
+        "hits": 0,
+        "total": 7
+      }
+    },
+    {
+      "legacy_id": "pack_size_250g",
+      "classification": "UNIQUE_CUSTOM",
+      "matching_approved_qa_ids": [],
+      "equivalence": null,
+      "runtime_dependencies": [],
+      "source_mapping_references": [],
+      "special_actions_assets": [
+        "Pack-specific price table and collection cards"
+      ],
+      "retirement_safe": false,
+      "decision": "KEEP_NOT_DUPLICATE",
+      "reason": "Outside the duplicate retirement scope; preserve unchanged.",
+      "current_status": "ACTIVE",
+      "replacement_statuses": {},
+      "prior_matcher_target_coverage": {
+        "hits": 0,
+        "total": 7
+      }
+    },
+    {
+      "legacy_id": "pack_size_500g",
+      "classification": "UNIQUE_CUSTOM",
+      "matching_approved_qa_ids": [],
+      "equivalence": null,
+      "runtime_dependencies": [],
+      "source_mapping_references": [],
+      "special_actions_assets": [
+        "Pack-specific price table and collection cards"
+      ],
+      "retirement_safe": false,
+      "decision": "KEEP_NOT_DUPLICATE",
+      "reason": "Outside the duplicate retirement scope; preserve unchanged.",
+      "current_status": "ACTIVE",
+      "replacement_statuses": {},
+      "prior_matcher_target_coverage": {
+        "hits": 0,
+        "total": 7
+      }
+    },
+    {
+      "legacy_id": "packaging",
+      "classification": "UNIQUE_CUSTOM",
+      "matching_approved_qa_ids": [],
+      "equivalence": null,
+      "runtime_dependencies": [],
+      "source_mapping_references": [],
+      "special_actions_assets": [
+        "Packaging/eco-friendly routing"
+      ],
+      "retirement_safe": false,
+      "decision": "KEEP_NOT_DUPLICATE",
+      "reason": "Outside the duplicate retirement scope; preserve unchanged.",
+      "current_status": "ACTIVE",
+      "replacement_statuses": {},
+      "prior_matcher_target_coverage": {
+        "hits": 0,
+        "total": 11
+      }
+    },
+    {
+      "legacy_id": "previous_menus",
+      "classification": "SYSTEM_OR_GUARD",
+      "matching_approved_qa_ids": [],
+      "equivalence": null,
+      "runtime_dependencies": [],
+      "source_mapping_references": [],
+      "special_actions_assets": [
+        "Live archive cards/expiry/archive offer state"
+      ],
+      "retirement_safe": false,
+      "decision": "KEEP_NOT_DUPLICATE",
+      "reason": "Outside the duplicate retirement scope; preserve unchanged.",
+      "current_status": "ACTIVE",
+      "replacement_statuses": {},
+      "prior_matcher_target_coverage": {
+        "hits": 0,
+        "total": 15
+      }
+    },
+    {
+      "legacy_id": "pricing_value_context",
+      "classification": "BUSINESS_DUPLICATE_EXACT",
+      "matching_approved_qa_ids": [
+        "price_is_high"
+      ],
+      "equivalence": "EXACT",
+      "runtime_dependencies": [
+        {
+          "path": "camellia/responder.py",
+          "line": 420,
+          "code": "\"price_is_high\": \"pricing_value_context\","
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 1828,
+          "code": "special_template_ids.append(\"pricing_value_context\")"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 5171,
+          "code": "\"pricing_value_context\", \"chicken_kosha_price\","
+        }
+      ],
+      "source_mapping_references": [],
+      "special_actions_assets": [
+        "Stable QA route ID and explicit objection shortcut"
+      ],
+      "retirement_safe": false,
+      "decision": "KEEP_DEPENDENCY",
+      "reason": "Required live Stable QA route ID and explicit objection shortcut. Removing the ID would remove current fallback/routing behavior; no route migration is authorized.",
+      "current_status": "ACTIVE",
+      "replacement_statuses": {
+        "price_is_high": "ACTIVE"
+      },
+      "prior_matcher_target_coverage": {
+        "hits": 4,
+        "total": 5
+      }
+    },
+    {
+      "legacy_id": "product_overview",
+      "classification": "SYSTEM_OR_GUARD",
+      "matching_approved_qa_ids": [],
+      "equivalence": null,
+      "runtime_dependencies": [],
+      "source_mapping_references": [],
+      "special_actions_assets": [
+        "Three cards/captions/current weekly menu/first-menu state"
+      ],
+      "retirement_safe": false,
+      "decision": "KEEP_NOT_DUPLICATE",
+      "reason": "Outside the duplicate retirement scope; preserve unchanged.",
+      "current_status": "ACTIVE",
+      "replacement_statuses": {},
+      "prior_matcher_target_coverage": {
+        "hits": 0,
+        "total": 27
+      }
+    },
+    {
+      "legacy_id": "product_recommendation",
+      "classification": "UNIQUE_CUSTOM",
+      "matching_approved_qa_ids": [],
+      "equivalence": null,
+      "runtime_dependencies": [],
+      "source_mapping_references": [],
+      "special_actions_assets": [
+        "Recommendation intent tier"
+      ],
+      "retirement_safe": false,
+      "decision": "KEEP_NOT_DUPLICATE",
+      "reason": "Outside the duplicate retirement scope; preserve unchanged.",
+      "current_status": "ACTIVE",
+      "replacement_statuses": {},
+      "prior_matcher_target_coverage": {
+        "hits": 0,
+        "total": 22
+      }
+    },
+    {
+      "legacy_id": "recall_name",
+      "classification": "SYSTEM_OR_GUARD",
+      "matching_approved_qa_ids": [],
+      "equivalence": null,
+      "runtime_dependencies": [],
+      "source_mapping_references": [],
+      "special_actions_assets": [
+        "Reads/writes name and awaiting_name state"
+      ],
+      "retirement_safe": false,
+      "decision": "KEEP_NOT_DUPLICATE",
+      "reason": "Outside the duplicate retirement scope; preserve unchanged.",
+      "current_status": "ACTIVE",
+      "replacement_statuses": {},
+      "prior_matcher_target_coverage": {
+        "hits": 0,
+        "total": 11
+      }
+    },
+    {
+      "legacy_id": "recall_order_flavour",
+      "classification": "SYSTEM_OR_GUARD",
+      "matching_approved_qa_ids": [],
+      "equivalence": null,
+      "runtime_dependencies": [],
+      "source_mapping_references": [],
+      "special_actions_assets": [
+        "Active order draft recall"
+      ],
+      "retirement_safe": false,
+      "decision": "KEEP_NOT_DUPLICATE",
+      "reason": "Outside the duplicate retirement scope; preserve unchanged.",
+      "current_status": "ACTIVE",
+      "replacement_statuses": {},
+      "prior_matcher_target_coverage": {
+        "hits": 0,
+        "total": 10
+      }
+    },
+    {
+      "legacy_id": "savoury_best_time_to_book",
+      "classification": "BUSINESS_DUPLICATE_EXACT",
+      "matching_approved_qa_ids": [
+        "best_time_to_book"
+      ],
+      "equivalence": "EXACT",
+      "runtime_dependencies": [
+        {
+          "path": "camellia/content_integrity.py",
+          "line": 134,
+          "code": "\"savoury_best_time_to_book\": ("
+        },
+        {
+          "path": "camellia/content_integrity.py",
+          "line": 203,
+          "code": "\"savoury_best_time_to_book\": ("
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 423,
+          "code": "\"best_time_to_book\": \"savoury_best_time_to_book\","
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 4712,
+          "code": "template = self._template_by_id(\"savoury_best_time_to_book\") or {}"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 4714,
+          "code": "\"savoury_best_time_to_book\", template.get(\"response\") or self._generic_fallback(),"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 4718,
+          "code": "\"savoury_best_time_to_book\", response_text, images, facts, user_message,"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 4723,
+          "code": "return response_text, True, \"savoury_best_time_to_book\", images"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 5169,
+          "code": "\"savoury_best_time_to_book\", \"savoury_delivery_time\", \"kolkata_expansion_info\","
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 5408,
+          "code": "elif tmpl_id == \"savoury_best_time_to_book\" and re.search(r'\\b(best time to order|when should i book|when to book|best time to book|when should i order|how early to book|how far in advance|when to place order|best time to place order)\\b', lowered_text):"
+        }
+      ],
+      "source_mapping_references": [],
+      "special_actions_assets": [
+        "Stable route ID and timing/context fallback"
+      ],
+      "retirement_safe": false,
+      "decision": "KEEP_DEPENDENCY",
+      "reason": "Required live Stable route ID and timing/context fallback. Removing the ID would remove current fallback/routing behavior; no route migration is authorized.",
+      "current_status": "ACTIVE",
+      "replacement_statuses": {
+        "best_time_to_book": "ACTIVE"
+      },
+      "prior_matcher_target_coverage": {
+        "hits": 4,
+        "total": 12
+      }
+    },
+    {
+      "legacy_id": "savoury_crosssell_sondesh",
+      "classification": "SYSTEM_OR_GUARD",
+      "matching_approved_qa_ids": [],
+      "equivalence": null,
+      "runtime_dependencies": [],
+      "source_mapping_references": [],
+      "special_actions_assets": [
+        "One-time savoury-to-sweets nudge/session flag"
+      ],
+      "retirement_safe": false,
+      "decision": "KEEP_NOT_DUPLICATE",
+      "reason": "Outside the duplicate retirement scope; preserve unchanged.",
+      "current_status": "ACTIVE",
+      "replacement_statuses": {},
+      "prior_matcher_target_coverage": {
+        "hits": 0,
+        "total": 11
+      }
+    },
+    {
+      "legacy_id": "savoury_delivery_time",
+      "classification": "BUSINESS_DUPLICATE_SEMANTIC",
+      "matching_approved_qa_ids": [
+        "savoury_delivery_time"
+      ],
+      "equivalence": "SEMANTIC",
+      "runtime_dependencies": [
+        {
+          "path": "camellia/client_qa.py",
+          "line": 82,
+          "code": "(\"savoury_delivery_time\", \"WHATS THE DELIVERY TIME\", \"savoury\"),"
+        },
+        {
+          "path": "camellia/client_qa.py",
+          "line": 332,
+          "code": "return result(\"savoury_delivery_time\")"
+        },
+        {
+          "path": "camellia/client_qa.py",
+          "line": 394,
+          "code": "\"savoury_delivery_time\": (\"savoury delivery time\", \"when will my savoury meal arrive\", \"how long for savoury delivery\", \"when do you deliver meals\"),"
+        },
+        {
+          "path": "camellia/client_qa.py",
+          "line": 489,
+          "code": "\"savoury\": (None, None, \"savoury_delivery_time\"),"
+        },
+        {
+          "path": "camellia/content_integrity.py",
+          "line": 118,
+          "code": "\"savoury_delivery_time\": ("
+        },
+        {
+          "path": "camellia/content_integrity.py",
+          "line": 209,
+          "code": "\"savoury_delivery_time\": ("
+        },
+        {
+          "path": "camellia/knowledge.py",
+          "line": 45,
+          "code": "\"delivery_time\": {\"source\": \"data/qa_templates.json > savoury_delivery_time / sondesh_dispatch_time\"},"
+        },
+        {
+          "path": "camellia/knowledge.py",
+          "line": 219,
+          "code": "\"savoury_delivery_time\", (SEND,),"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 424,
+          "code": "\"savoury_delivery_time\": \"savoury_delivery_time\","
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 2839,
+          "code": "\"savoury_delivery_time\", \"sondesh_delivery_time\", \"order_prebook\", \"alacarte_prebook\","
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 3434,
+          "code": "\"best_time_to_book\", \"savoury_delivery_time\", \"sondesh_delivery_time\","
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 4738,
+          "code": "template = self._template_by_id(\"savoury_delivery_time\") or {}"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 4740,
+          "code": "\"savoury_delivery_time\", template.get(\"response\") or self._generic_fallback(),"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 4744,
+          "code": "\"savoury_delivery_time\", response_text, images, facts, user_message,"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 4749,
+          "code": "return response_text, True, \"savoury_delivery_time\", images"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 5108,
+          "code": "tmpl = self._template_by_id(\"savoury_delivery_time\")"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 5115,
+          "code": "return response_text, True, \"savoury_delivery_time\", images"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 5169,
+          "code": "\"savoury_best_time_to_book\", \"savoury_delivery_time\", \"kolkata_expansion_info\","
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 5410,
+          "code": "elif tmpl_id == \"savoury_delivery_time\" and re.search(r'\\b(savoury delivery time|delivery time for food|how long for food|when will my meal arrive|food dispatch time|meal delivery time|how long for lunch|how long for dinner|food delivery time|when will meal arrive|delvery time)\\b', lowered_text):"
+        },
+        {
+          "path": "scripts/conversation_benchmark.py",
+          "line": 36,
+          "code": "(\"how long for food\", \"savoury_delivery_time\"),"
+        }
+      ],
+      "source_mapping_references": [],
+      "special_actions_assets": [
+        "Savoury timing, stable QA ID and time parsing"
+      ],
+      "retirement_safe": false,
+      "decision": "KEEP_DEPENDENCY",
+      "reason": "Required live Savoury timing, stable QA ID and time parsing. Removing the ID would remove current fallback/routing behavior; no route migration is authorized.",
+      "current_status": "ACTIVE",
+      "replacement_statuses": {
+        "savoury_delivery_time": "ACTIVE"
+      },
+      "prior_matcher_target_coverage": {
+        "hits": 8,
+        "total": 24
+      }
+    },
+    {
+      "legacy_id": "savoury_food_intro",
+      "classification": "BUSINESS_DUPLICATE_SEMANTIC",
+      "matching_approved_qa_ids": [
+        "general_details",
+        "general_price"
+      ],
+      "equivalence": "SEMANTIC",
+      "runtime_dependencies": [
+        {
+          "path": "camellia/instagram_routing.py",
+          "line": 618,
+          "code": "\"savoury\": \"savoury_food_intro\","
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 415,
+          "code": "\"general_price\": \"savoury_food_intro\","
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 416,
+          "code": "\"general_details\": \"savoury_food_intro\","
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 463,
+          "code": "\"weekly_menu_nonveg\", \"savoury_food_intro\", \"how_to_order\","
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 1165,
+          "code": "\"savoury_food_intro\": \"savoury\","
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 1212,
+          "code": "\"template_id\": \"savoury_food_intro\","
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 1418,
+          "code": "if template_id in {\"weekly_menu_veg\", \"weekly_menu_nonveg\", \"savoury_food_intro\"}:"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 1735,
+          "code": "template = self._template_by_id(\"savoury_food_intro\") or {}"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 1737,
+          "code": "\"savoury_food_intro\", template.get(\"response\") or \"\","
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 1740,
+          "code": "return text, True, \"savoury_food_intro\", images"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 1763,
+          "code": "template = self._template_by_id(\"savoury_food_intro\") or {}"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 1765,
+          "code": "\"savoury_food_intro\", template.get(\"response\") or \"\","
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 1768,
+          "code": "return text, True, \"savoury_food_intro\", images"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 1840,
+          "code": "special_template_ids.append(\"savoury_food_intro\")"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 1876,
+          "code": "tmpl = self._template_by_id(\"savoury_food_intro\")"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 4198,
+          "code": "template_id = \"savoury_food_intro\""
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 5165,
+          "code": "\"recall_order_flavour\", \"savoury_food_intro\", \"bento_details\","
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 5398,
+          "code": "elif tmpl_id == \"savoury_food_intro\" and re.search(r'\\b(lunch menu|dinner options|savoury food|bengali meals|lunch options|dinner menu|savoury menu|bengali lunch|bengali dinner|3 ways to order|savoury dishes|savoury ordering)\\b', lowered_text):"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 5432,
+          "code": "if tmpl_id == \"savoury_food_intro\" and re.search("
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 5604,
+          "code": "if tmpl_id == \"savoury_food_intro\" and not session_memory.has_prior_history(user_id, channel):"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 6355,
+          "code": "elif template_id in [\"savoury_food_intro\", \"sondesh_crosssell_savoury\", \"bento_details\"]:"
+        }
+      ],
+      "source_mapping_references": [],
+      "special_actions_assets": [
+        "Weekly menu/add-on images, menu discovery and first-contact state"
+      ],
+      "retirement_safe": false,
+      "decision": "KEEP_DEPENDENCY",
+      "reason": "Required live Weekly menu/add-on images, menu discovery and first-contact state. Removing the ID would remove current fallback/routing behavior; no route migration is authorized.",
+      "current_status": "ACTIVE",
+      "replacement_statuses": {
+        "general_details": "ACTIVE",
+        "general_price": "ACTIVE"
+      },
+      "prior_matcher_target_coverage": {
+        "hits": 1,
+        "total": 31
+      }
+    },
+    {
+      "legacy_id": "signature_collection",
+      "classification": "UNIQUE_CUSTOM",
+      "matching_approved_qa_ids": [],
+      "equivalence": null,
+      "runtime_dependencies": [],
+      "source_mapping_references": [],
+      "special_actions_assets": [
+        "Reviewed collection rows, Signature image/order context"
+      ],
+      "retirement_safe": false,
+      "decision": "KEEP_NOT_DUPLICATE",
+      "reason": "Outside the duplicate retirement scope; preserve unchanged.",
+      "current_status": "ACTIVE",
+      "replacement_statuses": {},
+      "prior_matcher_target_coverage": {
+        "hits": 0,
+        "total": 29
+      }
+    },
+    {
+      "legacy_id": "sondesh_classic_rose",
+      "classification": "UNIQUE_CUSTOM",
+      "matching_approved_qa_ids": [],
+      "equivalence": null,
+      "runtime_dependencies": [],
+      "source_mapping_references": [],
+      "special_actions_assets": [
+        "Flavour/collection-specific formatted prices/images"
+      ],
+      "retirement_safe": false,
+      "decision": "KEEP_NOT_DUPLICATE",
+      "reason": "Outside the duplicate retirement scope; preserve unchanged.",
+      "current_status": "ACTIVE",
+      "replacement_statuses": {},
+      "prior_matcher_target_coverage": {
+        "hits": 0,
+        "total": 31
+      }
+    },
+    {
+      "legacy_id": "sondesh_crosssell_savoury",
+      "classification": "SYSTEM_OR_GUARD",
+      "matching_approved_qa_ids": [],
+      "equivalence": null,
+      "runtime_dependencies": [],
+      "source_mapping_references": [],
+      "special_actions_assets": [
+        "One-time nudge, weekly image and session flags"
+      ],
+      "retirement_safe": false,
+      "decision": "KEEP_NOT_DUPLICATE",
+      "reason": "Outside the duplicate retirement scope; preserve unchanged.",
+      "current_status": "ACTIVE",
+      "replacement_statuses": {},
+      "prior_matcher_target_coverage": {
+        "hits": 0,
+        "total": 14
+      }
+    },
+    {
+      "legacy_id": "sondesh_details",
+      "classification": "BUSINESS_DUPLICATE_SEMANTIC",
+      "matching_approved_qa_ids": [
+        "sondesh_details_client"
+      ],
+      "equivalence": "SEMANTIC",
+      "runtime_dependencies": [
+        {
+          "path": "camellia/client_qa.py",
+          "line": 86,
+          "code": "(\"sondesh_details_client\", \"Tell me more about sondesh\", \"sondesh\"),"
+        },
+        {
+          "path": "camellia/client_qa.py",
+          "line": 147,
+          "code": "if qa_id in {\"sondesh_details_client\", \"sondesh_price_client\"}:"
+        },
+        {
+          "path": "camellia/client_qa.py",
+          "line": 325,
+          "code": "return result(\"sondesh_details_client\")"
+        },
+        {
+          "path": "camellia/client_qa.py",
+          "line": 398,
+          "code": "\"sondesh_details_client\": (\"tell me about sondesh\", \"sondesh details please\", \"describe sondesh\", \"more information about sondesh\"),"
+        },
+        {
+          "path": "camellia/client_qa.py",
+          "line": 487,
+          "code": "\"sondesh\": (\"sondesh_price_client\", \"sondesh_details_client\", \"sondesh_delivery_time\"),"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 428,
+          "code": "\"sondesh_details_client\": \"sondesh_tell_me_more\","
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 1155,
+          "code": "\"sondesh_details\": \"sondesh_general\","
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 1844,
+          "code": "\"sondesh_details\" if template_id == \"sondesh_tell_me_more\" else template_id"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 2021,
+          "code": "\"sondesh_details\", \"sondesh_unfamiliar\","
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 2023,
+          "code": "\"aamar_mishti_details\", \"signature_sondesh_details\","
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 3578,
+          "code": "and entry.qa_id in {\"sondesh_details_client\", \"sondesh_price_client\"}"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 3632,
+          "code": "if entry.qa_id == \"sondesh_details_client\":"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 6349,
+          "code": "elif template_id in [\"sondesh_details\", \"sondesh_tell_me_more\", \"sondesh_unfamiliar\"]:"
+        }
+      ],
+      "source_mapping_references": [],
+      "special_actions_assets": [
+        "Intent shortcut and three-card image sequence"
+      ],
+      "retirement_safe": false,
+      "decision": "KEEP_DEPENDENCY",
+      "reason": "Required live Intent shortcut and three-card image sequence. Removing the ID would remove current fallback/routing behavior; no route migration is authorized.",
+      "current_status": "ACTIVE",
+      "replacement_statuses": {
+        "sondesh_details_client": "ACTIVE"
+      },
+      "prior_matcher_target_coverage": {
+        "hits": 3,
+        "total": 4
+      }
+    },
+    {
+      "legacy_id": "sondesh_dispatch_time",
+      "classification": "BUSINESS_DUPLICATE_EXACT",
+      "matching_approved_qa_ids": [
+        "sondesh_delivery_time"
+      ],
+      "equivalence": "EXACT",
+      "runtime_dependencies": [
+        {
+          "path": "camellia/app.py",
+          "line": 941,
+          "code": "\"sondesh_dispatch_time\","
+        },
+        {
+          "path": "camellia/content_integrity.py",
+          "line": 114,
+          "code": "\"sondesh_dispatch_time\": ("
+        },
+        {
+          "path": "camellia/content_integrity.py",
+          "line": 237,
+          "code": "\"sondesh_dispatch_time\": ("
+        },
+        {
+          "path": "camellia/knowledge.py",
+          "line": 45,
+          "code": "\"delivery_time\": {\"source\": \"data/qa_templates.json > savoury_delivery_time / sondesh_dispatch_time\"},"
+        },
+        {
+          "path": "camellia/knowledge.py",
+          "line": 223,
+          "code": "\"sondesh_dispatch_time\", (SEND,)),"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 426,
+          "code": "\"sondesh_delivery_time\": \"sondesh_dispatch_time\","
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 1832,
+          "code": "special_template_ids.append(\"sondesh_dispatch_time\")"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 5088,
+          "code": "# still land on delivery_time or sondesh_dispatch_time — both of"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 5117,
+          "code": "tmpl = self._template_by_id(\"sondesh_dispatch_time\")"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 5123,
+          "code": "return response_text, True, \"sondesh_dispatch_time\", None"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 5168,
+          "code": "\"sondesh_dispatch_time\", \"savoury_crosssell_sondesh\", \"sondesh_crosssell_savoury\","
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 5402,
+          "code": "elif tmpl_id == \"sondesh_dispatch_time\" and re.search(r'\\b(how long to deliver|dispatch time|how fast can you deliver|dispatch timing|prep time|how long to dispatch|sondesh dispatch time|how fast can you dispatch)\\b', lowered_text):"
+        },
+        {
+          "path": "scripts/generalization_benchmark_v3.py",
+          "line": 48,
+          "code": "# Kanchagolla dispatch-time fact in sondesh_dispatch_time, so it is"
+        }
+      ],
+      "source_mapping_references": [],
+      "special_actions_assets": [
+        "Explicit dispatch shortcut and stable QA route ID"
+      ],
+      "retirement_safe": false,
+      "decision": "KEEP_DEPENDENCY",
+      "reason": "Required live Explicit dispatch shortcut and stable QA route ID. Removing the ID would remove current fallback/routing behavior; no route migration is authorized.",
+      "current_status": "ACTIVE",
+      "replacement_statuses": {
+        "sondesh_delivery_time": "ACTIVE"
+      },
+      "prior_matcher_target_coverage": {
+        "hits": 5,
+        "total": 16
+      }
+    },
+    {
+      "legacy_id": "sondesh_mango_kesar",
+      "classification": "UNIQUE_CUSTOM",
+      "matching_approved_qa_ids": [],
+      "equivalence": null,
+      "runtime_dependencies": [],
+      "source_mapping_references": [],
+      "special_actions_assets": [
+        "Flavour/collection formatter and cards"
+      ],
+      "retirement_safe": false,
+      "decision": "KEEP_NOT_DUPLICATE",
+      "reason": "Outside the duplicate retirement scope; preserve unchanged.",
+      "current_status": "ACTIVE",
+      "replacement_statuses": {},
+      "prior_matcher_target_coverage": {
+        "hits": 0,
+        "total": 22
+      }
+    },
+    {
+      "legacy_id": "sondesh_nolen_gur",
+      "classification": "UNIQUE_CUSTOM",
+      "matching_approved_qa_ids": [],
+      "equivalence": null,
+      "runtime_dependencies": [],
+      "source_mapping_references": [],
+      "special_actions_assets": [
+        "Flavour-specific pricing/cards and product context"
+      ],
+      "retirement_safe": false,
+      "decision": "KEEP_NOT_DUPLICATE",
+      "reason": "Outside the duplicate retirement scope; preserve unchanged.",
+      "current_status": "ACTIVE",
+      "replacement_statuses": {},
+      "prior_matcher_target_coverage": {
+        "hits": 0,
+        "total": 23
+      }
+    },
+    {
+      "legacy_id": "sondesh_price_detailed",
+      "classification": "BUSINESS_DUPLICATE_SEMANTIC",
+      "matching_approved_qa_ids": [
+        "sondesh_price_client"
+      ],
+      "equivalence": "SEMANTIC",
+      "runtime_dependencies": [
+        {
+          "path": "camellia/app.py",
+          "line": 4467,
+          "code": "#   Sondesh flavours & prices      -> sondesh_price_detailed"
+        },
+        {
+          "path": "camellia/content_integrity.py",
+          "line": 456,
+          "code": "\"jolbhora\", \"jolbhora_talgash_details\", \"sondesh_price_detailed\","
+        },
+        {
+          "path": "camellia/conversation_resolver.py",
+          "line": 249,
+          "code": "elif template_id == \"sondesh_price_detailed\" and re.search(r\"collection|option\\s*[12]\", text):"
+        },
+        {
+          "path": "camellia/instagram_routing.py",
+          "line": 617,
+          "code": "\"sondesh\": \"sondesh_price_detailed\" if price else \"know_more\","
+        },
+        {
+          "path": "camellia/knowledge.py",
+          "line": 206,
+          "code": "\"sondesh_price_detailed\", (PRICE,),"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 427,
+          "code": "\"sondesh_price_client\": \"sondesh_price_detailed\","
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 1154,
+          "code": "\"sondesh_price_detailed\": \"sondesh_general\","
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 1743,
+          "code": "template = self._template_by_id(\"sondesh_price_detailed\") or {}"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 1745,
+          "code": "\"sondesh_price_detailed\", template.get(\"response\") or \"\","
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 1748,
+          "code": "return text, True, \"sondesh_price_detailed\", images"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 1886,
+          "code": "tmpl = self._template_by_id(\"sondesh_price_detailed\")"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 2020,
+          "code": "\"sondesh_price_detailed\", \"sondesh_price_general\","
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 2124,
+          "code": "Intent.PRODUCT_PRICE.value: \"sondesh_price_detailed\","
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 5158,
+          "code": "\"sondesh_price_detailed\", \"sondesh_classic_rose\", \"sondesh_mango_kesar\","
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 5404,
+          "code": "elif tmpl_id == \"sondesh_price_detailed\" and re.search(r'\\b(sondesh price|price of sondesh|cost of sondesh|how much is sondesh|price list|sondesh cost|sondesh rate|how many pieces)\\b', lowered_text):"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 5613,
+          "code": "tmpl_id not in {\"greeting\", \"sondesh_price_detailed\", \"previous_menus\"}"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 6332,
+          "code": "\"sondesh_price_general\", \"sondesh_price_detailed\","
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 6344,
+          "code": "if template_id == \"sondesh_price_detailed\":"
+        },
+        {
+          "path": "scripts/conversation_benchmark.py",
+          "line": 37,
+          "code": "(\"sondesh price\", \"sondesh_price_detailed\"),"
+        },
+        {
+          "path": "scripts/conversation_benchmark.py",
+          "line": 51,
+          "code": "turns = [turn(price, \"price_clarify_product\"), turn(choice, \"context_meal_price_followup\" if meals else \"sondesh_price_detailed\")]"
+        },
+        {
+          "path": "scripts/conversation_benchmark.py",
+          "line": 65,
+          "code": "add(\"closing\", [turn(opening, \"weekly_menu_veg|sondesh_price_detailed\"), turn(msg, \"acknowledgement|conversation_closing\", max_words=20)])"
+        },
+        {
+          "path": "scripts/generalization_benchmark_v3.py",
+          "line": 630,
+          "code": "\"sondesh_price_detailed\", \"sondesh_classic_rose\","
+        }
+      ],
+      "source_mapping_references": [],
+      "special_actions_assets": [
+        "Specific price/count intents, collection cards and active product state"
+      ],
+      "retirement_safe": false,
+      "decision": "KEEP_DEPENDENCY",
+      "reason": "Required live Specific price/count intents, collection cards and active product state. Removing the ID would remove current fallback/routing behavior; no route migration is authorized.",
+      "current_status": "ACTIVE",
+      "replacement_statuses": {
+        "sondesh_price_client": "ACTIVE"
+      },
+      "prior_matcher_target_coverage": {
+        "hits": 12,
+        "total": 60
+      }
+    },
+    {
+      "legacy_id": "sondesh_unfamiliar",
+      "classification": "BUSINESS_DUPLICATE_SEMANTIC",
+      "matching_approved_qa_ids": [
+        "sondesh_unfamiliar_client"
+      ],
+      "equivalence": "SEMANTIC",
+      "runtime_dependencies": [
+        {
+          "path": "camellia/client_qa.py",
+          "line": 87,
+          "code": "(\"sondesh_unfamiliar_client\", \"Sondesh unfamiliar (new category)\", \"sondesh\"),"
+        },
+        {
+          "path": "camellia/client_qa.py",
+          "line": 323,
+          "code": "return result(\"sondesh_unfamiliar_client\")"
+        },
+        {
+          "path": "camellia/client_qa.py",
+          "line": 399,
+          "code": "\"sondesh_unfamiliar_client\": (\"what is sondesh\", \"i have never tried sondesh\", \"sondesh is new to me\", \"i am unfamiliar with sandesh\"),"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 429,
+          "code": "\"sondesh_unfamiliar_client\": \"sondesh_unfamiliar\","
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 1157,
+          "code": "\"sondesh_unfamiliar\": \"sondesh_general\","
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 1836,
+          "code": "special_template_ids.append(\"sondesh_unfamiliar\")"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 2021,
+          "code": "\"sondesh_details\", \"sondesh_unfamiliar\","
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 6349,
+          "code": "elif template_id in [\"sondesh_details\", \"sondesh_tell_me_more\", \"sondesh_unfamiliar\"]:"
+        }
+      ],
+      "source_mapping_references": [],
+      "special_actions_assets": [
+        "Stable QA ID and collection/weekly cards"
+      ],
+      "retirement_safe": false,
+      "decision": "KEEP_DEPENDENCY",
+      "reason": "Required live Stable QA ID and collection/weekly cards. Removing the ID would remove current fallback/routing behavior; no route migration is authorized.",
+      "current_status": "ACTIVE",
+      "replacement_statuses": {
+        "sondesh_unfamiliar_client": "ACTIVE"
+      },
+      "prior_matcher_target_coverage": {
+        "hits": 5,
+        "total": 5
+      }
+    },
+    {
+      "legacy_id": "subscription_booking_steps",
+      "classification": "UNIQUE_CUSTOM",
+      "matching_approved_qa_ids": [],
+      "equivalence": null,
+      "runtime_dependencies": [],
+      "source_mapping_references": [],
+      "special_actions_assets": [
+        "awaiting_subscription_booking state; five-hour date-change rule"
+      ],
+      "retirement_safe": false,
+      "decision": "KEEP_NOT_DUPLICATE",
+      "reason": "Outside the duplicate retirement scope; preserve unchanged.",
+      "current_status": "ACTIVE",
+      "replacement_statuses": {},
+      "prior_matcher_target_coverage": {
+        "hits": 0,
+        "total": 19
+      }
+    },
+    {
+      "legacy_id": "subscription_details",
+      "classification": "BUSINESS_DUPLICATE_EXACT",
+      "matching_approved_qa_ids": [
+        "subscription_price",
+        "subscription_details_client"
+      ],
+      "equivalence": "EXACT",
+      "runtime_dependencies": [
+        {
+          "path": "camellia/app.py",
+          "line": 940,
+          "code": "\"subscription_details\","
+        },
+        {
+          "path": "camellia/bootstrap.py",
+          "line": 58,
+          "code": "_SUBSCRIPTION_TEMPLATE_ID = \"subscription_details\""
+        },
+        {
+          "path": "camellia/bootstrap.py",
+          "line": 182,
+          "code": "# structural requirements.  The shipped seed carries subscription_details,"
+        },
+        {
+          "path": "camellia/client_qa.py",
+          "line": 77,
+          "code": "(\"subscription_details_client\", \"Tell me more about SUBSCRIPTION - HOME FOOD AWAY FROM HOME\", \"subscription\"),"
+        },
+        {
+          "path": "camellia/client_qa.py",
+          "line": 308,
+          "code": "return result(\"subscription_price\" if re.search(r\"\\b(?:price|cost|rate|how\\s+much)\\b\", text, re.I) else \"subscription_details_client\")"
+        },
+        {
+          "path": "camellia/client_qa.py",
+          "line": 391,
+          "code": "\"subscription_details_client\": (\"tell me about meal plan\", \"what is the subscription\", \"monthly meal plan details\", \"home food away from home details\"),"
+        },
+        {
+          "path": "camellia/client_qa.py",
+          "line": 488,
+          "code": "\"subscription\": (\"subscription_price\", \"subscription_details_client\", None),"
+        },
+        {
+          "path": "camellia/content_integrity.py",
+          "line": 264,
+          "code": "SUBSCRIPTION_TEMPLATE_ID = \"subscription_details\""
+        },
+        {
+          "path": "camellia/conversation_resolver.py",
+          "line": 245,
+          "code": "elif template_id == \"subscription_details\":"
+        },
+        {
+          "path": "camellia/knowledge.py",
+          "line": 48,
+          "code": "\"subscriptions\": {\"source\": \"data/qa_templates.json > subscription_details / subscription_booking_steps\"},"
+        },
+        {
+          "path": "camellia/knowledge.py",
+          "line": 247,
+          "code": "\"subscription_details\", (SEND,)),"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 418,
+          "code": "\"subscription_price\": \"subscription_details\","
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 419,
+          "code": "\"subscription_details_client\": \"subscription_details\","
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 1166,
+          "code": "\"subscription_details\": \"subscription\","
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 1191,
+          "code": "\"template_id\": \"subscription_details\","
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 1412,
+          "code": "if template_id == \"subscription_details\":"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 1583,
+          "code": "template = self._template_by_id(\"subscription_details\") or {}"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 1585,
+          "code": "\"subscription_details\", template.get(\"response\") or \"\","
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 1588,
+          "code": "return text, True, \"subscription_details\", images"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 2422,
+          "code": "if \"subscription_details\" in used_templates:"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 4375,
+          "code": "template = self._template_by_id(\"subscription_details\") or {}"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 4377,
+          "code": "\"subscription_details\", template.get(\"response\") or self._generic_fallback(),"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 4390,
+          "code": "return response_text, True, \"subscription_details\", images"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 4649,
+          "code": "template = self._template_by_id(\"subscription_details\") or {}"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 4651,
+          "code": "\"subscription_details\", template.get(\"response\") or self._generic_fallback(),"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 4658,
+          "code": "return response_text, True, \"subscription_details\", images"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 4661,
+          "code": "template = self._template_by_id(\"subscription_details\") or {}"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 4667,
+          "code": "return response_text, True, \"subscription_details\", None"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 4692,
+          "code": "template = self._template_by_id(\"subscription_details\") or {}"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 4694,
+          "code": "\"subscription_details\", template.get(\"response\") or self._generic_fallback(),"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 4701,
+          "code": "return response_text, True, \"subscription_details\", images"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 5060,
+          "code": "follow_up_id = \"subscription_details\""
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 5063,
+          "code": "follow_up_id = \"subscription_details\""
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 5167,
+          "code": "\"subscription_details\", \"subscription_booking_steps\", \"alacarte_prebooking_steps\","
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 5381,
+          "code": "# subscription_details, which boosts on the bare word"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 5386,
+          "code": "elif tmpl_id == \"subscription_details\" and re.search(r'\\b(subscription|subscriptions|meal plan|everyday meal|meal subscription|5 meals package|5 meals)\\b', lowered_text):"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 5594,
+          "code": "elif tmpl_id == \"subscription_details\":"
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 5984,
+          "code": "template_id == \"subscription_details\""
+        },
+        {
+          "path": "camellia/responder.py",
+          "line": 6259,
+          "code": "elif template_id == \"subscription_details\":"
+        },
+        {
+          "path": "scripts/generalization_benchmark_v3.py",
+          "line": 634,
+          "code": "\"subscription_details\", \"subscription_booking_steps\","
+        }
+      ],
+      "source_mapping_references": [
+        {
+          "routing_id": 6,
+          "response_mode": "CUSTOM",
+          "topic_id": "regular_meal_subscription"
+        }
+      ],
+      "special_actions_assets": [
+        "Stable QA IDs, rate chart, booking state and content-integrity handling"
+      ],
+      "retirement_safe": false,
+      "decision": "KEEP_DEPENDENCY",
+      "reason": "Required live Stable QA IDs, rate chart, booking state and content-integrity handling. Removing the ID would remove current fallback/routing behavior; no route migration is authorized.",
+      "current_status": "ACTIVE",
+      "replacement_statuses": {
+        "subscription_price": "ACTIVE",
+        "subscription_details_client": "ACTIVE"
+      },
+      "prior_matcher_target_coverage": {
+        "hits": 14,
+        "total": 18
+      }
+    },
+    {
+      "legacy_id": "sugar_free_options",
+      "classification": "SYSTEM_OR_GUARD",
+      "matching_approved_qa_ids": [],
+      "equivalence": null,
+      "runtime_dependencies": [],
+      "source_mapping_references": [],
+      "special_actions_assets": [
+        "Dietary/medical deferral and collection cards"
+      ],
+      "retirement_safe": false,
+      "decision": "KEEP_NOT_DUPLICATE",
+      "reason": "Outside the duplicate retirement scope; preserve unchanged.",
+      "current_status": "ACTIVE",
+      "replacement_statuses": {},
+      "prior_matcher_target_coverage": {
+        "hits": 0,
+        "total": 11
+      }
+    },
+    {
+      "legacy_id": "weekly_menu_nonveg",
+      "classification": "SYSTEM_OR_GUARD",
+      "matching_approved_qa_ids": [],
+      "equivalence": null,
+      "runtime_dependencies": [],
+      "source_mapping_references": [],
+      "special_actions_assets": [
+        "Live weekly rows, expiry/deletion guards and current menu image"
+      ],
+      "retirement_safe": false,
+      "decision": "KEEP_NOT_DUPLICATE",
+      "reason": "Outside the duplicate retirement scope; preserve unchanged.",
+      "current_status": "ACTIVE",
+      "replacement_statuses": {},
+      "prior_matcher_target_coverage": {
+        "hits": 0,
+        "total": 33
+      }
+    },
+    {
+      "legacy_id": "weekly_menu_veg",
+      "classification": "SYSTEM_OR_GUARD",
+      "matching_approved_qa_ids": [],
+      "equivalence": null,
+      "runtime_dependencies": [],
+      "source_mapping_references": [],
+      "special_actions_assets": [
+        "Live weekly rows, expiry/deletion guards and current menu image"
+      ],
+      "retirement_safe": false,
+      "decision": "KEEP_NOT_DUPLICATE",
+      "reason": "Outside the duplicate retirement scope; preserve unchanged.",
+      "current_status": "ACTIVE",
+      "replacement_statuses": {},
+      "prior_matcher_target_coverage": {
+        "hits": 0,
+        "total": 19
+      }
+    }
+  ]
+}

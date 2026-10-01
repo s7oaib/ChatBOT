@@ -308,9 +308,13 @@ def shared_post_media_id(message: Dict[str, Any]) -> Optional[str]:
 
 def product_catalogue() -> List[Dict[str, str]]:
     """Products/collections currently backed by canonical approved knowledge."""
+    from camellia.template_retirement import records
+    retired = {key for key, row in records().items() if row['retired']}
     seen = set()
     items: List[Dict[str, str]] = []
     for record in CATALOGUE:
+        if record.template_id in retired:
+            continue
         if not record.knowledge_id.startswith("product:"):
             continue
         product_id = record.knowledge_id.split(":", 1)[1]
@@ -607,18 +611,20 @@ def route_for_inbound(
 
 
 def route_template_id(product_id: str, *, price: bool = False) -> Optional[str]:
+    from camellia.template_retirement import records
+    retired = {key for key, row in records().items() if row['retired']}
     legacy = {
         "sondesh": "sondesh_price_detailed" if price else "know_more",
         "savoury": "savoury_food_intro",
         "bento": "bento_details",
     }
     if product_id in legacy:
-        return legacy[product_id]
+        return legacy[product_id] if legacy[product_id] not in retired else None
     prefix = "price:" if price else "product:"
     wanted = prefix + str(product_id or "")
     for record in CATALOGUE:
         if record.knowledge_id == wanted:
-            return record.template_id
+            return record.template_id if record.template_id not in retired else None
     return None
 
 

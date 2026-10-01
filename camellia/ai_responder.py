@@ -244,7 +244,8 @@ class AIResponder:
         # QA Syllabus / Templates — id plus the opening of each response. The
         # id tells the model which policy it is drafting against; the opening
         # carries the substance (prices usually lead).
-        templates = self.qa_data.get("templates", [])
+        from camellia.template_retirement import customer_templates
+        templates = customer_templates(self.qa_data.get("templates", []))
         if templates:
             context_parts.append("\n--- FREQUENTLY ASKED QUESTIONS & POLICIES (summarised) ---")
             for tmpl in templates:

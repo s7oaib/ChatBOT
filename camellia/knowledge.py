@@ -347,7 +347,8 @@ class ApprovedKnowledgeService:
         *,
         serviceable_location: Optional[bool] = None,
     ) -> KnowledgeResolution:
-        by_id = {item.get("id"): item for item in templates if item.get("id")}
+        from camellia.template_retirement import customer_templates
+        by_id = {item.get("id"): item for item in customer_templates(templates) if item.get("id")}
         raw_entities = understood.entities or {}
         entities = {
             key: str(value).lower()

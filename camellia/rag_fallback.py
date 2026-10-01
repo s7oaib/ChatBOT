@@ -446,7 +446,8 @@ class RAGFallbackEngine:
             return result
 
         # Search approved templates in qa_templates.json for candidate match
-        templates = self.qa_data.get("templates", [])
+        from camellia.template_retirement import customer_templates
+        templates = customer_templates(self.qa_data.get("templates", []))
         candidates = []
 
         for tmpl in templates:
