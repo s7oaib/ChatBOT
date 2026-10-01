@@ -304,7 +304,7 @@ class RAGFallbackEngine:
             result.proposed_intent = "approved_menu"
             result.contains_unapproved_facts = True
             return result
-        message = user_message.casefold().strip()
+        message = weekly_savoury._name(user_message)
         weekly_request = bool(re.search(r"\b(?:this week|weekly|savoury)\b", message)) and not bool(
             re.search(r"\b(?:aamar mishti|signature collection|bento)\b", message))
         weekly_fact_request = weekly_request or bool(re.search(r"\b(?:menu|price|cost|much)\b", message)
@@ -314,13 +314,29 @@ class RAGFallbackEngine:
             result.contains_unapproved_facts = True
             return result
         matches = []
+        matched_labels = {}
         for version in current_versions():
             approval = json.loads(version["approval_json"])
             for row in approval["rows"]:
                 names = [row["item"], *(row.get("aliases") or [])]
-                if any(re.search(r"(?<!\w)" + re.escape(name.casefold()) + r"(?!\w)", message)
-                       for name in names if name):
+                labels = [weekly_savoury.price_name_match(message, name) for name in names if name]
+                labels = [label for label in labels if label]
+                if labels:
                     matches.append((version, row))
+                    matched_labels[id(row)] = labels
+        if not matches:
+            for version in current_versions():
+                for row in json.loads(version["approval_json"])["rows"]:
+                    labels = [weekly_savoury.price_name_match(message, name, typo=True)
+                              for name in [row["item"], *(row.get("aliases") or [])] if name]
+                    labels = [label for label in labels if label]
+                    if labels:
+                        matches.append((version, row))
+                        matched_labels[id(row)] = labels
+            if len(matches) > 1:
+                result.proposed_intent = "approved_menu"
+                result.has_conflict = True
+                return result
         if weekly_request and any(v["menu_key"] in weekly_savoury.LEGACY_WEEKLY_KEYS for v, _ in matches):
             matches = [(v, r) for v, r in matches if v["menu_key"] in weekly_savoury.LEGACY_WEEKLY_KEYS]
         if not matches and weekly_savoury.lifecycle_enabled() and re.search(r"\b(?:price|cost|much|menu)\b", message) and weekly_savoury.historical_item_match(message):
@@ -375,8 +391,8 @@ class RAGFallbackEngine:
         ref = f"approved_menu:{version['menu_key']}:version:{version['id']}:item:{row['item']}"
         result.source_refs = result.retrieved_sources = [ref]
         remaining = message
-        for name in [row["item"], *(row.get("aliases") or [])]:
-            remaining = re.sub(r"(?<!\w)" + re.escape(name.casefold()) + r"(?!\w)", "", remaining)
+        for name in matched_labels[id(row)]:
+            remaining = re.sub(r"(?<!\w)" + re.escape(name) + r"(?!\w)", "", remaining)
         if row["quantity"]:
             remaining = re.sub(re.escape(row["quantity"].casefold()), "", remaining)
         words = set(re.findall(r"\w+", remaining))

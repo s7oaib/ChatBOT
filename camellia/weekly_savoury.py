@@ -7,6 +7,7 @@ CURRENT/UPCOMING/EXPIRED are calculated in the kitchen's timezone on reads.
 
 import json
 import re
+import difflib
 from datetime import date, datetime, timedelta, timezone
 
 from camellia.database import db
@@ -132,6 +133,36 @@ def display_range(start, end):
 
 def _name(value):
     return re.sub(r"[^a-z0-9]+", " ", str(value or "").casefold()).strip()
+
+
+def price_name_match(message, name, *, typo=False):
+    """Return the matched normalized label, never any business facts.
+
+    Typo candidates require a multiword label and at most one substituted
+    character, with every other token unchanged. Callers must reject multiple
+    plausible rows and select facts only from customer-servable versions.
+    """
+    text, label = _name(message), _name(name)
+    if not label:
+        return None
+    exact = re.search(r"(?<!\w)" + re.escape(label) + r"(?!\w)", text)
+    if exact:
+        return exact.group()
+    if not typo or not re.search(r"\b(?:price|cost|much)\b", text):
+        return None
+    tokens, names = text.split(), label.split()
+    if len(names) < 2 or len(label) < 10:
+        return None
+    for index in range(len(tokens) - len(names) + 1):
+        window = tokens[index:index + len(names)]
+        differing = [(a, b) for a, b in zip(window, names) if a != b]
+        candidate = " ".join(window)
+        if len(differing) == 1:
+            a, b = differing[0]
+            if len(a) == len(b) and len(a) >= 4 and sum(x != y for x, y in zip(a, b)) == 1 \
+                    and difflib.SequenceMatcher(None, candidate, label).ratio() >= .9:
+                return candidate
+    return None
 
 
 def _quantity(value):
