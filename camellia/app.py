@@ -5041,9 +5041,14 @@ def _response_library_search_score(query: Optional[str], item: Dict[str, Any]) -
 
 def _response_library_system_items(status: str = "ALL", search: Optional[str] = None) -> List[Dict[str, Any]]:
     overrides = db.list_response_template_overrides()
+    retirements = db.list_response_template_retirements()
     items = []
     for template in (responder.qa_data or {}).get("templates", []):
         item = _system_template_public(template, overrides.get(str(template.get("id"))))
+        retirement = retirements.get(item["template_id"])
+        if retirement and retirement["retired"]:
+            item.update(status="RETIRED", editable=False, retirement=retirement,
+                        source_label="SYSTEM · RETIRED · Approved Q&A " + retirement["replacement_qa_id"])
         if status and status.upper() != "ALL" and item["status"] != status.upper():
             continue
         score = _response_library_search_score(search, item)
@@ -12273,6 +12278,7 @@ Non-Veg:
                 <div style="display:flex;justify-content:space-between;gap:8px;align-items:center;"><b>${responseLibraryHighlight(item.title || item.template_id, query)}</b><span class="badge">SYSTEM · PROTECTED</span><span class="badge badge-veg">${escapeHtml(status)}</span></div>
                 <div style="font-size:.78rem;color:var(--text-muted);margin:5px 0;">${responseLibraryHighlight(item.primary_question || '', query)} · ${responseLibraryHighlight(item.template_id || '', query)}</div>
                 <div style="font-size:.76rem;color:var(--text-muted);">Protected System Template · ${escapeHtml(item.topic || item.category || '')} · Source: System Template · Priority: Protected<br>Aliases: ${aliases}</div>
+                ${item.retirement ? `<p>Canonical replacement: Approved Q&amp;A ${escapeHtml(item.retirement.replacement_qa_id)}. Customer runtime does not use this legacy response.</p>` : ''}
                 <div id="response-copy-${escapeHtml(item.template_id)}" data-collapsed="true" style="white-space:pre-wrap;font-size:.82rem;margin:8px 0;">${preview}</div>
                 ${expandButton}
                 <div style="display:flex;gap:6px;flex-wrap:wrap;">

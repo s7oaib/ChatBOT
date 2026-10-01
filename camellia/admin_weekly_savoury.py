@@ -43,7 +43,7 @@ WEEKLY_HTML = r'''
   @media(max-width:600px){#weeklySavouryPanel .ws-dates{grid-template-columns:1fr}#weeklySavouryPanel .ws-review-table{overflow:visible}#weeklySavouryPanel .ws-review-table thead{display:none}#weeklySavouryPanel .ws-review-table tr{display:block;border:1px solid var(--border);border-radius:10px;padding:10px;margin-bottom:10px}#weeklySavouryPanel .ws-review-table td{display:block;border:0;padding:6px}#weeklySavouryPanel .ws-review-table td:before{content:attr(data-label);display:block;font-size:.75rem;color:var(--text-muted)}#weeklySavouryPanel .ws-review-table input,#weeklySavouryPanel .ws-review-table select{width:100%}}
 </style>
 <section id="weeklySavouryPanel" aria-labelledby="wsHeading">
-  <h2 id="wsHeading">Weekly Savoury Menu</h2>
+  <h2 id="wsHeading" tabindex="-1">Weekly Savoury Menu</h2>
   <p class="ws-muted">Update this week's menu or prepare the next one.</p>
   <div id="wsSuccess" class="ws-success" role="status" hidden></div>
   <nav class="ws-actions" aria-label="Weekly menu timeline"><button type="button" class="btn-secondary" data-ws-pane="current" aria-selected="true" onclick="wsShowTimeline('current')">Current</button><button type="button" class="btn-secondary" data-ws-pane="upcoming" aria-selected="false" onclick="wsShowTimeline('upcoming')">Upcoming</button></nav>

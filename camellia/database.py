@@ -480,6 +480,17 @@ class Database:
             );
             """)
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_response_override_versions_template ON response_template_override_versions(template_id, version_id DESC)")
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS response_template_retirements (
+                template_id TEXT PRIMARY KEY,
+                retired INTEGER NOT NULL CHECK (retired IN (0, 1)),
+                replacement_qa_id TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                updated_by TEXT NOT NULL,
+                audit_json TEXT NOT NULL
+            )
+            """)
 
             # Candidate templates table for human approval workflow
             cursor.execute("""
@@ -4334,6 +4345,28 @@ class Database:
         with self.get_connection() as conn:
             rows = conn.execute("SELECT * FROM response_template_overrides").fetchall()
             return {str(row["template_id"]): dict(row) for row in rows}
+
+    def list_response_template_retirements(self) -> Dict[str, Dict[str, Any]]:
+        with self.get_connection() as conn:
+            return {row['template_id']: dict(row) for row in conn.execute(
+                'SELECT * FROM response_template_retirements')}
+
+    def _set_response_template_retirement(self, template_id, replacement_qa_id, reason, actor, retired):
+        """Internal durable write; callers must use template_retirement's safety gate."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self.get_connection() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            current = conn.execute('SELECT audit_json FROM response_template_retirements WHERE template_id=?',
+                                   (template_id,)).fetchone()
+            audit = json.loads(current['audit_json']) if current else []
+            audit.append(dict(retired=bool(retired), replacement_qa_id=replacement_qa_id,
+                              reason=reason, actor=actor, at=now))
+            conn.execute('INSERT INTO response_template_retirements VALUES (?,?,?,?,?,?,?) '
+                         'ON CONFLICT(template_id) DO UPDATE SET retired=excluded.retired, '
+                         'replacement_qa_id=excluded.replacement_qa_id, reason=excluded.reason, '
+                         'updated_at=excluded.updated_at, updated_by=excluded.updated_by, audit_json=excluded.audit_json',
+                         (template_id, int(retired), replacement_qa_id, reason, now, actor, json.dumps(audit)))
+            conn.commit()
 
     def save_response_template_override(
         self, template_id: str, response: str, updated_by: Optional[str] = None,

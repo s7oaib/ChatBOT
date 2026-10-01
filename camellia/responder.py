@@ -1312,7 +1312,7 @@ class DeterministicResponder:
         Those already vary themselves, so the repeat guard must leave them
         alone rather than swap an approved greeting for its notice.
         """
-        for tmpl in self.qa_data.get("templates", []):
+        for tmpl in self._customer_templates():
             if tmpl.get("id") == template_id:
                 return bool(tmpl.get("responses"))
         return False
@@ -2102,6 +2102,8 @@ class DeterministicResponder:
         """
         if not config.SEMANTIC_ROUTER_ENABLED:
             return None
+        from camellia.template_retirement import customer_templates
+        templates = customer_templates(templates)
 
         # Prefer the typed contract. It captures entities and multiple intents;
         # unlike the legacy router it cannot return an arbitrary template name.
@@ -2249,7 +2251,7 @@ class DeterministicResponder:
         location_for_trial = str(result.entities.get("location", "")).strip()
         trial = approved_knowledge.resolve(
             result,
-            self.qa_data.get("templates", []),
+            self._customer_templates(),
             serviceable_location=(
                 _is_serviceable_ncr_area(location_for_trial) if location_for_trial else None
             ),
@@ -2340,7 +2342,7 @@ class DeterministicResponder:
         serviceable = _is_serviceable_ncr_area(location) if location else None
         resolution = approved_knowledge.resolve(
             result,
-            self.qa_data.get("templates", []),
+            self._customer_templates(),
             serviceable_location=serviceable,
         )
         # A typed unknown is not itself the final route.  Give the existing
@@ -2572,7 +2574,7 @@ class DeterministicResponder:
                 user_message=user_message,
                 channel=channel,
                 keyword_pick=template_id,
-                templates=self.qa_data.get("templates", []),
+                templates=self._customer_templates(),
                 history_turns=session_memory.get_session(user_id, channel).get("turns", []),
             )
 
@@ -3774,7 +3776,7 @@ class DeterministicResponder:
                 and not menu_reading.unmapped_terms
             ):
                 menu_resolution = approved_knowledge.resolve(
-                    menu_reading, self.qa_data.get("templates", []),
+                    menu_reading, self._customer_templates(),
                 )
                 allowed_menu_templates = {
                     "know_more", "product_overview",
@@ -4543,7 +4545,7 @@ class DeterministicResponder:
                     # outside-Delhi-NCR message and close the area flow.
                     facts["awaiting_area_confirmation"] = False
                     out_of_area = next(
-                        (template for template in self.qa_data.get("templates", [])
+                        (template for template in self._customer_templates()
                          if template.get("id") == "delivery_out_of_area"),
                         {},
                     )
@@ -5940,10 +5942,14 @@ class DeterministicResponder:
         # the out-of-syllabus rule, rather than being redirected to a menu.
         return len(substantive) <= 1
 
+    def _customer_templates(self):
+        from camellia.template_retirement import customer_templates
+        return customer_templates(self.qa_data.get("templates", []))
+
     def _template_by_id(self, template_id: str) -> Dict[str, Any]:
         """Return protected template logic plus an optional managed copy override."""
         template = next(
-            (t for t in self.qa_data.get("templates", []) if t.get("id") == template_id),
+            (t for t in self._customer_templates() if t.get("id") == template_id),
             {},
         )
         if not template:
@@ -6017,7 +6023,7 @@ class DeterministicResponder:
             log.warning("Could not load response-library overrides: %s", exc)
             overrides = {}
         result = []
-        for template in self.qa_data.get("templates", []):
+        for template in self._customer_templates():
             template_id = template.get("id")
             if not template_id:
                 continue

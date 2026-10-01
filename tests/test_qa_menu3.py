@@ -201,7 +201,7 @@ def test_bento_projection_has_no_independent_editor_or_publish_entry():
     from camellia.admin_menu_review import REVIEW_SCRIPT
     assert "menu.workspace!=='weekly'&&!menu.read_only" in REVIEW_SCRIPT
     assert "Open weekly workspace" in REVIEW_SCRIPT
-    assert "?.read_only){mrShowCatalogue();await wsLoad();return;}" in REVIEW_SCRIPT
+    # The navigation contract is exercised by the click test in test_qa_menu31.
 
 
 def test_standing_bento_cannot_become_second_publish_authority(current):
