@@ -505,7 +505,7 @@ def customer_blocked_keys():
         deleted = {row[0] for row in conn.execute("SELECT menu_id FROM menu_deletion_tombstones")}
     pending = pending_review_keys()
     visible = {version["menu_key"] for version in customer_versions()}
-    blocked = (reviewed - visible) | inactive | deleted | pending
+    blocked = (reviewed - visible) | inactive | deleted | pending | {"bento"}
     weekly_keys = set(weekly_savoury.LEGACY_WEEKLY_KEYS)
     if visible & weekly_keys or (not pending & weekly_keys and weekly_savoury.legacy_baseline_current()):
         # A future reviewed schedule does not hide the still-current legacy week.
@@ -655,8 +655,13 @@ def canonical_menu(path=None):
     blocked = customer_blocked_keys()
     for key in blocked - set(weekly_savoury.LEGACY_WEEKLY_KEYS):
         if key == "bento":
-            for week in menu.get("weekly_menus", []):
-                week["bengali_bento"] = []
+            # Retire the independent standing authority, not Bento rows that
+            # belong to the approved current Weekly Savoury version.
+            reviewed_weekly = any(v["menu_key"] in weekly_savoury.LEGACY_WEEKLY_KEYS for v in visible_versions)
+            weeks = menu.get("weekly_menus", [])
+            for index, week in enumerate(weeks):
+                if not reviewed_weekly or index != len(weeks) - 1:
+                    week["bengali_bento"] = []
             menu.get("order_types", {}).pop("bengali_bento", None)
         else:
             collection_key = "signature_collection" if key == "signature" else key

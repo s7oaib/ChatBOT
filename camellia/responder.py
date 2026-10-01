@@ -2831,10 +2831,11 @@ class DeterministicResponder:
             facts["order_intake_declined"] = "explicit_menu_browsing"
 
         primary_qa = mapped_qa_match or client_qa.match(user_message, facts)
-        stable_primary_answer = bool(primary_qa and primary_qa.entry.qa_id in {
+        bento_authority = client_qa.effective_entry("bento_details_client")
+        stable_primary_answer = bool((primary_qa and primary_qa.entry.qa_id in {
             "bento_details_client", "bento_price_client", "best_time_to_book",
             "savoury_delivery_time", "sondesh_delivery_time", "order_prebook", "alacarte_prebook",
-        })
+        }) or (bento_authority and _bento_grounded_comparison(user_message, bento_authority.answer)))
         pending_menu = (
             channel == "instagram"
             and not stable_primary_answer

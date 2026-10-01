@@ -15,7 +15,7 @@ def test_menu_catalogue_and_selected_menu_are_the_only_primary_views():
     assert '<div id="mrSelectedView" hidden>' in REVIEW_HTML
     assert 'Menu Catalogue' in REVIEW_HTML
     assert '+ Add Menu' in REVIEW_HTML
-    assert "open.textContent='Open'" in REVIEW_SCRIPT
+    assert "open.textContent=menu.read_only?'Open weekly workspace':'Open'" in REVIEW_SCRIPT
     for label in ('data-mr-pane="current"', 'data-mr-pane="upload"', 'data-mr-pane="versions"'):
         assert label in REVIEW_HTML
     assert 'Continue to Review' in REVIEW_HTML

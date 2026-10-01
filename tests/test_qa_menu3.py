@@ -215,3 +215,19 @@ def test_standing_bento_cannot_become_second_publish_authority(current):
     with pytest.raises(ValueError, match="read-only"):
         menu_images.save_draft("bento", b"not-an-image", "image/png")
     assert db.get_menu_catalogue_entry("bento") == before
+
+
+def test_current_weekly_bento_rows_survive_retirement_of_standing_authority(current):
+    from camellia import weekly_savoury
+    from test_weekly_savoury_lifecycle import _draft, _publish
+    current_id = projection()["current_version"]
+    draft = _draft("2 Oct - 8 Oct 2026", 160, "Dhokar Dalna")
+    rows = copy.deepcopy(draft["rows"])
+    rows.append({**rows[0], "row_id": "weekly-bento", "category": "bengali_bento", "item": "Veg Bento", "price_inr": 170})
+    edited = menu_review.edit(weekly_savoury.WEEKLY_KEY, draft["draft_id"], draft["revision"], rows, "admin")
+    _publish(edited, replace_version_id=current_id)
+    canonical = menu_review.canonical_menu()
+    assert canonical["weekly_menus"][-1]["bengali_bento"] == [{"item": "Veg Bento", "quantity": "500g", "price_inr": 170, "description": ""}]
+    assert "bengali_bento" not in canonical.get("order_types", {})
+    from camellia.rag_fallback import rag_fallback_engine
+    assert rag_fallback_engine.retrieve_approved_menu("What is the price of Veg Bento?").auto_response == "Veg Bento 500g is ₹170."

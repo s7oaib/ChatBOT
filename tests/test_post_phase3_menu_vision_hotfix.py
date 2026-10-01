@@ -66,7 +66,7 @@ def test_model_404_is_not_auth_failure_and_never_retried(monkeypatch):
     assert calls[0]['messages'][0]['content'][1]['type'] == 'image_url'
 
 
-@pytest.mark.parametrize('key,weekly', [('weekly_vegetarian', True), ('bento', False)])
+@pytest.mark.parametrize('key,weekly', [('weekly_vegetarian', True), ('signature', False)])
 @pytest.mark.parametrize('failure', ['model', 'exception', 'empty'])
 def test_failed_extraction_retains_source_and_cannot_publish(isolated, monkeypatch, key, weekly, failure):
     before = isolated.read_bytes()
