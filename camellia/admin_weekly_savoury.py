@@ -60,6 +60,7 @@ WEEKLY_HTML = r'''
     <textarea id="wsText" class="field-control" rows="6" maxlength="50000"></textarea>
     <button type="button" class="btn-primary" onclick="wsExtractText()">Extract pasted menu</button></div>
   <div id="wsReview" hidden>
+    <p id="wsNotLive" class="ws-warning" role="status"></p>
     <h3 id="wsReviewHeading">Confirm Weekly Menu</h3>
     <p id="wsReviewCount"></p>
     <img id="wsSource" alt="Uploaded weekly menu preview" style="max-width:100%" hidden>
@@ -133,8 +134,8 @@ async function wsLoad(){
   try{const data=await mrRequest('/admin/weekly-savoury');wsToday=data.today;
     const state=document.getElementById('wsState');state.replaceChildren();
     const addLine=(value)=>{const p=document.createElement('p');p.textContent=value;state.appendChild(p);};
-    addLine(data.current?'Current · '+(data.current.display_date_range||'Current menu')+' · '+data.current.item_count+' items':'No current Weekly Savoury menu');
-    if(data.upcoming.length)addLine('Next scheduled menu · '+data.upcoming.map(item=>item.display_date_range).join(', '));
+    addLine(data.current?'LIVE / CURRENT · '+(data.current.display_date_range||'Current menu')+' · '+data.current.item_count+' items':'No current Weekly Savoury menu');
+    if(data.upcoming.length)addLine('PUBLISHED — UPCOMING · '+data.upcoming.map(item=>item.display_date_range).join(', '));
     else if(!data.current)addLine('Upload this week’s menu to begin.');
     const reminder=document.getElementById('wsReminder');reminder.hidden=!data.reminder;reminder.textContent=data.reminder||'';
     const history=document.getElementById('wsVersions');history.replaceChildren();
@@ -165,6 +166,7 @@ async function wsRetryExtraction(){if(!wsDraft||wsBusy||!confirm('Read the origi
 function wsRenderReview(options){
   const failed=!!wsDraft&&wsDraft.status==='FAILED';document.getElementById('wsFailed').hidden=!failed;
   const review=!!wsDraft&&!failed;document.getElementById('wsReview').hidden=!review;if(!review)return;
+  document.getElementById('wsNotLive').textContent='NOT LIVE — '+(wsDraft.status==='READY_TO_APPROVE'?'READY TO APPROVE':'NEEDS REVIEW')+'. Uploading a menu does not publish it to customers. Review the extracted items, prices and dates, then publish.';
   document.getElementById('wsReviewCount').textContent=wsDraft.rows.length?'We found '+wsDraft.rows.length+' items.':"Extraction unsuccessful. We couldn't extract any menu items from this flyer. Your published menu is unchanged. You can retry extraction or enter the items manually.";
   document.getElementById('wsFrom').value=options?.valid_from??wsDraft.weekly_dates?.valid_from??'';
   document.getElementById('wsUntil').value=options?.valid_until??wsDraft.weekly_dates?.valid_until??'';

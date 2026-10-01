@@ -221,6 +221,11 @@ def _unknown_named_price(message: str) -> bool:
             or explicit_entity(subject) or EXPLICIT_SUBJECT_RE.search(subject) \
             or HOME_TABLE_RE.search(subject):
         return False
+    # Reviewed rows (including their aliases) are business authority even
+    # when no fixed Q&A template or static catalogue entry names the dish.
+    approved_menu = rag_fallback_engine.retrieve_approved_menu(message)
+    if approved_menu.auto_response or approved_menu.has_conflict:
+        return False
     menu = menu_review.canonical_menu()
     names = [
         product.get("flavour", "")
@@ -2822,6 +2827,9 @@ class DeterministicResponder:
                 session_memory.add_turn(user_id, channel, user_message, re.sub(r"https://wa\.me/[^\s]+", "[Continue on WhatsApp]", continuity_reply))
                 return continuity_reply, True, "order_intake_draft", None
 
+        if channel == "instagram" and menu_review.weekly_menu_browsing(user_message):
+            facts["order_intake_declined"] = "explicit_menu_browsing"
+
         pending_menu = (
             channel == "instagram"
             and not _approved_chicken_kosha_price_question(user_message, facts)
@@ -2836,7 +2844,9 @@ class DeterministicResponder:
                 "last_route_source": "HUMAN_HANDOFF",
                 "last_intents": [Intent.ESCALATION.value],
                 "last_actions": [BusinessAction.ESCALATE_TO_TEAM.value],
-                "last_grounding": "newer_menu_pending_review" if pending_menu else "unknown_menu_price",
+                "last_grounding": ("newer_menu_pending_review" if menu_review.pending_review_keys()
+                    & menu_review.menu_question_keys(user_message, facts) else "menu_authority_unavailable")
+                    if pending_menu else "unknown_menu_price",
                 "knowledge_sufficient": False,
                 "last_llm_called": False,
                 "last_fallback_used": True,
@@ -3079,6 +3089,7 @@ class DeterministicResponder:
                 return order_response, False, "order_next_steps", None
             if (
                 not finalized_order
+                and not menu_review.weekly_menu_browsing(user_message)
                 and (not order_intake.is_order_information_question(user_message) or bool(order_intake._structured_fields(user_message)))
                 and not approved_intent_precedes_draft
                 and not source_referential_order
@@ -3164,6 +3175,33 @@ class DeterministicResponder:
                 })
                 session_memory.add_turn(user_id, channel, user_message, source_description)
                 return source_description, True, "source_description", None
+
+        if channel == "instagram" and menu_review.weekly_menu_browsing(user_message):
+            # A fresh explicit intent outranks an old order or source topic.
+            # Resolve approved rows and their associated flyer on every turn.
+            versions = [v for v in menu_review.customer_versions()
+                        if v["menu_key"] in weekly_savoury.LEGACY_WEEKLY_KEYS]
+            if len(versions) == 1:
+                version = versions[0]
+                approval = json.loads(version["approval_json"])
+                rows = approval["rows"]
+                if re.search(r"\b(?:non.?veg|non vegetarian)\b", lowered_text):
+                    rows = [r for r in rows if r["category"] == "non_vegetarian"]
+                elif re.search(r"\b(?:veg|vegetarian)\b", lowered_text):
+                    rows = [r for r in rows if r["category"] == "vegetarian"]
+                if rows:
+                    text = "Current approved Weekly Savoury menu:\n" + "\n".join(
+                        f"{r['item']}{(' ' + r['quantity']) if r['quantity'] else ''} is ₹{r['price_inr']}."
+                        for r in rows)
+                    ref = f"approved_menu:{version['menu_key']}:version:{version['id']}"
+                    facts.update({"last_route_source": "APPROVED_MENU", "last_knowledge_ids": [ref],
+                                  "last_grounding": "approved_menu_exact_facts", "last_topic": "savoury",
+                                  "active_topic": "savoury", "knowledge_sufficient": True,
+                                  "last_llm_called": False, "last_fallback_used": False,
+                                  "source_context_superseded": True, "source_context_used": False})
+                    session_memory.add_turn(user_id, channel, user_message, text)
+                    image = approval.get("image_path")
+                    return text, True, "approved_menu", [image] if image else None
 
         if channel == "instagram" and not _approved_chicken_kosha_price_question(user_message, facts):
             menu_result = rag_fallback_engine.retrieve_approved_menu(user_message)

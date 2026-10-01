@@ -512,13 +512,24 @@ def customer_blocked_keys():
     return blocked
 
 
+def weekly_menu_browsing(message):
+    """Explicit weekly/general browsing, independent of stale session context."""
+    text = weekly_savoury._name(message)
+    return bool(re.search(r"\bmenus?\b", text) and not re.search(
+        r"\b(?:order|draft|whatsapp|price|cost|pay|payment|available|availability|ingredient|"
+        r"ingredients|allergen|allergens|gluten|shelf|historical|archive|old|previous|last|"
+        r"sondesh|sandesh|mishti|signature|aamar|bento|subscription|home table)\b", text))
+
+
 def menu_question_keys(message, facts=None):
     """Exact identity for safety relevance only; never authorizes draft facts."""
     facts = facts or {}
     normalized = weekly_savoury._name(message)
+    if weekly_menu_browsing(message) and (weekly_savoury.lifecycle_enabled()
+            or pending_review_keys() & set(weekly_savoury.LEGACY_WEEKLY_KEYS)):
+        return set(weekly_savoury.LEGACY_WEEKLY_KEYS)
     def contains(name):
-        name = weekly_savoury._name(name)
-        return bool(name and re.search(r"(?<!\w)" + re.escape(name) + r"(?!\w)", normalized))
+        return bool(weekly_savoury.price_name_match(normalized, name, typo=True))
     explicit = set()
     with db.get_connection() as conn:
         for stored in conn.execute("SELECT menu_key,approval_json FROM menu_versions WHERE approval_json IS NOT NULL"):
