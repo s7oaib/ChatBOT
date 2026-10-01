@@ -29,6 +29,18 @@ HOME_TABLE_REEL_URLS = (
 )
 
 
+def build_home_table_reel_blocks(text: str) -> List[Dict[str, Any]]:
+    """Insert the one authoritative URL set without changing authored text."""
+    if HOME_TABLE_VIDEO_ANCHOR not in text:
+        return [{"kind": "TEXT", "text": text}]
+    end = text.index(HOME_TABLE_VIDEO_ANCHOR) + len(HOME_TABLE_VIDEO_ANCHOR)
+    blocks = [{"kind": "TEXT", "text": text[:end]}]
+    blocks.extend({"kind": "LINK", "url": url} for url in HOME_TABLE_REEL_URLS)
+    if text[end:]:
+        blocks.append({"kind": "TEXT", "text": text[end:]})
+    return blocks
+
+
 @dataclass(frozen=True)
 class ApprovedQA:
     qa_id: str

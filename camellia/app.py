@@ -1072,7 +1072,7 @@ def _process_instagram_event(
             template_id, **trace,
         )
 
-        ordered_blocks = facts.get("ordered_response_blocks") if facts.get("last_route_source") == "EXACT_APPROVED" else None
+        ordered_blocks = facts.get("ordered_response_blocks") if facts.get("last_route_source") in {"EXACT_APPROVED", "SOURCE_DESCRIPTION"} else None
         if ordered_blocks and not needs_escalation:
             send_instagram_response_blocks(sender_id, ordered_blocks, inbound_message_id=conversation_id)
         else:
