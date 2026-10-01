@@ -4,10 +4,10 @@ Previously validated unrelated application code is **frozen**. Change only what 
 
 ## Current baselines
 
-- Accepted application/runtime and comparison baseline: `b2d2b485c6c4e8b7c35d6908b75ce489a251d4bd`.
-- Production acceptance: Railway `10a13e8e-d96f-43ad-9aa0-8dff2e5f82b4`, SUCCESS, health/Admin 200.
-- Final exact-main manual [full CI 36931567553](https://github.com/s7oaib/ChatBOT/actions/runs/36931567553): 3410 passed, zero failed, one existing Starlette/httpx warning; critical flake8 and schema checks PASS.
-- Merge tree `f4ab3c5dc19d096daf22393053a68c45953ee446` equals tested feature head `1a22539286d2c0e947dc3dceb7fc7c18544387da`.
+- Accepted application/runtime and comparison baseline: `4071402099390dafc28c22c8c2a35920e385d470`.
+- Production acceptance: Railway `709ed586-3b7a-4137-9de7-d0cd0667e9c1`, SUCCESS, health/Admin 200.
+- Final exact-candidate manual (merge tree identical) [full CI 36938786442](https://github.com/s7oaib/ChatBOT/actions/runs/36938786442): 3432 passed, zero failed, one existing Starlette/httpx warning; critical flake8 and schema checks PASS.
+- Merge tree `99a560be27af38f9ce95a555a3eb0338d6a33b53` equals tested feature head `72150044d5222b279170bf656021a154076dc59d`.
 - The later handover docs/metadata merge/tag is distinct from this runtime baseline. Do not advance the baseline for each docs-only commit or rerun full merely for Markdown.
 
 `test_baseline.json` records the comparison baseline used by `scripts/run_impacted_tests.py`. It never auto-advances.
