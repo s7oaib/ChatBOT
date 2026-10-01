@@ -3130,7 +3130,6 @@ class DeterministicResponder:
                     and source.get("source_type") in {"story", "post", "reel"}
                     and str(source.get("routing_topic") or "").strip().casefold() == "bengali home table"
                     and client_qa.HOME_TABLE_VIDEO_ANCHOR in source_description
-                    and not facts.get("home_table_videos_sent")
                 ):
                     source_blocks = client_qa.build_home_table_reel_blocks(source_description)
                 facts.update({
@@ -3514,7 +3513,6 @@ class DeterministicResponder:
                 if block.kind == "TEXT":
                     if (
                         entry.qa_id in {"home_table_details", "home_table_price"}
-                        and not facts.get("home_table_videos_sent")
                         and client_qa.HOME_TABLE_VIDEO_ANCHOR in block.value
                     ):
                         ordered_response_blocks.extend(client_qa.build_home_table_reel_blocks(block.value))
@@ -3619,8 +3617,7 @@ class DeterministicResponder:
                     == _normalize_approved_transport_text(details)
                 ):
                     response_text = _approved_continuation(response_text, details)
-                    if facts.get("home_table_videos_sent"):
-                        ordered_response_blocks[:] = [{"kind": "TEXT", "text": response_text}]
+                    ordered_response_blocks[:] = client_qa.build_home_table_reel_blocks(response_text)
             session_memory.add_turn(user_id, channel, user_message, response_text)
             return (
                 response_text,

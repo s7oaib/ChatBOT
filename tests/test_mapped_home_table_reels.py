@@ -93,11 +93,11 @@ def test_real_source_send_path_queues_and_completes_durably(source_store):
     assert facts['home_table_videos_sent']
     assert len(database.home_table_reel_receipts(USER, facts['home_table_reel_delivery_id'])) == 4
     answer, blocks = resolve(memory)
-    assert answer == DESCRIPTION and not blocks
+    assert answer == DESCRIPTION and len(blocks) == 6
     queue_source(database, route, 'repeat')
     with patch.object(app_module, 'send_instagram_reply', return_value={'message_id': 'text'}) as send:
         app_module._process_instagram_outbound_jobs()
-    assert [c.args[1] for c in send.call_args_list] == [DESCRIPTION]
+    assert [c.args[1] for c in send.call_args_list] == [DESCRIPTION[:end], *client_qa.HOME_TABLE_REEL_URLS, DESCRIPTION[end:]]
 
 
 def test_partial_source_completion_retries_missing_only(source_store):
@@ -131,3 +131,45 @@ def test_blocked_mapped_source_has_zero_outbound_blocks(source_store):
 
 def test_builder_without_anchor_returns_original_text():
     assert client_qa.build_home_table_reel_blocks('unchanged') == [{'kind': 'TEXT', 'text': 'unchanged'}]
+
+
+@pytest.mark.parametrize('kind', ['story', 'post', 'reel'])
+def test_new_source_after_legacy_and_story_completion(source_store, kind):
+    database, memory = source_store
+    facts = memory.get_facts(USER, 'instagram')
+    facts['home_table_videos_sent'] = True  # Legitimate historical completion.
+    generations = []
+    for index, source in enumerate(['story', kind]):
+        route = mapped(source_store, source)
+        job = queue_source(database, route, 'new-source-' + str(index))
+        generation = facts['home_table_reel_delivery_id']
+        generations.append(generation)
+        with patch.object(app_module, 'send_instagram_reply', return_value={'message_id': 'accepted'}) as send:
+            app_module._process_instagram_outbound_jobs(inbound_job_id=job)
+        assert [c.args[1] for c in send.call_args_list if c.args[1] in client_qa.HOME_TABLE_REEL_URLS] == list(client_qa.HOME_TABLE_REEL_URLS)
+        assert len(database.home_table_reel_receipts(USER, generation)) == 4
+        assert ''.join(c.args[1] for c in send.call_args_list if c.args[1] not in client_qa.HOME_TABLE_REEL_URLS) == DESCRIPTION
+    assert generations[0] != generations[1]
+
+
+def test_approved_completion_does_not_suppress_new_story(source_store):
+    database, memory = source_store
+    facts = memory.get_facts(USER, 'instagram')
+    _, matched, *_ = responder.match_and_respond('Tell me about Bengali Home Table', user_id=USER, channel='instagram')
+    assert matched
+    job, _ = database.enqueue_instagram_inbound_job('approved-first', USER, '_process_instagram_event', {})
+    token = app_module._instagram_job_context.set({'job_id': job, 'sequence': 0})
+    try:
+        app_module.send_instagram_response_blocks(USER, facts['ordered_response_blocks'])
+    finally:
+        app_module._instagram_job_context.reset(token)
+    with patch.object(app_module, 'send_instagram_reply', return_value={'message_id': 'approved'}):
+        app_module._process_instagram_outbound_jobs()
+    old = facts['home_table_reel_delivery_id']
+    assert facts['home_table_videos_sent']
+    queue_source(database, mapped(source_store), 'new-story')
+    with patch.object(app_module, 'send_instagram_reply', return_value={'message_id': 'story'}) as send:
+        app_module._process_instagram_outbound_jobs()
+    assert [c.args[1] for c in send.call_args_list if c.args[1] in client_qa.HOME_TABLE_REEL_URLS] == list(client_qa.HOME_TABLE_REEL_URLS)
+    assert facts['home_table_reel_delivery_id'] != old
+    assert len(database.home_table_reel_receipts(USER, old)) == 4

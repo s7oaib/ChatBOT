@@ -173,9 +173,12 @@ def test_first_home_table_preserves_copy_and_exact_link_order(qa_id, question):
         app_module.send_instagram_response_blocks(user, blocks)
     assert [c.args[1] for c in send.call_args_list] == [b.get('text', b.get('url')) for b in blocks]
     assert facts['home_table_videos_sent'] is True
+    again, _, blocks = resolve(question, user)
+    assert again == text
+    assert tuple(b['url'] for b in blocks if b['kind'] == 'LINK') == URLS
     with patch.object(app_module, 'send_instagram_reply', return_value={'message_id':'ok'}) as send:
         app_module.send_instagram_response_blocks(user, blocks)
-    assert send.call_count == 2
+    assert send.call_count == 6
 
 
 def test_details_then_price_and_payment_do_not_repeat_links():
@@ -199,7 +202,7 @@ def test_failed_second_link_stops_and_does_not_mark_sent():
     assert [c.args[1] for c in send.call_args_list][1:] == list(URLS[:2])
     assert not facts.get('home_table_videos_sent')
     _, _, retry_blocks = resolve('What is the price of Bengali Home Table?', user)
-    assert tuple(b['url'] for b in retry_blocks if b['kind'] == 'LINK') == URLS
+    assert all(b['kind'] != 'LINK' for b in retry_blocks)  # Actual price continuation has no anchor.
 
 @pytest.mark.parametrize('question', ['Tell me about Bento', 'Tell me about Sondesh', 'subscription price', 'chicken kosha price', 'menu prices please', 'How do I pay for Home Table?'])
 def test_unrelated_and_payment_responses_have_no_links(question):

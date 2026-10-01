@@ -103,10 +103,10 @@ def test_partial_failure_restart_and_retry_only_missing_links(store, monkeypatch
     enqueue(database, event='followup')
     with patch.object(app_module, 'send_instagram_reply', return_value={'message_id': 'text'}) as send:
         app_module._process_instagram_outbound_jobs()
-    assert [c.args[1] for c in send.call_args_list] == ['approved before', 'approved after']
+    assert [c.args[1] for c in send.call_args_list] == ['approved before', *URLS, 'approved after']
 
 
-def test_terminal_failure_does_not_strand_later_missing_link_retry(store):
+def test_terminal_failure_does_not_strand_new_full_delivery(store):
     database, memory = store
     enqueue(database)
     for _ in range(3):
@@ -117,7 +117,7 @@ def test_terminal_failure_does_not_strand_later_missing_link_retry(store):
     enqueue(database, event='customer-retry')
     with patch.object(app_module, 'send_instagram_reply', return_value={'message_id': 'ok'}) as send:
         app_module._process_instagram_outbound_jobs()
-    assert [c.args[1] for c in send.call_args_list] == ['approved before', *URLS[2:], 'approved after']
+    assert [c.args[1] for c in send.call_args_list] == ['approved before', *URLS, 'approved after']
     assert memory.get_facts(USER, 'instagram')['home_table_videos_sent']
 
 
@@ -137,7 +137,7 @@ def test_blocked_queued_links_are_never_receipts(store):
 def test_duplicate_queued_answers_do_not_resend_confirmed_urls(store):
     database, memory = store
     enqueue(database)
-    enqueue(database, event='duplicate-request')
+    enqueue(database, event='first')
     with patch.object(app_module, 'send_instagram_reply', return_value={'message_id': 'ok'}) as send:
         app_module._process_instagram_outbound_jobs()
     urls = [c.args[1] for c in send.call_args_list if c.args[1] in URLS]
@@ -218,3 +218,57 @@ def test_customer_erasure_deletes_delivery_receipts(store):
     assert len(receipts(database, memory)) == 4
     database.delete_user_data(USER)
     assert not receipts(database, memory)
+
+
+def test_independent_requests_retain_both_receipt_sets(store):
+    database, memory = store
+    generations = []
+    for event in ['new-one', 'new-two']:
+        enqueue(database, event=event)
+        generation = memory.get_facts(USER, 'instagram')['home_table_reel_delivery_id']
+        generations.append(generation)
+        with patch.object(app_module, 'send_instagram_reply', return_value={'message_id': event}) as send:
+            app_module._process_instagram_outbound_jobs()
+        assert [c.args[1] for c in send.call_args_list] == ['approved before', *URLS, 'approved after']
+        assert len(database.home_table_reel_receipts(USER, generation)) == 4
+    assert generations[0] != generations[1]
+    assert len(database.home_table_reel_receipts(USER, generations[0])) == 4
+
+
+def test_same_inbound_retry_after_partial_restart_keeps_queue_positions(store, monkeypatch):
+    database, memory = store
+    enqueue(database)
+    generation = memory.get_facts(USER, 'instagram')['home_table_reel_delivery_id']
+    for _ in range(3):
+        step(database)
+    restarted = SessionMemoryManager(persistence_enabled=True, database=database)
+    monkeypatch.setattr(app_module, 'session_memory', restarted)
+    enqueue(database)
+    assert restarted.get_facts(USER, 'instagram')['home_table_reel_delivery_id'] == generation
+    with database.get_connection() as conn:
+        assert conn.execute('SELECT COUNT(*) FROM instagram_outbound_jobs').fetchone()[0] == 6
+    with patch.object(app_module, 'send_instagram_reply', return_value={'message_id': 'ok'}) as send:
+        app_module._process_instagram_outbound_jobs()
+    assert [c.args[1] for c in send.call_args_list] == [*URLS[2:], 'approved after']
+    assert len(database.home_table_reel_receipts(USER, generation)) == 4
+
+
+def test_same_meta_event_replay_and_new_mid(store, monkeypatch):
+    database, memory = store
+    class Deferred:
+        def add_task(self, *args, **kwargs):
+            pass
+    tasks = app_module._DurableInstagramTasks(Deferred())
+    def _process_instagram_event(sender, text, ad_id):
+        app_module.send_instagram_response_blocks(sender, BLOCKS)
+    monkeypatch.setattr(app_module, '_process_instagram_event', _process_instagram_event)
+    generations = []
+    for index, mid in enumerate(['meta-one', 'meta-one', 'meta-two']):
+        tasks.set_event('business', {'sender': {'id': USER}, 'message': {'mid': mid, 'text': 'Home Table'}})
+        tasks.add_task(_process_instagram_event, USER, 'Home Table', None)
+        with patch.object(app_module, 'send_instagram_reply', return_value={'message_id': mid}) as send:
+            app_module._process_instagram_inbound_jobs()
+        assert send.call_count == (0 if index == 1 else 6)
+        generations.append(memory.get_facts(USER, 'instagram')['home_table_reel_delivery_id'])
+    assert generations[0] == generations[1] != generations[2]
+    assert database.instagram_job_counts()['inbound'] == {'DONE': 2}
