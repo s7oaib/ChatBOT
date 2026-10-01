@@ -60,8 +60,8 @@ def test_menu_browsing_preserves_order_draft_and_ignores_old_topic(current_menu,
     facts.update(order_intake_draft=draft, last_topic="bengali_home_table", active_topic="subscription")
     before = copy.deepcopy(draft)
     answer = respond(query, uid)
-    assert answer[2] == "approved_menu"
-    assert "Dhokar Dalna 500g is ₹100." in answer[0]
+    assert answer[2] is None  # A text-only approval has no flyer to send.
+    assert "₹" not in answer[0]
     assert "unchanged" not in answer[0].lower()
     assert facts["order_intake_draft"] == before
     assert f"version:{current_menu['version_id']}" in facts["last_knowledge_ids"][0]
@@ -86,7 +86,10 @@ def test_pending_replacement_then_publish_hot_reload(current_menu):
     assert [v['id'] for v in menu_review.customer_versions()] == [new['version_id']]
     for query in queries:
         answer = respond(query)
-        assert "₹200" in answer[0] and "₹100" not in answer[0]
+        if query in BROWSE:
+            assert "₹" not in answer[0]
+        else:
+            assert "₹200" in answer[0] and "₹100" not in answer[0]
 
 
 def test_unique_stored_alias_bypasses_unknown_price_gate(current_menu):
@@ -148,8 +151,11 @@ def test_current_flyer_replacement_and_static_fallback(weekly_env, monkeypatch):
     new_image = json.loads(db.get_menu_version(second['version_id'])['approval_json'])['image_path']
     assert new_image != old_image
     for query in BROWSE:
-        answer = respond(query)
+        uid = uuid.uuid4().hex
+        answer = respond(query, uid)
         assert answer[3] == [new_image]
-        assert '₹200' in answer[0] and '₹100' not in answer[0]
+        assert answer[0] == ''
+        assert answer[2] == 'approved_menu'
+        assert respond('What is the price of Dhokar Dalna?', uid)[0] == 'Dhokar Dalna 500g is ₹200.'
     assert menu_images.current_weekly_url() == new_image
     assert menu_review.canonical_menu()['weekly_menus'][-1]['vegetarian'][0]['price_inr'] == 200

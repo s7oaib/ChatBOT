@@ -3190,18 +3190,17 @@ class DeterministicResponder:
                 elif re.search(r"\b(?:veg|vegetarian)\b", lowered_text):
                     rows = [r for r in rows if r["category"] == "vegetarian"]
                 if rows:
-                    text = "Current approved Weekly Savoury menu:\n" + "\n".join(
-                        f"{r['item']}{(' ' + r['quantity']) if r['quantity'] else ''} is ₹{r['price_inr']}."
-                        for r in rows)
+                    image = approval.get("image_path")
+                    # Browsing sends the flyer; exact item prices remain an explicit intent.
+                    text = "" if image else self._generic_fallback()
                     ref = f"approved_menu:{version['menu_key']}:version:{version['id']}"
-                    facts.update({"last_route_source": "APPROVED_MENU", "last_knowledge_ids": [ref],
-                                  "last_grounding": "approved_menu_exact_facts", "last_topic": "savoury",
-                                  "active_topic": "savoury", "knowledge_sufficient": True,
-                                  "last_llm_called": False, "last_fallback_used": False,
+                    facts.update({"last_route_source": "APPROVED_MENU" if image else "HUMAN_HANDOFF", "last_knowledge_ids": [ref],
+                                  "last_grounding": "approved_menu_flyer" if image else "approved_menu_flyer_missing", "last_topic": "savoury",
+                                  "active_topic": "savoury", "knowledge_sufficient": bool(image),
+                                  "last_llm_called": False, "last_fallback_used": not bool(image),
                                   "source_context_superseded": True, "source_context_used": False})
                     session_memory.add_turn(user_id, channel, user_message, text)
-                    image = approval.get("image_path")
-                    return text, True, "approved_menu", [image] if image else None
+                    return text, bool(image), "approved_menu" if image else None, [image] if image else None
 
         if channel == "instagram" and not _approved_chicken_kosha_price_question(user_message, facts):
             menu_result = rag_fallback_engine.retrieve_approved_menu(user_message)
