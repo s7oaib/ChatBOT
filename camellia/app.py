@@ -5661,10 +5661,16 @@ async def import_custom_qa_dry_run(file: UploadFile = File(...), x_admin_key: Op
 
 
 @app.post("/admin/custom-qa/import/confirm")
-async def import_custom_qa_confirm(file: UploadFile = File(...), x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+async def import_custom_qa_confirm(file: UploadFile = File(...), confirm_warnings: bool = Form(False),
+                                   x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
     require_admin(x_admin_key, x_admin_pin)
     rows = await _custom_import_rows(file)
-    plan, ids = db.apply_custom_qa_import(lambda: library.plan_import(db, responder.qa_data.get("templates", []), rows))
+    def build_plan():
+        plan = library.plan_import(db, responder.qa_data.get("templates", []), rows)
+        if plan['warnings'] and not confirm_warnings:
+            plan.update(can_confirm=False, warning_confirmation_required=True)
+        return plan
+    plan, ids = db.apply_custom_qa_import(build_plan)
     if not plan["can_confirm"]:
         raise HTTPException(status_code=409, detail=plan)
     return {**plan, "imported": len(ids), "imported_ids": ids,
@@ -12066,6 +12072,7 @@ Non-Veg:
         let customQaStatusFilter = 'ALL';
         let libraryTypeFilter = 'ALL';
         let cqaAliasesDraft = [];
+        let cqaImportWarnings = [];
         let responseLibrarySearchTimer = null;
         let responseLibrarySuggestionIndex = -1;
         let responseLibraryVisibleLimit = 20;
@@ -12675,7 +12682,7 @@ Non-Veg:
                 const data = await resp.json().catch(() => ({}));
                 if (resp.status === 409) {
                     const existing = (data.detail && data.detail.existing) || [];
-                    alert('An identical question or alias already exists:\n' + existing.map(e => `${e.topic} — ${e.primary_question}`).join('\n') + '\n\nEdit the existing Q&A instead.');
+                    alert('Question or alias conflicts with existing knowledge:\n' + existing.map(e => `${e.source || 'CUSTOM'}: ${e.qa_id || e.template_id || e.id || ''} — ${e.primary_question}`).join('\n') + '\n\nReview the conflicting record instead of creating a duplicate.');
                     return;
                 }
                 if (!resp.ok) { alert('Could not save: ' + (data.detail || resp.status)); return; }
@@ -12713,6 +12720,7 @@ Non-Veg:
         function downloadCustomQaTemplate() { downloadBlobFrom('/admin/custom-qa/csv-template', 'custom_qa_template.csv'); }
 
         function openCustomQaImportModal() {
+            cqaImportWarnings = [];
             document.getElementById('cqaImportFile').value = '';
             document.getElementById('cqaImportSummary').innerHTML = '';
             document.getElementById('cqaImportRows').innerHTML = '<tr><td colspan="4" style="text-align:center; color:#888;">Upload a CSV and click Validate.</td></tr>';
@@ -12731,6 +12739,7 @@ Non-Veg:
                 const data = await resp.json();
                 if (!resp.ok) { alert('Validation failed.'); return; }
                 const s = data.summary;
+                cqaImportWarnings = data.warnings || [];
                 document.getElementById('cqaImportSummary').innerHTML = `Rows: ${s.rows} · NEW: ${s.new} · UPDATE: ${s.update} · UNCHANGED: ${s.unchanged} · CONFLICT: ${s.conflict} · ERROR: ${s.error} · Metadata columns are ignored`;
                 document.getElementById('cqaImportRows').innerHTML = data.rows.map(r => `
                     <tr>
@@ -12748,6 +12757,10 @@ Non-Veg:
             if (!fileInput.files.length) { alert('Choose a CSV file first.'); return; }
             const form = new FormData();
             form.append('file', fileInput.files[0]);
+            if (cqaImportWarnings.length) {
+                if (!confirm('This CSV contains business commitments: ' + cqaImportWarnings.join(', ') + '. Confirm these details are current and approved before importing.')) return;
+                form.append('confirm_warnings', 'true');
+            }
             try {
                 const resp = await fetch('/admin/custom-qa/import/confirm', { method: 'POST', headers: getAuthHeaders(), body: form });
                 const data = await resp.json();

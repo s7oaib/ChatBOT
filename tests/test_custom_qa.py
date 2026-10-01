@@ -21,9 +21,10 @@ from camellia.session_memory import session_memory
 client = TestClient(app_module.app)
 
 
-def _csv_import(text, confirm=False):
+def _csv_import(text, confirm=False, confirm_warnings=False):
     return client.post('/admin/custom-qa/import/' + ('confirm' if confirm else 'dry-run'),
-                       files={'file': ('library.csv', text.encode('utf-8'), 'text/csv')}, headers=_auth())
+                       files={'file': ('library.csv', text.encode('utf-8'), 'text/csv')},
+                       data={'confirm_warnings': 'true'} if confirm_warnings else {}, headers=_auth())
 
 
 class TestLibraryManagement:
@@ -45,7 +46,7 @@ class TestLibraryManagement:
         dry = _csv_import(text).json()
         assert dry['summary'] == {'rows': 3, 'new': 1, 'update': 1, 'unchanged': 1, 'conflict': 0, 'error': 0}
         assert isolated_db.list_custom_qa(status='ALL') == before
-        assert _csv_import(text, True).status_code == 200
+        assert _csv_import(text, True, confirm_warnings=True).status_code == 200
         assert isolated_db.get_custom_qa(a)['verified_answer'] == answer
         assert isolated_db.get_custom_qa(a)['topic'] == 'Changed name'
         assert isolated_db.get_custom_qa(a)['priority'] == 'HIGH'
@@ -165,6 +166,18 @@ class TestLibraryManagement:
         changed = text.replace('Please discuss your bag.', 'A different conflicting answer.')
         assert _csv_import(changed, True).status_code == 409
         assert isolated_db.get_custom_qa(row['id'])['verified_answer'] == 'Please discuss your bag.'
+
+    def test_import_business_warnings_need_explicit_confirmation(self, isolated_db):
+        text = app_module.library.csv_text(app_module.library.COLUMNS, [{'topic': 'Packing',
+            'primary_question': 'special carry bag pricing', 'aliases': '[]',
+            'approved_answer': 'A special carry bag costs ₹250.'}])
+        dry = _csv_import(text).json()
+        assert 'price' in dry['warnings']
+        assert _csv_import(text, True).status_code == 409
+        assert isolated_db.list_custom_qa(status='ALL') == []
+        response = client.post('/admin/custom-qa/import/confirm',
+            files={'file': ('library.csv', text.encode(), 'text/csv')}, data={'confirm_warnings': 'true'}, headers=_auth())
+        assert response.status_code == 200 and response.json()['imported'] == 1
 
     def test_ui_type_counts_toolbar_and_guard_controls(self, isolated_db):
         page = client.get('/admin').text

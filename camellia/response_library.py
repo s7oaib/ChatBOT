@@ -5,7 +5,7 @@ import json
 import re
 
 from camellia import approved_qa, client_qa
-from camellia.candidate_safety import validate_candidate_answer
+from camellia.candidate_safety import validate_candidate_answer, detect_business_commitment_warnings
 
 COLUMNS = ['id', 'topic', 'primary_question', 'aliases', 'approved_answer',
            'priority', 'status', 'source', 'created_at', 'updated_at',
@@ -90,7 +90,7 @@ def plan_import(database, templates, rows):
     results, seen_ids, seen_keys = [], set(), set()
     for row in rows:
         result = {'row_number': row['row_number'], 'operation': 'ERROR', 'target_id': None,
-                  'reason': '', 'errors': [], 'conflicts': [], 'data': {}}
+                  'reason': '', 'errors': [], 'conflicts': [], 'warnings': [], 'data': {}}
         try:
             aliases = json.loads(row.get('aliases') or '[]')
             if not isinstance(aliases, list) or any(not isinstance(a, str) for a in aliases):
@@ -140,6 +140,10 @@ def plan_import(database, templates, rows):
                 compare = {**data, 'primary_question': data['primary_question'].lower()}
                 result.update(operation=('UNCHANGED' if current and editable(current) == compare else 'UPDATE' if current else 'NEW'),
                               reason='Server-maintained metadata columns are ignored; provenance and usage are preserved')
+                if result['operation'] in {'NEW', 'UPDATE'}:
+                    result['warnings'] = detect_business_commitment_warnings(data['approved_answer'])
+                    if result['warnings']:
+                        result['reason'] += '; review business commitments: ' + ', '.join(result['warnings'])
         except (ValueError, TypeError, KeyError) as exc:
             result['reason'] = str(exc)
             result['errors'] = [str(exc)]
@@ -148,4 +152,5 @@ def plan_import(database, templates, rows):
     counts = {name.lower(): sum(r['operation'] == name for r in results)
               for name in ('NEW', 'UPDATE', 'UNCHANGED', 'CONFLICT', 'ERROR')}
     return {'status': 'success', 'summary': {'rows': len(results), **counts}, 'rows': results,
+            'warnings': sorted({w for row in results for w in row['warnings']}),
             'can_confirm': not counts['conflict'] and not counts['error']}

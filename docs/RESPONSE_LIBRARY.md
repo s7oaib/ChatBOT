@@ -31,6 +31,8 @@ are removed with it. The legacy Admin delete API applies the same safeguards.
 - Import Custom Q&A requires upload, dry-run review, and confirmation. Dry-run
   writes nothing. Confirmation validates again under a write lock and applies
   the whole file transactionally; any ERROR or CONFLICT blocks all writes.
+  Existing business-commitment warnings appear in the review and require explicit
+  operator confirmation before any affected rows are written.
 - Blank IDs create new records. Existing numeric Custom IDs update that exact
   record. Unknown, malformed, and protected IDs are errors. Semantic similarity
   never selects an update target. Identical blank-ID rows may be skipped as
