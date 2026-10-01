@@ -2764,9 +2764,30 @@ class DeterministicResponder:
         facts["source_context_used"] = False
         facts["source_referential_intent"] = None
 
+        source_for_qa = facts.get("source_route") or {}
+        mapped_qa_reference = bool(
+            channel == "instagram" and isinstance(source_for_qa, dict)
+            and source_for_qa.get("routing_id") and source_for_qa.get("active", True)
+            and source_for_qa.get("source_type") in {"story", "post", "reel"}
+            and source_for_qa.get("response_mode") == "APPROVED_QA"
+            and re.fullmatch(
+                r"\s*(?:tell\s+me\s+(?:more(?:\s+about\s+(?:this|that)(?:\s+(?:story|post|reel))?)?|about\s+(?:this|that)(?:\s+(?:story|post|reel))?)|"
+                r"what(?:'s|\s+is)\s+(?:this|that)(?:\s+(?:story|post|reel))?(?:\s+about)?|"
+                r"more\s+details?(?:\s+please)?)\s*[?.!]*\s*", user_message, re.I)
+        )
+        mapped_qa_match = (client_qa.resolve_effective_approved_qa_by_id(source_for_qa.get("approved_qa_id"))
+                           if mapped_qa_reference else None)
+        if mapped_qa_reference and mapped_qa_match is None:
+            facts.update({"client_qa_id": None, "ordered_response_blocks": [],
+                          "last_route_source": "HUMAN_HANDOFF", "last_grounding": "approved_qa_unavailable",
+                          "last_actions": [BusinessAction.ESCALATE_TO_TEAM.value], "knowledge_sufficient": False})
+            text = self._generic_fallback()
+            session_memory.add_turn(user_id, channel, user_message, text)
+            return text, False, "approved_qa_unavailable", None
+
         if channel == "instagram":
             lifecycle_candidate = client_qa._match_base(user_message, facts)
-            if lifecycle_candidate and client_qa.effective_entry(lifecycle_candidate.entry.qa_id) is None:
+            if lifecycle_candidate and not mapped_qa_match and client_qa.effective_entry(lifecycle_candidate.entry.qa_id) is None:
                 # A retired/scheduled approved ID cannot fall through to an old
                 # template or be revived by durable follow-up state.
                 facts.update({"client_qa_id": None, "ordered_response_blocks": [],
@@ -3000,7 +3021,7 @@ class DeterministicResponder:
                 isinstance(existing_order_intake, dict)
                 and existing_order_intake.get("status")
             )
-            approved_qa_candidate = client_qa.match(user_message, facts)
+            approved_qa_candidate = mapped_qa_match or client_qa.match(user_message, facts)
             explicit_product_question = bool(
                 order_intake._PRODUCT_RE.search(user_message)
                 and re.search(r"\b(?:know|more|tell|details|about|what|why|price|cost|pay|payment|deliver\w*)\b", lowered_text)
@@ -3119,7 +3140,7 @@ class DeterministicResponder:
                 r"\s*(?:tell me more|what are you showing here)[?.!]*\s*",
                 user_message, re.I,
             ))
-            if source.get("active", True) and source_description and source_reference and (
+            if source.get("response_mode", "CUSTOM") == "CUSTOM" and source.get("active", True) and source_description and source_reference and (
                 not facts.get("source_context_superseded") or re.search(r"\b(?:post|reel|story|video|photo)\b", user_message, re.I)
             ) and not re.search(
                 r"\b(?:sondesh|bento|subscription|price|cost|delivery|menu)\b", user_message, re.I,
@@ -3178,6 +3199,7 @@ class DeterministicResponder:
             and source_route.get("active", True)
             and not facts.get("source_context_superseded")
             and source_detail_request
+            and source_route.get("response_mode", "CUSTOM") == "CUSTOM"
             and source_topic
             and str(source_topic.get("description") or "").strip()
         ):
@@ -3298,6 +3320,7 @@ class DeterministicResponder:
         # own canonical FAQ, even when stale source state is present.
         source_context_blocks_client_qa = bool(
             source_route_active
+            and source_route.get("response_mode", "CUSTOM") == "CUSTOM"
             and not HOME_TABLE_RE.search(source_topic_text)
             and not explicit_client_subject
             and not order_process_question
@@ -3337,7 +3360,7 @@ class DeterministicResponder:
             "bento" if context_topic == "bento" else ""
         ) if details_followup else ""
         contextual_topic = contextual_price_topic or contextual_details_topic
-        client_qa_candidate = client_qa.match(
+        client_qa_candidate = mapped_qa_match or client_qa.match(
             (
                 "tell me more about subscription"
                 if source_subscription_asset_request
@@ -3451,6 +3474,8 @@ class DeterministicResponder:
                     })
                     session_memory.add_turn(user_id, channel, user_message, response_text)
                     return response_text, True, "customer_topic_menus", [item["image_url"] for item in eligible]
+        if mapped_qa_match:
+            client_qa_excluded = False  # Only the exact referential whitelist can select by ID.
         client_match = (
             None
             if channel != "instagram" or client_qa_excluded
@@ -3458,7 +3483,7 @@ class DeterministicResponder:
         )
         if client_match:
             entry = client_match.entry
-            if source_subscription_asset_request:
+            if source_subscription_asset_request or mapped_qa_match:
                 facts["source_context_used"] = True
             asset_urls: List[str] = []
             asset_missing: List[str] = []
@@ -3488,6 +3513,7 @@ class DeterministicResponder:
             mapped_image = None
             if (
                 source_route_active and source_route
+                and source_route.get("response_mode", "CUSTOM") == "CUSTOM"
                 and str(source_route.get("menu_mode") or "").upper() == "SELECTED"
                 and source_route.get("menu_id")
                 and entry.context in str(source_route.get("routing_topic") or "").casefold()
@@ -3605,7 +3631,7 @@ class DeterministicResponder:
             response_text = entry.answer
             if weekly_missing:
                 response_text = "\n\n".join(block["text"] for block in ordered_response_blocks if block["kind"] == "TEXT")
-            if entry.qa_id == "home_table_price" and facts.get("last_answer_id") == "bengali_home_table_details":
+            if not mapped_qa_match and entry.qa_id == "home_table_price" and facts.get("last_answer_id") == "bengali_home_table_details":
                 previous = session_memory.get_session(user_id, channel)["turns"][-1:]
                 details_entry = client_qa.effective_entry("home_table_details")
                 details = details_entry.answer if details_entry else ""

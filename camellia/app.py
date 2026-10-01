@@ -70,6 +70,7 @@ from camellia.instagram_routing import (
     shared_reel_identity,
     update_topic,
     validate_route_payload,
+    prepare_source_response,
     verify_media_by_id,
 )
 from camellia.sheet_sync import sheet_sync
@@ -3425,6 +3426,24 @@ async def identify_instagram_route(
     }
 
 
+@app.get("/admin/instagram-routes/approved-qa-options")
+def approved_source_options(x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    from camellia import approved_qa
+    try:
+        records = [record for record in approved_qa.listing()["records"] if record["status"] == "ACTIVE"]
+        for record in records:
+            record["ordered_blocks"] = []
+            for block in record["blocks"]:
+                if block["kind"] == "TEXT" and record["qa_id"] in {"home_table_details", "home_table_price"}:
+                    record["ordered_blocks"].extend(client_qa.build_home_table_reel_blocks(block["value"]))
+                else:
+                    record["ordered_blocks"].append(block)
+        return {"records": records}
+    except Exception:
+        raise HTTPException(503, "Effective Approved Q&A is unavailable.")
+
+
 @app.get("/admin/instagram-routes")
 def list_instagram_routes(
     include_archived: bool = False,
@@ -3561,10 +3580,8 @@ async def save_instagram_media_mapping(item_id: int, request: Request, x_admin_k
     if not item:
         raise HTTPException(status_code=404, detail="Instagram media not found.")
     body = await request.json()
-    if not str(body.get("source_description") or "").strip():
-        raise HTTPException(status_code=400, detail="Source Description is required.")
     topic_id = str(body.get("topic_id") or "").strip()
-    if not topic_id:
+    if not topic_id and body.get("response_mode", "CUSTOM") != "APPROVED_QA":
         raise HTTPException(status_code=400, detail="Choose a Topic.")
     existing = db.get_instagram_source_route(int(item["custom_route_id"])) if item.get("custom_route_id") else None
     if existing and existing.get("media_id") != item["instagram_media_id"]:
@@ -3575,6 +3592,8 @@ async def save_instagram_media_mapping(item_id: int, request: Request, x_admin_k
                          if route.get("media_id") == item["instagram_media_id"] and route.get("source_type") == source_type), None)
     route_body = {
         "source_type": source_type, "url": item.get("permalink") or "",
+        "response_mode": body.get("response_mode") or (existing or {}).get("response_mode") or "CUSTOM",
+        "approved_qa_id": body.get("approved_qa_id"),
         "media_id": item["instagram_media_id"], "shortcode": item.get("shortcode"),
         "topic_id": topic_id, "source_description": body.get("source_description") or "",
         "menu_id": body.get("menu_id"), "menu_mode": body.get("menu_mode") or "NONE",
@@ -3585,7 +3604,7 @@ async def save_instagram_media_mapping(item_id: int, request: Request, x_admin_k
         "knowledge_scope": json.loads(existing["knowledge_scope"]) if existing else [],
     }
     try:
-        route = validate_route_payload(route_body)
+        route = validate_route_payload(prepare_source_response(route_body, existing))
         saved = db.save_instagram_source_route(route, int(existing["routing_id"]) if existing else None)
     except (ValueError, TypeError) as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -3782,12 +3801,19 @@ async def save_instagram_route(
     require_admin(x_admin_key, x_admin_pin)
     try:
         body = await request.json()
-        if not str(body.get("source_description") or "").strip():
-            raise ValueError("Source Description is required.")
-        route = validate_route_payload(body)
         routing_id = body.get("routing_id")
         if routing_id is not None:
             routing_id = int(routing_id)
+        existing = db.get_instagram_source_route(routing_id) if routing_id else None
+        if not existing and routing_id is None:
+            url = str(body.get("canonical_url") or body.get("url") or "").strip()
+            identities = {"canonical_url": normalize_instagram_url(url).get("canonical_url") if url else None,
+                          "media_id": body.get("story_media_id") or body.get("media_id"), "ad_id": body.get("ad_id")}
+            existing = next((row for row in db.list_instagram_source_routes()
+                             if any(value and row.get(key) == value for key, value in identities.items())), None)
+            if existing:
+                routing_id = int(existing["routing_id"])
+        route = validate_route_payload(prepare_source_response(body, existing))
         saved = decode_route(db.save_instagram_source_route(route, routing_id))
     except (ValueError, TypeError) as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -8985,6 +9011,7 @@ THIS WEEK'S BENGAL SPECIALS
                 const selectedMenu = item.mapping_route?.menu_mode === 'INHERIT' ? '__inherit__' : item.mapping_route?.menu_mode === 'NONE' ? '__none__' : item.menu_id || '__none__';
                 const menuOptions = `<option value="__none__">No attachment</option>${selectedMenu === '__inherit__' ? '<option value="__inherit__" selected>Use existing Topic-linked menu</option>' : ''}${igMenus.map(menu => `<option value="${escapeHtml(menu.menu_id)}" ${menu.menu_id === selectedMenu ? 'selected' : ''}>${escapeHtml(menu.name)}</option>`).join('')}`;
                 document.getElementById('contentDetailsActions').innerHTML = `<div class="source-map-form">
+                    ${sourceResponseHtml('igMedia')}
                     <div class="source-map-field"><label class="field-label" for="igMediaTopic">Topic</label><select class="field-control" id="igMediaTopic" onchange="renderSourceAssetCard('igMediaMenu','igMediaMenuSelected')">${topicOptions}</select><div class="source-secondary-actions"><button class="btn-secondary" type="button" onclick="openTopicModal('', 'igMediaTopic')">+ Add Topic</button><button class="btn-secondary" type="button" onclick="openManageTopics('igMediaTopic')">Manage Topics</button></div></div>
                     <div class="source-map-field"><label class="field-label" for="igMediaDescription">Description for this ${item.source_type}</label><p class="source-map-help">Used when someone asks what this ${item.source_type} is about.</p><textarea class="field-control" id="igMediaDescription" rows="5">${escapeHtml(item.source_description || '')}</textarea></div>
                     <div class="source-map-field"><label class="field-label" for="igMediaMenu">Menu / Image <span class="ig-media-muted">Optional</span></label><select class="field-control" id="igMediaMenu" onchange="renderSourceAssetCard('igMediaMenu','igMediaMenuSelected')">${menuOptions}</select><div class="source-secondary-actions"><button class="btn-secondary" type="button" onclick="openMenuModal('igMediaMenu')">+ Add Menu / Image</button></div><div class="source-asset-card" id="igMediaMenuSelected"></div></div>
@@ -8992,6 +9019,7 @@ THIS WEEK'S BENGAL SPECIALS
                     <div><button class="btn-primary source-save" type="button" onclick="saveInstagramMediaRoute(${Number(item.id)})">Save Mapping</button>${item.permalink ? `<div style="margin-top:16px;"><a class="btn-secondary" target="_blank" rel="noopener" href="${escapeHtml(item.permalink)}">Open on Instagram</a></div>` : ''}</div>
                     ${item.mapping_route || item.topic_id ? `<div class="source-danger"><b>Delete Mapping</b><p class="source-map-help">Removes chatbot mapping only. The Instagram ${item.source_type} will not be deleted.</p><button class="btn-danger" type="button" onclick="deleteInstagramMediaMapping(${Number(item.id)})">Delete Mapping</button></div>` : ''}
                 </div>`;
+                initSourceResponse('igMedia', item.mapping_route || {});
                 renderSourceAssetCard('igMediaMenu', 'igMediaMenuSelected');
                 drawer.classList.add('open', 'source-mapping-drawer'); backdrop.classList.add('open'); drawer.setAttribute('aria-hidden', 'false'); backdrop.setAttribute('aria-hidden', 'false'); return;
             }
@@ -9020,7 +9048,7 @@ THIS WEEK'S BENGAL SPECIALS
         async function saveInstagramMediaRoute(id) {
             const menu = document.getElementById('igMediaMenu').value;
             const menuChoice = menuChoiceParts(menu);
-            const payload = { topic_id: document.getElementById('igMediaTopic').value, source_description: document.getElementById('igMediaDescription').value.trim(), menu_id: menuChoice.menu_id, menu_mode: menuChoice.menu_mode, auto_reply_enabled: document.getElementById('igMediaAutoReply').checked };
+            const payload = { ...sourceResponseFields('igMedia'), topic_id: document.getElementById('igMediaTopic').value, source_description: document.getElementById('igMediaDescription').value.trim(), menu_id: menuChoice.menu_id, menu_mode: menuChoice.menu_mode, auto_reply_enabled: document.getElementById('igMediaAutoReply').checked };
             const response = await fetch(`/admin/instagram-media/${id}/mapping`, { method: 'PUT', headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
             if (!response.ok) { const data = await response.json().catch(() => ({})); alert(data.detail || 'Could not save mapping.'); return; }
             closeContentDetails(); await loadInstagramContentGallery();
@@ -9571,6 +9599,7 @@ THIS WEEK'S BENGAL SPECIALS
             renderSourceAssetCard('igMenuPicker', 'igMenuSelected');
             document.getElementById('igActive').checked = true;
             document.getElementById('igSourceDescription').value = '';
+            initSourceResponse('ig', {});
             document.getElementById('igTopicDescription').value = '';
             document.getElementById('igEscalationPolicy').value='human_if_unsupported';
             Array.from(document.getElementById('igKnowledgeScope').options).forEach(option => option.selected=false);
@@ -9629,6 +9658,7 @@ THIS WEEK'S BENGAL SPECIALS
             document.getElementById('igEscalationPolicy').value=route.escalation_policy||'human_if_unsupported';
             document.getElementById('igActive').checked=route.active !== false;
             document.getElementById('igSourceDescription').value=route.source_description||'';
+            initSourceResponse('ig', route);
             Array.from(document.getElementById('igKnowledgeScope').options).forEach(option=>option.selected=(route.knowledge_scope||[]).includes(option.value));
             renderIgPriorityProducts(); onIgTopicChange(true);
             setMenuChoiceFromRoute('igMenuPicker', 'igMenuWarning', route);
@@ -9640,10 +9670,10 @@ THIS WEEK'S BENGAL SPECIALS
 
         async function saveInstagramRoute() {
             const result=document.getElementById('adRouteResult');
-            if (updateMenuChoiceWarning('igMenuPicker', 'igMenuWarning')) { result.style.display='block'; result.className='result-box error'; result.innerText='Choose an active menu or No menu before saving.'; return; }
+            if (sourceResponseFields('ig').response_mode === 'CUSTOM' && updateMenuChoiceWarning('igMenuPicker', 'igMenuWarning')) { result.style.display='block'; result.className='result-box error'; result.innerText='Choose an active menu or No menu before saving.'; return; }
             const menuChoice=menuChoiceParts(document.getElementById('igMenuPicker').value);
             const sourceType=document.getElementById('igSourceType').value;
-            const payload={routing_id:igEditingId,source_type:sourceType,url:sourceType==='story'?'':document.getElementById('igRouteUrl').value.trim(),topic_id:document.getElementById('igTopicPicker').value,source_description:document.getElementById('igSourceDescription').value.trim(),menu_id:menuChoice.menu_id,menu_mode:menuChoice.menu_mode,media_id:document.getElementById('igMediaId').value.trim(),ad_id:document.getElementById('igAdId').value.trim(),campaign_id:document.getElementById('igCampaignId').value.trim(),preview_url:igMediaMetadata.preview_url,media_type:igMediaMetadata.media_type,escalation_policy:document.getElementById('igEscalationPolicy').value,priority_products:igPriority,knowledge_scope:Array.from(document.getElementById('igKnowledgeScope').selectedOptions).map(o=>o.value),active:document.getElementById('igActive').checked};
+            const payload={...sourceResponseFields('ig'),routing_id:igEditingId,source_type:sourceType,url:sourceType==='story'?'':document.getElementById('igRouteUrl').value.trim(),topic_id:document.getElementById('igTopicPicker').value,source_description:document.getElementById('igSourceDescription').value.trim(),menu_id:menuChoice.menu_id,menu_mode:menuChoice.menu_mode,media_id:document.getElementById('igMediaId').value.trim(),ad_id:document.getElementById('igAdId').value.trim(),campaign_id:document.getElementById('igCampaignId').value.trim(),preview_url:igMediaMetadata.preview_url,media_type:igMediaMetadata.media_type,escalation_policy:document.getElementById('igEscalationPolicy').value,priority_products:igPriority,knowledge_scope:Array.from(document.getElementById('igKnowledgeScope').selectedOptions).map(o=>o.value),active:document.getElementById('igActive').checked};
             const resp=await fetch('/admin/instagram-routes',{method:'POST',headers:{...getAuthHeaders(),'Content-Type':'application/json'},body:JSON.stringify(payload)});
             const data=await resp.json().catch(()=>({})); result.style.display='block';
             if(!resp.ok){result.className='result-box error';result.innerText=data.detail||'Could not save route.';return;}
@@ -10308,6 +10338,7 @@ THIS WEEK'S BENGAL SPECIALS
             document.getElementById('igStoryMappingPreview').innerHTML = '<span>Instagram Story preview unavailable</span>';
             document.getElementById('igStoryTopicPicker').value = source.topic_id || '';
             document.getElementById('igStorySourceDescription').value = source.source_description || '';
+            initSourceResponse('igStory', source);
             refreshMenuChoicePicker('igStoryMenuPicker', source.topic_id || '', routeId ? menuChoiceForRoute(source) : '__none__');
             if (routeId) setMenuChoiceFromRoute('igStoryMenuPicker', 'igStoryMenuWarning', source);
             renderSourceAssetCard('igStoryMenuPicker', 'igStoryMenuSelected');
@@ -10374,10 +10405,11 @@ THIS WEEK'S BENGAL SPECIALS
             const mediaId = document.getElementById('igStoryMediaId')?.value.trim() || '';
             const topicId = document.getElementById('igStoryTopicPicker')?.value || '';
             if (!mediaId) return showInstagramStoryResult('error', 'Choose a captured Story before mapping it.');
-            if (!topicId) return showInstagramStoryResult('error', 'Select a Topic before saving the Story mapping.');
-            if (updateMenuChoiceWarning('igStoryMenuPicker', 'igStoryMenuWarning')) return showInstagramStoryResult('error', 'Choose an active menu or No menu before saving.');
+            if (!topicId && sourceResponseFields('igStory').response_mode === 'CUSTOM') return showInstagramStoryResult('error', 'Select a Topic before saving the Story mapping.');
+            if (sourceResponseFields('igStory').response_mode === 'CUSTOM' && updateMenuChoiceWarning('igStoryMenuPicker', 'igStoryMenuWarning')) return showInstagramStoryResult('error', 'Choose an active menu or No menu before saving.');
             const menuChoice = menuChoiceParts(document.getElementById('igStoryMenuPicker').value);
             const payload = {
+                ...sourceResponseFields('igStory'),
                 routing_id: igStoryEditingRoutingId,
                 source_type: 'story', url: '', media_id: mediaId, ad_id: '', campaign_id: '',
                 preview_url: null, media_type: 'story', topic_id: topicId,
@@ -12818,7 +12850,12 @@ Non-Veg:
     html_content = html_content.replace("legacy: 'tab-ai-resolution',", "'approved-qa': 'tab-approved-qa', legacy: 'tab-ai-resolution',", 1)
     html_content = html_content.replace("if (group === 'custom_qa')", "if (group === 'approved_qa') { loadApprovedQa(); }\n            if (group === 'custom_qa')", 1)
     html_content = html_content.replace('loadDashboardOverview(); loadHandoffs(); loadInstagramContentGallery();', 'loadDashboardOverview(); loadHandoffs(); loadInstagramContentGallery(); if (document.getElementById("tab-approved-qa").style.display !== "none") loadApprovedQa();')
-    html_content = html_content.replace('</body>', REVIEW_SCRIPT + WEEKLY_SCRIPT + APPROVED_SCRIPT + '</body>', 1)
+    from camellia.admin_source_response import selector_html, SCRIPT as SOURCE_RESPONSE_SCRIPT
+    for prefix, topic_id in (("ig", "igTopicPicker"), ("igStory", "igStoryTopicPicker")):
+        position = html_content.index(f'for="{topic_id}"')
+        field = html_content.rfind('<div class="source-map-field">', 0, position)
+        html_content = html_content[:field] + selector_html(prefix) + html_content[field:]
+    html_content = html_content.replace('</body>', REVIEW_SCRIPT + WEEKLY_SCRIPT + APPROVED_SCRIPT + SOURCE_RESPONSE_SCRIPT + '</body>', 1)
     return HTMLResponse(
         content=html_content,
         headers={
