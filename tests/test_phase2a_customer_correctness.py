@@ -164,7 +164,8 @@ def test_weekly_routes_have_no_stale_asset_or_attachment_claim(customer, monkeyp
         text, _matched, _template, images = result
         assert images is None or not any("Friday" in str(image) or "Thursday" in str(image) for image in images)
         assert "attached this week’s menu" not in text
-        assert "full menu card with price" not in text
+        if "menu" in message:
+            assert "full menu card with price" not in text
         assert not any(
             block.get("asset_key") == "weekly_menu"
             for block in facts.get("ordered_response_blocks") or []
@@ -173,8 +174,11 @@ def test_weekly_routes_have_no_stale_asset_or_attachment_claim(customer, monkeyp
             assert [block["asset_key"] for block in facts["ordered_response_blocks"] if block["kind"] != "TEXT"] == [
                 "aamar_menu", "signature_menu",
             ]
-        else:
+        elif "menu" in message:
             assert "finalising this week's menu" in text
+        else:
+            from camellia import client_qa
+            assert text == client_qa.effective_entry(facts["client_qa_id"]).answer
 
 
 def test_sondesh_topic_owns_bare_price_after_home_table(customer, monkeypatch):

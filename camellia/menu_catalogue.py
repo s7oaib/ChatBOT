@@ -387,6 +387,31 @@ def workspace_summary(menus: List[Dict[str, Any]]) -> Dict[str, Any]:
         weekly["current_version"] = None
     weekly.update(menu_id="__weekly_savoury__", workspace="weekly", catalogue_state=None,
                   actions={"edit": False, "toggle_active": False, "delete": False})
+    # Stable catalogue identity, zero copied rows or independent publication.
+    # Only a unique reviewed upcoming week may be previewed by the operator.
+    safe_upcoming = [version for version in upcoming if not any(
+        other["id"] != version["id"] and other.get("valid_from") and other.get("valid_until")
+        and other.get("weekly_state") != "SUPERSEDED"
+        and other["valid_from"] <= version["valid_until"]
+        and version["valid_from"] <= other["valid_until"] for other in related)]
+    projection_version = current_weekly or (safe_upcoming[0] if safe_upcoming else None)
+    projection_approval = json.loads(projection_version["approval_json"]) if projection_version else {}
+    for row in rows:
+        if row["menu_id"] != "bento":
+            continue
+        status = weekly_savoury.version_status(projection_version) if projection_version else "NO CURRENT MENU"
+        row.update(read_only=True, derived_from="__weekly_savoury__",
+                   image_url=projection_approval.get("image_path"),
+                   image_status=status, lifecycle_status=status, display_status=status,
+                   valid_from=projection_version.get("valid_from") if projection_version else None,
+                   valid_until=projection_version.get("valid_until") if projection_version else None,
+                   validity_label=weekly_savoury.display_range(projection_version["valid_from"], projection_version["valid_until"]) if projection_version else None,
+                   item_count=len(projection_approval.get("rows") or []),
+                   current_version=projection_version["id"] if current_weekly else None,
+                   last_approved_version=projection_version["id"] if projection_version else None,
+                   last_approved_date=projection_approval.get("approved_at") or (projection_version.get("changed_at") if projection_version else None),
+                   pending_review_status=None, review_required=False, review_label=None,
+                   actions={"edit": False, "toggle_active": False, "delete": False})
     rows.insert(0, weekly)
     return {"workspace_rows": rows, "review_count": sum(row["review_required"] for row in rows)}
 

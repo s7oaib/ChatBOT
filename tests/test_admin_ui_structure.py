@@ -94,7 +94,7 @@ def test_menu_manager_sits_between_menu_and_ai_resolution(page):
     assert 'id="mrSelectedView" hidden' in page
     assert 'id="mrCatalogueList" class="mr-catalogue-list"' in page
     assert 'id="mrCatalogueTable"' not in page
-    assert "open.textContent='Open'" in page
+    assert "open.textContent=menu.read_only?'Open weekly workspace':'Open'" in page
     assert "'tab-menu-manager'].includes(tabId)) tabId = 'tab-image'" in page
 
 

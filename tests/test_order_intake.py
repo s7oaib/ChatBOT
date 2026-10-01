@@ -35,8 +35,9 @@ def test_generic_how_to_order_starts_request_draft_with_customer_instructions(mo
     response, matched, template_id, _images = _respond(uid, "how do i order")
 
     assert matched is True
-    assert template_id == "order_intake_draft"
-    assert response.startswith(instruction_message())
+    assert template_id == "alacarte_prebooking_steps"
+    from camellia.client_qa import effective_entry
+    assert response.startswith(effective_entry("order_prebook").answer + "\n\nContinue on WhatsApp:")
     assert "https://wa.me/" in response
     assert "wa.me" in response
     facts = session_memory.get_facts(uid, "instagram")
@@ -307,7 +308,8 @@ def test_instagram_order_start_sends_one_reply_and_creates_no_human_handoff(monk
         app_module._process_instagram_event(uid, "how do i order", "ad-order-intake")
 
     assert send.call_count == 1
-    assert send.call_args.args[1].startswith(instruction_message())
+    from camellia.client_qa import effective_entry
+    assert send.call_args.args[1].startswith(effective_entry("order_prebook").answer + "\n\nContinue on WhatsApp:")
     assert "https://wa.me/" in send.call_args.args[1]
     escalate.assert_not_called()
     assert not [row for row in db.get_handoffs(limit=300) if row["source_user_id"] == uid]
@@ -371,8 +373,9 @@ def test_how_to_order_overrides_mapped_source_without_sending_source_description
 
     response, matched, template_id, _images = _respond(uid, "how do i order")
 
-    assert matched is True and template_id == "order_intake_draft"
-    assert response.startswith(instruction_message())
+    assert matched is True and template_id == "alacarte_prebooking_steps"
+    from camellia.client_qa import effective_entry
+    assert response.startswith(effective_entry("order_prebook").answer + "\n\nContinue on WhatsApp:")
     assert "https://wa.me/" in response
     assert "Source description" not in response
     assert facts["source_context_superseded"] is True
@@ -427,7 +430,14 @@ def one_shot_customer(monkeypatch):
         previous = facts.get('order_intake_last_presented_fingerprint')
         with patch('camellia.ai_responder.ai_responder._query_groq', side_effect=AssertionError('LLM called')):
             text, matched, template, images = _respond(uid, message)
-        assert matched and template == 'order_intake_draft' and images is None
+        assert matched and images is None
+        if template == 'alacarte_prebooking_steps':
+            from camellia.client_qa import effective_entry
+            assert facts['client_qa_id'] in {'order_prebook', 'alacarte_prebook'}
+            assert text.startswith(effective_entry(facts['client_qa_id']).answer + '\n\nContinue on WhatsApp:')
+            assert text.count('https://wa.me/') == 1
+        else:
+            assert template == 'order_intake_draft'
         unchanged = previous == draft_fingerprint(facts['order_intake_draft']) and not (is_link_resend_request(message) or is_order_process_question(message))
         if unchanged:
             assert 'https://wa.me/' not in text and 'ORDER DRAFT' not in text
@@ -449,7 +459,8 @@ def test_zero_detail_request_has_exact_four_point_instruction_and_immediate_temp
     )
     text, draft = one_shot_customer(message)
     assert instruction_message() == expected
-    assert text.startswith(expected)
+    from camellia.client_qa import effective_entry
+    assert text.startswith(effective_entry("order_prebook").answer + "\n\nContinue on WhatsApp:")
     body = unquote(text.split('?text=', 1)[1])
     assert body.count('Not provided') == 4
     assert body.endswith('Please help me complete any missing details and confirm this order.')

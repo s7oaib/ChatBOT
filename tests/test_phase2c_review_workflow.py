@@ -27,14 +27,14 @@ def review_env(tmp_path, monkeypatch):
 
 
 def test_retry_text_requires_revision_and_never_publishes(review_env):
-    draft = menu_review.extract("bento", "admin", text="Veg:\nTest meal 250g ₹100")
+    draft = menu_review.extract("signature", "admin", text="Veg:\nTest meal 250g ₹100")
     with pytest.raises(menu_review.ReviewConflict):
-        menu_review.retry_extraction("bento", draft["draft_id"], 99, "reviewer")
-    retried = menu_review.retry_extraction("bento", draft["draft_id"], draft["revision"], "reviewer")
+        menu_review.retry_extraction("signature", draft["draft_id"], 99, "reviewer")
+    retried = menu_review.retry_extraction("signature", draft["draft_id"], draft["revision"], "reviewer")
     assert retried["status"] == "NEEDS_REVIEW"
     assert retried["draft_id"] != draft["draft_id"]
     assert retried["rows"][0]["price_inr"] == 100
-    assert db.get_menu_versions("bento") == []
+    assert db.get_menu_versions("signature") == []
     with db.get_connection() as conn:
         details = json.loads(conn.execute("SELECT details_json FROM menu_review_audit WHERE action='extraction_retried'").fetchone()[0])
     assert details["previous_draft_id"] == draft["draft_id"]
@@ -44,49 +44,49 @@ def test_failed_image_retry_retains_private_source_and_requires_human_approval(r
     stream = io.BytesIO()
     Image.new("RGB", (4, 4), "red").save(stream, "PNG")
     monkeypatch.setattr(menu_review.menu_parser, "parse_image_and_update_menu", lambda *_: {"status": "error"})
-    draft = menu_review.extract("bento", "admin", data=stream.getvalue(), mime="image/png")
-    retried = menu_review.retry_extraction("bento", draft["draft_id"], draft["revision"], "admin")
+    draft = menu_review.extract("signature", "admin", data=stream.getvalue(), mime="image/png")
+    retried = menu_review.retry_extraction("signature", draft["draft_id"], draft["revision"], "admin")
     assert retried["status"] == "NEEDS_REVIEW" and retried["source_asset"]
     assert retried["rows"] == []
-    assert db.get_menu_versions("bento") == []
+    assert db.get_menu_versions("signature") == []
     with pytest.raises(ValueError):
-        menu_review.publish_approved_menu("bento", retried["draft_id"], retried["revision"], "admin")
+        menu_review.publish_approved_menu("signature", retried["draft_id"], retried["revision"], "admin")
 
 
 def test_retry_endpoint_auth_and_terminal_draft_protection(review_env):
     client, headers = review_env
-    draft = menu_review.extract("bento", "admin", text="Veg:\nTest meal 250g ₹100")
-    path = "/admin/menu-manager/menus/bento/review/retry-extraction"
+    draft = menu_review.extract("signature", "admin", text="Veg:\nTest meal 250g ₹100")
+    path = "/admin/menu-manager/menus/signature/review/retry-extraction"
     body = {"draft_id": draft["draft_id"], "revision": draft["revision"]}
     assert client.post(path, json=body).status_code in {401, 403}
-    menu_review.reject("bento", draft["draft_id"], draft["revision"], "admin")
+    menu_review.reject("signature", draft["draft_id"], draft["revision"], "admin")
     assert client.post(path, json=body, headers=headers).status_code == 409
 
 
 def test_standing_menu_alias_collision_blocks_approval(review_env):
-    draft = menu_review.extract("bento", "admin", text="Veg:\nFirst meal 250g ₹100\nSecond meal 250g ₹120")
+    draft = menu_review.extract("signature", "admin", text="Veg:\nFirst meal 250g ₹100\nSecond meal 250g ₹120")
     rows = draft["rows"]
     rows[0]["aliases"] = ["shared alias"]
     rows[1]["aliases"] = ["shared alias"]
-    edited = menu_review.edit("bento", draft["draft_id"], draft["revision"], rows, "admin")
+    edited = menu_review.edit("signature", draft["draft_id"], draft["revision"], rows, "admin")
     assert edited["status"] == "NEEDS_REVIEW"
     assert any("alias" in warning for warning in edited["warnings"])
     with pytest.raises(ValueError, match="alias"):
-        menu_review.publish_approved_menu("bento", edited["draft_id"], edited["revision"], "admin")
+        menu_review.publish_approved_menu("signature", edited["draft_id"], edited["revision"], "admin")
 
 
 def test_history_pagination_keeps_approved_snapshots_immutable(review_env):
     client, headers = review_env
     for index in range(25):
-        db.record_menu_version("bento", json.dumps({"marker": index}), "test")
-    first = client.get("/admin/menu-manager/menus/bento/review/versions?limit=10", headers=headers)
+        db.record_menu_version("signature", json.dumps({"marker": index}), "test")
+    first = client.get("/admin/menu-manager/menus/signature/review/versions?limit=10", headers=headers)
     assert first.status_code == 200
     assert len(first.json()["versions"]) == 10 and first.json()["has_more"]
     before = first.json()["next_before_id"]
-    second = client.get(f"/admin/menu-manager/menus/bento/review/versions?limit=10&before_id={before}", headers=headers)
+    second = client.get(f"/admin/menu-manager/menus/signature/review/versions?limit=10&before_id={before}", headers=headers)
     assert len(second.json()["versions"]) == 10
     assert not {v["id"] for v in first.json()["versions"]} & {v["id"] for v in second.json()["versions"]}
-    assert len(db.get_menu_versions("bento", limit=100)) == 25
+    assert len(db.get_menu_versions("signature", limit=100)) == 25
 
 
 def test_review_ui_exposes_retry_aliases_friendly_warnings_and_load_more():
@@ -112,9 +112,9 @@ def test_approved_history_source_preview_is_private_and_read_only(review_env, mo
     Image.new("RGB", (4, 4), "red").save(stream, "PNG")
     monkeypatch.setattr(menu_review.menu_parser, "parse_image_and_update_menu", lambda *_: {
         "status": "success", "parsed": {"vegetarian": [{"item": "Test meal", "quantity": "250g", "price_inr": 100}]}})
-    draft = menu_review.extract("bento", "admin", data=stream.getvalue(), mime="image/png")
-    published = menu_review.publish_approved_menu("bento", draft["draft_id"], draft["revision"], "admin")
-    path = f'/admin/menu-manager/menus/bento/review/versions/{published["version_id"]}/source'
+    draft = menu_review.extract("signature", "admin", data=stream.getvalue(), mime="image/png")
+    published = menu_review.publish_approved_menu("signature", draft["draft_id"], draft["revision"], "admin")
+    path = f'/admin/menu-manager/menus/signature/review/versions/{published["version_id"]}/source'
     assert client.get(path).status_code in {401, 403}
     with db.get_connection() as conn:
         before = tuple(conn.iterdump())
@@ -122,14 +122,14 @@ def test_approved_history_source_preview_is_private_and_read_only(review_env, mo
     assert response.status_code == 200 and response.headers["content-type"].startswith("image/png")
     with db.get_connection() as conn:
         assert tuple(conn.iterdump()) == before
-    assert client.get(path.replace("/bento/", "/signature/"), headers=headers).status_code == 404
+    assert client.get(path.replace("/signature/", "/aamar_mishti/"), headers=headers).status_code == 404
 
 
 def test_version_source_path_cannot_escape_private_storage(review_env):
     with db.get_connection() as conn:
-        cursor = conn.execute("INSERT INTO menu_versions(menu_key,snapshot_json,approval_json) VALUES('bento','[]',?)",
+        cursor = conn.execute("INSERT INTO menu_versions(menu_key,snapshot_json,approval_json) VALUES('signature','[]',?)",
                               (json.dumps({"source_asset": "../menu.json"}),))
         conn.commit()
         version_id = cursor.lastrowid
     with pytest.raises(KeyError):
-        menu_review.version_source_file("bento", version_id)
+        menu_review.version_source_file("signature", version_id)

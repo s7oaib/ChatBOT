@@ -292,6 +292,7 @@ def _extract_customer_item(text: str) -> str | None:
     if (
         not candidate
         or candidate.casefold() in {"a", "an", "order", "place an order", "place order", "next week"}
+        or (process_prefix and re.fullmatch(r"(?:from\s+)?(?:(?:a|the|your)\s+)?menu", candidate, re.I))
         or re.match(r"^(?:know|learn|see|ask|talk|speak|information|more|actually|make it|change|not|use)\b", candidate, re.I)
     ):
         return None

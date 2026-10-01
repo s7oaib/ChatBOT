@@ -210,6 +210,15 @@ def list_menus() -> list[Dict[str, Any]]:
     result = []
     for entry in db.list_menu_catalogue():
         key = entry["menu_id"]
+        if key == "bento":
+            from camellia import menu_catalogue
+            projection = next(row for row in menu_catalogue.workspace_summary(menu_catalogue.list_menus())["workspace_rows"] if row["menu_id"] == key)
+            result.append({"menu_key": key, "title": entry["name"], "category": entry["category"],
+                           "description": entry["description"], "active": bool(entry["active"]),
+                           "image_url": projection["image_url"], "status": projection["display_status"],
+                           "draft_status": None, "version": projection["current_version"],
+                           "published_at": projection["last_approved_date"], "draft": None, "read_only": True})
+            continue
         current = db.get_menu_image_current(key)
         draft = db.get_menu_image_draft(key)
         archived = db.has_menu_image_archive(key)
@@ -263,6 +272,13 @@ def cards(menu_keys: list[str]) -> Dict[str, Dict[str, Any]]:
 
 
 def _card_payload(menu_key, current, draft, archived, fallback) -> Dict[str, Any]:
+    if _key(menu_key) == "bento":
+        weekly = current_weekly() or {}
+        image = current_weekly_url()
+        return {"menu_key": menu_key, "image_url": image,
+                "image_status": "CURRENT" if image else "NO CURRENT MENU",
+                "draft_status": None, "image_version": weekly.get("version"),
+                "published_at": weekly.get("published_at"), "image_draft": None, "read_only": True}
     image_url = (current or {}).get("image_path") or (None if archived else fallback)
     status = "Archived" if current is None and archived else ("Published" if current else "Built-in")
     return {
@@ -275,6 +291,8 @@ def _card_payload(menu_key, current, draft, archived, fallback) -> Dict[str, Any
 
 def save_draft(menu_key: str, data: bytes, content_type: str, uploaded_by: str = "admin") -> Dict[str, Any]:
     menu_key = _key(menu_key)
+    if menu_key == "bento":
+        raise ValueError("Savoury Meal Menu is read-only. Use Weekly Savoury.")
     if not _known(menu_key):
         raise KeyError(menu_key)
     ext = validate_image(data, content_type)
@@ -305,6 +323,8 @@ def _requires_review(menu_key: str) -> bool:
 
 
 def publish(menu_key: str) -> Dict[str, Any]:
+    if _key(menu_key) == "bento":
+        raise ValueError("Savoury Meal Menu is read-only. Use Weekly Savoury.")
     if _requires_review(menu_key):
         raise ValueError("Use Review Menu → Approve & Publish to publish facts and flyer together.")
     menu_key = _key(menu_key)
@@ -350,6 +370,8 @@ def restore(menu_key: str, version_id: int) -> Optional[Dict[str, Any]]:
 
 def current_url(menu_key: str, fallback: Optional[str] = None) -> Optional[str]:
     menu_key = _key(menu_key)
+    if menu_key == "bento":
+        return current_weekly_url()
     if menu_key in WEEKLY_MENU_KEYS:
         entry = db.get_menu_catalogue_entry(menu_key)
         if not entry or not entry["active"]:

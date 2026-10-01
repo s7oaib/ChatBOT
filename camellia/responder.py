@@ -2830,8 +2830,15 @@ class DeterministicResponder:
         if channel == "instagram" and menu_review.weekly_menu_browsing(user_message):
             facts["order_intake_declined"] = "explicit_menu_browsing"
 
+        primary_qa = mapped_qa_match or client_qa.match(user_message, facts)
+        bento_authority = client_qa.effective_entry("bento_details_client")
+        stable_primary_answer = bool((primary_qa and primary_qa.entry.qa_id in {
+            "bento_details_client", "bento_price_client", "best_time_to_book",
+            "savoury_delivery_time", "sondesh_delivery_time", "order_prebook", "alacarte_prebook",
+        }) or (bento_authority and _bento_grounded_comparison(user_message, bento_authority.answer)))
         pending_menu = (
             channel == "instagram"
+            and not stable_primary_answer
             and not _approved_chicken_kosha_price_question(user_message, facts)
             and (_pending_menu_affects_question(user_message, facts)
                  or menu_review.menu_question_blocked(user_message, facts))
@@ -3037,9 +3044,14 @@ class DeterministicResponder:
                 and re.search(r"\b(?:know|more|tell|details|about|what|why|price|cost|pay|payment|deliver\w*)\b", lowered_text)
                 and not order_intake.is_order_process_question(user_message)
             )
+            process_details = order_intake.new_order_draft()
+            if order_intake.is_order_process_question(user_message):
+                order_intake.update_order_draft(process_details, user_message)
+            supplied_process_details = any(process_details.get(key) for key in (
+                "item", "quantity", "delivery_area", "delivery_address", "receiver_phone", "delivery_slot"))
             explicit_order_details = bool(
-                order_intake._structured_fields(user_message)
-                or order_intake.is_order_process_question(user_message)
+                supplied_process_details
+                or order_intake._structured_fields(user_message)
                 or (
                     order_intake.is_order_request(user_message, facts.get("active_product_context"))
                     and not re.search(r"\b(?:what|why|how|when|can|does|know|tell|about|price|cost|pay|payment|available)\b", lowered_text)
@@ -3050,7 +3062,7 @@ class DeterministicResponder:
                     explicit_product_question
                     or (
                         approved_qa_candidate
-                        and approved_qa_candidate.entry.qa_id not in {"alacarte_prebook", "order_prebook"}
+                        and approved_qa_candidate.entry.qa_id != "order_ready_handoff"
                     )
                 )
                 and not explicit_order_details
@@ -3067,6 +3079,8 @@ class DeterministicResponder:
                 )
                 and not order_intake.is_order_process_question(user_message)
             )
+            if finalized_order and approved_intent_precedes_draft:
+                finalized_order = False
             if finalized_order:
                 # A confirmed/ready order is an explicit next-steps intent.
                 # Resolve it before the fail-closed approved-Q&A miss path,
@@ -3190,19 +3204,19 @@ class DeterministicResponder:
                 elif re.search(r"\b(?:veg|vegetarian)\b", lowered_text):
                     rows = [r for r in rows if r["category"] == "vegetarian"]
                 if rows:
-                    image = approval.get("image_path")
+                    image = current_weekly_url()
                     # Browsing sends the flyer; exact item prices remain an explicit intent.
                     text = "" if image else self._generic_fallback()
                     ref = f"approved_menu:{version['menu_key']}:version:{version['id']}"
                     facts.update({"last_route_source": "APPROVED_MENU" if image else "HUMAN_HANDOFF", "last_knowledge_ids": [ref],
                                   "last_grounding": "approved_menu_flyer" if image else "approved_menu_flyer_missing", "last_topic": "savoury",
-                                  "active_topic": "savoury", "knowledge_sufficient": bool(image),
+                                  "active_topic": "savoury", "last_intents": [menu_review.WEEKLY_SAVOURY_BROWSE], "knowledge_sufficient": bool(image),
                                   "last_llm_called": False, "last_fallback_used": not bool(image),
                                   "source_context_superseded": True, "source_context_used": False})
                     session_memory.add_turn(user_id, channel, user_message, text)
                     return text, bool(image), "approved_menu" if image else None, [image] if image else None
 
-        if channel == "instagram" and not _approved_chicken_kosha_price_question(user_message, facts):
+        if channel == "instagram" and not stable_primary_answer and not _approved_chicken_kosha_price_question(user_message, facts):
             menu_result = rag_fallback_engine.retrieve_approved_menu(user_message)
             if menu_result.proposed_intent == "approved_menu":
                 response_text = menu_result.auto_response or self._generic_fallback()
@@ -3413,9 +3427,11 @@ class DeterministicResponder:
         elif contextual_topic and source_route_active:
             source_context_blocks_client_qa = False
             facts["source_context_used"] = True
-        client_qa_flow_candidate = bool(
-            client_qa_candidate
-            and client_qa_candidate.entry.qa_id in {"alacarte_prebook", "order_prebook"}
+        supported_service_question = bool(
+            client_qa_candidate and client_qa_candidate.entry.qa_id in {
+                "best_time_to_book", "savoury_delivery_time", "sondesh_delivery_time",
+                "order_prebook", "alacarte_prebook",
+            }
         )
         client_qa_excluded = bool(
             (
@@ -3435,13 +3451,13 @@ class DeterministicResponder:
             or (
                 channel == "instagram"
                 and PURCHASE_ASSISTANCE_RE.search(lowered_text)
-                and not client_qa_flow_candidate
+                and not supported_service_question
             )
             or (
                 semantic_fallback._ESCALATION_INTENT_RE.search(lowered_text)
                 and not semantic_fallback._IDENTITY_QUESTION_RE.search(lowered_text)
             )
-            or source_context_blocks_client_qa
+            or (source_context_blocks_client_qa and not supported_service_question)
             or BULK_CONTEXT_RE.search(lowered_text)
             or BULK_QTY_RE.search(lowered_text)
             or re.search(r"\b(?:discount|special\s+offers?|cater|wedding|guests|no\s+onion|gluten[- ]free)\b", lowered_text)
@@ -3456,6 +3472,7 @@ class DeterministicResponder:
             )
             or (
                 facts.get("active_product_context")
+                and not supported_service_question
                 and not explicit_client_subject
                 and not (
                     client_qa_candidate
@@ -3464,6 +3481,7 @@ class DeterministicResponder:
             )
             or (
                 facts.get("ad_product")
+                and not supported_service_question
                 and not explicit_client_subject
                 and bool(_CANONICAL_ROUTE_HINT_RE.search(lowered_text))
             )
@@ -3539,14 +3557,6 @@ class DeterministicResponder:
                 "weekly_menu": [current_weekly_url()],
             }
             weekly_missing = "weekly_menu" in entry.asset_keys and not asset_map["weekly_menu"][0]
-            if (weekly_missing
-                    and entry.qa_id not in {"sondesh_details_client", "sondesh_price_client"}
-                    and not _approved_chicken_kosha_price_question(user_message, facts)):
-                response_text = _WEEKLY_MENU_BEING_UPDATED
-                facts.update({"ordered_response_blocks": [], "last_route_source": "EXACT_APPROVED",
-                              "client_qa_id": entry.qa_id, "last_llm_called": False})
-                session_memory.add_turn(user_id, channel, user_message, response_text)
-                return response_text, True, _CLIENT_QA_TEMPLATE_IDS.get(entry.qa_id), None
             mapped_image = None
             if (
                 source_route_active and source_route
@@ -3583,7 +3593,7 @@ class DeterministicResponder:
                     ordered_response_blocks.append({"kind": "TEXT", "text": block.value})
                     continue
                 values = [value for value in asset_map.get(block.value, []) if value]
-                if mapped_image and block.value in {"subscription_rate_chart", "weekly_menu"}:
+                if mapped_image and block.value == "subscription_rate_chart":
                     values = [mapped_image]
                 if not values:
                     asset_missing.append(block.value)
@@ -3591,6 +3601,8 @@ class DeterministicResponder:
                     ordered_response_blocks.append({"kind": block.kind, "asset_key": block.value, "urls": values})
                     asset_urls.extend(values)
             for asset_key in client_match.asset_keys:
+                if asset_key == "weekly_menu" and weekly_missing:
+                    continue
                 if asset_key not in {block.value for block in entry.blocks if block.kind != "TEXT"}:
                     values = [value for value in asset_map.get(asset_key, []) if value]
                     if not values:
@@ -3666,6 +3678,19 @@ class DeterministicResponder:
                 return handoff, False, "client_approved_asset_missing", None
             template_id = _CLIENT_QA_TEMPLATE_IDS.get(entry.qa_id)
             response_text = entry.answer
+            if entry.qa_id in {"order_prebook", "alacarte_prebook"} and "https://wa.me/" not in response_text:
+                draft = facts.get("order_intake_draft") or order_intake.new_order_draft()
+                facts["order_intake_draft"] = draft
+                facts["source_context_superseded"] = True
+                facts["source_context_used"] = False
+                active_handoff = db.get_active_handoff(channel, user_id)
+                reference = (active_handoff or {}).get("handoff_ref")
+                action = "Continue on WhatsApp:\n" + order_intake.whatsapp_draft_link(draft, reference=reference)
+                if ordered_response_blocks and ordered_response_blocks[-1]["kind"] == "TEXT":
+                    ordered_response_blocks[-1]["text"] += "\n\n" + action
+                else:
+                    ordered_response_blocks.append({"kind": "TEXT", "text": action})
+                response_text += "\n\n" + action
             if weekly_missing:
                 response_text = "\n\n".join(block["text"] for block in ordered_response_blocks if block["kind"] == "TEXT")
             if not mapped_qa_match and entry.qa_id == "home_table_price" and facts.get("last_answer_id") == "bengali_home_table_details":

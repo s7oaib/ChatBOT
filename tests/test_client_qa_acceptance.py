@@ -83,7 +83,8 @@ def test_instagram_prebook_question_beats_stale_subscription_context(monkeypatch
     assert matched is True
     assert template_id == "alacarte_prebooking_steps"
     from camellia.client_qa import REGISTRY_BY_ID
-    assert response == REGISTRY_BY_ID["alacarte_prebook"].answer
+    assert response.startswith(REGISTRY_BY_ID["alacarte_prebook"].answer + "\n\nContinue on WhatsApp:")
+    assert response.count("https://wa.me/") == 1
 
 
 @pytest.mark.parametrize("message", [
@@ -109,8 +110,10 @@ def test_order_process_phrases_start_the_customer_order_draft(monkeypatch, messa
     )
 
     assert matched is True
-    assert template_id == "order_intake_draft"
-    assert response.startswith(instruction_message())
+    from camellia.client_qa import effective_entry
+    facts = session_memory.get_facts(user_id, "instagram")
+    assert template_id == "alacarte_prebooking_steps"
+    assert response.startswith(effective_entry(facts["client_qa_id"]).answer + "\n\nContinue on WhatsApp:")
     assert "https://wa.me/" in response
     assert session_memory.get_facts(user_id, "instagram")["order_intake_draft"]["status"] == ORDER_DRAFT_INCOMPLETE
 

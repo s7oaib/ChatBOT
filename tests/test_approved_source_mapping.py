@@ -75,7 +75,12 @@ def test_selected_id_uses_canonical_blocks_and_exact_answer(store, kind, message
 def test_every_current_effective_qa_uses_existing_actions_and_assets(store, qa_id, eligible_weekly_asset):
     route = create(store, qa_id=qa_id)
     result, facts = resolve(store, route=route)
-    assert result[0] == client_qa.effective_entry(qa_id).answer, {k:facts.get(k) for k in ['client_qa_id','client_qa_match_kind','last_route_source','last_grounding','source_route']}
+    expected = client_qa.effective_entry(qa_id).answer
+    if qa_id in {'order_prebook', 'alacarte_prebook'}:
+        assert result[0].startswith(expected + '\n\nContinue on WhatsApp:')
+        assert result[0].count('https://wa.me/') == 1
+    else:
+        assert result[0] == expected, facts.get('client_qa_id')
     assert facts['client_qa_id'] == qa_id
     assert facts['client_qa_asset_status'] == 'available'
     assert facts['client_qa_handoff_exact'] is (qa_id == 'order_ready_handoff')
