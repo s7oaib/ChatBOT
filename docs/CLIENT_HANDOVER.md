@@ -1,190 +1,88 @@
 # Camellia Artisanal client handover
 
-This is the operational handover for the accepted production baseline. It
-contains no credentials. Secrets and environment values belong in Railway's
-secret manager or the approved local development environment.
+Handover date: **2 October 2026, Asia/Kolkata**. This document contains no credentials.
 
-## 1. Architecture
+## Accepted release and evidence
 
-Camellia is a FastAPI webhook service with durable SQLite state on the Railway
-volume. Instagram is the only AI chatbot channel. WhatsApp is outside this
-service: customers receive a manual `wa.me` continuation link and the human
-team handles the conversation there.
+- Accepted application/runtime SHA: `b2d2b485c6c4e8b7c35d6908b75ce489a251d4bd` (PR #45).
+- Complete source tree: `f4ab3c5dc19d096daf22393053a68c45953ee446`, identical to tested feature head `1a22539286d2c0e947dc3dceb7fc7c18544387da`.
+- Accepted Railway deployment: `10a13e8e-d96f-43ad-9aa0-8dff2e5f82b4`, SUCCESS.
+- Final exact-main [full CI](https://github.com/s7oaib/ChatBOT/actions/runs/36931567553): 3410 passed, 0 failed, 1 existing Starlette/httpx warning; critical flake8 and schemas PASS.
+- Production: [Admin portal](https://web-production-0cad70.up.railway.app/admin); `/health` and `/admin` returned 200, startup complete, no observed new HTTP 5xx.
+- Immutable handover tag: `camellia-handover-2026-10-02`, created on the later documentation merge. Resolve that tag for the documentation SHA.
+- `test_baseline.json` remains on the accepted runtime SHA above. A later docs-only deployment does not require another baseline promotion or full regression.
 
-Customer response order is:
+## Production controls and access
 
-1. deterministic and canonical approved knowledge;
-2. structured understanding where needed;
-3. controlled semantic/RAG/provider assistance;
-4. strict business-fact and content-integrity guardrails; and
-5. durable human escalation when the request is unsupported or sensitive.
+Instagram is the only AI chatbot channel. Production is **TEST_ONLY**, with two allowed testers. The global status card sits below the Admin header and above navigation on every tab. `INSTAGRAM_CHATBOT_ENABLED` controls channel capability; durable Admin LIVE/TEST_ONLY controls customer access. Only exact enabled Meta sender IDs are allowed in TEST_ONLY; usernames are labels, not authorization. Non-allowlisted customers cannot reach responder, session business processing, orders, handoffs, RAG, Groq, candidates, or customer chatbot sending.
 
-Provider assistance is never the source of truth. If Groq is unavailable,
-approved deterministic responses and safe escalation continue.
+WhatsApp is **HUMAN ONLY**: a customer-facing `wa.me` draft/continuation may be offered for order, purchase, prebook or payment. There is no WhatsApp chatbot, inbound WhatsApp AI route or Cloud API bot sender. Preserve captured order fields and the CAM reference; a draft never confirms an order. Prebook Approved Q&A may append one continuation link. Informational questions such as best time to book must not force a purchase handoff.
 
-## 2. Production baseline
+Groq is the only AI provider. Approved copy and facts remain authoritative; provider assistance cannot invent facts or rewrite protected approved answers. LLM Auto Resolve actual customer sending is OFF; Web Tester is OFF. Do not change credentials, mode, allowlist, business facts, Meta or Railway configuration without explicit approval.
 
-- Accepted production SHA:
-  `75642a2ef763bcf46e214487f5e6ded1538b8cdc`
-- Frozen release reference: `release/production-freeze-2026-09-19`
-- Railway deployment: `7855239b-1116-4d0c-a98a-cfe48b1cd110`
-- Approved rollback reference: `0ced6ed4050a2c295e25d4c2bc64dd1cbaec7804`
-- Freeze record: GitHub Issue #27 — Production Freeze — 2026-09-19
+Browser Admin login uses `ADMIN_USERNAME` and `ADMIN_PASSWORD_HASH`. Machine API access uses separate `ADMIN_API_KEY`. Legacy `ADMIN_PIN` is not browser authentication. Never include passwords, tokens, keys, PINs or recovery destinations in tickets, logs, URLs or Git.
 
-The frozen release is not edited directly. Future work uses an isolated
-`maintenance/`, `hotfix/`, or explicitly approved `feature/` branch.
+## Approved knowledge and Response Library
 
-## 3. Channel and safety policy
+Approved Q&A contains canonical client-approved business answers: 23 effective ACTIVE entries at handover. Effective lifecycle is ACTIVE, SCHEDULED, EXPIRED or ARCHIVED. Preview before publishing; verify exact wording, flexible aliases/questions, controlled assets/actions and validity. Admin edits are durable overrides stored separately from immutable source; do not edit seed files to change production copy.
 
-- Instagram AI: enabled.
-- WhatsApp automation: removed; no inbound webhook, AI path, or server sender.
-- WhatsApp continuation: manual `wa.me` link only; preserve the CAM reference.
-- Story Auto Sync: off; manual Admin sync remains available.
-- LLM Auto Resolve: off; simulation/evaluation is not customer sending.
-- Web Tester: off in production.
-- Webhook signatures: enforced.
-- Intended Instagram account guard: enforced when configured.
+Response Library contains protected SYSTEM templates and operator-managed CUSTOM Q&A. At handover: 67 SYSTEM, 0 CUSTOM. SYSTEM entries are not freely deletable; CUSTOM entries use their normal editing, lifecycle and safe-delete workflow.
 
-Do not change these settings, locked business facts, Meta configuration, or
-credentials without explicit owner approval.
+QA-CLEAN2 reviewed 16 duplicate candidates, retired **0**: all remain KEEP_DEPENDENCY because live references exist. Do not delete them as presumed duplicates. `combo_bento` remains **KEEP_NEEDS_REVIEW**. See [decision evidence](QA_MENU31_CLEAN2.md). Legacy storage guidance is not an effective canonical Approved Q&A answer; the accepted Instagram policy safely hands off that unsupported question.
 
-## 4. Models
+## Weekly Savoury and catalogue authority
 
-- Structured NLU: `openai/gpt-oss-120b`.
-- Main responder/refinement: `openai/gpt-oss-20b`.
-- `groq/compound-mini` must not be reintroduced.
+Weekly Savoury's human-reviewed published timeline is the single changing savoury authority:
 
-The models may classify or refine within approved context. They may not invent
-prices, availability, delivery promises, ingredients, allergy guarantees,
-shelf-life claims, or dispatch estimates.
+`DRAFT → human review → PUBLISHED/UPCOMING → CURRENT at valid_from → SUPERSEDED / EXPIRED`.
 
-## 5. Admin login and daily operation
+Only CURRENT reviewed data is customer authority. Upcoming facts must not appear early. Unverified OCR never auto-publishes. Current at handover: version 5, **2–8 October 2026**, 13 reviewed rows and current uploaded flyer. Review dates as time advances; this is a dated observation, not a permanent menu claim.
 
-Open the authenticated `/admin` portal over HTTPS. Browser login uses the
-configured admin username/password hash. Machine-only
-Admin API calls use the separate `ADMIN_API_KEY`; the legacy `ADMIN_PIN` is
-not a browser or API authentication path.
+Menu Catalogue's Savoury Meal Menu is a projection of Weekly Savoury, not another publish system. **Open weekly workspace** opens the real timeline workspace (production click verified). Ordinary menu browse sends the current approved flyer without an item/price text list. Explicit item-price questions use the current reviewed row and never guess. Bento details use approved copy plus the same current flyer.
 
-Never put a credential in a ticket, screenshot, URL, log, or repository file.
+## Important: Bento validity decision
 
-### Create or edit a Topic
+**`bento_details_client` and `bento_price_client` expire after 11 October 2026, 23:59:59 Asia/Kolkata. At 12 October 2026, 00:00 IST they become ineligible unless deliberately extended.** This is expected lifecycle behavior.
 
-1. Open Instagram Content Routing in Admin.
-2. Choose `+ Add Topic`.
-3. Enter the operator-approved Topic name and description.
-4. Optionally choose an approved default menu, priority products, knowledge
-   scope, and reply order.
-5. Leave the Topic active only when it is ready for new mappings.
-6. Save and confirm it appears in the active Topic selectors.
+Before expiry, the operator must choose whether to let both expire or extend their approved validity through the normal Admin preview/publish workflow. This handover does not extend either entry.
 
-An empty Topic catalogue is valid on a new database. The portal explains that
-the operator must create a Topic; it does not seed fake business Topics.
-Inactive Topics remain historical records and are not offered for new
-selectors.
+## Instagram source mapping and Home Table
 
-### Map Story, Post, or Reel content
+Story/Post/Reel routing uses exact Meta identity. Choose Custom Response (`CUSTOM`) or Approved Q&A (`APPROVED_QA`, stable `qa_id`). `source_description` is operator-supplied. Never infer identity from OCR, captions, images or timing. Existing mappings remain intact.
 
-1. Use the captured exact Meta Story media ID for a Story; never type a guessed
-   ID or route from OCR/caption/visual similarity.
-2. For a Post or Reel, paste the canonical Instagram link and let the service
-   normalize and verify its source identity.
-3. Select an active Topic and choose the menu behavior.
-4. Save the mapping and verify the exact source ID, Topic, route status, and
-   approved preview.
-5. For shared Posts without a usable shortcode, use the deliberate admin
-   pairing flow and its short expiry window.
+A new qualifying Home Table request sends approved opening text, four ordered Reel URLs, then remaining approved text:
 
-Existing mappings are persisted in SQLite and are independent copies of the
-Topic defaults. Editing a Topic does not silently rewrite existing routes.
+1. https://www.instagram.com/reel/DdJhXQMT4VZ/
+2. https://www.instagram.com/reel/Dcd5bbEzbCo/
+3. https://www.instagram.com/reel/DcLZpuQzCKE/
+4. https://www.instagram.com/reel/DcQYp72zf8D/
 
-### Menu management
+The same inbound-event retry must not duplicate delivery; partial retries recover only missing links using durable receipts. A new qualifying request can receive its own sequence. Accepted production delivery uses URL links; native MEDIA_SHARE is not claimed.
 
-Use the authenticated Menu Manager to edit a draft, preview it, and publish
-only after checking the approved content. Menu state is persisted under the
-configured durable path, normally `/app/var/menu.json`. Do not insert prices
-or claims from an unreviewed image; the image parser is not a business-fact
-authority.
+## Human handoff
 
-## 6. Human escalation workflow
+`WAITING_FOR_HUMAN` suppresses autonomous Instagram AI replies and persists across restart/deploy. Only explicit operator resume restores AI handling. Repeated messages reuse the active durable handoff. Generic support handoffs do not force WhatsApp; order/payment flows may offer manual continuation. Inspect pending handoffs in Admin rather than clearing them through storage edits.
 
-Unsupported, sensitive, order/event, or explicit human requests create or
-reuse an opaque durable CAM handoff reference. Repeated customer messages do
-not create duplicate active handoffs. Staff-facing handoff data uses the
-bounded durable outbox path; external WhatsApp alerts are not sent by this
-service.
+## Storage, backup and recovery
 
-While a handoff is `WAITING_FOR_HUMAN`, autonomous AI replies are suppressed.
-Generic support handoffs do not include a `wa.me` link; booking, order,
-payment, and purchase-related handoffs may include the separately approved
-manual continuation. The operator must explicitly resume the handoff before
-chatbot behavior can continue. A notification failure must not be represented
-to the customer as a successful handoff.
+Production uses durable SQLite at `/app/var/camellia.db` on the `/app/var` Railway volume. Health reports database available and expected durable database/menu placement. Confirm attachment before maintenance. Follow [PRODUCTION_BACKUP_RECOVERY.md](PRODUCTION_BACKUP_RECOVERY.md).
 
-## 7. Health verification
+Code rollback and data rollback are separate: never overwrite live SQLite merely because code is rolled back. Back up before schema migration and verify integrity. The authenticated backup endpoint verifies its copy; it does not prove off-host retention or snapshots. Restore requires explicit operator approval. Never initialize an empty production DB over damaged or unavailable storage. No backup/restore mutation was performed during this read-only handover.
 
-Check `GET /health` after a deploy, restart, provider incident, or environment
-change. Verify:
+## Operator checklists
 
-- `status=healthy` and `warnings` are understood;
-- durable storage points to `/app/var/camellia.db`;
-- reply delivery is live when production delivery is expected;
-- webhook signatures are enforced;
-- Instagram token/account state is valid or explicitly being remediated;
-- outbound delivery has no unexplained repeated failures;
-- `ai` reports the intended provider/model and safe cooldown state;
-- reply latency is within the configured threshold;
-- `auto_resolve.actual_enabled=false`; and
-- `/health` reports `whatsapp.automation=removed` and
-  `manual_handoff=available`.
+**Daily / before changes:** check `/health`, storage, intentional TEST_ONLY/LIVE mode, allowlist if TEST_ONLY, menu and Approved Q&A lifecycle, and pending handoffs.
 
-Use authenticated Admin audit/evaluation endpoints for detailed outbound,
-Topic/source, Story, handoff, notification, and AI-resolution state.
+**Before menu publish:** verify validity dates, reviewed rows/prices and flyer; obtain human approval, then publish.
 
-## 8. Backup and recovery
+**Before Approved Q&A publish:** preview exact wording, variations, assets/actions and validity; publish only reviewed content.
 
-Follow [`PRODUCTION_BACKUP_RECOVERY.md`](PRODUCTION_BACKUP_RECOVERY.md). The
-authenticated `POST /admin/db-backup` endpoint creates a timestamped SQLite
-copy and checks `PRAGMA integrity_check`. It does not prove Railway snapshots
-or off-host retention. Production restore and destructive data migration are
-approval gates.
+**Before deploy:** run impacted tests and selected smoke, full regression for CRITICAL/core/release changes, review diff, require CI and deployment authorization.
 
-Code rollback and data rollback are separate. The approved code rollback is
-`0ced6ed4050a2c295e25d4c2bc64dd1cbaec7804`; do not overwrite the live database
-just because code was rolled back.
+**After deploy:** verify exact SHA, Railway SUCCESS, `/health` 200, `/admin` 200, no new observed 5xx and limited authorized production smoke.
 
-## 9. Privacy and security
+## Maintenance validation
 
-Normal logs use safe event shape, counts, HTTP status, error classes, hashes,
-and bounded correlation IDs. They must not contain customer message bodies,
-raw Meta identifiers, tokens, webhook signatures, expected HMAC values, or raw
-provider response bodies. Webhook signature verification and admin
-authentication must remain enabled.
+Normal PR/push green CI is a fast current-contract gate, not proof of a full suite. Use `python scripts/run_impacted_tests.py`; failure debugging uses `python -m pytest --lf -q`. CRITICAL/core/release/handover validation requires `python -m pytest -q`. Final handover executed one manual full CI on the exact accepted runtime and reuses that evidence for documentation-only changes.
 
-## 10. Troubleshooting
-
-| Symptom | First checks | Safe action |
-|---|---|---|
-| Instagram replies fail | `/health`, Instagram token state, outbound audit, Meta HTTP status | Keep canonical routes available; renew credentials only through approval |
-| Groq 429/5xx/timeout | `/health` AI state, safe error class, latency | Do not create retry storms; keep deterministic fallback and Auto Resolve off |
-| Topic selector empty | Topic API/admin session, active Topic count, database durability | Create/configure a Topic; do not seed fake production data |
-| Story routes incorrectly | Exact Story media ID, route status, source audit | Disable the bad mapping and preserve the exact ID evidence |
-| Duplicate handoff | Handoff reference and outbox audit | Do not mint another reference; inspect durable deduplication state |
-| Bot replies while waiting for human | Handoff state and resume audit | Stop autonomous paths, preserve evidence, investigate before deploy |
-| Database warning | `storage` block and `/app/var` mount | Do not wipe data; follow backup/recovery procedure |
-| WhatsApp bot reply observed | `/health`, route inventory, and deployment logs | Treat as an incident; preserve evidence and investigate before change |
-
-## 11. Maintenance and change approval
-
-Every change must document the issue, evidence, severity, root cause, branch,
-base/candidate SHA, files, behavior changed/unchanged, focused and full tests,
-CI, policy/fact/privacy/database impact, deployment need, rollback, residual
-risk, and Git status.
-
-The workflow is:
-
-`observe → reproduce → minimum safe fix → focused tests → full suite → diff and policy review → CI → explicit production approval → deploy → live verification`
-
-Green tests do not authorize production deployment. Never deploy, restore,
-rotate credentials, change Meta configuration, enable Story Auto Sync, enable
-Auto Resolve, or alter locked business facts without explicit approval. The
-removed WhatsApp automation must not be reintroduced as a flag-only change.
+See [testing policy](TESTING_STRATEGY.md), [runbook](PRODUCTION_RUNBOOK.md), [architecture](architecture.md), [chatbot control](INSTAGRAM_CHATBOT_CONTROL.md) and [validated dependency snapshot](HANDOVER_DEPENDENCY_SNAPSHOT.md).

@@ -4,9 +4,11 @@ Previously validated unrelated application code is **frozen**. Change only what 
 
 ## Current baselines
 
-- Production application baseline before the testing-infrastructure integration: `1d19a97bef4967bff806b14ac58c9328cd0aaa74` (production deployment `a784414d-d8db-48b8-9a31-11c1083338fe`).
-- Current testing/change-impact baseline: `cfba04404e4b6e09c8b1d877af569b016fd86798`.
-- The testing-infrastructure commit contains test/CI/docs infrastructure only. Its exact contents passed a 2,673-test full regression before commit, its feature and main CI passed, and Railway production deployment `24262558-f874-4b02-93d1-0e7ff66c0ccf` succeeded. This deployment does not imply application-business behavior changed.
+- Accepted application/runtime and comparison baseline: `b2d2b485c6c4e8b7c35d6908b75ce489a251d4bd`.
+- Production acceptance: Railway `10a13e8e-d96f-43ad-9aa0-8dff2e5f82b4`, SUCCESS, health/Admin 200.
+- Final exact-main manual [full CI 36931567553](https://github.com/s7oaib/ChatBOT/actions/runs/36931567553): 3410 passed, zero failed, one existing Starlette/httpx warning; critical flake8 and schema checks PASS.
+- Merge tree `f4ab3c5dc19d096daf22393053a68c45953ee446` equals tested feature head `1a22539286d2c0e947dc3dceb7fc7c18544387da`.
+- The later handover docs/metadata merge/tag is distinct from this runtime baseline. Do not advance the baseline for each docs-only commit or rerun full merely for Markdown.
 
 `test_baseline.json` records the comparison baseline used by `scripts/run_impacted_tests.py`. It never auto-advances.
 
