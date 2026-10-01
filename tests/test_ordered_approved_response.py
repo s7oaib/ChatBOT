@@ -231,7 +231,7 @@ def test_durable_queue_accepts_exact_order_before_marking_sent(tmp_path, monkeyp
         send.assert_not_called()
     finally:
         app_module._instagram_job_context.reset(token)
-    assert facts['home_table_videos_sent']
+    assert not facts['home_table_videos_sent']
     with patch.object(app_module, 'send_instagram_reply', return_value={'message_id':'ok'}) as send:
         app_module._process_instagram_outbound_jobs(inbound_job_id=job_id)
     assert [c.args[1] for c in send.call_args_list] == [b.get('text', b.get('url')) for b in blocks]

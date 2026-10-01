@@ -44,6 +44,7 @@ class SessionMemoryManager:
                 "subscription_context": False,
                 "home_table_context": False,
                 "home_table_videos_sent": False,
+                "home_table_reel_delivery_id": None,
                 "savoury_crosssell_sent": False,
                 "alacarte_sondesh_addon_sent": False,
                 "alacarte_sondesh_addon_declined": False,
@@ -146,7 +147,7 @@ class SessionMemoryManager:
         facts = session.setdefault("facts", {})
         transient = {
             "image_card_sent", "awaiting_subscription_booking", "subscription_context",
-            "home_table_context", "home_table_videos_sent",
+            "home_table_context", "home_table_videos_sent", "home_table_reel_delivery_id",
             "last_greeting_index", "savoury_crosssell_sent",
             "alacarte_sondesh_addon_sent", "alacarte_sondesh_addon_declined",
             "sondesh_crosssell_sent",

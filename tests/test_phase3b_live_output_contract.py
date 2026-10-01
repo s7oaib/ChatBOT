@@ -37,7 +37,7 @@ def _run_instagram(monkeypatch, database, message, *, facts=None):
         "send_instagram_reply",
         side_effect=lambda recipient, text, image_url=None, **kwargs: sent.append(
             {"recipient": recipient, "text": text, "image_url": image_url, **kwargs}
-        ),
+        ) or {"message_id": f"accepted-{len(sent)}"},
     ), patch.object(
         app_module.escalator, "handle_escalation", return_value={"escalation_id": 1}
     ) as escalated, patch.object(config, "WHATSAPP_BUSINESS_NUMBER", "919800000000"):
