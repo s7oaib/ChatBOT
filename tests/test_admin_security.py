@@ -161,6 +161,22 @@ def test_legacy_pin_and_browser_api_key_bypass_are_blocked(security_client):
     assert "X-Admin-Key': currentAdminKey" not in page
 
 
+def test_library_import_and_delete_preserve_browser_auth_and_csrf(security_client):
+    client, database = security_client
+    csv_text = 'topic,primary_question,aliases,approved_answer\nPacking,special carry bag,[],Please discuss your bag with the kitchen.\n'
+    upload = {'file': ('library.csv', csv_text.encode(), 'text/csv')}
+    assert client.post('/admin/custom-qa/import/confirm', files=upload).status_code == 403
+    assert _login(client).status_code == 200
+    assert client.post('/admin/custom-qa/import/confirm', files=upload).status_code == 403
+    csrf = {'X-CSRF-Token': client.cookies.get('camellia_admin_csrf')}
+    assert client.post('/admin/custom-qa/import/dry-run', files=upload, headers=csrf).status_code == 200
+    assert database.list_custom_qa(status='ALL') == []
+    assert client.post('/admin/custom-qa/import/confirm', files=upload, headers=csrf).status_code == 200
+    row = database.list_custom_qa(status='ALL')[0]
+    assert client.request('DELETE', f'/admin/custom-qa/{row["id"]}', json={'confirm_permanent_delete': True,
+                          'confirm_question': row['question_pattern']}).status_code == 403
+
+
 def test_security_headers_and_admin_endpoint_inventory(security_client):
     client, _database = security_client
     response = client.get("/admin")

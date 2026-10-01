@@ -4839,17 +4839,10 @@ async def add_learned_knowledge_entry(
     return {"status": "success", "id": entry_id, "message": "Learned knowledge saved and active."}
 
 @app.delete("/admin/learned-knowledge/{knowledge_id}")
-def delete_learned_knowledge_entry(
-    knowledge_id: int,
-    x_admin_key: Optional[str] = Header(None),
-    x_admin_pin: Optional[str] = Header(None),
-):
-    """Deletes a learned knowledge entry."""
+async def delete_learned_knowledge_entry(knowledge_id: int, request: Request,
+                                       x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
     require_admin(x_admin_key, x_admin_pin)
-    deleted = db.delete_learned_knowledge(knowledge_id)
-    if not deleted:
-        raise HTTPException(status_code=404, detail="Knowledge entry not found")
-    return {"status": "deleted", "id": knowledge_id}
+    return await delete_custom_qa(knowledge_id, request, x_admin_key, x_admin_pin)
 
 SOURCE_LABELS = {
     "system_template": "System Template",
@@ -4875,13 +4868,16 @@ def _source_label(source: Optional[str]) -> str:
     return source.replace("_", " ").title() if source else "Unknown"
 
 
+from camellia import response_library as library
+
+
 def _custom_qa_public(item: Dict[str, Any]) -> Dict[str, Any]:
     """Shapes a learned_knowledge row for the Custom Q&A tab — no bare DB id up front."""
     result = {
         "id": item.get("id"),
         "topic": item.get("topic"),
         "primary_question": item.get("question_pattern"),
-        "aliases": item.get("aliases", []),
+        "aliases": library.alias_texts(item.get("aliases", [])),
         "approved_answer": item.get("verified_answer"),
         "priority": item.get("priority") or "NORMAL",
         "status": item.get("status") or "ACTIVE",
@@ -5058,18 +5054,27 @@ def _response_library_system_items(status: str = "ALL", search: Optional[str] = 
     return sorted(items, key=lambda item: (-int(item.get("relevance_score") or 0), item.get("title") or ""))
 
 
-def _system_trigger_conflicts(primary_question: str, aliases: List[str]) -> List[Dict[str, Any]]:
-    """Find exact trigger collisions without copying system templates into DB."""
-    candidates = {str(value or "").strip().lower() for value in [primary_question, *(aliases or [])] if str(value or "").strip()}
-    conflicts = []
-    for template in (responder.qa_data or {}).get("templates", []):
-        override = db.get_response_template_override(str(template.get("id")))
-        if override and str(override.get("status") or "ACTIVE").upper() != "ACTIVE":
-            continue
-        triggers = {str(value or "").strip().lower() for value in (template.get("triggers") or [])}
-        if candidates & triggers:
-            conflicts.append(_system_template_public(template))
-    return conflicts
+def _system_trigger_conflicts(primary_question, aliases):
+    return [item for item in library.conflicts(db, responder.qa_data.get("templates", []), primary_question, aliases)
+            if item["source"] != "CUSTOM"]
+
+
+def _check_custom_conflicts(question, aliases, exclude_id=None):
+    existing = library.conflicts(db, responder.qa_data.get("templates", []), question, aliases, exclude_id)
+    if existing:
+        raise HTTPException(status_code=409, detail={"message": "Question or alias conflicts with existing knowledge", "existing": existing})
+
+
+def _custom_aliases(values):
+    if not isinstance(values, list) or any(not isinstance(v, str) for v in values):
+        raise HTTPException(status_code=400, detail="aliases must be an array of strings")
+    return [v.strip() for v in values if v.strip()]
+
+
+def _validate_custom_fields(body):
+    if not isinstance(body, dict) or any(key in body and not isinstance(body[key], str)
+            for key in ("topic", "primary_question", "approved_answer", "priority", "status")):
+        raise HTTPException(status_code=400, detail="Custom Q&A fields must contain text")
 
 
 @app.get("/admin/response-library")
@@ -5105,7 +5110,11 @@ def list_response_library(
     # result dump. Keep the API response small so the client remains instant.
     if search and len("".join(str(search).split())) <= 1:
         items = [item for item in items if int(item.get("relevance_score") or 0) >= 90][:8]
-    return {"status": "success", "count": len(items[:limit]), "items": items[:limit]}
+    with db.get_connection() as conn:
+        custom_count = conn.execute("SELECT COUNT(*) FROM learned_knowledge").fetchone()[0]
+    system_count = len(responder.qa_data.get("templates", []))
+    return {"status": "success", "count": len(items[:limit]), "items": items[:limit],
+            "counts": {"all": system_count + custom_count, "system": system_count, "custom": custom_count}}
 
 
 @app.patch("/admin/response-library/system/{template_id}")
@@ -5126,6 +5135,10 @@ async def edit_response_library_system_template(
         body = await request.json()
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON body")
+    if any(key in body for key in ("template_id", "id", "triggers", "aliases", "primary_question")):
+        raise HTTPException(status_code=400, detail="Protected System Template identity and triggers are read-only")
+    if str(body.get("status") or "ACTIVE").upper() != "ACTIVE":
+        raise HTTPException(status_code=400, detail="Protected System Templates cannot be disabled or archived")
     response = str(body.get("approved_answer") or body.get("response") or "").strip()
     actor = body.get("updated_by") or "client_admin_dashboard"
     if not response:
@@ -5296,13 +5309,14 @@ async def create_custom_qa(
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON body")
 
+    _validate_custom_fields(body)
     topic = (body.get("topic") or "").strip()
     primary_question = (body.get("primary_question") or "").strip()
     answer = (body.get("approved_answer") or "").strip()
-    aliases = [a for a in (body.get("aliases") or []) if (a or "").strip()]
+    aliases = _custom_aliases(body.get("aliases", []))
     priority = (body.get("priority") or "NORMAL").upper()
     status = (body.get("status") or "ACTIVE").upper()
-    created_by = body.get("created_by") or "client_admin_dashboard"
+    created_by = "client_admin_dashboard"
     force_save = bool(body.get("force_save"))
 
     if not topic or not primary_question or not answer:
@@ -5314,6 +5328,7 @@ async def create_custom_qa(
 
     _validate_custom_qa_answer(answer)
 
+    _check_custom_conflicts(primary_question, aliases)
     dupes = db.find_learned_knowledge_duplicates(primary_question, aliases)
     if dupes["exact"]:
         raise HTTPException(status_code=409, detail={
@@ -5359,16 +5374,19 @@ async def edit_custom_qa(
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON body")
 
-    topic = (body.get("topic") or existing.get("topic") or "").strip()
-    primary_question = (body.get("primary_question") or existing.get("question_pattern") or "").strip()
-    answer = (body.get("approved_answer") or existing.get("verified_answer") or "").strip()
+    _validate_custom_fields(body)
+    topic = (body.get("topic", existing.get("topic")) or "").strip()
+    primary_question = (body.get("primary_question", existing.get("question_pattern")) or "").strip()
+    answer = (body.get("approved_answer", existing.get("verified_answer")) or "").strip()
+    if not topic or not primary_question or not answer:
+        raise HTTPException(status_code=400, detail="topic, primary_question, and approved_answer are required")
     aliases = body.get("aliases")
     if aliases is None:
         aliases = [a["alias_text"] for a in existing.get("aliases", [])]
-    aliases = [a for a in aliases if (a or "").strip()]
+    aliases = _custom_aliases(aliases)
     priority = (body.get("priority") or existing.get("priority") or "NORMAL").upper()
     status = (body.get("status") or existing.get("status") or "ACTIVE").upper()
-    updated_by = body.get("updated_by") or "client_admin_dashboard"
+    updated_by = "client_admin_dashboard"
     force_save = bool(body.get("force_save"))
 
     if priority not in {"NORMAL", "HIGH"}:
@@ -5378,6 +5396,7 @@ async def edit_custom_qa(
 
     _validate_custom_qa_answer(answer)
 
+    _check_custom_conflicts(primary_question, aliases, knowledge_id)
     dupes = db.find_learned_knowledge_duplicates(primary_question, aliases, exclude_id=knowledge_id)
     if dupes["exact"]:
         raise HTTPException(status_code=409, detail={
@@ -5417,22 +5436,36 @@ async def set_custom_qa_status(
     except Exception:
         body = {}
     status = str(body.get("status", "")).strip().upper()
-    actor = body.get("actor") or "client_admin_dashboard"
+    actor = "client_admin_dashboard"
+    if status == "ACTIVE":
+        item = db.get_custom_qa(knowledge_id)
+        if not item:
+            raise HTTPException(status_code=404, detail="Custom Q&A not found")
+        _check_custom_conflicts(item["question_pattern"], library.alias_texts(item["aliases"]), knowledge_id)
     if not db.set_custom_qa_status(knowledge_id, status, actor):
         raise HTTPException(status_code=400, detail="Could not update status (bad status value or Q&A not found)")
     return {"status": status, "id": knowledge_id}
 
 
 @app.delete("/admin/custom-qa/{knowledge_id:int}")
-def delete_custom_qa(
-    knowledge_id: int,
-    x_admin_key: Optional[str] = Header(None),
-    x_admin_pin: Optional[str] = Header(None),
-):
-    """Permanent delete — only this Q&A and its own aliases/version history."""
+@app.delete("/admin/learned-knowledge/{knowledge_id:int}/permanent")
+async def delete_custom_qa(knowledge_id: int, request: Request,
+                          x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
     require_admin(x_admin_key, x_admin_pin)
-    if not db.delete_learned_knowledge(knowledge_id):
+    item = db.get_custom_qa(knowledge_id)
+    if not item:
         raise HTTPException(status_code=404, detail="Custom Q&A not found")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if body.get("confirm_permanent_delete") is not True or body.get("confirm_question") != item["question_pattern"]:
+        raise HTTPException(status_code=400, detail="Two explicit confirmations are required, including the exact question")
+    try:
+        if not db.delete_archived_custom_qa(knowledge_id, body['confirm_question']):
+            raise HTTPException(status_code=404, detail="Custom Q&A not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
     return {"status": "deleted", "id": knowledge_id}
 
 
@@ -5460,6 +5493,10 @@ async def restore_custom_qa_version(
     except Exception:
         body = {}
     actor = body.get("actor") or "client_admin_dashboard"
+    version = next((v for v in db.get_learned_knowledge_versions(knowledge_id) if v["version_id"] == version_id), None)
+    if version:
+        _check_custom_conflicts(version["primary_question"], version["aliases_snapshot"], knowledge_id)
+        _validate_custom_qa_answer(version["answer"])
     if not db.restore_learned_knowledge_version(knowledge_id, version_id, actor):
         raise HTTPException(status_code=404, detail="Version or Q&A not found")
     return {"status": "restored", "id": knowledge_id, "version_id": version_id}
@@ -5562,194 +5599,82 @@ async def preview_custom_qa_reply(
     return {"preview_text": answer, "note": "Preview only — nothing has been sent."}
 
 
-_CSV_COLUMNS = [
-    "id", "topic", "primary_question", "aliases", "approved_answer",
-    "priority", "status", "source", "usage_count", "last_used_at",
-    "created_at", "updated_at",
-]
+_CSV_COLUMNS = library.COLUMNS
 
 
-def _custom_qa_to_csv_row(item: Dict[str, Any]) -> Dict[str, Any]:
+def _custom_qa_to_csv_row(item):
     public = _custom_qa_public(item)
-    return {
-        "id": public["id"],
-        "topic": public["topic"],
-        "primary_question": public["primary_question"],
-        "aliases": json.dumps(public["aliases"]),
-        "approved_answer": public["approved_answer"],
-        "priority": public["priority"],
-        "status": public["status"],
-        "source": public["source"],
-        "usage_count": public["usage_count"],
-        "last_used_at": public["last_used_at"] or "",
-        "created_at": public["created_at"] or "",
-        "updated_at": public["updated_at"] or "",
-    }
+    return {**public, "aliases": json.dumps(public["aliases"], ensure_ascii=False)}
+
+
+def _library_csv_response(columns, rows, filename):
+    return PlainTextResponse(library.csv_text(columns, rows), media_type="text/csv",
+                             headers={"Content-Disposition": f"attachment; filename={filename}"})
 
 
 @app.get("/admin/custom-qa/export.csv")
-def export_custom_qa_csv(
-    status: str = "ALL",
-    source: Optional[str] = None,
-    priority: Optional[str] = None,
-    topic: Optional[str] = None,
-    x_admin_key: Optional[str] = Header(None),
-    x_admin_pin: Optional[str] = Header(None),
-):
-    """
-    Admin-only CSV export. Columns are stable and never include secrets —
-    they are drawn from the same public shaping (_custom_qa_public) the
-    JSON list endpoint uses, which never surfaces a raw credential field.
-    """
+def export_custom_qa_csv(status: str = "ALL", source: Optional[str] = None,
+                        priority: Optional[str] = None, topic: Optional[str] = None,
+                        x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
     require_admin(x_admin_key, x_admin_pin)
-    items = db.list_custom_qa(status=status, source=source, priority=priority, topic=topic, limit=5000)
-    buffer = io.StringIO()
-    writer = csv.DictWriter(buffer, fieldnames=_CSV_COLUMNS)
-    writer.writeheader()
-    for item in items:
-        writer.writerow(_custom_qa_to_csv_row(item))
-    return PlainTextResponse(
-        content=buffer.getvalue(),
-        media_type="text/csv",
-        headers={"Content-Disposition": "attachment; filename=custom_qa_export.csv"},
-    )
+    items = db.list_custom_qa(status=status, source=source, priority=priority, topic=topic, limit=2147483647)
+    return _library_csv_response(library.COLUMNS, [_custom_qa_to_csv_row(i) for i in items], "custom_qa_export.csv")
+
+
+@app.get("/admin/response-library/export.csv")
+def export_full_response_library(x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    rows = []
+    for template in responder.qa_data.get("templates", []):
+        item = _system_template_public(template)
+        rows.append({**item, "record_type": "SYSTEM", "display_name": item["title"],
+                     "aliases": json.dumps(item["aliases"], ensure_ascii=False), "response": item["approved_answer"],
+                     "protected_runtime": "true", "editable": str(item["editable"]).lower(), "importable": "false",
+                     "runtime_action_or_behavior": json.dumps({k: template[k] for k in ("action", "actions", "escalate", "behavior") if k in template})})
+    for raw in db.list_custom_qa(status="ALL", limit=2147483647):
+        item = _custom_qa_public(raw)
+        rows.append({**item, "record_type": "CUSTOM", "display_name": item["topic"],
+                     "aliases": json.dumps(item["aliases"], ensure_ascii=False), "response": item["approved_answer"],
+                     "protected_runtime": "false", "editable": "true", "importable": "true"})
+    return _library_csv_response(library.AUDIT_COLUMNS, rows, "response_library_audit.csv")
 
 
 @app.get("/admin/custom-qa/csv-template")
-def custom_qa_csv_template(
-    x_admin_key: Optional[str] = Header(None),
-    x_admin_pin: Optional[str] = Header(None),
-):
+def custom_qa_csv_template(x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
     require_admin(x_admin_key, x_admin_pin)
-    buffer = io.StringIO()
-    writer = csv.DictWriter(buffer, fieldnames=["topic", "primary_question", "aliases", "approved_answer", "priority", "status"])
-    writer.writeheader()
-    writer.writerow({
-        "topic": "Delivery",
-        "primary_question": "Do you deliver outside Delhi NCR?",
-        "aliases": json.dumps(["deliver outside ncr", "ship outside delhi"]),
-        "approved_answer": "We currently deliver only within Delhi NCR.",
-        "priority": "NORMAL",
-        "status": "ACTIVE",
-    })
-    return PlainTextResponse(
-        content=buffer.getvalue(),
-        media_type="text/csv",
-        headers={"Content-Disposition": "attachment; filename=custom_qa_template.csv"},
-    )
+    return _library_csv_response(library.COLUMNS, [{"topic": "Packing preferences", "primary_question": "Can I bring my own carry bag?",
+        "aliases": '["own carry bag"]', "approved_answer": "Please discuss your packing preference with our kitchen.",
+        "priority": "NORMAL", "status": "ACTIVE"}], "custom_qa_template.csv")
 
 
-def _parse_custom_qa_csv(raw_text: str) -> List[Dict[str, Any]]:
-    reader = csv.DictReader(io.StringIO(raw_text))
-    rows = []
-    for i, row in enumerate(reader, start=1):
-        rows.append({"row_number": i, **{k: (v or "").strip() for k, v in row.items()}})
-    return rows
-
-
-def _validate_import_row(row: Dict[str, Any]) -> Dict[str, Any]:
-    topic = row.get("topic", "")
-    primary_question = row.get("primary_question", "")
-    answer = row.get("approved_answer", "")
-    priority = (row.get("priority") or "NORMAL").upper()
-    status = (row.get("status") or "ACTIVE").upper()
+async def _custom_import_rows(file):
     try:
-        aliases = json.loads(row.get("aliases") or "[]")
-        if isinstance(aliases, str):
-            aliases = [a.strip() for a in aliases.split("|") if a.strip()]
-    except Exception:
-        aliases = [a.strip() for a in (row.get("aliases") or "").split("|") if a.strip()]
-
-    errors = []
-    if not topic:
-        errors.append("topic is required")
-    if not primary_question:
-        errors.append("primary_question is required")
-    if priority not in {"NORMAL", "HIGH"}:
-        errors.append("priority must be NORMAL or HIGH")
-    if status not in {"ACTIVE", "DISABLED", "ARCHIVED"}:
-        errors.append("status must be ACTIVE, DISABLED, or ARCHIVED")
-
-    valid, answer_error = validate_candidate_answer(answer)
-    if not valid:
-        errors.append(answer_error)
-
-    if errors:
-        return {"row_number": row["row_number"], "row_status": "Invalid", "errors": errors, "data": row}
-
-    warnings = detect_business_commitment_warnings(answer)
-    dupes = db.find_learned_knowledge_duplicates(primary_question, aliases)
-    row_status = "Ready"
-    if dupes["exact"]:
-        row_status = "Duplicate"
-    elif dupes["similar"]:
-        row_status = "Possible Duplicate"
-    elif warnings:
-        row_status = "Validation Warning"
-
-    return {
-        "row_number": row["row_number"],
-        "row_status": row_status,
-        "errors": [],
-        "warnings": warnings,
-        "duplicates": [i.get("id") for i in dupes["exact"]] + [i.get("id") for i in dupes["similar"]],
-        "data": {"topic": topic, "primary_question": primary_question, "approved_answer": answer, "aliases": aliases, "priority": priority, "status": status},
-    }
+        return library.parse_csv((await file.read()).decode("utf-8-sig"))
+    except (ValueError, UnicodeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 @app.post("/admin/custom-qa/import/dry-run")
-async def import_custom_qa_dry_run(
-    file: UploadFile = File(...),
-    x_admin_key: Optional[str] = Header(None),
-    x_admin_pin: Optional[str] = Header(None),
-):
-    """Step 2 of the import flow: validates every row, writes nothing."""
+async def import_custom_qa_dry_run(file: UploadFile = File(...), x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
     require_admin(x_admin_key, x_admin_pin)
-    raw = (await file.read()).decode("utf-8-sig", errors="replace")
-    rows = _parse_custom_qa_csv(raw)
-    results = [_validate_import_row(row) for row in rows]
-    summary = {
-        "rows": len(results),
-        "valid": sum(1 for r in results if r["row_status"] == "Ready"),
-        "warnings": sum(1 for r in results if r["row_status"] == "Validation Warning"),
-        "duplicates": sum(1 for r in results if r["row_status"] == "Duplicate"),
-        "possible_duplicates": sum(1 for r in results if r["row_status"] == "Possible Duplicate"),
-        "errors": sum(1 for r in results if r["row_status"] == "Invalid"),
-    }
-    return {"status": "success", "summary": summary, "rows": results}
+    return library.plan_import(db, responder.qa_data.get("templates", []), await _custom_import_rows(file))
 
 
 @app.post("/admin/custom-qa/import/confirm")
-async def import_custom_qa_confirm(
-    file: UploadFile = File(...),
-    x_admin_key: Optional[str] = Header(None),
-    x_admin_pin: Optional[str] = Header(None),
-):
-    """
-    Step 3: re-validates the same file (nothing was staged from the dry
-    run) and imports only rows that are Ready. Duplicate/Invalid rows are
-    skipped, never silently overwritten or partially published.
-    """
+async def import_custom_qa_confirm(file: UploadFile = File(...), confirm_warnings: bool = Form(False),
+                                   x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
     require_admin(x_admin_key, x_admin_pin)
-    raw = (await file.read()).decode("utf-8-sig", errors="replace")
-    rows = _parse_custom_qa_csv(raw)
-    results = [_validate_import_row(row) for row in rows]
-
-    imported_ids = []
-    skipped = []
-    for r in results:
-        if r["row_status"] != "Ready":
-            skipped.append({"row_number": r["row_number"], "reason": r["row_status"]})
-            continue
-        data = r["data"]
-        new_id = db.add_learned_knowledge(
-            data["topic"], data["primary_question"], data["approved_answer"],
-            source="csv_import", confidence=1.0, priority=data["priority"], status=data["status"],
-            created_by="csv_import", aliases=data["aliases"],
-        )
-        imported_ids.append(new_id)
-
-    return {"status": "success", "imported": len(imported_ids), "imported_ids": imported_ids, "skipped": skipped}
+    rows = await _custom_import_rows(file)
+    def build_plan():
+        plan = library.plan_import(db, responder.qa_data.get("templates", []), rows)
+        if plan['warnings'] and not confirm_warnings:
+            plan.update(can_confirm=False, warning_confirmation_required=True)
+        return plan
+    plan, ids = db.apply_custom_qa_import(build_plan)
+    if not plan["can_confirm"]:
+        raise HTTPException(status_code=409, detail=plan)
+    return {**plan, "imported": len(ids), "imported_ids": ids,
+            "skipped": [{"row_number": r["row_number"], "reason": "UNCHANGED"} for r in plan["rows"] if r["operation"] == "UNCHANGED" ]}
 
 
 @app.post("/admin/escalations/{escalation_id}/resolve")
@@ -7324,7 +7249,7 @@ def get_admin_dashboard():
             </nav>
             <div class="admin-sidebar-label">More</div>
             <nav class="tabs-nav" aria-label="Secondary">
-                <button class="tab-btn" onclick="switchTab('tab-custom-qa', this)">▤ <span class="nav-label">QA Templates</span></button>
+                <button class="tab-btn" onclick="switchTab('tab-custom-qa', this)">▤ <span class="nav-label">Response Library</span></button>
                 <button class="tab-btn" onclick="switchTab('tab-stats', this)">⌁ <span class="nav-label">Analytics</span></button>
                 <button class="tab-btn" onclick="switchTab('tab-candidates', this)">✓ <span class="nav-label">Candidates</span></button>
                 <button class="tab-btn" onclick="switchTab('tab-settings', this)">⚙ <span class="nav-label">Settings / Health</span></button>
@@ -7986,17 +7911,25 @@ THIS WEEK'S BENGAL SPECIALS
             <div class="panel-header">
                 <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
                     <div>
-                        <h2>🗂️ Custom Q&amp;A / Response Library</h2>
+                        <h2>🗂️ Response Library</h2>
                         <p>Create and manage approved answers the chatbot can reuse when customers ask similar questions. Search, preview, test and safely edit customer-facing copy; protected runtime rules remain read-only.</p>
                     </div>
                     <div style="display:flex; gap:8px; flex-wrap:wrap;">
-                        <button class="btn-primary" onclick="openCustomQaModal()">+ Add Q&amp;A</button>
-                        <button class="btn-secondary" onclick="openCustomQaImportModal()">Import CSV</button>
-                        <button class="btn-secondary" onclick="exportCustomQaCsv()">Export CSV</button>
+                        <button class="btn-primary" onclick="openCustomQaModal()">+ Add Custom Q&amp;A</button>
+                        <button class="btn-secondary" onclick="openCustomQaImportModal()">Import Custom Q&amp;A</button>
+                        <button class="btn-secondary" onclick="exportCustomQaCsv()">Export Custom Q&amp;A</button>
+                        <button class="btn-secondary" onclick="downloadBlobFrom('/admin/response-library/export.csv', 'response_library_audit.csv')">Export Full Library</button>
+                        <button class="btn-secondary" onclick="downloadCustomQaTemplate()">Download CSV Template</button>
                     </div>
                 </div>
             </div>
 
+            <div id="responseLibraryCounts" style="margin:12px 0;"></div>
+            <div style="display:flex;gap:8px;margin-bottom:12px;">
+                <button class="tab-btn active" id="libraryType-ALL" onclick="setLibraryType('ALL')">All</button>
+                <button class="tab-btn" id="libraryType-SYSTEM" onclick="setLibraryType('SYSTEM')">System Templates</button>
+                <button class="tab-btn" id="libraryType-CUSTOM" onclick="setLibraryType('CUSTOM')">Custom Q&amp;A</button>
+            </div>
             <section class="qa-architecture" aria-labelledby="qaArchitectureTitle">
                 <h3 id="qaArchitectureTitle" style="margin:0;color:var(--primary);">Authoritative approved QA model</h3>
                 <p style="margin:6px 0 0;color:var(--text-muted);font-size:.82rem;line-height:1.5;">Canonical answers are the production source of truth. The assistant may classify and ground a request, but it cannot freely rewrite an approved answer; human edits remain explicit, versioned, and subject to the existing approval rules.</p>
@@ -8020,9 +7953,10 @@ THIS WEEK'S BENGAL SPECIALS
             <div id="customQaAiSignals" style="padding:10px;border:1px solid var(--border);border-radius:10px;margin-bottom:12px;font-size:.82rem;">AI Review Signal: loading…</div>
 
             <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:10px;">
-                <button class="tab-btn active" type="button" id="cqaStatusBtn-ACTIVE" onclick="setCustomQaStatusFilter('ACTIVE')">Active</button>
+                <button class="tab-btn" type="button" id="cqaStatusBtn-ACTIVE" onclick="setCustomQaStatusFilter('ACTIVE')">Active</button>
+                <button class="tab-btn" type="button" id="cqaStatusBtn-ARCHIVED" onclick="setCustomQaStatusFilter('ARCHIVED')">Archived</button>
                 <button class="tab-btn" type="button" id="cqaStatusBtn-DISABLED" onclick="setCustomQaStatusFilter('DISABLED')">Disabled</button>
-                <button class="tab-btn" type="button" id="cqaStatusBtn-ALL" onclick="setCustomQaStatusFilter('ALL')">All</button>
+                <button class="tab-btn active" type="button" id="cqaStatusBtn-ALL" onclick="setCustomQaStatusFilter('ALL')">All</button>
             </div>
             <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:14px;">
                 <select class="field-control" id="cqaSourceFilter" style="max-width:200px;" onchange="renderCustomQaList(); renderSystemResponseLibrary()">
@@ -8179,7 +8113,7 @@ THIS WEEK'S BENGAL SPECIALS
     <div id="customQaModal" style="display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 9999; justify-content: center; align-items: center; padding: 20px; overflow-y: auto;">
         <div style="background: white; border-radius: 16px; width: 100%; max-width: 640px; padding: 24px; box-shadow: 0 10px 30px rgba(0,0,0,0.2); max-height: 90vh; overflow-y: auto;">
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px;">
-                <h3 style="margin: 0; color: var(--primary);" id="customQaModalTitle">+ Add Q&amp;A</h3>
+                <h3 style="margin: 0; color: var(--primary);" id="customQaModalTitle">+ Add Custom Q&amp;A</h3>
                 <button onclick="closeCustomQaModal()" style="background: none; border: none; font-size: 1.4rem; cursor: pointer;">&times;</button>
             </div>
             <input type="hidden" id="cqaEditingId">
@@ -8254,7 +8188,7 @@ THIS WEEK'S BENGAL SPECIALS
             </div>
             <div id="cqaDeleteDetails" style="background:#F7F5F3; border:1px solid var(--border); border-radius:10px; padding:12px; font-size:0.82rem; line-height:1.6; margin-bottom:12px;"></div>
             <div style="background:#FEF2F2; border:1px solid #FCA5A5; border-radius:10px; padding:10px 12px; font-size:0.8rem; color:#991B1B; margin-bottom:16px;">
-                This permanently removes this Q&amp;A and it will no longer be available to the chatbot.
+                This cannot be undone. Only archived Custom Q&amp;A can be permanently deleted; referenced records are blocked.
             </div>
             <div style="display: flex; gap: 8px; justify-content: flex-end;">
                 <button class="btn-secondary" onclick="closeCustomQaDeleteModal()">Cancel</button>
@@ -8282,13 +8216,13 @@ THIS WEEK'S BENGAL SPECIALS
     <div id="customQaImportModal" style="display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 9999; justify-content: center; align-items: center; padding: 20px;">
         <div style="background: white; border-radius: 16px; width: 100%; max-width: 680px; padding: 24px; box-shadow: 0 10px 30px rgba(0,0,0,0.2); max-height: 85vh; overflow-y: auto;">
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px;">
-                <h3 style="margin: 0; color: var(--primary);">Import CSV</h3>
+                <h3 style="margin: 0; color: var(--primary);">Import Custom Q&amp;A</h3>
                 <button onclick="closeCustomQaImportModal()" style="background: none; border: none; font-size: 1.4rem; cursor: pointer;">&times;</button>
             </div>
             <p style="font-size:0.82rem; color:var(--text-muted);">
                 <a href="#" onclick="downloadCustomQaTemplate(); return false;">Download CSV Template</a>
             </p>
-            <input type="file" id="cqaImportFile" accept=".csv" class="field-control" style="margin-bottom:12px;">
+            <input type="file" id="cqaImportFile" onchange="document.getElementById('cqaImportConfirmBtn').style.display='none'" accept=".csv" class="field-control" style="margin-bottom:12px;">
             <div style="display:flex; gap:8px; margin-bottom:14px;">
                 <button class="btn-secondary" onclick="runCustomQaImportDryRun()">Validate (Dry Run)</button>
                 <button class="btn-primary" id="cqaImportConfirmBtn" style="display:none;" onclick="confirmCustomQaImport()">Confirm Import</button>
@@ -12135,8 +12069,10 @@ Non-Veg:
         // knowledge store or second editor.
         let customQaItems = [];
         let systemResponseItems = [];
-        let customQaStatusFilter = 'ACTIVE';
+        let customQaStatusFilter = 'ALL';
+        let libraryTypeFilter = 'ALL';
         let cqaAliasesDraft = [];
+        let cqaImportWarnings = [];
         let responseLibrarySearchTimer = null;
         let responseLibrarySuggestionIndex = -1;
         let responseLibraryVisibleLimit = 20;
@@ -12176,6 +12112,9 @@ Non-Veg:
                 const systemData = await systemResp.json();
                 customQaItems = data.items || [];
                 systemResponseItems = (systemData.items || []).filter(i => i.kind === 'system_template');
+                const counts = systemData.counts;
+                document.getElementById('responseLibraryCounts').innerText = `All: ${counts.all} · System Templates: ${counts.system} · Custom Q&A: ${counts.custom}`;
+                document.getElementById('responseLibraryCounts').dataset.custom = String(counts.custom);
 
                 const topicSelect = document.getElementById('cqaTopicFilter');
                 const currentTopic = topicSelect.value;
@@ -12189,6 +12128,12 @@ Non-Veg:
             } catch (err) {
                 tbody.innerHTML = '<tr><td colspan="9" style="text-align: center; color: red;">Failed to load Custom Q&amp;A.</td></tr>';
             }
+        }
+
+        function setLibraryType(type) {
+            libraryTypeFilter = type;
+            ['ALL', 'SYSTEM', 'CUSTOM'].forEach(value => document.getElementById(`libraryType-${value}`).classList.toggle('active', value === type));
+            renderCustomQaList(); renderSystemResponseLibrary();
         }
 
         function setCustomQaStatusFilter(status) {
@@ -12273,7 +12218,7 @@ Non-Veg:
             const topic = document.getElementById('cqaTopicFilter').value;
             const priority = document.getElementById('cqaPriorityFilter').value;
 
-            let items = customQaItems;
+            let items = libraryTypeFilter === 'SYSTEM' ? [] : customQaItems;
             if (source === 'system_template') items = [];
             else if (source) items = items.filter(i => i.source === source);
             if (topic) items = items.filter(i => i.topic === topic);
@@ -12284,7 +12229,7 @@ Non-Veg:
                 .map(entry => entry.item);
 
             if (!items.length) {
-                tbody.innerHTML = '<tr><td colspan="9" style="text-align: center; color: #888;">Nothing here yet.</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="9" style="text-align: center; color: #888;">No Custom Q&amp;A yet. System Templates are protected built-in responses. Use Add Custom Q&amp;A or Import Custom Q&amp;A to create operator-managed responses.</td></tr>';
                 return;
             }
 
@@ -12298,7 +12243,8 @@ Non-Veg:
             const source = document.getElementById('cqaSourceFilter').value;
             const topic = document.getElementById('cqaTopicFilter').value;
             const priority = document.getElementById('cqaPriorityFilter').value;
-            if (source && source !== 'system_template') { box.innerHTML = ''; return; }
+            document.getElementById('systemResponseLibrary').style.display = libraryTypeFilter === 'CUSTOM' ? 'none' : '';
+            if (libraryTypeFilter === 'CUSTOM' || (source && source !== 'system_template')) { box.innerHTML = ''; return; }
             const ranked = systemResponseItems.map(item => ({ item, score: responseLibrarySearchScore(query, item) })).filter(entry => {
                 const item = entry.item;
                 if (priority && priority !== 'PROTECTED') return false;
@@ -12316,7 +12262,7 @@ Non-Veg:
         function renderSystemResponseCard(item) {
             const status = item.status || 'ACTIVE';
             const aliases = (item.aliases || []).slice(0, 5).map(escapeHtml).join(', ') || '—';
-            const editButton = item.editable ? `<button class="btn-secondary" style="padding:4px 8px;font-size:.72rem;" onclick="openSystemResponseEditor('${escapeHtml(item.template_id)}')">Edit</button>` : '';
+            const editButton = item.editable ? `<button class="btn-secondary" style="padding:4px 8px;font-size:.72rem;" onclick="openSystemResponseEditor('${escapeHtml(item.template_id)}')">Edit Response</button>` : '';
             const query = (document.getElementById('customQaSearch') || {}).value || '';
             const full = escapeHtml(item.approved_answer || '');
             const preview = full.length > 260 ? `${full.slice(0, 260)}…` : full;
@@ -12324,9 +12270,9 @@ Non-Veg:
                 ? '<button class="btn-secondary" style="padding:3px 7px;font-size:.7rem;" onclick="toggleSystemResponse(\'' + escapeHtml(item.template_id) + '\', this)" data-full-response="' + full.replace(/"/g, '&quot;') + '">View full response</button>'
                 : '';
             return `<div id="response-card-${escapeHtml(item.template_id)}" style="border:1px solid var(--border);border-radius:10px;padding:12px;background:#fff;">
-                <div style="display:flex;justify-content:space-between;gap:8px;align-items:center;"><b>${responseLibraryHighlight(item.title || item.template_id, query)}</b><span class="badge badge-veg">${escapeHtml(status)}</span></div>
+                <div style="display:flex;justify-content:space-between;gap:8px;align-items:center;"><b>${responseLibraryHighlight(item.title || item.template_id, query)}</b><span class="badge">SYSTEM · PROTECTED</span><span class="badge badge-veg">${escapeHtml(status)}</span></div>
                 <div style="font-size:.78rem;color:var(--text-muted);margin:5px 0;">${responseLibraryHighlight(item.primary_question || '', query)} · ${responseLibraryHighlight(item.template_id || '', query)}</div>
-                <div style="font-size:.76rem;color:var(--text-muted);">Aliases: ${aliases}</div>
+                <div style="font-size:.76rem;color:var(--text-muted);">Protected System Template · ${escapeHtml(item.topic || item.category || '')} · Source: System Template · Priority: Protected<br>Aliases: ${aliases}</div>
                 <div id="response-copy-${escapeHtml(item.template_id)}" data-collapsed="true" style="white-space:pre-wrap;font-size:.82rem;margin:8px 0;">${preview}</div>
                 ${expandButton}
                 <div style="display:flex;gap:6px;flex-wrap:wrap;">
@@ -12497,14 +12443,14 @@ Non-Veg:
             const aliasCount = (item.aliases || []).length;
             const priorityBadge = item.priority === 'HIGH' ? '<span class="badge badge-nonveg">High</span>' : '<span class="badge badge-veg">Normal</span>';
             const statusBadge = { ACTIVE: '<span class="badge badge-veg">Active</span>', DISABLED: '<span class="badge badge-nonveg">Disabled</span>', ARCHIVED: '<span class="badge">Archived</span>' }[item.status] || item.status;
-            const lifecycleAction = item.status === 'ARCHIVED' ? ''
-                : `<button class="btn-secondary" style="padding:4px 8px;font-size:0.72rem;" onclick="cqaSetStatus(${item.id},'${item.status === 'ACTIVE' ? 'DISABLED' : 'ACTIVE'}')">${item.status === 'ACTIVE' ? 'Disable' : 'Enable'}</button>`;
+            const lifecycleAction = item.status === 'ARCHIVED' ? `<button class="btn-secondary" onclick="cqaSetStatus(${item.id},'ACTIVE')">Restore</button>`
+                : `<button class="btn-secondary" style="padding:4px 8px;font-size:0.72rem;" onclick="cqaSetStatus(${item.id},'${item.status === 'ACTIVE' ? 'DISABLED' : 'ACTIVE'}')">${item.status === 'ACTIVE' ? 'Disable' : 'Activate'}</button>`;
             return `
             <tr>
-                <td style="max-width:140px;">${escapeHtml(item.topic || '')}</td>
+                <td style="max-width:140px;"><span class="badge">CUSTOM</span><br>${escapeHtml(item.topic || '')}</td>
                 <td style="max-width:220px;">
                     <b>${escapeHtml(item.primary_question || '')}</b>
-                    ${aliasCount ? `<br><small style="color:var(--text-muted);">+${aliasCount} alternative question${aliasCount === 1 ? '' : 's'}</small>` : ''}
+                    ${aliasCount ? `<br><small style="color:var(--text-muted);">${(item.aliases || []).map(escapeHtml).join(', ')}</small>` : ''}
                 </td>
                 <td style="max-width:280px; font-size:0.82rem; white-space:pre-wrap;">${escapeHtml((item.approved_answer || '').slice(0, 220))}${(item.approved_answer || '').length > 220 ? '…' : ''}</td>
                 <td>${statusBadge}</td>
@@ -12515,10 +12461,10 @@ Non-Veg:
                 <td style="white-space:nowrap;">
                     <button class="btn-secondary" style="padding:4px 8px;font-size:0.72rem;" onclick="cqaQuickTest(${item.id})">Test</button>
                     <button class="btn-secondary" style="padding:4px 8px;font-size:0.72rem;" onclick="cqaQuickPreview(${item.id})">Preview</button>
-                    <button class="btn-secondary" style="padding:4px 8px;font-size:0.72rem;" onclick="cqaOpenEdit(${item.id})">Edit</button>
+                    ${item.status === 'ARCHIVED' ? `<button class="btn-secondary" onclick="cqaQuickPreview(${item.id})">View</button>` : `<button class="btn-secondary" onclick="cqaOpenEdit(${item.id})">Edit</button>`}
                     ${lifecycleAction}
                     <button class="btn-secondary" style="padding:4px 8px;font-size:0.72rem;" onclick="cqaOpenHistory(${item.id})">History</button>
-                    <button class="btn-secondary" style="padding:4px 8px;font-size:0.72rem;color:var(--danger);" onclick="cqaOpenDeleteConfirm(${item.id})">Delete</button>
+                    ${item.status === 'ARCHIVED' ? `<button class="btn-danger" onclick="cqaOpenDeleteConfirm(${item.id})">Delete Permanently</button>` : `<button class="btn-secondary" onclick="cqaSetStatus(${item.id},'ARCHIVED')">Archive</button>`}
                 </td>
             </tr>`;
         }
@@ -12530,7 +12476,7 @@ Non-Veg:
                     body: JSON.stringify({ status, actor: 'client_admin_dashboard' }),
                 });
                 if (resp.ok) { loadCustomQa(); refreshAiResolutionIfVisible(); }
-                else alert('Could not update status.');
+                else alert('Could not update status: ' + JSON.stringify((await resp.json()).detail));
             } catch (e) { alert('Could not update status.'); }
         }
 
@@ -12577,9 +12523,12 @@ Non-Veg:
         async function confirmCustomQaDelete() {
             const id = document.getElementById('customQaDeleteModal').dataset.id;
             try {
-                const resp = await fetch(`/admin/custom-qa/${id}`, { method: 'DELETE', headers: getAuthHeaders() });
+                const item = customQaItems.find(i => String(i.id) === String(id));
+                if (!item || item.status !== 'ARCHIVED') return;
+                if (!confirm(`FINAL CONFIRMATION: Permanently delete "${item.topic}" — "${item.primary_question}"? This cannot be undone.`)) return;
+                const resp = await fetch(`/admin/custom-qa/${id}`, { method: 'DELETE', headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ confirm_permanent_delete: true, confirm_question: item.primary_question }) });
                 if (resp.ok) { closeCustomQaDeleteModal(); loadCustomQa(); refreshAiResolutionIfVisible(); }
-                else alert('Could not delete.');
+                else alert('Could not delete: ' + JSON.stringify((await resp.json()).detail));
             } catch (e) { alert('Could not delete.'); }
         }
 
@@ -12649,7 +12598,7 @@ Non-Veg:
 
         function openCustomQaModal(item) {
             document.getElementById('cqaEditingId').value = item ? item.id : '';
-            document.getElementById('customQaModalTitle').innerText = item ? 'Edit Q&A' : '+ Add Q&A';
+            document.getElementById('customQaModalTitle').innerText = item ? 'Edit Custom Q&A' : '+ Add Custom Q&A';
             const topicSelect = document.getElementById('cqaTopicSelect');
             const topic = item ? item.topic : '';
             if (topic && CQA_TOPIC_PRESETS.includes(topic)) {
@@ -12734,7 +12683,7 @@ Non-Veg:
                 const data = await resp.json().catch(() => ({}));
                 if (resp.status === 409) {
                     const existing = (data.detail && data.detail.existing) || [];
-                    alert('An identical question or alias already exists:\n' + existing.map(e => `${e.topic} — ${e.primary_question}`).join('\n') + '\n\nEdit the existing Q&A instead.');
+                    alert('Question or alias conflicts with existing knowledge:\n' + existing.map(e => `${e.source || 'CUSTOM'}: ${e.qa_id || e.template_id || e.id || ''} — ${e.primary_question}`).join('\n') + '\n\nReview the conflicting record instead of creating a duplicate.');
                     return;
                 }
                 if (!resp.ok) { alert('Could not save: ' + (data.detail || resp.status)); return; }
@@ -12767,11 +12716,13 @@ Non-Veg:
             a.href = objectUrl; a.download = filename;
             document.body.appendChild(a); a.click(); a.remove();
             URL.revokeObjectURL(objectUrl);
+            return true;
         }
-        function exportCustomQaCsv() { downloadBlobFrom('/admin/custom-qa/export.csv?status=ALL', 'custom_qa_export.csv'); }
+        async function exportCustomQaCsv() { const downloaded = await downloadBlobFrom('/admin/custom-qa/export.csv?status=ALL', 'custom_qa_export.csv'); if (downloaded && document.getElementById('responseLibraryCounts').dataset.custom === '0') alert('0 Custom Q&A records — exported file contains headers only.'); }
         function downloadCustomQaTemplate() { downloadBlobFrom('/admin/custom-qa/csv-template', 'custom_qa_template.csv'); }
 
         function openCustomQaImportModal() {
+            cqaImportWarnings = [];
             document.getElementById('cqaImportFile').value = '';
             document.getElementById('cqaImportSummary').innerHTML = '';
             document.getElementById('cqaImportRows').innerHTML = '<tr><td colspan="4" style="text-align:center; color:#888;">Upload a CSV and click Validate.</td></tr>';
@@ -12790,15 +12741,16 @@ Non-Veg:
                 const data = await resp.json();
                 if (!resp.ok) { alert('Validation failed.'); return; }
                 const s = data.summary;
-                document.getElementById('cqaImportSummary').innerHTML = `Rows: ${s.rows} · Valid: ${s.valid} · Warnings: ${s.warnings} · Duplicates: ${s.duplicates} · Possible Duplicates: ${s.possible_duplicates} · Errors: ${s.errors}`;
+                cqaImportWarnings = data.warnings || [];
+                document.getElementById('cqaImportSummary').innerHTML = `Rows: ${s.rows} · NEW: ${s.new} · UPDATE: ${s.update} · UNCHANGED: ${s.unchanged} · CONFLICT: ${s.conflict} · ERROR: ${s.error} · Metadata columns are ignored`;
                 document.getElementById('cqaImportRows').innerHTML = data.rows.map(r => `
                     <tr>
                         <td>${r.row_number}</td>
                         <td style="max-width:220px;">${escapeHtml((r.data && r.data.primary_question) || '')}</td>
-                        <td><span class="badge ${r.row_status === 'Ready' ? 'badge-veg' : 'badge-nonveg'}">${r.row_status}</span></td>
-                        <td style="font-size:0.78rem;">${escapeHtml((r.errors || []).concat(r.warnings || []).join('; '))}</td>
+                        <td><span class="badge ${['NEW', 'UPDATE', 'UNCHANGED'].includes(r.operation) ? 'badge-veg' : 'badge-nonveg'}">${escapeHtml(r.operation)}${r.target_id ? ' → ID ' + r.target_id : ''}</span></td>
+                        <td style="font-size:0.78rem;">${escapeHtml([r.reason, ...((r.conflicts || []).map(c => `${c.source}: ${c.primary_question} (${c.qa_id || c.template_id || c.id || ''})`))].join('; '))}</td>
                     </tr>`).join('');
-                document.getElementById('cqaImportConfirmBtn').style.display = s.valid > 0 ? 'inline-block' : 'none';
+                document.getElementById('cqaImportConfirmBtn').style.display = data.can_confirm && (s.new + s.update > 0) ? 'inline-block' : 'none';
             } catch (e) { alert('Validation failed.'); }
         }
 
@@ -12807,6 +12759,10 @@ Non-Veg:
             if (!fileInput.files.length) { alert('Choose a CSV file first.'); return; }
             const form = new FormData();
             form.append('file', fileInput.files[0]);
+            if (cqaImportWarnings.length) {
+                if (!confirm('This CSV contains business commitments: ' + cqaImportWarnings.join(', ') + '. Confirm these details are current and approved before importing.')) return;
+                form.append('confirm_warnings', 'true');
+            }
             try {
                 const resp = await fetch('/admin/custom-qa/import/confirm', { method: 'POST', headers: getAuthHeaders(), body: form });
                 const data = await resp.json();
@@ -12843,7 +12799,7 @@ Non-Veg:
     )
     from camellia.admin_approved_qa import HTML as APPROVED_HTML, SCRIPT as APPROVED_SCRIPT
     html_content = html_content.replace('<div id="tab-custom-qa"', APPROVED_HTML + '<div id="tab-custom-qa"', 1)
-    old_qa_nav = '<button class="tab-btn" onclick="switchTab(\'tab-custom-qa\', this)">▤ <span class="nav-label">QA Templates</span></button>'
+    old_qa_nav = '<button class="tab-btn" onclick="switchTab(\'tab-custom-qa\', this)">▤ <span class="nav-label">Response Library</span></button>'
     html_content = html_content.replace(old_qa_nav, '<button class="tab-btn" onclick="switchTab(\'tab-approved-qa\', this)">▤ <span class="nav-label">Approved Q&amp;A</span></button><details><summary>Advanced / Legacy</summary>' + old_qa_nav + '</details>', 1)
     html_content = html_content.replace("'tab-custom-qa': 'custom_qa'", "'tab-approved-qa': 'approved_qa', 'tab-custom-qa': 'custom_qa'", 1)
     html_content = html_content.replace("custom_qa: 'tab-custom-qa',", "custom_qa: 'tab-custom-qa', approved_qa: 'tab-approved-qa',", 1)

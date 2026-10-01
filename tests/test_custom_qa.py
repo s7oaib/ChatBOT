@@ -7,6 +7,7 @@ ai_responder matcher those already use.
 """
 import io
 import json
+import csv
 
 import pytest
 from fastapi.testclient import TestClient
@@ -18,6 +19,172 @@ from camellia.responder import responder
 from camellia.session_memory import session_memory
 
 client = TestClient(app_module.app)
+
+
+def _csv_import(text, confirm=False, confirm_warnings=False):
+    return client.post('/admin/custom-qa/import/' + ('confirm' if confirm else 'dry-run'),
+                       files={'file': ('library.csv', text.encode('utf-8'), 'text/csv')},
+                       data={'confirm_warnings': 'true'} if confirm_warnings else {}, headers=_auth())
+
+
+class TestLibraryManagement:
+    def test_round_trip_update_unchanged_new_and_replay(self, isolated_db):
+        from camellia import response_library as lib
+        a = isolated_db.add_learned_knowledge('A', 'alpha packing preference', 'Please discuss packing with the kitchen.')
+        b = isolated_db.add_learned_knowledge('B', 'bravo packing preference', 'A reusable, safe answer.',
+                    aliases=['bravo carry bag', 'বাংলা ব্যাগ'], status='DISABLED')
+        export = client.get('/admin/custom-qa/export.csv', headers=_auth()).text
+        records = list(csv.DictReader(io.StringIO(export.lstrip('\ufeff'))))
+        answer = '₹ বাংলা, "quoted"\nCustomer\'s preferred bag.'
+        for row in records:
+            if int(row['id']) == a:
+                row.update(topic='Changed name', primary_question='alpha revised packing', approved_answer=answer, priority='HIGH')
+        records.append({'id': '', 'topic': 'C', 'primary_question': 'charlie special bag', 'aliases': '[]',
+                        'approved_answer': 'Please discuss your bag preference.', 'status': 'ARCHIVED', 'priority': 'NORMAL'})
+        text = lib.csv_text(lib.COLUMNS, records)
+        before = isolated_db.list_custom_qa(status='ALL')
+        dry = _csv_import(text).json()
+        assert dry['summary'] == {'rows': 3, 'new': 1, 'update': 1, 'unchanged': 1, 'conflict': 0, 'error': 0}
+        assert isolated_db.list_custom_qa(status='ALL') == before
+        assert _csv_import(text, True, confirm_warnings=True).status_code == 200
+        assert isolated_db.get_custom_qa(a)['verified_answer'] == answer
+        assert isolated_db.get_custom_qa(a)['topic'] == 'Changed name'
+        assert isolated_db.get_custom_qa(a)['priority'] == 'HIGH'
+        assert isolated_db.get_custom_qa(b)['status'] == 'DISABLED'
+        assert lib.alias_texts(isolated_db.get_custom_qa(b)['aliases']) == ['bravo carry bag', 'বাংলা ব্যাগ']
+        assert _csv_import(text, True).json()['imported'] == 0  # identical blank-ID row is skipped, never overwritten
+        for _ in range(2):
+            exported = client.get('/admin/custom-qa/export.csv', headers=_auth()).text
+            assert _csv_import(exported, True).json()['imported'] == 0
+        assert len(isolated_db.list_custom_qa(status='ALL')) == 3
+        assert len(isolated_db.get_learned_knowledge_versions(a)) == 1
+
+    @pytest.mark.parametrize('value', ['=SUM(1,2)', '+formula', '-formula', '@formula', "'apostrophe", '₹ বাংলা, "quotes"\nnew line', '\t=formula'])
+    def test_excel_safe_reversible_cells(self, value):
+        from camellia import response_library as lib
+        text = lib.csv_text(lib.COLUMNS, [{'topic': value, 'primary_question': 'isolated export question',
+                                         'approved_answer': value, 'aliases': '[]'}])
+        assert text.startswith('\ufeff')
+        assert lib.parse_csv(text)[0]['approved_answer'] == value
+        if value.lstrip().startswith(('=', '+', '-', '@')):
+            assert list(csv.DictReader(io.StringIO(text.lstrip('\ufeff'))))[0]['approved_answer'].startswith("'")
+
+    def test_exports_empty_and_full_system_inventory(self, isolated_db):
+        custom = client.get('/admin/custom-qa/export.csv', headers=_auth()).text
+        reader = csv.DictReader(io.StringIO(custom.lstrip('\ufeff')))
+        assert reader.fieldnames == app_module.library.COLUMNS
+        assert list(reader) == []
+        full = client.get('/admin/response-library/export.csv', headers=_auth()).text
+        rows = list(csv.DictReader(io.StringIO(full.lstrip('\ufeff'))))
+        assert len(rows) == len(responder.qa_data['templates']) == 67
+        assert {r['record_type'] for r in rows} == {'SYSTEM'}
+        assert all(r['protected_runtime'] == 'true' and r['importable'] == 'false' for r in rows)
+        assert _csv_import(full, True).status_code == 400
+        assert isolated_db.list_custom_qa(status='ALL') == []
+
+    @pytest.mark.parametrize('id_value', ['system:greeting', 'greeting', '9999999', '-1', '1.0'])
+    def test_invalid_import_id_blocks_all_writes(self, isolated_db, id_value):
+        lib = app_module.library
+        text = lib.csv_text(lib.COLUMNS, [{'id': id_value, 'topic': 'Bag', 'primary_question': 'unusual carry bag',
+                    'approved_answer': 'Discuss the carry bag.', 'aliases': '[]'},
+                   {'topic': 'Other', 'primary_question': 'separate unique bag', 'approved_answer': 'Discuss the preference.', 'aliases': '[]'}])
+        assert _csv_import(text).json()['summary']['error'] == 1
+        assert _csv_import(text, True).status_code == 409
+        assert isolated_db.list_custom_qa(status='ALL') == []
+
+    def test_conflicts_all_authorities_and_unicode(self, isolated_db):
+        from camellia import approved_qa
+        approved = next(r for r in approved_qa.listing()['records'] if r['qa_id'] == 'home_table_details')
+        for question, source in [('HI!!!', 'SYSTEM'), (approved['question'], 'APPROVED_QA')]:
+            response = client.post('/admin/custom-qa', json={'topic': 'Conflict', 'primary_question': question,
+                        'approved_answer': 'A harmless different answer.', 'force_save': True}, headers=_auth())
+            assert response.status_code == 409
+            assert source in {r['source'] for r in response.json()['detail']['existing']}
+            text = app_module.library.csv_text(app_module.library.COLUMNS, [{'topic': 'Conflict', 'primary_question': question,
+                        'aliases': '[]', 'approved_answer': 'A harmless different answer.'}])
+            assert _csv_import(text, True).status_code == 409
+        isolated_db.add_learned_knowledge('বাংলা', 'বাংলা ব্যাগ', 'Please ask the kitchen.')
+        response = client.post('/admin/custom-qa', json={'topic': 'Other', 'primary_question': 'বাংলা ব্যাগ!',
+                            'approved_answer': 'Please ask the kitchen.', 'force_save': True}, headers=_auth())
+        assert response.status_code == 409
+
+    @pytest.mark.parametrize('aliases', ['hi', [123], {'alias': 'hi'}])
+    def test_invalid_alias_shape(self, isolated_db, aliases):
+        assert client.post('/admin/custom-qa', json={'topic': 'Bag', 'primary_question': 'special bag preference',
+                    'approved_answer': 'Please ask the kitchen.', 'aliases': aliases}, headers=_auth()).status_code == 400
+
+    def test_full_edit_and_lifecycle_same_id(self, isolated_db):
+        response = client.post('/admin/custom-qa', json={'topic': 'Packing', 'primary_question': 'special bag preference',
+                    'approved_answer': 'Please discuss packing with the kitchen.'}, headers=_auth())
+        kid = response.json()['id']
+        assert client.patch(f'/admin/custom-qa/{kid}', json={'topic': 'New topic', 'primary_question': 'revised bag preference',
+            'aliases': ['special tote preference'], 'approved_answer': 'Please discuss your tote with the kitchen.',
+            'priority': 'HIGH', 'status': 'ACTIVE', 'force_save': True}, headers=_auth()).status_code == 200
+        for state in ['DISABLED', 'ACTIVE', 'ARCHIVED', 'ACTIVE']:
+            assert client.post(f'/admin/custom-qa/{kid}/status', json={'status': state}, headers=_auth()).status_code == 200
+            assert bool(isolated_db.search_learned_knowledge('special tote preference', count_usage=False)) == (state == 'ACTIVE')
+        row = isolated_db.get_custom_qa(kid)
+        assert row['topic'] == 'New topic' and row['priority'] == 'HIGH'
+        assert row['question_pattern'] == 'revised bag preference'
+        assert len(isolated_db.list_custom_qa(status='ALL')) == 1
+
+    def test_restore_rechecks_new_conflicts(self, isolated_db):
+        kid = isolated_db.add_learned_knowledge('Bag', 'hi', 'Historical custom greeting.', status='ARCHIVED')
+        isolated_db.update_custom_qa(kid, 'Bag', 'special carry bag', 'Please ask the kitchen.', [], 'NORMAL', 'ARCHIVED', 'tester')
+        version = isolated_db.get_learned_knowledge_versions(kid)[0]['version_id']
+        assert client.post(f'/admin/custom-qa/{kid}/restore/{version}', json={}, headers=_auth()).status_code == 409
+        isolated_db.update_custom_qa(kid, 'Bag', 'hi', 'Historical greeting.', [], 'NORMAL', 'ARCHIVED', 'tester')
+        assert client.post(f'/admin/custom-qa/{kid}/status', json={'status': 'ACTIVE'}, headers=_auth()).status_code == 409
+
+    def test_delete_guards_and_legacy_endpoint(self, isolated_db):
+        kid = isolated_db.add_learned_knowledge('Bag', 'special carry bag', 'Please ask the kitchen.')
+        body = {'confirm_permanent_delete': True, 'confirm_question': 'special carry bag'}
+        for route in ['/admin/custom-qa/', '/admin/learned-knowledge/']:
+            assert client.request('DELETE', route + str(kid), json=body, headers=_auth()).status_code == 409
+        isolated_db.set_custom_qa_status(kid, 'ARCHIVED', 'tester')
+        assert client.delete(f'/admin/custom-qa/{kid}', headers=_auth()).status_code == 400
+        with isolated_db.get_connection() as conn:
+            conn.execute('INSERT INTO triage_shadow(user_message, matched_knowledge_id) VALUES (?, ?)', ('test', kid))
+        assert client.request('DELETE', f'/admin/custom-qa/{kid}', json=body, headers=_auth()).status_code == 409
+        assert isolated_db.get_custom_qa(kid)
+
+    def test_protected_system_rejects_lifecycle_identity_and_delete(self, isolated_db):
+        for payload in [{'response': 'Safe greeting.', 'status': 'ARCHIVED'},
+                        {'response': 'Safe greeting.', 'triggers': ['hacked']}]:
+            assert client.patch('/admin/response-library/system/greeting', json=payload, headers=_auth()).status_code == 400
+        assert client.delete('/admin/response-library/system/greeting', headers=_auth()).status_code == 405
+        assert client.get('/admin/response-library?status=ALL', headers=_auth()).json()['counts'] == {'all': 67, 'system': 67, 'custom': 0}
+
+    def test_server_metadata_ignored_and_confirm_revalidates(self, isolated_db):
+        lib = app_module.library
+        text = lib.csv_text(lib.COLUMNS, [{'topic': 'Bag', 'primary_question': 'special carry bag', 'approved_answer': 'Please discuss your bag.',
+                     'aliases': '[]', 'source': 'APPROVED_QA', 'usage_count': 9000, 'created_at': 'forged'}])
+        assert _csv_import(text).json()['summary']['new'] == 1
+        assert _csv_import(text, True).status_code == 200
+        row = isolated_db.list_custom_qa(status='ALL')[0]
+        assert row['source'] == 'csv_import' and row['usage_count'] == 0 and row['created_at'] != 'forged'
+        changed = text.replace('Please discuss your bag.', 'A different conflicting answer.')
+        assert _csv_import(changed, True).status_code == 409
+        assert isolated_db.get_custom_qa(row['id'])['verified_answer'] == 'Please discuss your bag.'
+
+    def test_import_business_warnings_need_explicit_confirmation(self, isolated_db):
+        text = app_module.library.csv_text(app_module.library.COLUMNS, [{'topic': 'Packing',
+            'primary_question': 'special carry bag pricing', 'aliases': '[]',
+            'approved_answer': 'A special carry bag costs ₹250.'}])
+        dry = _csv_import(text).json()
+        assert 'price' in dry['warnings']
+        assert _csv_import(text, True).status_code == 409
+        assert isolated_db.list_custom_qa(status='ALL') == []
+        response = client.post('/admin/custom-qa/import/confirm',
+            files={'file': ('library.csv', text.encode(), 'text/csv')}, data={'confirm_warnings': 'true'}, headers=_auth())
+        assert response.status_code == 200 and response.json()['imported'] == 1
+
+    def test_ui_type_counts_toolbar_and_guard_controls(self, isolated_db):
+        page = client.get('/admin').text
+        for marker in ['Response Library', 'responseLibraryCounts', 'libraryType-SYSTEM', 'libraryType-CUSTOM',
+                       'SYSTEM · PROTECTED', 'CUSTOM</span>', 'Edit Response', 'Export Full Library',
+                       'Import Custom Q&amp;A', 'Download CSV Template', 'FINAL CONFIRMATION', 'Delete Permanently']:
+            assert marker in page
 
 
 def _auth():
@@ -236,12 +403,13 @@ class TestMatching:
         assert isolated_db.search_learned_knowledge("tell me about the retired topic", count_usage=False) is None
         assert isolated_db.search_learned_knowledge("retired topic details", count_usage=False) is None
 
-    def test_archived_knowledge_is_blocked_across_runtime_paths(self, isolated_db):
+    @pytest.mark.parametrize('lifecycle_status', ['ARCHIVED', 'DISABLED'])
+    def test_archived_knowledge_is_blocked_across_runtime_paths(self, isolated_db, lifecycle_status):
         archived_id = isolated_db.add_learned_knowledge(
             "Retired runtime topic",
             "tell me about the retired runtime topic",
             "ARCHIVED RUNTIME ANSWER MUST NEVER BE SERVED",
-            status="ARCHIVED",
+            status=lifecycle_status,
             aliases=["retired runtime details"],
         )
 
@@ -284,12 +452,13 @@ class TestMatching:
         assert template_id == f"learned_{active_id}"
         assert response == "ACTIVE APPROVED ANSWER"
 
-    def test_archived_knowledge_is_excluded_from_ai_context(self, isolated_db):
+    @pytest.mark.parametrize('lifecycle_status', ['ARCHIVED', 'DISABLED'])
+    def test_archived_knowledge_is_excluded_from_ai_context(self, isolated_db, lifecycle_status):
         isolated_db.add_learned_knowledge(
             "Retired AI context topic",
             "retired ai context question",
             "ARCHIVED AI CONTEXT MUST NEVER BE INCLUDED",
-            status="ARCHIVED",
+            status=lifecycle_status,
         )
 
         from camellia.ai_responder import ai_responder
@@ -580,7 +749,9 @@ class TestLifecycle:
     def test_permanent_delete_affects_only_that_qa(self, isolated_db):
         kid1 = isolated_db.add_learned_knowledge("Topic1", "q1", "a1")
         kid2 = isolated_db.add_learned_knowledge("Topic2", "q2", "a2")
-        resp = client.delete(f"/admin/custom-qa/{kid1}", headers=_auth())
+        isolated_db.set_custom_qa_status(kid1, "ARCHIVED", "tester")
+        resp = client.request("DELETE", f"/admin/custom-qa/{kid1}", headers=_auth(),
+                              json={"confirm_permanent_delete": True, "confirm_question": "q1"})
         assert resp.status_code == 200
         assert isolated_db.get_custom_qa(kid1) is None
         assert isolated_db.get_custom_qa(kid2) is not None
@@ -649,24 +820,24 @@ class TestCsv:
         csv_text = "topic,primary_question,aliases,approved_answer,priority,status\nDelivery,do you ship to jaipur,[],That falls outside our current coverage area.,NORMAL,ACTIVE\n"
         resp = client.post("/admin/custom-qa/import/dry-run", files={"file": ("t.csv", io.BytesIO(csv_text.encode()), "text/csv")}, headers=_auth())
         assert resp.status_code == 200
-        assert resp.json()["summary"]["valid"] == 1
+        assert resp.json()["summary"]["new"] == 1
         assert len(isolated_db.list_custom_qa(status="ALL")) == before
 
     def test_valid_row_preview(self, isolated_db):
         csv_text = "topic,primary_question,aliases,approved_answer,priority,status\nDelivery,do you ship to jaipur,[],That falls outside our current coverage area.,NORMAL,ACTIVE\n"
         resp = client.post("/admin/custom-qa/import/dry-run", files={"file": ("t.csv", io.BytesIO(csv_text.encode()), "text/csv")}, headers=_auth())
-        assert resp.json()["rows"][0]["row_status"] == "Ready"
+        assert resp.json()["rows"][0]["operation"] == "NEW"
 
     def test_invalid_row_rejected(self, isolated_db):
         csv_text = "topic,primary_question,aliases,approved_answer,priority,status\n,do you ship to jaipur,[],,NORMAL,ACTIVE\n"
         resp = client.post("/admin/custom-qa/import/dry-run", files={"file": ("t.csv", io.BytesIO(csv_text.encode()), "text/csv")}, headers=_auth())
-        assert resp.json()["rows"][0]["row_status"] == "Invalid"
+        assert resp.json()["rows"][0]["operation"] == "ERROR"
 
     def test_duplicate_row_identified(self, isolated_db):
         isolated_db.add_learned_knowledge("Topic", "do you ship to jaipur", "Existing answer.")
         csv_text = "topic,primary_question,aliases,approved_answer,priority,status\nDelivery,do you ship to jaipur,[],A new different answer.,NORMAL,ACTIVE\n"
         resp = client.post("/admin/custom-qa/import/dry-run", files={"file": ("t.csv", io.BytesIO(csv_text.encode()), "text/csv")}, headers=_auth())
-        assert resp.json()["rows"][0]["row_status"] == "Duplicate"
+        assert resp.json()["rows"][0]["operation"] == "CONFLICT"
 
     def test_nothing_saved_before_confirm(self, isolated_db):
         before = len(isolated_db.list_custom_qa(status="ALL"))
@@ -688,8 +859,8 @@ class TestCsv:
         csv_text = "topic,primary_question,aliases,approved_answer,priority,status\nDelivery,do you ship to jaipur,[],A conflicting new answer.,NORMAL,ACTIVE\n"
         resp = client.post("/admin/custom-qa/import/confirm", files={"file": ("t.csv", io.BytesIO(csv_text.encode()), "text/csv")}, headers=_auth())
         data = resp.json()
-        assert data["imported"] == 0
-        assert data["skipped"][0]["reason"] == "Duplicate"
+        assert resp.status_code == 409
+        assert data["detail"]["summary"]["conflict"] == 1
         match = isolated_db.search_learned_knowledge("do you ship to jaipur", count_usage=False)
         assert match["verified_answer"] == "Existing answer."
 
