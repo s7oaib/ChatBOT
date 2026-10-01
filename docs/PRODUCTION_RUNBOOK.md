@@ -2,10 +2,10 @@
 
 ## Current handover operating state
 
-Accepted runtime `b2d2b485c6c4e8b7c35d6908b75ce489a251d4bd`, deployment
-`10a13e8e-d96f-43ad-9aa0-8dff2e5f82b4`, verified 2 October 2026 IST.
+Accepted runtime `4071402099390dafc28c22c8c2a35920e385d470`, deployment
+`709ed586-3b7a-4137-9de7-d0cd0667e9c1`, verified 2 October 2026 IST.
 See [CLIENT_HANDOVER.md](CLIENT_HANDOVER.md) for dated knowledge/menu counts and
-checklists. Production remains **TEST_ONLY**, two testers; confirm the global
+checklists. Production remains **TEST_ONLY**, three allowed sender IDs; older entries preserved; confirm the global
 Admin card and exact allowlist before any authorized smoke. Channel capability
 and durable LIVE/TEST_ONLY are separate. Do not enable LIVE as a health remedy.
 Only explicit operator resume clears WAITING_FOR_HUMAN; deploy/restart does not.

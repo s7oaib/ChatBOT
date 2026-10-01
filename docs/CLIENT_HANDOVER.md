@@ -4,17 +4,17 @@ Handover date: **2 October 2026, Asia/Kolkata**. This document contains no crede
 
 ## Accepted release and evidence
 
-- Accepted application/runtime SHA: `b2d2b485c6c4e8b7c35d6908b75ce489a251d4bd` (PR #45).
-- Complete source tree: `f4ab3c5dc19d096daf22393053a68c45953ee446`, identical to tested feature head `1a22539286d2c0e947dc3dceb7fc7c18544387da`.
-- Accepted Railway deployment: `10a13e8e-d96f-43ad-9aa0-8dff2e5f82b4`, SUCCESS.
-- Final exact-main [full CI](https://github.com/s7oaib/ChatBOT/actions/runs/36931567553): 3410 passed, 0 failed, 1 existing Starlette/httpx warning; critical flake8 and schemas PASS.
+- Accepted application/runtime SHA: `4071402099390dafc28c22c8c2a35920e385d470` (QA-M1B, PR #47).
+- Complete source tree: `99a560be27af38f9ce95a555a3eb0338d6a33b53`, identical to tested feature head `72150044d5222b279170bf656021a154076dc59d`.
+- Accepted Railway deployment: `709ed586-3b7a-4137-9de7-d0cd0667e9c1`, SUCCESS.
+- Final exact-candidate (merge tree identical) [full CI](https://github.com/s7oaib/ChatBOT/actions/runs/36938786442): 3432 passed, 0 failed, 1 existing Starlette/httpx warning; critical flake8 and schemas PASS.
 - Production: [Admin portal](https://web-production-0cad70.up.railway.app/admin); `/health` and `/admin` returned 200, startup complete, no observed new HTTP 5xx.
-- Immutable handover tag: `camellia-handover-2026-10-02`, created on the later documentation merge. Resolve that tag for the documentation SHA.
+- Original immutable handover tag: `camellia-handover-2026-10-02`, preserved at `f8643e7366902e95ad7f2098a13ec053d14327fd` as historical evidence. New native release tag: `camellia-native-reels-2026-10-02`, points to the accepted QA-M1B runtime.
 - `test_baseline.json` remains on the accepted runtime SHA above. A later docs-only deployment does not require another baseline promotion or full regression.
 
 ## Production controls and access
 
-Instagram is the only AI chatbot channel. Production is **TEST_ONLY**, with two allowed testers. The global status card sits below the Admin header and above navigation on every tab. `INSTAGRAM_CHATBOT_ENABLED` controls channel capability; durable Admin LIVE/TEST_ONLY controls customer access. Only exact enabled Meta sender IDs are allowed in TEST_ONLY; usernames are labels, not authorization. Non-allowlisted customers cannot reach responder, session business processing, orders, handoffs, RAG, Groq, candidates, or customer chatbot sending.
+Instagram is the only AI chatbot channel. Production is **TEST_ONLY**, with three allowed sender IDs (two earlier entries preserved plus the verified real-Camellia sender for the existing tester). The global status card sits below the Admin header and above navigation on every tab. `INSTAGRAM_CHATBOT_ENABLED` controls channel capability; durable Admin LIVE/TEST_ONLY controls customer access. Only exact enabled Meta sender IDs are allowed in TEST_ONLY; usernames are labels, not authorization. Non-allowlisted customers cannot reach responder, session business processing, orders, handoffs, RAG, Groq, candidates, or customer chatbot sending.
 
 WhatsApp is **HUMAN ONLY**: a customer-facing `wa.me` draft/continuation may be offered for order, purchase, prebook or payment. There is no WhatsApp chatbot, inbound WhatsApp AI route or Cloud API bot sender. Preserve captured order fields and the CAM reference; a draft never confirms an order. Prebook Approved Q&A may append one continuation link. Informational questions such as best time to book must not force a purchase handoff.
 
@@ -50,14 +50,14 @@ Before expiry, the operator must choose whether to let both expire or extend the
 
 Story/Post/Reel routing uses exact Meta identity. Choose Custom Response (`CUSTOM`) or Approved Q&A (`APPROVED_QA`, stable `qa_id`). `source_description` is operator-supplied. Never infer identity from OCR, captions, images or timing. Existing mappings remain intact.
 
-A new qualifying Home Table request sends approved opening text, four ordered Reel URLs, then remaining approved text:
+A new qualifying Home Table request sends approved opening text, four ordered native Reel cards (canonical fallback URLs below), then remaining approved text:
 
 1. https://www.instagram.com/reel/DdJhXQMT4VZ/
 2. https://www.instagram.com/reel/Dcd5bbEzbCo/
 3. https://www.instagram.com/reel/DcLZpuQzCKE/
 4. https://www.instagram.com/reel/DcQYp72zf8D/
 
-The same inbound-event retry must not duplicate delivery; partial retries recover only missing links using durable receipts. A new qualifying request can receive its own sequence. Accepted production delivery uses URL links; native MEDIA_SHARE is not claimed.
+The same inbound-event retry must not duplicate delivery; partial retries recover only missing links using durable receipts. A new qualifying request can receive its own sequence. Native MEDIA_SHARE is verified and enabled for the four exact owned Camellia media IDs. Explicit unsupported native rejections can use the canonical URL fallback; ambiguous acceptance/timeouts do not immediately send duplicate URLs. See [delivery provenance](HOME_TABLE_REEL_DELIVERY.md).
 
 ## Human handoff
 
@@ -67,7 +67,7 @@ The same inbound-event retry must not duplicate delivery; partial retries recove
 
 Production uses durable SQLite at `/app/var/camellia.db` on the `/app/var` Railway volume. Health reports database available and expected durable database/menu placement. Confirm attachment before maintenance. Follow [PRODUCTION_BACKUP_RECOVERY.md](PRODUCTION_BACKUP_RECOVERY.md).
 
-Code rollback and data rollback are separate: never overwrite live SQLite merely because code is rolled back. Back up before schema migration and verify integrity. The authenticated backup endpoint verifies its copy; it does not prove off-host retention or snapshots. Restore requires explicit operator approval. Never initialize an empty production DB over damaged or unavailable storage. No backup/restore mutation was performed during this read-only handover.
+Code rollback and data rollback are separate: never overwrite live SQLite merely because code is rolled back. Back up before schema migration and verify integrity. The authenticated backup endpoint verifies its copy; it does not prove off-host retention or snapshots. Restore requires explicit operator approval. Never initialize an empty production DB over damaged or unavailable storage. QA-M1B created a verified pre-migration backup with integrity_check=ok; no restore or destructive production data operation was performed.
 
 ## Operator checklists
 
@@ -83,6 +83,6 @@ Code rollback and data rollback are separate: never overwrite live SQLite merely
 
 ## Maintenance validation
 
-Normal PR/push green CI is a fast current-contract gate, not proof of a full suite. Use `python scripts/run_impacted_tests.py`; failure debugging uses `python -m pytest --lf -q`. CRITICAL/core/release/handover validation requires `python -m pytest -q`. Final handover executed one manual full CI on the exact accepted runtime and reuses that evidence for documentation-only changes.
+Normal PR/push green CI is a fast current-contract gate, not proof of a full suite. Use `python scripts/run_impacted_tests.py`; failure debugging uses `python -m pytest --lf -q`. CRITICAL/core/release/handover validation requires `python -m pytest -q`. Final handover executed one manual full CI on the exact accepted runtime candidate with exact merge-tree equality and reuses that evidence for documentation-only changes.
 
 See [testing policy](TESTING_STRATEGY.md), [runbook](PRODUCTION_RUNBOOK.md), [architecture](architecture.md), [chatbot control](INSTAGRAM_CHATBOT_CONTROL.md) and [validated dependency snapshot](HANDOVER_DEPENDENCY_SNAPSHOT.md).
