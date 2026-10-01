@@ -136,24 +136,33 @@ def delete_customer_topic(topic_id: str, actor=Depends(reviewer)):
 
 
 def _weekly_view():
+    today = menu_dates.today_ist()
     versions = weekly_savoury.lifecycle_versions()
-    current = weekly_savoury.current_version()
-    upcoming = [version for version in versions if weekly_savoury.version_status(version) == "UPCOMING"]
+    current = weekly_savoury.current_version(today=today)
+    upcoming = [version for version in versions if weekly_savoury.version_status(version, today=today) == "UPCOMING"]
+    # An inconsistent schedule is not permission to choose the newest row.
+    # Explicit replacement publication already supersedes its predecessor.
+    ambiguous = {v["id"] for v in upcoming if any(
+        other["id"] != v["id"] and other["valid_from"] <= v["valid_until"]
+        and v["valid_from"] <= other["valid_until"] for other in versions
+        if other.get("weekly_state") != "SUPERSEDED")}
+    upcoming = [version for version in upcoming if version["id"] not in ambiguous]
     upcoming.sort(key=lambda version: version["valid_from"])
     def present(version):
         if not version:
             return None
         approval = json.loads(version["approval_json"])
-        return {"version_id": version["id"], "status": weekly_savoury.version_status(version)
+        return {"version_id": version["id"], "status": weekly_savoury.version_status(version, today=today)
                 if version.get("valid_from") else "CURRENT",
                 "valid_from": version.get("valid_from"), "valid_until": version.get("valid_until"),
-                "dates_expired": bool(version.get("valid_until") and version["valid_until"] < menu_dates.today_ist().isoformat()),
+                "dates_expired": bool(version.get("valid_until") and version["valid_until"] < today.isoformat()),
                 "display_date_range": weekly_savoury.display_range(version["valid_from"], version["valid_until"])
                 if version.get("valid_from") else (approval.get("menu_metadata") or {}).get("week_of"),
                 "date_provenance": version.get("date_provenance"),
                 "item_count": len(approval.get("rows") or []),
                 "source_type": approval.get("source_type"), "uploaded_by": version.get("changed_by"),
                 "menu_key": version["menu_key"], "has_source": bool(approval.get("source_asset")),
+                "image_url": approval.get("image_path"),
                 "approved_by": approval.get("approved_by") or version.get("changed_by"),
                 "changed_at": version.get("changed_at")}
     shown_current = present(current)
@@ -173,7 +182,7 @@ def _weekly_view():
                                tzinfo=menu_dates._IST)
         if timedelta(0) <= end - datetime.now(menu_dates._IST) <= timedelta(hours=24):
             reminder = "Next menu is already scheduled." if upcoming else "Weekly Savoury expires within 24 hours. Upload next week's menu."
-    return {"today": menu_dates.today_ist().isoformat(),
+    return {"today": today.isoformat(), "upcoming_ambiguous": bool(ambiguous),
             "current": shown_current, "upcoming": [present(version) for version in upcoming],
             "versions": [present(version) for version in versions], "reminder": reminder,
             "draft": menu_review.get_draft(weekly_savoury.WEEKLY_KEY)}

@@ -398,11 +398,12 @@ def test_weekly_admin_panel_has_all_safe_input_and_confirmation_paths():
     assert 'Weekly Savoury Menu' in WEEKLY_HTML
     for label in ("Drop this week's menu here", "Paste image", "application/pdf",
                   "Paste Menu Text", "Valid from", "Valid until", "Needs Review",
-                  "Preview only — not sent to customers.", "Update Weekly Menu",
-                  "Restore previous weekly menu"):
+                  "Preview only — not sent to customers.", "Update Weekly Menu"):
         assert label in WEEKLY_HTML + WEEKLY_SCRIPT
     for handler in ("dragover", "drop", "clipboardData", "wsExtractFile", "wsExtractText",
-                    "wsSaveCorrections", "wsPreview", "wsPublish", "wsRestore"):
+                    "wsSaveCorrections", "wsPreview", "wsPublish"):
         assert handler in WEEKLY_SCRIPT
+    assert "Restore previous weekly menu" not in WEEKLY_HTML + WEEKLY_SCRIPT
+    assert "wsRestore" not in WEEKLY_SCRIPT
     assert "send_instagram" not in WEEKLY_SCRIPT
     assert "wa.me" not in WEEKLY_SCRIPT
