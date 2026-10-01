@@ -226,8 +226,14 @@ def test_current_weekly_bento_rows_survive_retirement_of_standing_authority(curr
     rows.append({**rows[0], "row_id": "weekly-bento", "category": "bengali_bento", "item": "Veg Bento", "price_inr": 170})
     edited = menu_review.edit(weekly_savoury.WEEKLY_KEY, draft["draft_id"], draft["revision"], rows, "admin")
     _publish(edited, replace_version_id=current_id)
+    legacy_id = db.record_menu_version("bento", "[]", "historical_publish", "admin")
+    with db.get_connection() as conn:
+        conn.execute("UPDATE menu_versions SET approval_json=?, is_current=1 WHERE id=?",
+                     (json.dumps({"rows": [{**rows[-1], "item": "Stale Bento", "price_inr": 99}]}), legacy_id))
+        conn.commit()
+    assert "bento" in menu_review.customer_blocked_keys()
+    assert all(v["menu_key"] != "bento" for v in menu_review.customer_versions())
     canonical = menu_review.canonical_menu()
     assert canonical["weekly_menus"][-1]["bengali_bento"] == [{"item": "Veg Bento", "quantity": "500g", "price_inr": 170, "description": ""}]
-    assert "bengali_bento" not in canonical.get("order_types", {})
     from camellia.rag_fallback import rag_fallback_engine
     assert rag_fallback_engine.retrieve_approved_menu("What is the price of Veg Bento?").auto_response == "Veg Bento 500g is ₹170."

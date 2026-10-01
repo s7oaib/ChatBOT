@@ -505,7 +505,7 @@ def customer_blocked_keys():
         deleted = {row[0] for row in conn.execute("SELECT menu_id FROM menu_deletion_tombstones")}
     pending = pending_review_keys()
     visible = {version["menu_key"] for version in customer_versions()}
-    blocked = (reviewed - visible) | inactive | deleted | pending | {"bento"}
+    blocked = (reviewed - visible) | inactive | deleted | pending
     weekly_keys = set(weekly_savoury.LEGACY_WEEKLY_KEYS)
     if visible & weekly_keys or (not pending & weekly_keys and weekly_savoury.legacy_baseline_current()):
         # A future reviewed schedule does not hide the still-current legacy week.
