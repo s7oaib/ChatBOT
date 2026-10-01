@@ -3124,7 +3124,17 @@ class DeterministicResponder:
             ) and not re.search(
                 r"\b(?:sondesh|bento|subscription|price|cost|delivery|menu)\b", user_message, re.I,
             ):
+                source_blocks = []
+                if (
+                    source.get("routing_id")
+                    and source.get("source_type") in {"story", "post", "reel"}
+                    and str(source.get("routing_topic") or "").strip().casefold() == "bengali home table"
+                    and client_qa.HOME_TABLE_VIDEO_ANCHOR in source_description
+                    and not facts.get("home_table_videos_sent")
+                ):
+                    source_blocks = client_qa.build_home_table_reel_blocks(source_description)
                 facts.update({
+                    "ordered_response_blocks": source_blocks,
                     "last_route_source": "SOURCE_DESCRIPTION",
                     "last_knowledge_ids": [f"source_route:{source.get('routing_id')}"],
                     "last_grounding": "explicit_admin_source_description",
@@ -3179,6 +3189,7 @@ class DeterministicResponder:
                 menu_id = source_topic.get("default_menu_id")
             image_url = current_menu_image(str(menu_id), None) if mode != "NONE" and menu_id else None
             facts.update({
+                "ordered_response_blocks": [],
                 "last_route_source": "SOURCE_DESCRIPTION",
                 "last_knowledge_ids": [f"topic:{source_topic.get('topic_id')}"],
                 "last_grounding": "explicit_admin_source_description",
@@ -3506,11 +3517,7 @@ class DeterministicResponder:
                         and not facts.get("home_table_videos_sent")
                         and client_qa.HOME_TABLE_VIDEO_ANCHOR in block.value
                     ):
-                        end = block.value.index(client_qa.HOME_TABLE_VIDEO_ANCHOR) + len(client_qa.HOME_TABLE_VIDEO_ANCHOR)
-                        ordered_response_blocks.append({"kind": "TEXT", "text": block.value[:end]})
-                        ordered_response_blocks.extend({"kind": "LINK", "url": url} for url in client_qa.HOME_TABLE_REEL_URLS)
-                        if block.value[end:]:
-                            ordered_response_blocks.append({"kind": "TEXT", "text": block.value[end:]})
+                        ordered_response_blocks.extend(client_qa.build_home_table_reel_blocks(block.value))
                         continue
                     ordered_response_blocks.append({"kind": "TEXT", "text": block.value})
                     continue
