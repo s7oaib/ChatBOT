@@ -93,7 +93,10 @@ def test_home_table_prefix_mismatch_keeps_entire_selected_answer(customer, monke
     )
     reply, facts = customer("What's the price?")
     assert reply[0] == changed
-    assert facts["ordered_response_blocks"] == [{"kind": "TEXT", "text": changed}]
+    blocks = facts["ordered_response_blocks"]
+    assert ''.join(b['text'] for b in blocks if b['kind'] == 'TEXT') == changed
+    assert tuple(b['url'] for b in blocks if b['kind'] == 'LINK') == client_qa.HOME_TABLE_REEL_URLS
+    assert [b['kind'] for b in blocks] == ['TEXT', 'LINK', 'LINK', 'LINK', 'LINK', 'TEXT']
 
 
 def test_home_table_matching_text_with_wrong_previous_answer_id_fails_closed(customer):
