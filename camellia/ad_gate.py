@@ -7,6 +7,7 @@ from typing import Dict, Any, Tuple, Optional
 from camellia.database import db
 from camellia.config import config
 from camellia.ice_breakers import question_for_payload
+from camellia import instagram_chatbot_control
 
 log = logging.getLogger("camellia.ad_gate")
 
@@ -190,6 +191,11 @@ class AdGate:
     the bot answering organic DMs too. With it on, nothing here filters a
     complaint or a personal message away from the bot, so the escalation
     triggers in qa_templates.json are what route those to a human.
+
+    QA-C1 adds an outer LIVE / TEST_ONLY gate before that existing policy. It
+    never rewrites BYPASS_AD_GATE: LIVE preserves this method's old behaviour,
+    while TEST_ONLY rejects non-allowlisted exact sender IDs before session,
+    responder, order or handoff work can be queued.
     """
 
     @staticmethod
@@ -256,6 +262,32 @@ class AdGate:
             if source == "ADS":
                 is_direct_ad_referral = True
                 ad_id = referral.get("ad_id")
+
+        # QA-C1 channel access gate. Exact Meta sender ID is authoritative;
+        # username/display name are observation-only labels for Admin. This is
+        # deliberately before ad-session mutation and before any work is queued.
+        observed_username = (
+            str(sender_obj.get("username")).strip().lstrip("@")
+            if isinstance(sender_obj, dict) and sender_obj.get("username") else None
+        )
+        observed_display_name = (
+            str(sender_obj.get("name") or sender_obj.get("display_name") or "").strip() or None
+            if isinstance(sender_obj, dict) else None
+        )
+        instagram_chatbot_control.observe_sender(
+            sender_id,
+            username=observed_username,
+            display_name=observed_display_name,
+            database=db,
+        )
+        if not instagram_chatbot_control.is_sender_allowed(sender_id, database=db):
+            state = instagram_chatbot_control.get_state(database=db)
+            log.info(
+                "Instagram chatbot gate blocked sender_hash=%s mode=%s",
+                hashlib.sha256(str(sender_id).encode("utf-8")).hexdigest()[:12],
+                state.get("mode"),
+            )
+            return False, sender_id, message_text, ad_id
 
         if config.BYPASS_AD_GATE:
             return True, sender_id, message_text, ad_id

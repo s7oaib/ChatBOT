@@ -223,6 +223,8 @@ class Database:
             cursor.execute("PRAGMA synchronous=NORMAL;")
             from camellia.approved_qa_schema import initialize as initialize_approved_qa
             initialize_approved_qa(cursor)
+            from camellia.instagram_chatbot_control import _ensure_schema as initialize_chatbot_control
+            initialize_chatbot_control(conn)
             
             # Sessions table to track ad qualification
             cursor.execute("""

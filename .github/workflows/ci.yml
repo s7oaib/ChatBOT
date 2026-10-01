@@ -78,6 +78,7 @@ jobs:
           tests/test_client_approved_qa.py
           tests/test_client_qa_acceptance.py
           tests/test_approved_qa_manager.py
+          tests/test_instagram_chatbot_control.py
           tests/test_ordered_approved_response.py
           tests/test_channel_policy.py
           tests/test_admin_security.py
@@ -93,7 +94,7 @@ jobs:
 
   full-regression:
     name: Full regression (Python 3.11)
-    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || github.event_name == 'release'
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || github.event_name == 'release' || (github.event_name == 'pull_request' && github.head_ref == 'qa-c1-instagram-chatbot-control')
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
