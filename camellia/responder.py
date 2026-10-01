@@ -137,6 +137,17 @@ def _pending_draft_item_keys(message: str, pending: set[str]) -> set[str]:
     return matches
 
 
+def _approved_chicken_kosha_price_question(message: str, facts: Dict[str, Any]) -> bool:
+    """Only an active, ordinary approved price can outrank menu protection."""
+    if re.search(
+        r"\b(?:current\w*|today|tonight|tomorrow|this\s+week|available|availability|"
+        r"in\s+stock|sold\s+out|menus?)\b", message, re.I,
+    ) or not re.search(r"\b(?:price|cost|rate|how\s+much)\b", message, re.I):
+        return False
+    candidate = client_qa.match(message, facts)
+    return bool(candidate and candidate.entry.qa_id == "chicken_kosha_price_client")
+
+
 def _pending_menu_affects_question(message: str, facts: Dict[str, Any]) -> bool:
     """Fail closed only when the pending menu can supersede the asked fact."""
     pending = menu_review.pending_review_keys()
@@ -2790,8 +2801,12 @@ class DeterministicResponder:
                 session_memory.add_turn(user_id, channel, user_message, re.sub(r"https://wa\.me/[^\s]+", "[Continue on WhatsApp]", continuity_reply))
                 return continuity_reply, True, "order_intake_draft", None
 
-        pending_menu = channel == "instagram" and (_pending_menu_affects_question(user_message, facts)
-                       or menu_review.menu_question_blocked(user_message, facts))
+        pending_menu = (
+            channel == "instagram"
+            and not _approved_chicken_kosha_price_question(user_message, facts)
+            and (_pending_menu_affects_question(user_message, facts)
+                 or menu_review.menu_question_blocked(user_message, facts))
+        )
         unknown_price = (channel == "instagram" and not pending_menu
                          and not facts.get("source_route") and _unknown_named_price(user_message))
         if pending_menu or unknown_price:
@@ -3120,7 +3135,7 @@ class DeterministicResponder:
                 session_memory.add_turn(user_id, channel, user_message, source_description)
                 return source_description, True, "source_description", None
 
-        if channel == "instagram":
+        if channel == "instagram" and not _approved_chicken_kosha_price_question(user_message, facts):
             menu_result = rag_fallback_engine.retrieve_approved_menu(user_message)
             if menu_result.proposed_intent == "approved_menu":
                 response_text = menu_result.auto_response or self._generic_fallback()
@@ -3452,7 +3467,9 @@ class DeterministicResponder:
                 "weekly_menu": [current_weekly_url()],
             }
             weekly_missing = "weekly_menu" in entry.asset_keys and not asset_map["weekly_menu"][0]
-            if weekly_missing and entry.qa_id not in {"sondesh_details_client", "sondesh_price_client"}:
+            if (weekly_missing
+                    and entry.qa_id not in {"sondesh_details_client", "sondesh_price_client"}
+                    and not _approved_chicken_kosha_price_question(user_message, facts)):
                 response_text = _WEEKLY_MENU_BEING_UPDATED
                 facts.update({"ordered_response_blocks": [], "last_route_source": "EXACT_APPROVED",
                               "client_qa_id": entry.qa_id, "last_llm_called": False})
