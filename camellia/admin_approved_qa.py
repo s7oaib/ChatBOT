@@ -4,6 +4,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Header, HTTPException, Request
 from camellia import approved_qa
+from camellia import admin_chatbot_control
 
 
 def create_router(require_admin, actor):
@@ -73,6 +74,10 @@ def create_router(require_admin, actor):
         require_admin(x_admin_key)
         return call(approved_qa.archive_or_restore, qa_id, actor(), restore=True, version_id=version_id)
 
+    # QA-C1 deliberately reuses the already-mounted Admin router bridge so the
+    # customer-facing app module does not need another route-registration edit.
+    # These routes keep their own /admin/chatbot-control prefix.
+    router.routes.extend(admin_chatbot_control.create_router(require_admin, actor).routes)
     return router
 
 
@@ -126,3 +131,8 @@ async function aqRestore(id,version) { if(!confirm('Restore this approved Q&A? I
 async function aqTest() { try{const result=await aqApi('/test','POST',{message:document.getElementById('aqTestQuestion').value});document.getElementById('aqTestResult').textContent=JSON.stringify(result,null,2);}catch(e){document.getElementById('aqTestResult').textContent=e.message;} }
 </script>
 '''
+
+# The control card is global (inserted immediately below .admin-header), not a
+# child of the Approved Q&A tab. Appending its script here only reuses the
+# already-established Admin HTML injection point.
+SCRIPT += admin_chatbot_control.SCRIPT
