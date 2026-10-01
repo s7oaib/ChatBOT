@@ -4,13 +4,14 @@ import json
 import shutil
 import subprocess
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 import pytest
 from PIL import Image
 
 from camellia import admin_menu_review, menu_dates, menu_images, menu_review, weekly_savoury
 from camellia.admin_weekly_savoury import WEEKLY_HTML, WEEKLY_SCRIPT
+from camellia.menu_dates import today_ist as real_today_ist
 from camellia.config import config
 from camellia.database import db
 from test_qa_menu1 import BROWSE, respond
@@ -27,6 +28,8 @@ def replacement_chain(weekly_env, monkeypatch):
             return cls.instant.astimezone(tz) if tz else cls.instant.replace(tzinfo=None)
 
     monkeypatch.setattr(menu_dates, 'datetime', Clock)
+    # Other legacy suites mock the entry point; explicitly own both clock hooks.
+    monkeypatch.setattr(menu_dates, 'today_ist', real_today_ist)
     monkeypatch.setattr(config, 'BYPASS_AD_GATE', True)
     price = [100]
     monkeypatch.setattr(menu_review.menu_parser, 'parse_image_and_update_menu', lambda *_: {
@@ -47,6 +50,7 @@ def replacement_chain(weekly_env, monkeypatch):
 def test_a_b_c_replacement_and_exact_midnight_without_restart(replacement_chain):
     clock, versions = replacement_chain
     assert [weekly_savoury.version_status(v) for v in versions] == ['SUPERSEDED', 'SUPERSEDED', 'UPCOMING']
+    assert menu_dates.today_ist() == date(2026, 10, 1)
     before = admin_menu_review._weekly_view()
     assert before['current'] is None
     assert [v['version_id'] for v in before['upcoming']] == [versions[-1]['id']]
@@ -58,6 +62,7 @@ def test_a_b_c_replacement_and_exact_midnight_without_restart(replacement_chain)
         assert not answer[3]
 
     clock.instant = datetime(2026, 10, 1, 18, 30, tzinfo=timezone.utc)
+    assert menu_dates.today_ist() == date(2026, 10, 2)
     latest = versions[-1]
     flyer = json.loads(latest['approval_json'])['image_path']
     assert weekly_savoury.current_version()['id'] == latest['id']
