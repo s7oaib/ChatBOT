@@ -10,10 +10,11 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
-from camellia import menu_review
+from camellia import approved_qa, client_qa, menu_review
 from camellia.config import config
 from camellia.database import db
 from camellia.responder import _pending_menu_affects_question
+from camellia.responder import _approved_chicken_kosha_price_question, ai_responder, rag_fallback_engine
 from camellia.responder import responder
 from camellia.session_memory import session_memory
 
@@ -170,6 +171,68 @@ def test_pending_weekly_menu_blocks_volatile_fact_for_its_current_item(menu_env,
     reply, matched, route, _ = _reply(question, user="phase2b-price")
     assert not matched and route == "pending_menu_handoff"
     assert "₹" not in reply
+
+
+@pytest.mark.parametrize("pending", [False, True])
+@pytest.mark.parametrize("question", [
+    "How much is chicken kosha",
+    "How much is chicken kosha?",
+    "What is the price of chicken kosha?",
+    "Chicken kosha price?",
+    "Chicken kosha rate?",
+])
+def test_active_approved_chicken_price_outranks_pending_weekly_menu(menu_env, monkeypatch, question, pending):
+    if pending:
+        _weekly_draft()
+
+    def unexpected_provider(*args, **kwargs):
+        raise AssertionError("Approved price reached Groq/RAG")
+
+    monkeypatch.setattr(ai_responder, "_query_groq", unexpected_provider)
+    monkeypatch.setattr(rag_fallback_engine, "retrieve", unexpected_provider)
+    monkeypatch.setattr(rag_fallback_engine, "retrieve_approved_menu", unexpected_provider)
+    reply, matched, route, _ = _reply(question)
+    facts = session_memory.get_facts("phase2b-price", "instagram")
+    approved = client_qa.effective_entry("chicken_kosha_price_client")
+    assert matched and route != "pending_menu_handoff", (reply, route, facts.get("last_grounding"), facts.get("last_route_source"))
+    assert facts["client_qa_id"] == approved.qa_id
+    assert reply.startswith(approved.answer.split("\n\n", 1)[0])
+    assert "₹400" in reply and "₹750" not in reply
+    assert facts["last_route_source"] == "EXACT_APPROVED"
+    assert not facts["last_llm_called"]
+    if pending:
+        assert all(block.get("asset_key") != "weekly_menu" for block in facts["ordered_response_blocks"])
+
+
+@pytest.mark.parametrize("question", [
+    "Is Chicken Kosha on this week's menu?",
+    "Do you have Chicken Kosha in stock?",
+    "Is Chicken Kosha sold out?",
+])
+def test_explicit_chicken_availability_keeps_pending_menu_protection(menu_env, question):
+    _weekly_draft()
+    reply, matched, route, _ = _reply(question)
+    assert not matched and route == "pending_menu_handoff"
+    assert "₹" not in reply
+
+
+@pytest.mark.parametrize("inactive", ["archived", "expired", "scheduled"])
+def test_inactive_approved_chicken_price_cannot_bypass_pending_menu(menu_env, inactive):
+    _weekly_draft()
+    qa_id = "chicken_kosha_price_client"
+    approved_qa.archive_or_restore(qa_id, "isolated-test")
+    if inactive != "archived":
+        with db.get_connection() as conn:
+            column = "valid_until" if inactive == "expired" else "valid_from"
+            value = "2000-01-01T00:00:00+00:00" if inactive == "expired" else "2099-01-01T00:00:00+00:00"
+            conn.execute(f"UPDATE approved_qa_overrides SET status='ACTIVE', {column}=? WHERE qa_id=?", (value, qa_id))
+            conn.commit()
+    question = "How much is chicken kosha?"
+    assert client_qa.match(question, {}) is None
+    assert not _approved_chicken_kosha_price_question(question, {})
+    reply, matched, route, _ = _reply(question)
+    assert not matched and route == "approved_qa_unavailable"
+    assert "₹400" not in reply and "₹750" not in reply
 
 
 def test_historical_menu_question_is_not_made_current_by_pending_week(menu_env):
