@@ -3297,7 +3297,7 @@ class DeterministicResponder:
                 session_memory.add_turn(user_id, channel, user_message, response_text)
                 return response_text, bool(menu_result.auto_response), "approved_menu" if menu_result.auto_response else None, None
 
-        # A mapped source's configured Topic description is the answer to a
+        # A mapped source's own description is the answer to a
         # genuine, vague source-details request. Resolve this before the broad
         # client-QA matcher can turn source metadata (including priority
         # products) into an unrelated legacy product answer. The menu image is
