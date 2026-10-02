@@ -2833,6 +2833,67 @@ class DeterministicResponder:
             facts["order_intake_declined"] = "explicit_menu_browsing"
 
         primary_qa = mapped_qa_match or client_qa.match(user_message, facts)
+        if channel == "instagram":
+            source = facts.get("source_route") if isinstance(facts.get("source_route"), dict) else {}
+            source_active = bool(source.get("routing_id") and source.get("active", True)
+                                 and not facts.get("source_context_superseded"))
+            named_other_menu = bool(re.search(
+                r"\b(?:weekly|savoury|savory|sondesh|sandesh|mishti|bento|subscription|aamar|signature)\b",
+                lowered_text,
+            ))
+            menu_request = bool(re.search(r"\bmenu\b|\bwhat food (?:will be|is) served\b", lowered_text))
+            home_context = bool(
+                facts.get("home_table_context")
+                or facts.get("active_topic") == "bengali_home_table"
+                or facts.get("last_topic") == "bengali_home_table"
+                or str(facts.get("client_qa_id") or "").startswith("home_table_")
+                or (source_active and (
+                    HOME_TABLE_RE.search(str(source.get("routing_topic") or ""))
+                    or str(source.get("approved_qa_id") or "").startswith("home_table_")
+                ))
+            )
+            home_menu = menu_request and not named_other_menu and (
+                home_context or HOME_TABLE_RE.search(lowered_text)
+            )
+            source_menu_request = bool(
+                source_active and source.get("response_mode", "CUSTOM") == "CUSTOM"
+                and not named_other_menu
+                and (menu_review.weekly_menu_browsing(user_message)
+                     or re.fullmatch(
+                         r"\s*(?:tell\s+me\s+(?:more(?:\s+about\s+(?:this|that)(?:\s+(?:post|reel|story))?)?|about\s+(?:this|that)(?:\s+(?:post|reel|story))?)|"
+                         r"what(?:['’]s|\s+is|\s+are)?\s+(?:this|that)(?:\s+(?:post|reel|story))?(?:\s+about)?|"
+                         r"(?:can\s+you\s+)?explain\s+(?:this|that)(?:\s+(?:post|reel|story))?|more\s+details?|what\s+are\s+you\s+showing\s+here)\s*[?.!]*\s*",
+                         user_message, re.I,
+                     ))
+                and not (primary_qa and not menu_request)
+            )
+            mode = str(source.get("menu_mode") or "INHERIT").upper()
+            topic = db.get_instagram_topic(source["topic_id"]) if source_active and source.get("topic_id") else None
+            menu_id = ((topic or {}).get("default_menu_id") if mode == "INHERIT" else source.get("menu_id"))
+            if home_menu or (source_menu_request and (menu_request or menu_id or mode == "SELECTED")):
+                menu = db.get_menu_catalogue_entry(str(menu_id)) if menu_id and not home_menu else None
+                image = current_menu_image(str(menu_id)) if mode != "NONE" and menu and menu.get("active") else None
+                description = str(source.get("source_description") or "").strip()
+                if home_menu or (mode != "NONE" and not image) or (not image and not description):
+                    text = self._generic_fallback()
+                    facts.update({"ordered_response_blocks": [], "last_route_source": "HUMAN_HANDOFF",
+                                  "last_grounding": "home_table_menu_requires_human" if home_menu else "source_menu_unavailable",
+                                  "last_actions": [BusinessAction.ESCALATE_TO_TEAM.value],
+                                  "knowledge_sufficient": False, "last_llm_called": False})
+                    session_memory.add_turn(user_id, channel, user_message, text)
+                    return text, False, None, None
+                blocks = ([{"kind": "TEXT", "text": description}] if description else [])
+                image_block = {"kind": "IMAGE", "urls": [image]}
+                if image and (topic or {}).get("response_order") == "menu_first":
+                    blocks.insert(0, image_block)
+                elif image:
+                    blocks.append(image_block)
+                facts.update({"ordered_response_blocks": blocks, "last_route_source": "SOURCE_DESCRIPTION",
+                              "last_knowledge_ids": [f"source_route:{source.get('routing_id')}"],
+                              "last_grounding": "explicit_source_menu", "source_context_used": True,
+                              "last_actions": [BusinessAction.SEND_RESPONSE.value], "knowledge_sufficient": True})
+                session_memory.add_turn(user_id, channel, user_message, description)
+                return description, True, "source_menu", [image] if image else None
         bento_authority = client_qa.effective_entry("bento_details_client")
         stable_primary_answer = bool((primary_qa and primary_qa.entry.qa_id in {
             "bento_details_client", "bento_price_client", "best_time_to_book",
@@ -3019,11 +3080,11 @@ class DeterministicResponder:
                 return clarification, True, "clarify_request", None
 
         if channel == "instagram":
-            # Stateless social turns can be answered immediately. Short
-            # acknowledgements wait until active order/clarification state
-            # has had a chance to consume them.
+            # Social acknowledgements during intake preserve the draft without
+            # treating them as new order data or asking another field question.
+            # Non-order clarification flows retain their existing yes/no path.
             conversation_reply = grounded_answers.system_reply(
-                user_message, include_contextual_acknowledgement=False,
+                user_message, include_contextual_acknowledgement=active_intake,
             )
             if conversation_reply is not None:
                 facts.update({
@@ -3119,7 +3180,7 @@ class DeterministicResponder:
                         user_message, facts.get("active_product_context"),
                     )
                 )
-                if has_order_intake or starts_order_intake:
+                if (has_order_intake and order_intake.is_order_detail_message(user_message)) or starts_order_intake:
                     draft = existing_order_intake if has_order_intake else order_intake.new_order_draft()
                     facts["order_intake_draft"] = draft
                     facts["source_context_superseded"] = True

@@ -19,7 +19,7 @@ def system_reply(
     text = re.sub(r"[\s.!?]+", " ", message.casefold()).strip()
     if re.fullmatch(r"hi|hello|hey|good morning|good afternoon|good evening", text):
         return "Hi! Thanks for reaching out to Camellia.artisanal 😊 How can I help you today?"
-    if re.fullmatch(r"thanks|thank you|thank you so much|thx", text):
+    if re.fullmatch(r"(?:(?:okay|ok) )?(?:thanks|thank you|thank you so much|thx)", text):
         return "You're most welcome! 😊"
     if include_contextual_acknowledgement and re.fullmatch(
         r"okay|ok|sure|great|nice|got it|yes|no|yep|nope|👍|😊|🙏", text,

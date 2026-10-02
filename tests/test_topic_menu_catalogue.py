@@ -277,11 +277,10 @@ def test_duplicate_topic_name_rejected(catalogue_db):
         create_topic("Meal Subscription", "A different description.")
 
 
-def test_topic_requires_name_and_description(catalogue_db):
+def test_topic_requires_name_description_is_optional(catalogue_db):
     with pytest.raises(InstagramTopicError):
         create_topic("", "Has a description.")
-    with pytest.raises(InstagramTopicError):
-        create_topic("No Description", "")
+    assert create_topic("No Description")["description"] == ""
 
 
 def test_topic_with_unknown_default_menu_rejected(catalogue_db):
@@ -783,7 +782,7 @@ def bypass_ad_gate(monkeypatch):
     return True
 
 
-def test_tell_me_more_surfaces_the_topic_description(catalogue_db, bypass_ad_gate):
+def test_menu_only_source_does_not_infer_source_copy_from_topic(catalogue_db, bypass_ad_gate):
     topic = create_topic(
         "Wedding / Event Sondesh", "Explore handcrafted Bengali Sondesh for weddings and celebrations.",
         default_menu_id="aamar_mishti", priority_products=["jolbhora"],
@@ -800,7 +799,8 @@ def test_tell_me_more_surfaces_the_topic_description(catalogue_db, bypass_ad_gat
     facts["source_match_method"] = "shared_media_url"
 
     text, matched, template_id, _images = responder.match_and_respond("Tell me more", user_id=uid, channel="instagram")
-    assert "Explore handcrafted Bengali Sondesh" in text
+    assert matched and text == "" and template_id == "source_menu"
+    assert _images == [menu_images_module.current_url("aamar_mishti")]
 
 
 def test_explicit_intent_still_overrides_topic_context(catalogue_db, bypass_ad_gate):

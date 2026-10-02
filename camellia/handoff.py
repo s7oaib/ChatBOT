@@ -273,7 +273,10 @@ def get_or_create_handoff(
     day — an order they had not mentioned and might no longer want.
     """
     effective_mode = contact_mode or handoff_contact_mode(user_message, facts=facts)
-    customer_draft = customer_order_intake_summary(facts) if (include_order or (effective_mode == "whatsapp_order" and is_human_help_request(user_message))) else None
+    # Customer-provided intake fields also inform staff about an unsupported
+    # question during that intake. They remain explicitly UNVERIFIED; this
+    # does not promote a stale cart to an order or change the contact mode.
+    customer_draft = customer_order_intake_summary(facts)
     order_summary = verified_order_summary(facts) if include_order else None
     known_entities = _known_entities(facts, include_order=include_order)
     if order_summary:
