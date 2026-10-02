@@ -2856,29 +2856,37 @@ class DeterministicResponder:
             home_menu = menu_request and not named_other_menu and (
                 home_context or HOME_TABLE_RE.search(lowered_text)
             )
+            mode = str(source.get("menu_mode") or "INHERIT").upper()
+            topic = db.get_instagram_topic(source["topic_id"]) if source_active and source.get("topic_id") else None
+            menu_id = ((topic or {}).get("default_menu_id") if mode == "INHERIT" else source.get("menu_id"))
+            vague_source_reference = bool(re.fullmatch(
+                r"\s*(?:tell\s+me\s+(?:more(?:\s+about\s+(?:this|that)(?:\s+(?:post|reel|story))?)?|about\s+(?:this|that)(?:\s+(?:post|reel|story))?)|"
+                r"what(?:['’]s|\s+is|\s+are)?\s+(?:this|that)(?:\s+(?:post|reel|story))?(?:\s+about)?|"
+                r"(?:can\s+you\s+)?explain\s+(?:this|that)(?:\s+(?:post|reel|story))?|more\s+details?|what\s+are\s+you\s+showing\s+here)\s*[?.!]*\s*",
+                user_message, re.I,
+            ))
+            source_menu = None
+            source_image = None
+            if menu_id and mode != "NONE" and (
+                vague_source_reference or menu_request or menu_review.weekly_menu_browsing(user_message)
+            ):
+                source_menu = db.get_menu_catalogue_entry(str(menu_id))
+                if source_menu and source_menu.get("active"):
+                    source_image = current_menu_image(str(menu_id))
             source_menu_request = bool(
                 source_active and source.get("response_mode", "CUSTOM") == "CUSTOM"
                 and not named_other_menu
                 and (menu_review.weekly_menu_browsing(user_message)
-                     or re.fullmatch(
-                         r"\s*(?:tell\s+me\s+(?:more(?:\s+about\s+(?:this|that)(?:\s+(?:post|reel|story))?)?|about\s+(?:this|that)(?:\s+(?:post|reel|story))?)|"
-                         r"what(?:['’]s|\s+is|\s+are)?\s+(?:this|that)(?:\s+(?:post|reel|story))?(?:\s+about)?|"
-                         r"(?:can\s+you\s+)?explain\s+(?:this|that)(?:\s+(?:post|reel|story))?|more\s+details?|what\s+are\s+you\s+showing\s+here)\s*[?.!]*\s*",
-                         user_message, re.I,
-                     ))
-                and not (primary_qa and not menu_request)
+                     or (vague_source_reference and (bool(source_image) or not primary_qa)))
             )
-            mode = str(source.get("menu_mode") or "INHERIT").upper()
-            topic = db.get_instagram_topic(source["topic_id"]) if source_active and source.get("topic_id") else None
-            menu_id = ((topic or {}).get("default_menu_id") if mode == "INHERIT" else source.get("menu_id"))
             legacy_subscription_request = bool(
                 mode == "INHERIT" and not menu_id and not source.get("source_description")
                 and str(source.get("routing_topic") or "").casefold() in {"subscription", "everyday meal subscription"}
                 and client_qa.effective_entry("subscription_details_client")
             )
             if home_menu or (source_menu_request and not legacy_subscription_request and (menu_request or menu_id or mode == "SELECTED" or not str(source.get("source_description") or "").strip())):
-                menu = db.get_menu_catalogue_entry(str(menu_id)) if menu_id and not home_menu else None
-                image = current_menu_image(str(menu_id)) if mode != "NONE" and menu and menu.get("active") else None
+                menu = source_menu if menu_id and not home_menu else None
+                image = source_image if not home_menu else None
                 description = str(source.get("source_description") or "").strip()
                 if home_menu or (mode != "NONE" and not image) or (not image and not description):
                     text = self._generic_fallback()

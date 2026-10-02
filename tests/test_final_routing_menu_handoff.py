@@ -221,6 +221,74 @@ def test_source_menu_first_uses_existing_ordered_sender(customer):
     assert send.call_args_list[1].args[1] == "Authored copy"
 
 
+@pytest.mark.parametrize("kind", ["story", "post", "reel"])
+@pytest.mark.parametrize("question", ["tell me more", "what is this about?"])
+def test_custom_source_vague_followup_owns_selected_menu_over_contextual_qa(customer, kind, question):
+    route, topic = source(customer, kind=kind, description="Operator's custom description.")
+    route["routing_topic"] = "Bengali Bento"
+    instagram_routing.update_topic(topic["topic_id"], name="Bengali Bento")
+
+    answer = reply(customer, question)
+
+    assert answer == (
+        "Operator's custom description.", True, "source_menu", ["/uploads/exact-source.jpg"],
+    )
+    assert customer[1]["last_route_source"] == "SOURCE_DESCRIPTION"
+    assert customer[1]["ordered_response_blocks"] == [
+        {"kind": "TEXT", "text": "Operator's custom description."},
+        {"kind": "IMAGE", "urls": ["/uploads/exact-source.jpg"]},
+    ]
+    assert "bento_details_client" not in customer[1].get("last_intents", [])
+
+
+@pytest.mark.parametrize("kind", ["story", "post", "reel"])
+def test_custom_source_without_description_sends_selected_menu_only(customer, kind):
+    source(customer, kind=kind, description="")
+
+    answer = reply(customer, "tell me more")
+
+    assert answer == ("", True, "source_menu", ["/uploads/exact-source.jpg"])
+    assert customer[1]["ordered_response_blocks"] == [
+        {"kind": "IMAGE", "urls": ["/uploads/exact-source.jpg"]},
+    ]
+
+
+@pytest.mark.parametrize("kind", ["story", "post", "reel"])
+@pytest.mark.parametrize("question,qa_id", [
+    ("price?", "bento_price_client"),
+    ("What's the best time to book?", "best_time_to_book"),
+])
+def test_explicit_supported_question_overrides_custom_source_attachment(customer, kind, question, qa_id):
+    route, topic = source(customer, kind=kind, description="Operator's custom description.")
+    route["routing_topic"] = "Bengali Bento"
+    instagram_routing.update_topic(topic["topic_id"], name="Bengali Bento")
+    customer[1]["active_topic"] = "bengali_bento"
+
+    answer = reply(customer, question)
+
+    assert customer[1]["last_route_source"] == "EXACT_APPROVED"
+    assert qa_id in customer[1]["last_intents"]
+    assert answer[2] != "source_menu"
+
+
+def test_custom_source_menu_first_and_description_first_are_sent_in_order(customer):
+    _route, topic = source(customer, description="Operator's custom description.")
+    blocks = []
+    for response_order in ("description_first", "menu_first"):
+        instagram_routing.update_topic(topic["topic_id"], response_order=response_order)
+        reply(customer, "tell me more")
+        blocks = customer[1]["ordered_response_blocks"]
+        assert [block["kind"] for block in blocks] == (
+            ["TEXT", "IMAGE"] if response_order == "description_first" else ["IMAGE", "TEXT"]
+        )
+    with patch.object(app_module, "_send_or_queue_instagram_reply", return_value={"status": "sent"}) as send:
+        app_module.send_instagram_response_blocks(customer[0], blocks)
+    assert [call.kwargs.get("image_url") for call in send.call_args_list] == [
+        ["/uploads/exact-source.jpg"], None,
+    ]
+    assert send.call_args_list[1].args[1] == "Operator's custom description."
+
+
 def test_fresh_exact_non_home_source_supersedes_old_home_flags(customer):
     source(customer, description="New exact source copy")
     customer[1].update(home_table_context=True, last_topic="bengali_home_table", active_topic="bengali_home_table", client_qa_id="home_table_details")
