@@ -185,12 +185,14 @@ def test_response_library_type_filters_and_protected_lifecycle_controls():
         console.log('RESULT::' + JSON.stringify({custom, system, archived, onlySystem,
             systemHidden: document.getElementById('systemResponseLibrary').style.display}));
     ''')
-    assert 'CUSTOM' in result['custom'] and 'Archive' in result['custom']
+    assert 'CUSTOM' in result['custom'] and 'Delete' in result['custom']
+    assert 'must be archived before permanent deletion' in _extract_admin_script()
     assert 'Delete Permanently' not in result['custom']
     assert 'SYSTEM · PROTECTED' in result['system'] and 'Edit Response' in result['system']
     assert 'Delete' not in result['system'] and 'Archive' not in result['system']
-    assert 'Restore' in result['archived'] and 'Delete Permanently' in result['archived']
+    assert 'View' in result['archived'] and 'Delete' in result['archived']
     assert 'cqaOpenEdit' not in result['archived']
+    assert 'FINAL CONFIRMATION: Permanently delete' in _extract_admin_script()
     assert 'carry bag' not in result['onlySystem']
     assert result['systemHidden'] == 'none'
 

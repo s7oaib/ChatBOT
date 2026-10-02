@@ -33,6 +33,16 @@ BROWSE = [
 ]
 
 
+@pytest.mark.parametrize('template_id', ['weekly_menu_veg', 'weekly_menu_nonveg'])
+def test_response_library_weekly_ids_delegate_to_current_flyer(current, template_id):
+    from camellia.responder import responder
+    clock, _ = current
+    db.save_response_template_override(template_id, 'Frozen general_details and old menu copy.', 'test')
+    assert responder.render_approved_template(template_id) == ('', [menu_images.current_weekly_url()])
+    clock.instant = datetime(2026, 10, 8, 18, 30, tzinfo=timezone.utc)
+    assert responder.render_approved_template(template_id) == (responder._generic_fallback(), None)
+
+
 @pytest.mark.parametrize("query", BROWSE)
 def test_browse_one_intent_preserves_draft(current, query):
     uid = uuid.uuid4().hex

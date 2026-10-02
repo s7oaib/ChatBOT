@@ -309,7 +309,7 @@ def test_mapped_media_explicit_product_and_guard_override_the_source(story_db):
     assert all("Manager of Kitchens" in text for text in sent)
 
 
-def test_unknown_media_does_not_block_explicit_product_but_vague_text_clarifies(story_db):
+def test_unknown_media_hands_off_vague_share_without_claiming_product_access(story_db):
     explicit_uid = "unknown-explicit-" + uuid.uuid4().hex[:8]
     vague_uid = "unknown-vague-" + uuid.uuid4().hex[:8]
     sent = []
@@ -325,7 +325,7 @@ def test_unknown_media_does_not_block_explicit_product_but_vague_text_clarifies(
             {"shortcode": "another-unmapped-reel"}, None, "reel",
         )
     assert "Manager of Kitchens" in sent[0]
-    assert "what would you like to know more about" in sent[1].lower()
+    assert "Manager of Kitchens" in sent[1]
     assert "jolbhora" not in sent[1].lower()
 
 

@@ -88,25 +88,26 @@ class TestKolkataDisambiguation:
         "is the kitchen moving",
         "will the recipes change after you move",
     ])
-    def test_a_relocation_question_reaches_the_reassurance_answer(self, message):
-        text, matched, template_id, _ = reply_to(message)
-        assert matched is True
+    def test_relocation_question_hands_off_without_retired_reassurance(self, message):
+        text, matched, template_id, images = reply_to(message)
+        assert matched is False
         assert template_id == "kolkata_expansion_info"
-        assert "Guru Dayal Singh" in text
+        assert "Manager of Kitchens" in text
+        assert images is None
 
     @pytest.mark.parametrize("message, expected_template", [
         ("who is the founder", "GUARD_staff_names_manager_contact"),
         ("where is your kitchen", "GUARD_pickup_address_hours"),
         ("do you deliver to gurgaon", "delivery_area"),
     ])
-    def test_the_same_words_without_a_relocation_verb_still_answer_their_own_question(
+    def test_other_unsupported_business_intents_keep_distinct_handoff_identity(
         self, message, expected_template
     ):
-        # "kitchen", "gurgaon" and "founder" are legitimate words in their own
-        # right — the disambiguator only fires alongside a move/leave/close verb.
-        _text, matched, template_id, _ = reply_to(message)
-        assert matched is True
+        text, matched, template_id, images = reply_to(message)
+        assert matched is False
         assert template_id == expected_template
+        assert "Manager of Kitchens" in text
+        assert images is None
 
 
 class TestOutOfAreaWithoutANamedCity:
@@ -119,20 +120,24 @@ class TestOutOfAreaWithoutANamedCity:
         "is this available worldwide",
     ])
     def test_a_generic_beyond_ncr_question_gets_the_approved_refusal(self, message):
-        text, matched, template_id, _ = reply_to(message)
+        from camellia import client_qa
+        text, matched, template_id, images = reply_to(message)
         assert matched is True
         assert template_id == "delivery_out_of_area"
-        assert "unable to ship our sondesh outside Delhi NCR" in text
+        assert text == client_qa.resolve_effective_approved_qa_by_id("delivery_out_of_area_client").entry.answer
+        assert images is None
 
     @pytest.mark.parametrize("message", [
         "do you deliver outside delhi ncr",
         "where do you deliver",
         "do you deliver to noida",
     ])
-    def test_ncr_zone_questions_are_unaffected(self, message):
-        _text, matched, template_id, _ = reply_to(message)
-        assert matched is True
+    def test_unapproved_coverage_questions_hand_off(self, message):
+        text, matched, template_id, images = reply_to(message)
+        assert matched is False
         assert template_id == "delivery_area"
+        assert "Manager of Kitchens" in text
+        assert images is None
 
 
 class TestTheSavourySondeshCrosssellUsesTheClientsOwnText:

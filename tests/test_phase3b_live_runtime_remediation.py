@@ -84,18 +84,19 @@ def test_exact_phase3b_copy_survives_active_runtime_quarantine(tmp_path, monkeyp
         message, user_id=user_id, channel=test_channel
     )
 
-    if template_id == "sondesh_crosssell_savoury":
+    if template_id in {"sondesh_crosssell_savoury", "kolkata_expansion_info", "GUARD_staff_names_manager_contact"}:
         # The standalone cross-sell exists only in the retired template path;
         # it is not a canonical client-QA question. Instagram must hand off.
         assert matched is False
-        assert actual_id is None
+        assert actual_id == (None if template_id == "sondesh_crosssell_savoury" else template_id)
         assert "manager of kitchens" in text.lower()
         assert _images is None
         return
 
     assert matched is True
     assert actual_id == template_id
-    assert text == CLIENT_CONFIRMED_EXACT_RESPONSES[template_id]
+    from camellia.approved_response_alignment import effective_binding
+    assert text == effective_binding(template_id)[1]
 
 
 def test_exact_allowlist_does_not_bypass_modified_unsafe_copy():

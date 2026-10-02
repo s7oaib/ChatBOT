@@ -86,7 +86,7 @@ def test_weekly_vegetarian_hard_delete_is_not_reseeded_after_restart(deletion_db
         "weekly_menu_veg", "approved weekly copy", user_message="vegetarian menu"
     )
     assert not images
-    assert "finalising" in text.lower()
+    assert "Manager of Kitchens" in text
 
 
 def test_menu_manager_key_alias_deletes_the_matching_catalogue_menu(deletion_db):

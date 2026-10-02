@@ -76,25 +76,17 @@ def test_llm_contract_rejects_non_boolean_gap_fields():
 
 
 def test_price_and_delivery_execute_two_approved_actions():
-    result = _result(
-        ["product_price", "delivery_query"],
-        {"product": "Jolbhora", "location": "Delhi"},
-    )
-    text, matched, template_id, _ = _ask(
-        "What is the price of Jolbhora and do you deliver to Delhi?",
-        result,
-        "structured-price-delivery",
-    )
-
+    result = _result(["product_price", "delivery_query"], {"product": "Jolbhora", "location": "Delhi"})
+    text, matched, _template, images = _ask("What is the price of Jolbhora and do you deliver to Delhi?", result, "structured-price-delivery")
+    assert matched is False
+    assert "Manager of Kitchens" in text
+    assert "₹750" not in text and "₹900" not in text
+    assert "Delhi NCR" not in text
+    assert images is None
     facts = session_memory.get_facts("structured-price-delivery", "whatsapp")
-    assert matched is True
-    assert template_id == "compound_product_price_delivery_query"
-    assert "Jolbhora" in text and "Delhi NCR" in text
-    assert "₹750" in text and "₹900" in text
     assert facts["last_intents"] == ["product_price", "delivery_query"]
-    assert "SEND_PRICE_SEQUENCE" in facts["last_actions"]
-    assert "CONFIRM_DELIVERY_AREA" in facts["last_actions"]
-    assert facts["knowledge_sufficient"] is True
+    assert "ESCALATE_TO_TEAM" in facts["last_actions"]
+    assert facts["knowledge_sufficient"] is False
 
 
 def test_structured_nlu_rollout_cohort_is_stable():
@@ -111,15 +103,12 @@ def test_structured_nlu_rollout_cohort_is_stable():
 
 def test_jolbhora_price_uses_specific_approved_table_without_nlu():
     with patch.object(config, "STRUCTURED_NLU_ROLLOUT_PERCENT", 0):
-        text, matched, template_id, _ = responder.match_and_respond(
-            "What is the price of Jolbhora?",
-            user_id="deterministic-jolbhora-price",
-            channel="whatsapp",
-        )
-
-    assert matched is True
+        text, matched, template_id, images = responder.match_and_respond("What is the price of Jolbhora?", user_id="deterministic-jolbhora-price", channel="whatsapp")
+    assert matched is False
     assert template_id == "jolbhora"
-    assert "₹750" in text and "₹900" in text
+    assert "Manager of Kitchens" in text
+    assert "₹750" not in text and "₹900" not in text
+    assert images is None
 
 
 def test_event_request_uses_deterministic_human_handoff():
@@ -144,15 +133,12 @@ def test_event_request_uses_deterministic_human_handoff():
 
 def test_provider_failure_keeps_multi_intent_behavior_deterministically():
     unavailable = UnderstandingResult(reason="groq_http_429")
-    text, matched, template_id, _ = _ask(
-        "Jolbhora price and do you deliver to Delhi?",
-        unavailable,
-        "structured-provider-down",
-    )
-
-    assert matched is True
-    assert template_id == "compound_product_price_delivery_query"
-    assert "Jolbhora" in text and "Delhi NCR" in text
+    text, matched, _template, images = _ask("Jolbhora price and do you deliver to Delhi?", unavailable, "structured-provider-down")
+    assert matched is False
+    assert "Manager of Kitchens" in text
+    assert "₹750" not in text and "₹900" not in text
+    assert "Delhi NCR" not in text
+    assert images is None
 
 
 def test_qualitative_business_claim_must_exist_in_approved_context():

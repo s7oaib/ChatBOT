@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 import pytest
 
+from camellia import client_qa
 from camellia.config import config
 from camellia.responder import responder
 from camellia.session_memory import session_memory
@@ -177,17 +178,16 @@ def test_general_savoury_intro_does_not_repeat_retired_subscription_price():
     assert "rate chart" in response.lower()
 
 
-def test_home_table_introduction_is_deterministic_and_media_blocked():
-    text, matched, template_id, images = _ask("Tell me more about Bengali Home Table")
+def test_legacy_channel_home_table_intro_uses_effective_approved_opening():
+    user_id = _user("home_table_intro")
+    text, matched, template_id, images = _ask('Tell me more about Bengali Home Table', user_id)
     assert matched is True
     assert template_id == "bengali_home_table_details"
-    assert _normalize(text) == _normalize(HOME_TABLE_DETAILS_CANONICAL)
+    approved = client_qa.resolve_effective_approved_qa_by_id("home_table_details").entry.answer
+    assert _normalize(approved).startswith(_normalize(text))
+    assert "Next steps to book a seat" in text
+    assert "Which of the two dates would you prefer" in text
     assert images is None
-    template = next(
-        item for item in responder.qa_data["templates"]
-        if item["id"] == "bengali_home_table_details"
-    )
-    assert template["media_status"] == "BLOCKED_PENDING_CLIENT_ASSETS"
 
 
 def test_home_table_context_bare_price_reuses_the_contextual_home_table_block():
@@ -213,7 +213,7 @@ def test_home_table_explicit_detailed_pricing_wins_over_kolkata_expansion():
     )
     assert matched is True
     assert template_id == "bengali_home_table_pricing"
-    assert _normalize(text) == _normalize(HOME_TABLE_PRICING_CANONICAL)
+    assert _normalize(text) == _normalize(client_qa.resolve_effective_approved_qa_by_id("home_table_price").entry.answer)
     assert images is None
 
 
@@ -235,16 +235,13 @@ def test_home_table_payment_is_distinct_from_generic_payment():
 
 def test_explicit_product_switch_clears_home_table_context():
     user_id = _user("home_table_switch")
-    session_memory.clear_session(user_id, "whatsapp")
-    responder.match_and_respond(
-        "Tell me about Bengali Home Table", user_id=user_id, channel="whatsapp"
-    )
-
-    _text, matched, template_id, _images = responder.match_and_respond(
-        "Tell me about Kanchagolla", user_id=user_id, channel="whatsapp"
-    )
-    assert matched is True
+    _ask("Tell me about Bengali Home Table", user_id)
+    text, matched, template_id, images = responder.match_and_respond("Tell me about Kanchagolla", user_id=user_id, channel="whatsapp")
+    assert matched is False
     assert template_id == "kanchagolla"
+    assert "Manager of Kitchens" in text
+    assert "Home Table" not in text
+    assert images is None
 
 
 def test_unregistered_jolbhora_price_overrides_stale_context_but_fails_closed(monkeypatch):
@@ -327,10 +324,14 @@ def test_explicit_bento_switch_preserves_bento_context_for_bare_price(eligible_w
     "bengal home tabel kolkata",
 ])
 def test_home_table_typo_and_short_forms_use_exact_introduction(message):
-    text, matched, template_id, images = _ask(message)
+    user_id = _user("home_table_intro")
+    text, matched, template_id, images = _ask(message, user_id)
     assert matched is True
     assert template_id == "bengali_home_table_details"
-    assert _normalize(text) == _normalize(HOME_TABLE_DETAILS_CANONICAL)
+    approved = client_qa.resolve_effective_approved_qa_by_id("home_table_details").entry.answer
+    assert _normalize(approved).startswith(_normalize(text))
+    assert "Next steps to book a seat" in text
+    assert "Which of the two dates would you prefer" in text
     assert images is None
 
 
@@ -348,16 +349,15 @@ def test_home_table_pricing_natural_language_and_typo_variants_use_exact_pricing
     text, matched, template_id, images = _ask(message)
     assert matched is True
     assert template_id == "bengali_home_table_pricing"
-    assert _normalize(text) == _normalize(HOME_TABLE_PRICING_CANONICAL)
+    assert _normalize(text) == _normalize(client_qa.resolve_effective_approved_qa_by_id("home_table_price").entry.answer)
     assert images is None
 
 
-def test_kolkata_move_question_keeps_expansion_route():
-    text, matched, template_id, images = _ask(
-        "who runs the kitchen now that you're moving to kolkata"
-    )
-    assert matched is True
+def test_kolkata_move_question_hands_off_without_retired_expansion_copy():
+    text, matched, template_id, images = _ask("who runs the kitchen now that you're moving to kolkata")
+    assert matched is False
     assert template_id == "kolkata_expansion_info"
+    assert "Manager of Kitchens" in text
     assert images is None
 
 

@@ -11,6 +11,8 @@ from camellia.instagram_routing import decode_route, route_for_inbound, validate
 from camellia.responder import responder
 from camellia.session_memory import session_memory
 
+OWNER_ID = "17841455615744812"
+
 
 @pytest.fixture
 def mapping_db(tmp_path, monkeypatch):
@@ -19,6 +21,8 @@ def mapping_db(tmp_path, monkeypatch):
     monkeypatch.setattr("camellia.database.db", database)
     monkeypatch.setattr(app_module, "db", database)
     monkeypatch.setattr(config, "ADMIN_API_KEY", "source-test-admin-key-123456")
+    monkeypatch.setattr(config, "INSTAGRAM_ACCOUNT_ID", OWNER_ID)
+    monkeypatch.setattr(config, "INSTAGRAM_GRAPH_ACCOUNT_ID", OWNER_ID)
     monkeypatch.setattr(config, "BYPASS_AD_GATE", True)
     return database, path
 
@@ -61,7 +65,10 @@ def test_gallery_mapping_requires_source_description(mapping_db, description):
     topic_response = client.post("/admin/instagram-topics", headers=headers, json={"name": "Staging topic", "description": "Test classification."})
     assert topic_response.status_code == 200, topic_response.text
     topic = topic_response.json()["topic"]
-    media = database.upsert_instagram_media({"instagram_media_id": "description-required-post", "media_type": "IMAGE"})
+    media = database.upsert_instagram_media({"instagram_media_id": "description-required-post", "media_type": "IMAGE",
+        "owner_instagram_account_id": OWNER_ID, "owner_username": "camellia.artisanal",
+        "last_sync_generation": "verified-description-test", "inventory_state": "CURRENT"})
+    database.reconcile_instagram_media_inventory(OWNER_ID, "verified-description-test")
     path = f"/admin/instagram-media/{media['id']}/mapping"
     payload = {"topic_id": topic["topic_id"], "source_description": description, "menu_mode": "NONE"}
     rejected = client.put(path, headers=headers, json=payload)
@@ -74,6 +81,38 @@ def test_gallery_mapping_requires_source_description(mapping_db, description):
     rejected_update = client.put(path, headers=headers, json=payload)
     assert rejected_update.status_code == 400
     assert database.get_instagram_source_route(route_id)["source_description"] == "Operator-approved post copy."
+
+
+def test_unverified_legacy_gallery_is_labeled_read_only_and_cannot_create_mapping(mapping_db):
+    database, _path = mapping_db
+    client = TestClient(app_module.app)
+    headers = {"x-admin-key": config.ADMIN_API_KEY}
+    topic = client.post("/admin/instagram-topics", headers=headers, json={
+        "name": "Legacy safety", "description": "Test-only topic.",
+    }).json()["topic"]
+    media = database.upsert_instagram_media({
+        "instagram_media_id": "unverified-legacy", "media_type": "IMAGE",
+        "permalink": "https://www.instagram.com/p/LEGACY001/",
+    })
+
+    response = client.get("/admin/instagram-media", headers=headers)
+    assert response.status_code == 200
+    assert response.json()["inventory_verification"] == "LEGACY_UNVERIFIED"
+    item = response.json()["items"][0]
+    assert item["inventory_verification"] == "LEGACY_UNVERIFIED"
+    assert item["owner_instagram_account_id"] is None
+    rejected = client.put(f"/admin/instagram-media/{media['id']}/mapping", headers=headers, json={
+        "topic_id": topic["topic_id"], "source_description": "Must not be saved.",
+    })
+    assert rejected.status_code == 409
+    assert database.list_instagram_source_routes() == []
+
+    html = client.get("/admin").text
+    card = html[html.index("function renderInstagramContentCard"):html.index("function renderInstagramContentGallery")]
+    assert "LEGACY · UNVERIFIED" in card
+    assert "route.inventory_verification === 'LEGACY_UNVERIFIED'" in card
+    assert "disabled title=\"Ownership is unverified" in card
+    assert "ownership has not been verified" in html
 
 
 @pytest.mark.parametrize("source_type,question", [
@@ -243,7 +282,11 @@ def test_gallery_mapping_delete_keeps_instagram_media(mapping_db, media_type, pe
     client = TestClient(app_module.app)
     headers = {"x-admin-key": config.ADMIN_API_KEY}
     topic = client.post("/admin/instagram-topics", headers=headers, json={"name": "Subscription", "description": "Client topic"}).json()["topic"]
-    media = database.upsert_instagram_media({"instagram_media_id": "exact-media-456", "media_type": media_type, "permalink": permalink, "shortcode": shortcode})
+    media = database.upsert_instagram_media({"instagram_media_id": "exact-media-456", "media_type": media_type,
+        "permalink": permalink, "shortcode": shortcode, "owner_instagram_account_id": OWNER_ID,
+        "owner_username": "camellia.artisanal", "last_sync_generation": "verified-delete-test",
+        "inventory_state": "CURRENT"})
+    database.reconcile_instagram_media_inventory(OWNER_ID, "verified-delete-test")
     menu = database.list_menu_catalogue()[0]
     response = client.put(f"/admin/instagram-media/{media['id']}/mapping", headers=headers, json={
         "topic_id": topic["topic_id"], "source_description": "This reel is about subscription.",

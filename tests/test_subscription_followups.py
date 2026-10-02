@@ -45,13 +45,14 @@ class TestTheReplyToWouldYouLikeToBook:
         "ok i'll take option 2",
         "what's next",
     ])
-    def test_an_intent_to_book_gets_the_four_steps(self, message):
+    def test_booking_followup_hands_off_without_retired_interview(self, message):
         user_id = start_a_subscription_conversation()
-        text, matched, template_id, _images = follow_up(user_id, message)
-
-        assert matched
+        text, matched, template_id, images = follow_up(user_id, message)
+        assert matched is False
         assert template_id == "subscription_booking_steps"
-        assert "Choose Option 1, 2 or 3" in text
+        assert "Manager of Kitchens" in text
+        assert "Choose Option 1, 2 or 3" not in text
+        assert images is None
 
     def test_asking_what_an_option_contains_stays_on_the_meal_plans(self):
         user_id = start_a_subscription_conversation()
@@ -78,14 +79,15 @@ class TestChangingADeliveryDate:
         "what if i need to change a delivery date",
         "i need to reschedule my delivery",
     ])
-    def test_the_five_hour_notice_answers_it(self, message):
+    def test_rescheduling_hands_off_without_unapproved_five_hour_promise(self, message):
         user_id = start_a_subscription_conversation()
-        follow_up(user_id, "yes book me")  # steps sent, awaiting flag cleared
-
-        text, _matched, template_id, _images = follow_up(user_id, message)
-
+        follow_up(user_id, "yes book me")
+        text, matched, template_id, images = follow_up(user_id, message)
+        assert matched is False
         assert template_id == "subscription_booking_steps"
-        assert "at least 5 hours in advance" in text
+        assert "Manager of Kitchens" in text
+        assert "5 hours" not in text
+        assert images is None
 
     def test_a_sondesh_question_is_not_swallowed_by_the_subscription_context(self):
         user_id = start_a_subscription_conversation()

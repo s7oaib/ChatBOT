@@ -86,11 +86,20 @@ def test_the_price_quoted_is_the_price_charged(eligible_weekly_asset):
     while ordering used a separate hardcoded table, so the two could disagree.
     """
     _write_menu(CURRENT, nonveg=[MANGSHO])
+    # Explicit item facts require reviewed authority, not an unreviewed JSON row.
+    from camellia.database import db
+    row = {"item": "Robibarer Mangsho", "quantity": "200g", "price_inr": 640,
+           "category": "non_vegetarian", "description": "Sunday mutton", "aliases": []}
+    approval = {"rows": [row], "approved_at": "2026-06-21T10:00:00Z", "image_path": eligible_weekly_asset}
+    with db.get_connection() as conn:
+        conn.execute("INSERT INTO menu_versions(menu_key,snapshot_json,approval_json,is_current,valid_from,valid_until) VALUES(?,?,?,?,?,?)",
+                     ("weekly_vegetarian", "[]", json.dumps(approval), 1, "2026-06-21", "2026-06-27"))
+        conn.commit()
 
     uid = "quote_vs_charge"
-    session_memory.clear_session(uid, "whatsapp")
+    session_memory.clear_session(uid, "instagram")
     menu_text, _, _, _ = responder.match_and_respond(
-        "non veg menu", user_id=uid, channel="whatsapp"
+        "What is the price of Robibarer Mangsho this week?", user_id=uid, channel="instagram"
     )
     assert "640" in menu_text, "menu text did not quote the uploaded price"
 

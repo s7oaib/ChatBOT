@@ -53,7 +53,13 @@ def reply_to(message):
 def test_a_confirmed_question_reaches_its_confirmed_answer(message, template_id):
     text, was_matched, matched_id, _ = reply_to(message)
 
-    assert was_matched is True, f"{message!r} fell through to a human"
+    from camellia.approved_response_alignment import HANDOFF_ONLY_TEMPLATE_IDS, effective_binding
+    if template_id in HANDOFF_ONLY_TEMPLATE_IDS and not effective_binding(template_id)[0]:
+        assert was_matched is False
+        assert "Manager of Kitchens" in text
+        assert "₹" not in text
+    else:
+        assert was_matched is True, f"{message!r} fell through to a human"
     assert matched_id == template_id
     assert text.strip()
 

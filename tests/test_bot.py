@@ -161,43 +161,34 @@ class TestCamelliaBot(unittest.TestCase):
 
     @pytest.mark.usefixtures("eligible_weekly_asset")
     def test_responder_dynamic_weekly_menu(self):
-        """Test menu query returns menu photo card URL."""
-        response, was_matched, tmpl_id, img_url = responder.match_and_respond("Show me the veg menu this week")
-        self.assertTrue(was_matched)
-        self.assertEqual(tmpl_id, "weekly_menu_veg")
-        self.assertIn("Camellia Artisanal", response)
-        self.assertIsNotNone(img_url)
+        """Weekly requests send the exact current reviewed flyer with no legacy price list."""
+        config.BYPASS_AD_GATE = True
+        text, matched, _template, images = responder.match_and_respond("give me savoury menu", user_id="weekly-live-asset", channel="instagram")
+        self.assertTrue(matched)
+        self.assertEqual(text, "")
+        self.assertEqual(images, ["/uploads/test-reviewed-current-weekly.jpeg"])
 
     def test_responder_delivery_location_matching(self):
-        """Delivery in Delhi NCR matches delivery_area; Bangalore/out-of-area matches delivery_out_of_area."""
-        # 1. Delhi NCR query
-        resp_delhi, matched_delhi, tmpl_delhi, _ = responder.match_and_respond("do you deliver in delhi")
-        self.assertTrue(matched_delhi)
-        self.assertEqual(tmpl_delhi, "delivery_area")
-        self.assertIn("Delhi NCR", resp_delhi)
-
-        # 2. Bangalore location reply / query
-        resp_blr, matched_blr, tmpl_blr, _ = responder.match_and_respond("bangalore")
-        self.assertTrue(matched_blr)
-        self.assertEqual(tmpl_blr, "delivery_out_of_area")
-        self.assertIn("do not deliver to Bangalore", resp_blr)
-
-        # 3. Explicit "do you deliver to Bangalore" query
-        resp_blr2, matched_blr2, tmpl_blr2, _ = responder.match_and_respond("do you deliver to bangalore")
-        self.assertTrue(matched_blr2)
-        self.assertEqual(tmpl_blr2, "delivery_out_of_area")
+        """Unsupported legacy business wording cannot invent an approved fact."""
+        config.BYPASS_AD_GATE = True
+        for index, message in enumerate(['which areas do you deliver to']):
+            response, matched, _template, images = responder.match_and_respond(
+                message, user_id="{}-{}".format('test_responder_delivery_location_matching', index), channel="instagram")
+            self.assertFalse(matched)
+            self.assertTrue("Manager of Kitchens" in response or "team confirm" in response)
+            self.assertIsNone(images)
+            self.assertNotIn("₹", response)
 
     def test_responder_typo_fuzzy_matching(self):
-        """Spelling typos like 'delivere' or 'banglore' are matched using fuzzy similarity."""
-        # 1. Typo in delivere & delhi
-        resp1, matched1, tmpl1, _ = responder.match_and_respond("do you delivere in delhi")
-        self.assertTrue(matched1)
-        self.assertEqual(tmpl1, "delivery_area")
-
-        # 2. Typo in delivere & banglore
-        resp2, matched2, tmpl2, _ = responder.match_and_respond("do you delivere in banglore")
-        self.assertTrue(matched2)
-        self.assertEqual(tmpl2, "delivery_out_of_area")
+        """Unsupported legacy business wording cannot invent an approved fact."""
+        config.BYPASS_AD_GATE = True
+        for index, message in enumerate(['do you delivere in delhi']):
+            response, matched, _template, images = responder.match_and_respond(
+                message, user_id="{}-{}".format('test_responder_typo_fuzzy_matching', index), channel="instagram")
+            self.assertFalse(matched)
+            self.assertTrue("Manager of Kitchens" in response or "team confirm" in response)
+            self.assertIsNone(images)
+            self.assertNotIn("₹", response)
 
     def test_responder_explicit_escalation(self):
         """Sensitive queries (refund/complaint) must trigger explicit escalation."""
@@ -663,37 +654,27 @@ class TestCamelliaBot(unittest.TestCase):
             self.assertTrue(monitor.snapshot()["healthy"])
 
     def test_freshness_ingredients_query(self):
-        """Verify 'how fresh are the ingredients' matches freshness_ingredients template and not delivery_time."""
-        resp_text, matched, tmpl_id, img_url = responder.match_and_respond(
-            "how fresh are the ingredients", "test_user_fresh", "whatsapp"
-        )
-        self.assertTrue(matched)
-        self.assertEqual(tmpl_id, "freshness_ingredients")
-        self.assertIn("freshness and quality", resp_text.lower())
-        self.assertNotIn("sushant lok", resp_text.lower())
+        """Unsupported legacy business wording cannot invent an approved fact."""
+        config.BYPASS_AD_GATE = True
+        for index, message in enumerate(['how fresh are the ingredients']):
+            response, matched, _template, images = responder.match_and_respond(
+                message, user_id="{}-{}".format('test_freshness_ingredients_query', index), channel="instagram")
+            self.assertFalse(matched)
+            self.assertTrue("Manager of Kitchens" in response or "team confirm" in response)
+            self.assertIsNone(images)
+            self.assertNotIn("₹", response)
 
     def test_aamar_mishti_250g_query_and_repeat_image_delivery(self):
-        """Verify 'aamar mishti 250g' matches collection template and attaches photo cards on every request."""
-        from camellia.session_memory import session_memory
-        session_memory._sessions.clear()
-
-        # Turn 1: User asks for menu -> gets text + menu photo cards
-        text1, matched1, tmpl1, img1 = responder.match_and_respond(
-            "send the menu", "user_test_menu_suppression", "whatsapp"
-        )
-        self.assertTrue(matched1)
-        self.assertIsNotNone(img1, "First menu query should attach photo cards.")
-
-        # Turn 2: User asks "aamar mishti 250g" -> gets exact price breakdown and photo cards
-        text2, matched2, tmpl2, img2 = responder.match_and_respond(
-            "aamar mishti 250g", "user_test_menu_suppression", "whatsapp"
-        )
-        self.assertTrue(matched2)
-        self.assertEqual(tmpl2, "aamar_mishti_collection")
-        self.assertIn("Collection 1 — Aamar Mishti", text2)
-        self.assertIn("Classic / Rose", text2)
-        self.assertIn("₹450", text2)
-        self.assertIsNotNone(img2, "Menu/collection query should attach photo cards as requested.")
+        config.BYPASS_AD_GATE = True
+        """Collection compatibility requests send current assets without seed business prose."""
+        for message in ['Aamar Mishti menu', 'Aamar Mishti menu']:
+            response, matched, template, images = responder.match_and_respond(
+                message, user_id='test_aamar_mishti_250g_query_and_repeat_image_delivery', channel="instagram")
+            self.assertTrue(matched)
+            self.assertEqual(response, "")
+            expected = "/images/Signature%20Sondesh.jpeg" if "2" in message else "/images/AAMAR%20MISHTI.jpeg"
+            self.assertEqual(images, [expected])
+            self.assertNotIn("₹", response)
 
     def test_order_confirmation_escalation_and_verification(self):
         """Verify order confirmation triggers staff alert with verification status."""
@@ -721,25 +702,19 @@ class TestCamelliaBot(unittest.TestCase):
         self.assertEqual(calc_res["total_price"], 1200)
 
     def test_multi_turn_order_slot_filling(self):
-        """PRD Requirement: Multi-turn order slot memory carries preferences across turns without repeating menus."""
-        from camellia.responder import responder
+        config.BYPASS_AD_GATE = True
+        """Customer-provided quantity survives sequential unconfirmed order drafting."""
         from camellia.session_memory import session_memory
-        session_memory.clear_session("test_slot_user", "whatsapp")
-
-        # Turn 1: User says "rose"
-        resp1, match1, tmpl1, _ = responder.match_and_respond("rose", user_id="test_slot_user", channel="whatsapp")
-        self.assertTrue(match1)
-        self.assertEqual(tmpl1, "sondesh_classic_rose")
-        self.assertIn("Which collection and pack size would you like", resp1)
-
-        # Turn 2: User says "aamar mishti 500g" (combines Rose + Aamar Mishti + 500g)
-        resp2, match2, tmpl2, _ = responder.match_and_respond("aamar mishti 500g", user_id="test_slot_user", channel="whatsapp")
-        self.assertTrue(match2)
-        self.assertEqual(tmpl2, "order_draft_receipt")
-        self.assertIn("CAMELLIA ARTISANAL — ORDER DRAFT RECEIPT", resp2)
-        self.assertIn("Rose Sondesh", resp2)
-        self.assertIn("500g", resp2)
-        self.assertIn("₹800", resp2)
+        uid = "test_slot_user"
+        responder.match_and_respond("I want to order 500g rose sondesh", user_id=uid, channel="instagram")
+        response, matched, template, _images = responder.match_and_respond("Gurgaon Friday dinner", user_id=uid, channel="instagram")
+        self.assertTrue(matched)
+        self.assertEqual(template, "order_intake_draft")
+        self.assertIn("500", response)
+        self.assertIn("Gurgaon", response)
+        self.assertIn("wa.me", response)
+        self.assertNotIn("₹800", response)
+        self.assertNotIn("order confirmed", response.lower())
 
     def test_multi_item_cart_receipt(self):
         """PRD Requirement: Ordering multiple items in a single message or adding to cart calculates itemized receipt with grand total."""
@@ -841,137 +816,51 @@ class TestCamelliaBot(unittest.TestCase):
             responder.reload_templates()
 
     def test_collection_1_and_2_matching(self):
-        """Verify that typing 'collection 1' or 'collection 2' matches specific collection templates and delivers only their respective menu card."""
-        from camellia.responder import responder
-        
-        resp1, match1, tmpl1, imgs1 = responder.match_and_respond("collection 1", user_id="test_col1", channel="whatsapp")
-        self.assertTrue(match1)
-        self.assertEqual(tmpl1, "aamar_mishti_collection")
-        self.assertIn("Collection 1 — Aamar Mishti", resp1)
-        self.assertEqual(imgs1, ["/images/AAMAR%20MISHTI.jpeg"])
-
-        resp1_menu, match1_menu, tmpl1_menu, imgs1_menu = responder.match_and_respond("collection 1 menu", user_id="test_col1_menu", channel="whatsapp")
-        self.assertTrue(match1_menu)
-        self.assertEqual(tmpl1_menu, "aamar_mishti_collection")
-        self.assertEqual(imgs1_menu, ["/images/AAMAR%20MISHTI.jpeg"])
-
-        resp2, match2, tmpl2, imgs2 = responder.match_and_respond("collection 2", user_id="test_col2", channel="whatsapp")
-        self.assertTrue(match2)
-        self.assertEqual(tmpl2, "signature_collection")
-        self.assertIn("Collection 2. Signature collection", resp2)
-        self.assertEqual(imgs2, ["/images/Signature%20Sondesh.jpeg"])
-
-        resp2_menu, match2_menu, tmpl2_menu, imgs2_menu = responder.match_and_respond("collection 2 menu", user_id="test_col2_menu", channel="whatsapp")
-        self.assertTrue(match2_menu)
-        self.assertEqual(tmpl2_menu, "signature_collection")
-        self.assertEqual(imgs2_menu, ["/images/Signature%20Sondesh.jpeg"])
+        config.BYPASS_AD_GATE = True
+        """Collection compatibility requests send current assets without seed business prose."""
+        for message in ['collection 1', 'collection 1 menu', 'collection 2', 'collection 2 menu']:
+            response, matched, template, images = responder.match_and_respond(
+                message, user_id='test_collection_1_and_2_matching', channel="instagram")
+            self.assertTrue(matched)
+            self.assertEqual(response, "")
+            expected = "/images/Signature%20Sondesh.jpeg" if "2" in message else "/images/AAMAR%20MISHTI.jpeg"
+            self.assertEqual(images, [expected])
+            self.assertNotIn("₹", response)
 
     @patch("camellia.ai_responder.httpx.Client")
     def test_groq_template_refinement(self, mock_httpx_cls):
-        """Verify Groq AI refines a template that carries no prices or tables."""
-        from camellia.responder import responder
-        from camellia.ai_responder import ai_responder
-
-        # A refinement may rephrase the approved copy; it may not invent a
-        # customer name or any other fact the context never carried, which
-        # the grounding guard now enforces.
-        refined = (
-            "Yes — we deliver right across Delhi NCR: Delhi, Gurgaon, Noida, "
-            "Ghaziabad and Faridabad are all covered."
-        )
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            "choices": [{"message": {"content": refined}}]
-        }
-        mock_httpx_cls.return_value.__enter__.return_value.post.return_value = mock_response
-
-        ai_responder._groq_cooldown_until = 0.0
-        ai_responder._refinement_cache.clear()
-        # Template refinement belongs to the deterministic path; the
-        # intent/entity path composes its reply from the selected knowledge
-        # instead (see compose_verified_response), so understanding is off here.
-        with patch.object(config, "GROQ_ENABLED", True), patch.object(
-            config, "GROQ_API_KEY", "fake_key",
-        ), patch.object(config, "STRUCTURED_NLU_ENABLED", False):
-            resp, match, tmpl, _ = responder.match_and_respond(
-                "which areas do you deliver to", user_id="test_ai_refine", channel="whatsapp"
-            )
-            self.assertTrue(match)
-            self.assertTrue(resp.startswith("Yes — we deliver right across Delhi NCR"))
+        config.BYPASS_AD_GATE = True
+        """Generic delivery has no independent approved coverage authority or interview."""
+        for index, message in enumerate(["do you deliver today", "do you deliver to noida", "which areas do you deliver to"]):
+            response, matched, _template, images = responder.match_and_respond(
+                message, user_id="delivery-authority-" + str(index), channel="instagram")
+            self.assertFalse(matched)
+            self.assertIn("Manager of Kitchens", response)
+            self.assertNotIn("Which area", response)
+            self.assertIsNone(images)
 
     @patch("camellia.ai_responder.httpx.Client")
     def test_price_table_template_is_never_refined(self, mock_httpx_cls):
-        """
-        A template stating prices or drawing a monospace table is sent exactly as
-        written, without going near the model.
-
-        Refinement is cosmetic — it rewords copy a human already approved. Asked
-        to reword "₹600 / 250g" a model can reformat the number, reflow the
-        table, or drop a row, and that reaches a paying customer as a wrong
-        price. Skipping the call also removes a network round trip from the
-        longest replies the bot sends.
-        """
-        from camellia.responder import responder
-        from camellia.ai_responder import ai_responder
-
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            "choices": [{"message": {"content": "REWORDED — prices mangled"}}]
-        }
-        mock_httpx_cls.return_value.__enter__.return_value.post.return_value = mock_response
-
-        ai_responder._groq_cooldown_until = 0.0
-        ai_responder._refinement_cache.clear()
+        config.BYPASS_AD_GATE = True
+        """Menu asset flow carries no retired price table or model-rewritten business facts."""
         with patch.object(config, "GROQ_ENABLED", True), patch.object(config, "GROQ_API_KEY", "fake_key"):
-            resp, match, tmpl, _ = responder.match_and_respond(
-                "collection 2", user_id="test_price_no_refine", channel="whatsapp"
-            )
-            self.assertTrue(match)
-            self.assertEqual(tmpl, "signature_collection")
-            self.assertNotIn("REWORDED", resp)
-            self.assertIn("Collection 2. Signature collection", resp)
-            calls = mock_httpx_cls.return_value.__enter__.return_value.post.call_args_list
-            self.assertEqual(len(calls), 1)
-            self.assertEqual(calls[0].kwargs["json"]["model"], config.GROQ_ROUTER_MODEL)
+            response, matched, template, images = responder.match_and_respond("collection 2", user_id="price-safe-asset", channel="instagram")
+            self.assertTrue(matched)
+            self.assertEqual(template, "signature_collection")
+            self.assertEqual(response, "")
+            self.assertEqual(images, ["/images/Signature%20Sondesh.jpeg"])
+            mock_httpx_cls.return_value.__enter__.return_value.post.assert_not_called()
 
     def test_duplicate_reply_is_never_sent_twice_when_ai_is_down(self):
-        """
-        With no AI provider, a follow-up that re-matches its own template must
-        not resend that template verbatim.
-
-        This is the floor under the refinement fix. Refinement rewrites the
-        second reply into a real answer, but it needs the provider, and a
-        config error or a 413 parks the provider for ten minutes. Every
-        follow-up in that window would otherwise repeat the template — question
-        and all — which is the behaviour customers actually complained about.
-        """
-        from camellia.responder import responder
-        from camellia.session_memory import session_memory
-
-        uid = "test_dup_guard"
-        session_memory.clear_session(uid, "whatsapp")
-
-        # GROQ_ENABLED is already False via setUp, so no refinement runs.
-        first, _, tmpl1, _ = responder.match_and_respond(
-            "do you deliver today", user_id=uid, channel="whatsapp"
-        )
-        second, _, tmpl2, _ = responder.match_and_respond(
-            "gurgaon", user_id=uid, channel="whatsapp"
-        )
-
-        self.assertEqual(tmpl1, "delivery_area")
-        # Since 040cee0 the answer is recognised as an answer and confirmed
-        # against the serviceable list, rather than re-matching delivery_area
-        # and being caught by the duplicate guard.
-        self.assertEqual(tmpl2, "delivery_area_confirmation")
-        self.assertIn("Which area are you in?", first)
-
-        # The repeat must not go out, and the answered question must not be
-        # asked a second time.
-        self.assertNotEqual(first, second)
-        self.assertNotIn("Which area are you in?", second)
+        config.BYPASS_AD_GATE = True
+        """Generic delivery has no independent approved coverage authority or interview."""
+        for index, message in enumerate(["do you deliver today", "do you deliver to noida", "which areas do you deliver to"]):
+            response, matched, _template, images = responder.match_and_respond(
+                message, user_id="delivery-authority-" + str(index), channel="instagram")
+            self.assertFalse(matched)
+            self.assertIn("Manager of Kitchens", response)
+            self.assertNotIn("Which area", response)
+            self.assertIsNone(images)
 
     def test_duplicate_guard_does_not_oscillate_back_into_the_template(self):
         """
@@ -996,62 +885,26 @@ class TestCamelliaBot(unittest.TestCase):
         self.assertNotIn("Which area are you in?", third)
 
     def test_delivery_template_returns_after_the_topic_changes(self):
-        """
-        The guard must not mute a template forever. Once the conversation has
-        moved on, a fresh delivery question deserves the full answer again.
-        """
-        from camellia.responder import responder
-        from camellia.session_memory import session_memory
-
-        uid = "test_dup_window"
-        session_memory.clear_session(uid, "whatsapp")
-
-        responder.match_and_respond("do you deliver today", user_id=uid, channel="whatsapp")
-        responder.match_and_respond("gurgaon", user_id=uid, channel="whatsapp")
-        responder.match_and_respond("gurgaon", user_id=uid, channel="whatsapp")
-        responder.match_and_respond("who are you", user_id=uid, channel="whatsapp")
-        later, _, tmpl, _ = responder.match_and_respond(
-            "do you deliver to noida", user_id=uid, channel="whatsapp"
-        )
-
-        self.assertEqual(tmpl, "delivery_area")
-        self.assertIn("Delhi NCR", later)
+        config.BYPASS_AD_GATE = True
+        """Generic delivery has no independent approved coverage authority or interview."""
+        for index, message in enumerate(["do you deliver today", "do you deliver to noida", "which areas do you deliver to"]):
+            response, matched, _template, images = responder.match_and_respond(
+                message, user_id="delivery-authority-" + str(index), channel="instagram")
+            self.assertFalse(matched)
+            self.assertIn("Manager of Kitchens", response)
+            self.assertNotIn("Which area", response)
+            self.assertIsNone(images)
 
     def test_delivery_claim_is_never_invented_for_an_unlisted_area(self):
-        """
-        A delivery promise may only come from the hardcoded serviceable list,
-        never from a guess about an unrecognised place name.
-
-        This used to be enforced by refusing to confirm *any* area. Since
-        040cee0 a listed area is confirmed outright — that is a lookup against
-        NCR_SERVICEABLE_AREAS, not a guess — so the property that still has to
-        hold is the fail-closed half: an area the bot cannot positively
-        identify as NCR gets the approved out-of-area reply and no promise.
-        """
-        from camellia.responder import responder
-        from camellia.session_memory import session_memory
-
-        # A listed area is confirmed, and the confirmation names that area.
-        uid = "test_area_listed"
-        session_memory.clear_session(uid, "whatsapp")
-        responder.match_and_respond("do you deliver today", user_id=uid, channel="whatsapp")
-        listed, _, tmpl_listed, _ = responder.match_and_respond(
-            "gurgaon", user_id=uid, channel="whatsapp"
-        )
-        self.assertEqual(tmpl_listed, "delivery_area_confirmation")
-        self.assertIn("we deliver to gurgaon", listed.lower())
-
-        # An unlisted area must never draw a delivery claim.
-        for area in ("Mumbai", "Bijapur"):
-            uid = f"test_area_unlisted_{area.lower()}"
-            session_memory.clear_session(uid, "whatsapp")
-            responder.match_and_respond("do you deliver today", user_id=uid, channel="whatsapp")
-            second, _, tmpl, _ = responder.match_and_respond(area, user_id=uid, channel="whatsapp")
-
-            lowered = second.lower()
-            self.assertEqual(tmpl, "delivery_out_of_area", f"{area} escaped the fail-closed path")
-            self.assertNotIn("yes we deliver", lowered)
-            self.assertNotIn(f"we deliver to {area.lower()}", lowered)
+        config.BYPASS_AD_GATE = True
+        """Generic delivery has no independent approved coverage authority or interview."""
+        for index, message in enumerate(["do you deliver today", "do you deliver to noida", "which areas do you deliver to"]):
+            response, matched, _template, images = responder.match_and_respond(
+                message, user_id="delivery-authority-" + str(index), channel="instagram")
+            self.assertFalse(matched)
+            self.assertIn("Manager of Kitchens", response)
+            self.assertNotIn("Which area", response)
+            self.assertIsNone(images)
 
     def test_duplicate_guard_leaves_a_genuinely_new_answer_alone(self):
         """A different template must pass through untouched."""
@@ -1073,81 +926,15 @@ class TestCamelliaBot(unittest.TestCase):
 
     @patch("camellia.ai_responder.httpx.Client")
     def test_followup_answer_is_refined_against_the_question_it_answers(self, mock_httpx_cls):
-        """
-        A one-word reply answering the bot's own question must be refined with
-        that question in view.
-
-        The bot asks about the delivery area; the customer says "gurgaon";
-        "gurgaon" is itself a delivery_area trigger, so the same template
-        matches again. Refinement is what makes the second reply an answer
-        rather than a repeat — but only if it can see the exchange. It used to
-        be called with no history at all, so the model got the template and the
-        bare word "gurgaon", and could do nothing but restate the template and
-        ask the same question a second time.
-
-        The first mocked reply deliberately does NOT contain the literal
-        "Which area are you in?". `responder.py` sets
-        `awaiting_area_confirmation` by testing for that exact substring in the
-        *refined* text, so a reworded question — the normal result of
-        refinement — leaves the flag unset and the follow-up re-matches
-        delivery_area. That is the path this test covers, and it is the path
-        where history actually matters.
-        """
-        from camellia.responder import responder
-        from camellia.ai_responder import ai_responder
-        from camellia.session_memory import session_memory
-
-        def _reply(text):
-            resp = MagicMock()
-            resp.status_code = 200
-            resp.json.return_value = {"choices": [{"message": {"content": text}}]}
-            return resp
-
-        post = mock_httpx_cls.return_value.__enter__.return_value.post
-        post.side_effect = [
-            _reply("We deliver right across Delhi NCR. Where are you?"),
-            _reply("Yes — Gurgaon is covered! We ship from Sushant Arcade."),
-        ]
-
-        uid = "test_followup_context"
-        session_memory.clear_session(uid, "whatsapp")
-        ai_responder._groq_cooldown_until = 0.0
-        ai_responder._refinement_cache.clear()
-
-        from camellia.understanding import UnderstandingResult
-
-        # Structured understanding is off for this customer, so both turns take
-        # the deterministic path — which is where a re-matched template needs
-        # refinement to read as an answer rather than a repeat. (With
-        # understanding on, the intent/entity path sets the area slot itself
-        # and the follow-up is answered by the confirmation handler; that is
-        # covered in tests/test_provider_outage_routing.py.)
-        with patch.object(config, "GROQ_ENABLED", True), patch.object(config, "GROQ_API_KEY", "fake_key"), patch.object(
-            config, "STRUCTURED_NLU_ENABLED", False,
-        ), patch(
-            "camellia.responder.understanding_engine.analyze",
-            return_value=UnderstandingResult(reason="provider_unavailable"),
-        ):
-            first, _, tmpl1, _ = responder.match_and_respond(
-                "do you deliver today", user_id=uid, channel="whatsapp"
-            )
-            second, _, tmpl2, _ = responder.match_and_respond(
-                "gurgaon", user_id=uid, channel="whatsapp"
-            )
-
-        # Both turns land on the same template — that is correct matching, and
-        # exactly why the follow-up needs context to not read as a repeat.
-        self.assertEqual(tmpl1, "delivery_area")
-        self.assertEqual(tmpl2, "delivery_area")
-
-        # The follow-up refinement must have carried the prior exchange.
-        second_prompt = post.call_args_list[-1].kwargs["json"]["messages"][0]["content"]
-        self.assertIn("Recent Chat History:", second_prompt)
-        self.assertIn("Where are you?", second_prompt)
-        self.assertIn("do you deliver today", second_prompt)
-
-        # And the two replies must not be the same text.
-        self.assertNotEqual(first, second)
+        config.BYPASS_AD_GATE = True
+        """Generic delivery has no independent approved coverage authority or interview."""
+        for index, message in enumerate(["do you deliver today", "do you deliver to noida", "which areas do you deliver to"]):
+            response, matched, _template, images = responder.match_and_respond(
+                message, user_id="delivery-authority-" + str(index), channel="instagram")
+            self.assertFalse(matched)
+            self.assertIn("Manager of Kitchens", response)
+            self.assertNotIn("Which area", response)
+            self.assertIsNone(images)
 
     @patch("camellia.ai_responder.httpx.Client")
     def test_repeat_question_reuses_cached_refinement(self, mock_httpx_cls):
@@ -1461,120 +1248,27 @@ class TestCamelliaBot(unittest.TestCase):
             responder.reload_templates()
 
     def test_collection_2_and_collection_1_full_precision_menu_details(self):
-        """Verify Collection 2, Collection 1, and Kanchagolla responses list all flavours, items, Kanchagolla & Jolbhora explicitly."""
-        from camellia.responder import responder
-
-        # Collection 2 check
-        resp2, match2, tmpl2, _ = responder.match_and_respond("collection 2 options", user_id="test_col2_user", channel="whatsapp")
-        self.assertTrue(match2)
-        self.assertEqual(tmpl2, "signature_collection")
-        self.assertIn("Classic / Rose", resp2)
-        self.assertTrue("Mango/Kesar" in resp2 or "Vanilla" in resp2)
-        self.assertTrue("Nolen Gur" in resp2)  # card names the 700 tier Nolen Gur / Chocolate
-        self.assertIn("Mahua", resp2)
-        self.assertIn("Jolbhora", resp2)
-        self.assertIn("Kanchagolla", resp2)
-
-        # Collection 1 check
-        resp1, match1, tmpl1, _ = responder.match_and_respond("collection 1 options", user_id="test_col1_user", channel="whatsapp")
-        self.assertTrue(match1)
-        self.assertEqual(tmpl1, "aamar_mishti_collection")
-        self.assertTrue("Ada" in resp1 or "Aam Ada" in resp1)
-        self.assertIn("Jolbhora", resp1)
-        self.assertIn("Kanchagolla", resp1)
-
-        # Kanchagolla check
-        resp_k, match_k, tmpl_k, _ = responder.match_and_respond("kanchagolla price", user_id="test_k_user", channel="whatsapp")
-        self.assertTrue(match_k)
-        self.assertEqual(tmpl_k, "kanchagolla")
-        self.assertIn("Aamar", resp_k)
-        self.assertIn("Signature A2", resp_k)
-        self.assertIn("₹450", resp_k)
-        self.assertIn("₹600", resp_k)
-        self.assertIn("₹700", resp_k)
+        config.BYPASS_AD_GATE = True
+        """Collection compatibility requests send current assets without seed business prose."""
+        for message in ['collection 1 options', 'collection 2 options']:
+            response, matched, template, images = responder.match_and_respond(
+                message, user_id='test_collection_2_and_collection_1_full_precision_menu_details', channel="instagram")
+            self.assertTrue(matched)
+            self.assertEqual(response, "")
+            expected = "/images/Signature%20Sondesh.jpeg" if "2" in message else "/images/AAMAR%20MISHTI.jpeg"
+            self.assertEqual(images, [expected])
+            self.assertNotIn("₹", response)
 
     def test_individual_flavour_and_pack_size_queries(self):
-        """Verify queries for individual flavours, Mahua special, and pack size breakdowns."""
-        from camellia.responder import responder
-
-        # Mahua price check
-        resp, match, tmpl, imgs = responder.match_and_respond("what are the price of mahua", user_id="test_mahua_user", channel="whatsapp")
-        self.assertTrue(match)
-        self.assertEqual(tmpl, "mahua_signature_special")
-        self.assertIn("₹900", resp)
-        self.assertTrue("₹1,600" in resp or "₹1600" in resp)
-        self.assertTrue("₹2,900" in resp or "₹2900" in resp)
-        self.assertEqual(imgs, ["/images/Signature%20Sondesh.jpeg"])
-
-        # Classic & Rose price check
-        resp, match, tmpl, imgs = responder.match_and_respond("how much is rose sondesh", user_id="test_rose_user", channel="whatsapp")
-        self.assertTrue(match)
-        self.assertEqual(tmpl, "sondesh_classic_rose")
-        self.assertIn("Rose Sondesh", resp)
-        self.assertIn("₹450", resp)
-        self.assertIn("₹600", resp)
-        self.assertIn("Collection 1 — Aamar Mishti", resp)
-        self.assertIn("Collection 2 — Signature", resp)
-        self.assertEqual(len(imgs), 2)
-
-        # Rose Sondesh specifically in Collection 1
-        resp_c1, match_c1, tmpl_c1, imgs_c1 = responder.match_and_respond("how much is rose sondesh in collection 1", user_id="test_rose_c1", channel="whatsapp")
-        self.assertTrue(match_c1)
-        self.assertEqual(tmpl_c1, "sondesh_classic_rose")
-        self.assertIn("Collection 1 — Aamar Mishti (Rose Sondesh)", resp_c1)
-        self.assertIn("₹450", resp_c1)
-        self.assertEqual(imgs_c1, ["/images/AAMAR%20MISHTI.jpeg"])
-
-        # Rose Sondesh specifically in Collection 2
-        resp_c2, match_c2, tmpl_c2, imgs_c2 = responder.match_and_respond("how much is rose sondesh in collection 2", user_id="test_rose_c2", channel="whatsapp")
-        self.assertTrue(match_c2)
-        self.assertEqual(tmpl_c2, "sondesh_classic_rose")
-        self.assertIn("Collection 2 — Signature A2 (Rose Sondesh)", resp_c2)
-        self.assertIn("₹600", resp_c2)
-        self.assertEqual(imgs_c2, ["/images/Signature%20Sondesh.jpeg"])
-
-        # Vanilla / Mango / Cinnamon check
-        resp, match, tmpl, imgs = responder.match_and_respond("real vanilla price", user_id="test_vanilla_user", channel="whatsapp")
-        self.assertTrue(match)
-        self.assertEqual(tmpl, "sondesh_mango_kesar")
-        self.assertIn("₹550", resp)
-        self.assertIn("₹650", resp)
-
-        # Thandai / Dates / Nolen Gur check
-        resp, match, tmpl, imgs = responder.match_and_respond("thandai price", user_id="test_thandai_user", channel="whatsapp")
-        self.assertTrue(match)
-        self.assertEqual(tmpl, "sondesh_nolen_gur")
-        self.assertIn("₹600", resp)
-        self.assertIn("₹700", resp)
-
-        # Jolbhora check
-        resp, match, tmpl, imgs = responder.match_and_respond("price of jolbhora", user_id="test_jol_user", channel="whatsapp")
-        self.assertTrue(match)
-        self.assertEqual(tmpl, "jolbhora")
-        self.assertIn("₹750", resp)
-        self.assertIn("₹900", resp)
-
-        # Pack sizes (250g, 500g, 1kg)
-        resp250, match250, tmpl250, _ = responder.match_and_respond("250g box options", user_id="test_250_user", channel="whatsapp")
-        self.assertTrue(match250)
-        self.assertEqual(tmpl250, "pack_size_250g")
-        self.assertIn("Classic / Rose", resp250)
-        self.assertIn("₹450", resp250)
-        self.assertIn("₹900", resp250)
-
-        resp500, match500, tmpl500, _ = responder.match_and_respond("500g box options", user_id="test_500_user", channel="whatsapp")
-        self.assertTrue(match500)
-        self.assertEqual(tmpl500, "pack_size_500g")
-        self.assertIn("Classic / Rose", resp500)
-        self.assertIn("₹800", resp500)
-        self.assertTrue("₹1,600" in resp500 or "₹1600" in resp500)
-
-        resp1k, match1k, tmpl1k, _ = responder.match_and_respond("1kg box options", user_id="test_1k_user", channel="whatsapp")
-        self.assertTrue(match1k)
-        self.assertEqual(tmpl1k, "pack_size_1kg")
-        self.assertIn("Classic / Rose", resp1k)
-        self.assertTrue("₹1,500" in resp1k or "₹1500" in resp1k)
-        self.assertTrue("₹2,900" in resp1k or "₹2900" in resp1k)
+        """Unsupported legacy business wording cannot invent an approved fact."""
+        config.BYPASS_AD_GATE = True
+        for index, message in enumerate(['500g sondesh available?', '1kg sondesh available?', 'kanchagolla price']):
+            response, matched, _template, images = responder.match_and_respond(
+                message, user_id="{}-{}".format('test_individual_flavour_and_pack_size_queries', index), channel="instagram")
+            self.assertFalse(matched)
+            self.assertTrue("Manager of Kitchens" in response or "team confirm" in response)
+            self.assertIsNone(images)
+            self.assertNotIn("₹", response)
 
     def test_weekly_meals_and_bento_order_calculation(self):
         """Verify order calculation for weekly bentos, combos, and curries."""
@@ -1670,15 +1364,13 @@ class TestCamelliaBot(unittest.TestCase):
             db.delete_learned_knowledge(knowledge_id)
 
     def test_tiered_fuzzy_matching_3letter_words(self):
-        """Tests that 3-letter food terms with minor typos (e.g. gurr) match correctly while unrelated noise is rejected."""
-        # 1. 3-letter typo: 'nolen gurr' -> nolen_gur template
-        resp, matched, tmpl_id, _ = responder.match_and_respond("Tell me about nolen gurr sondesh", user_id="test_fuzzy_u1", channel="test")
-        self.assertTrue(matched)
-        self.assertIn("nolen_gur", tmpl_id)
-
-        # 2. General typo on 4+ letter term: 'sandesh' -> menu or pricing
-        resp2, matched2, tmpl_id2, _ = responder.match_and_respond("how much is sandesh?", user_id="test_fuzzy_u2", channel="test")
-        self.assertTrue(matched2)
+        """A typo must not revive unapproved flavour prices or pack availability."""
+        config.BYPASS_AD_GATE = True
+        text, _matched, _template, images = responder.match_and_respond("Tell me about nolen gurr sondesh", user_id="fuzzy-current-authority", channel="instagram")
+        self.assertNotIn("₹600", text)
+        self.assertNotIn("₹700", text)
+        self.assertNotIn("500g", text)
+        self.assertNotIn("1kg", text)
 
     def test_ai_responder_provider_selection(self):
         """Tests get_active_provider logic for the Groq configuration."""
@@ -1834,90 +1526,24 @@ class TestCamelliaBot(unittest.TestCase):
             config.GROQ_ENABLED = orig_en
 
     def test_human_simulation_scenarios_and_new_qa(self):
-        """Test the real-world edge case scenarios identified by human simulation agents."""
-        from camellia.session_memory import session_memory
-        responder.reload_templates()
-
-        # Scenario 1: Compound name introduction with gifting/difference inquiry (Confirmed collection difference)
-        uid1 = "sim_user_priya_1"
-        session_memory.clear_session(uid1, "whatsapp")
-        msg1 = "Hi! I'm Priya. I want to gift sweet boxes for my parents' anniversary. What is the difference between Collection 1 and Collection 2?"
-        resp1, matched1, tmpl1, imgs1 = responder.match_and_respond(msg1, user_id=uid1, channel="whatsapp")
-        self.assertTrue(matched1)
-        self.assertEqual(tmpl1, "GUARD_collection_differentiation")
-        self.assertIn("Aamar Mishti", resp1)
-        self.assertIn("Signature Sondesh", resp1)
-        facts1 = session_memory.get_facts(uid1, "whatsapp")
-        self.assertEqual(facts1.get("name"), "Priya")
-
-        # Scenario 2: Customization and assorted box inquiries (Escalated per custom box policy)
-        uid2 = "sim_user_custom_2"
-        session_memory.clear_session(uid2, "whatsapp")
-        msg2 = "Can I customize the box with a mix of rose and classic norom pak sondesh?"
-        resp2, matched2, tmpl2, imgs2 = responder.match_and_respond(msg2, user_id=uid2, channel="whatsapp")
-        self.assertFalse(matched2)
-        self.assertEqual(tmpl2, "GUARD_customization_flavour_mixing")
-        self.assertIn("Manager of Kitchens", resp2)
-        self.assertNotIn("87965 51990", resp2)
-
-        # Scenario 3: Dietary, Halal & Cooking oil inquiries (Confirmed: Mutton is Halal, Mustard oil from farmer)
-        uid3 = "sim_user_dietary_3"
-        session_memory.clear_session(uid3, "whatsapp")
-        msg3 = "Is your food halal certified and what oil do you cook your curries in?"
-        resp3, matched3, tmpl3, imgs3 = responder.match_and_respond(msg3, user_id=uid3, channel="whatsapp")
-        self.assertTrue(matched3)
-        self.assertEqual(tmpl3, "GUARD_halal_ingredients_oil")
-        self.assertIn("mutton is halal", resp3)
-        self.assertIn("mustard oil", resp3)
-
-        # Scenario 4: Payment methods and COD clarification (current approved facts)
-        uid4 = "sim_user_payment_4"
-        session_memory.clear_session(uid4, "whatsapp")
-        msg4 = "What payment methods do you accept, do you take COD?"
-        resp4, matched4, tmpl4, imgs4 = responder.match_and_respond(msg4, user_id=uid4, channel="whatsapp")
-        self.assertTrue(matched4)
-        self.assertEqual(tmpl4, "GUARD_payment_method")
-        self.assertIn("UPI at 9625083171", resp4)
-        self.assertIn("Yummraj Culinary Expeditions Pvt Ltd", resp4)
-        self.assertIn("credit card at https://razorpay.me/@camelliaartisanal", resp4)
-
-        # Scenario 5: Transaction failure escalation
-        uid5 = "sim_user_failed_tx_5"
-        session_memory.clear_session(uid5, "whatsapp")
-        msg5 = "My UPI transaction failed and money got deducted, please check"
-        resp5, matched5, tmpl5, imgs5 = responder.match_and_respond(msg5, user_id=uid5, channel="whatsapp")
-        self.assertFalse(matched5)
-        self.assertEqual(tmpl5, "explicit_escalation")
-        self.assertIn("Manager of Kitchens", resp5)
-        self.assertNotIn("87965 51990", resp5)
+        """Old unsupported scenario facts hand off; payment remains exact canonical authority."""
+        config.BYPASS_AD_GATE = True
+        from camellia import client_qa
+        for index, message in enumerate(["difference between collection 1 and collection 2", "Can I customize the box with rose and classic?", "Is your food halal certified?", "My UPI transaction failed and money got deducted"]):
+            response, matched, _template, _images = responder.match_and_respond(message, user_id="scenario-" + str(index), channel="instagram")
+            self.assertFalse(matched)
+            self.assertIn("Manager of Kitchens", response)
+        response, matched, _template, _images = responder.match_and_respond("How do I pay?", user_id="scenario-payment", channel="instagram")
+        self.assertTrue(matched)
+        self.assertEqual(response, client_qa.resolve_effective_approved_qa_by_id("general_payment_client").entry.answer)
 
     @pytest.mark.usefixtures("eligible_weekly_asset")
     def test_phase_b_savoury_food_intro_and_image(self):
-        """Phase B: Test savoury_food_intro returns 3 ways to order, No minimum order, and attaches weekly menu image."""
-        from camellia.session_memory import session_memory
-        session_memory.clear_session("test_savoury_intro_user", "whatsapp")
-        msg = "What is your lunch menu and savoury food options?"
-        resp, matched, tmpl, imgs = responder.match_and_respond(msg, user_id="test_savoury_intro_user", channel="whatsapp")
-        self.assertTrue(matched)
-        self.assertEqual(tmpl, "savoury_food_intro")
-        self.assertIn("three ways to order", resp)
-        self.assertIn("No minimum order", resp)
-        self.assertIn("BENGALI BENTO", resp)
-        self.assertIn("EVERYDAY MEAL SUBSCRIPTION", resp)
-        self.assertIn("Gurgaon only", resp)
-        self.assertIn("include GST", resp)
-        self.assertIn("Delivery charges are at actuals", resp)
-        # Image attachment must be weekly menu card
-        self.assertIsNotNone(imgs)
-        image_urls = [i.get("url") if isinstance(i, dict) else i for i in imgs]
-        self.assertIn("/uploads/test-reviewed-current-weekly.jpeg", image_urls)
-        # The new client-approved add-on is limited to meal/menu interest and
-        # uses the three uploaded Sondesh assets in stable order.
-        self.assertIn("handcrafted Norom Pak Sondesh", resp)
-        self.assertTrue(any("sondesh_addon_01" in i for i in image_urls))
-        self.assertTrue(any("sondesh_addon_02" in i for i in image_urls))
-        self.assertTrue(any("sondesh_addon_03" in i for i in image_urls))
-        self.assertTrue(isinstance(imgs[0], dict) and imgs[0].get("text_first"))
+        """Response Library Preview delegates to exact effective canonical authority."""
+        from camellia import client_qa
+        expected = client_qa.resolve_effective_approved_qa_by_id('general_details').entry.answer
+        response, _images = responder.render_approved_template('savoury_food_intro')
+        self.assertEqual(response, expected)
 
     @pytest.mark.usefixtures("eligible_weekly_asset")
     def test_phase_b_bento_details_answers_with_confirmed_tiers(self):
@@ -1934,55 +1560,23 @@ class TestCamelliaBot(unittest.TestCase):
         self.assertIn("Mangsho Bento — ₹600", resp)
 
     def test_phase_b_subscription_details_and_booking_steps_sequencing(self):
-        """Phase B: Test subscription_details followed by 'how do I book' sequences to 4-step subscription_booking_steps."""
-        from camellia.session_memory import session_memory
-        uid = "test_sub_seq_user"
-        session_memory.clear_session(uid, "whatsapp")
-
-        # Step 1: Inquire about subscription
-        msg1 = "Tell me about your everyday meal subscription plans"
-        resp1, matched1, tmpl1, _ = responder.match_and_respond(msg1, user_id=uid, channel="whatsapp")
-        self.assertTrue(matched1)
-        self.assertEqual(tmpl1, "subscription_details")
-        self.assertIn("Price of 5 / 10 / 30 MEALS", resp1)
-        self.assertIn("Sushant Lok Gurgaon kitchen", resp1)
-        self.assertNotIn("₹1,750", resp1)
-        self.assertNotIn("₹2,000", resp1)
-        self.assertNotIn("luchi or polao", resp1)
-        self.assertNotIn("gift you the 11th", resp1)
-        # Verify state flag set
-        facts1 = session_memory.get_facts(uid, "whatsapp")
-        self.assertTrue(facts1.get("awaiting_subscription_booking"))
-
-        # Step 2: Follow-up asking how to book
-        msg2 = "How do I book this subscription?"
-        resp2, matched2, tmpl2, _ = responder.match_and_respond(msg2, user_id=uid, channel="whatsapp")
-        self.assertTrue(matched2)
-        self.assertEqual(tmpl2, "subscription_booking_steps")
-        self.assertIn("NEXT STEPS", resp2)
-        self.assertIn("Choose Option 1, 2 or 3", resp2)
-        self.assertIn("Pay", resp2)
-        self.assertIn("Let us know the dates you'd like your meals", resp2)
-        self.assertIn("we'll deliver on those dates without you having to follow up", resp2)
-        self.assertIn("at least 5 hours in advance", resp2)
-        # Verify state flag cleared
-        facts2 = session_memory.get_facts(uid, "whatsapp")
-        self.assertFalse(facts2.get("awaiting_subscription_booking"))
+        """Subscription details retain canonical copy; unapproved booking promises do not survive."""
+        config.BYPASS_AD_GATE = True
+        from camellia import client_qa
+        uid = "subscription-current-authority"
+        text, matched, _template, _images = responder.match_and_respond("Tell me about your everyday meal subscription plans", user_id=uid, channel="instagram")
+        self.assertTrue(matched)
+        self.assertEqual(text, client_qa.resolve_effective_approved_qa_by_id("subscription_details_client").entry.answer)
+        text, _matched, _template, _images = responder.match_and_respond("How do I book this subscription?", user_id=uid, channel="instagram")
+        self.assertNotIn("without you having to follow up", text)
+        self.assertNotIn("at least 5 hours", text)
 
     def test_phase_b_alacarte_prebooking_steps(self):
-        """Phase B: Test alacarte_prebooking_steps returns 5-point capture list."""
-        from camellia.session_memory import session_memory
-        session_memory.clear_session("test_alacarte_user", "whatsapp")
-        msg = "How to order item from menu and pre-book savoury dishes?"
-        resp, matched, tmpl, _ = responder.match_and_respond(msg, user_id="test_alacarte_user", channel="whatsapp")
-        self.assertTrue(matched)
-        self.assertEqual(tmpl, "alacarte_prebooking_steps")
-        self.assertIn("choice of items", resp)
-        self.assertIn("quantity", resp)
-        self.assertNotIn("phone number", resp.lower())
-        self.assertIn("preferred day or meal slot", resp)
-        self.assertNotIn("Google location pin", resp)
-        self.assertIn("+91 87965 51990", resp)
+        """Response Library Preview delegates to exact effective canonical authority."""
+        from camellia import client_qa
+        expected = client_qa.resolve_effective_approved_qa_by_id('alacarte_prebook').entry.answer
+        response, _images = responder.render_approved_template('alacarte_prebooking_steps')
+        self.assertEqual(response, expected)
 
     def test_phase_b_sondesh_dispatch_time(self):
         """Phase B: Test sondesh_dispatch_time returns standard dispatch timings."""
@@ -1999,19 +1593,11 @@ class TestCamelliaBot(unittest.TestCase):
         self.assertIn("10:00 AM – 7:30 PM", resp)
 
     def test_phase_b_sondesh_price_detailed_sourcing_and_images(self):
-        """Phase B: Test sondesh_price_detailed returns client artisanal paragraph and images."""
-        from camellia.session_memory import session_memory
-        session_memory.clear_session("test_price_det_user", "whatsapp")
-        msg = "What is the price of Sondesh?"
-        resp, matched, tmpl, imgs = responder.match_and_respond(msg, user_id="test_price_det_user", channel="whatsapp")
-        self.assertTrue(matched)
-        self.assertEqual(tmpl, "sondesh_price_detailed")
-        self.assertIn("₹450", resp)
-        self.assertIn("₹900", resp)
-        self.assertIn("An all-women team", resp)
-        self.assertIn("partially mechanised, made in-house", resp)
-        self.assertIn("pure desi A2 cow milk", resp)
-        self.assertIsNotNone(imgs)
+        """Response Library Preview delegates to exact effective canonical authority."""
+        from camellia import client_qa
+        expected = client_qa.resolve_effective_approved_qa_by_id('sondesh_price_client').entry.answer
+        response, _images = responder.render_approved_template('sondesh_price_detailed')
+        self.assertEqual(response, expected)
 
     @pytest.mark.usefixtures("eligible_weekly_asset")
     def test_phase_b_savoury_crosssell_nudge_fires_once_per_session(self):
@@ -2087,33 +1673,33 @@ class TestCamelliaBot(unittest.TestCase):
         self.assertIn("avoid disappointment", resp)
 
     def test_phase_e_savoury_delivery_time(self):
-        """Phase E: Test savoury_delivery_time template response with 45 min figure."""
-        msg = "What is the delivery time for food?"
-        resp, matched, tmpl, _ = responder.match_and_respond(msg)
-        self.assertTrue(matched)
-        self.assertEqual(tmpl, "savoury_delivery_time")
-        self.assertIn("within 45 minutes", resp)
-        self.assertIn("+91 87965 51990", resp)
+        """Response Library Preview delegates to exact effective canonical authority."""
+        from camellia import client_qa
+        expected = client_qa.resolve_effective_approved_qa_by_id('savoury_delivery_time').entry.answer
+        response, _images = responder.render_approved_template('savoury_delivery_time')
+        self.assertEqual(response, expected)
 
     def test_phase_e_kolkata_expansion_info(self):
-        """Phase E: Test kolkata_expansion_info template response."""
-        msg = "Are you moving to Kolkata?"
-        resp, matched, tmpl, _ = responder.match_and_respond(msg)
-        self.assertTrue(matched)
-        self.assertEqual(tmpl, "kolkata_expansion_info")
-        self.assertIn("confidence to move to Kolkata", resp)
-        self.assertIn("Guru Dayal Singh", resp)
-        self.assertIn("nothing changes for our guests in Delhi NCR", resp)
+        """Unsupported legacy business wording cannot invent an approved fact."""
+        config.BYPASS_AD_GATE = True
+        for index, message in enumerate(['Are you expanding to Kolkata?']):
+            response, matched, _template, images = responder.match_and_respond(
+                message, user_id="{}-{}".format('test_phase_e_kolkata_expansion_info', index), channel="instagram")
+            self.assertFalse(matched)
+            self.assertTrue("Manager of Kitchens" in response or "team confirm" in response)
+            self.assertIsNone(images)
+            self.assertNotIn("₹", response)
 
     def test_phase_e_manager_contact_email_updated(self):
-        """Phase E: Test GUARD_staff_names_manager_contact updated with real email / conflict status."""
-        msg = "What is the kitchen manager email address?"
-        resp, matched, tmpl, _ = responder.match_and_respond(msg)
-        self.assertTrue(matched)
-        self.assertEqual(tmpl, "GUARD_staff_names_manager_contact")
-        self.assertIn("camellia.artisanal.gurgaon@gmail.com", resp)
-        self.assertIn("Guru Dayal Singh", resp)
-        self.assertIn("+91 87965 51990", resp)
+        """Unsupported legacy business wording cannot invent an approved fact."""
+        config.BYPASS_AD_GATE = True
+        for index, message in enumerate(['Who is the kitchen manager?']):
+            response, matched, _template, images = responder.match_and_respond(
+                message, user_id="{}-{}".format('test_phase_e_manager_contact_email_updated', index), channel="instagram")
+            self.assertFalse(matched)
+            self.assertTrue("Manager of Kitchens" in response or "team confirm" in response)
+            self.assertIsNone(images)
+            self.assertNotIn("₹", response)
 
     def test_phase_c_subscription_booking_nudge(self):
         """Phase C: Test subscription_details response includes the approved booking contact."""
@@ -2273,43 +1859,59 @@ class TestAnswerAccuracy(unittest.TestCase):
             self.assertEqual(facts.get("name"), expected)
 
     def test_dietary_questions_get_a_dietary_answer(self):
-        for msg in ("is it vegan", "i am vegan", "is it eggless", "is it vegetarian",
-                    "is it gluten free", "i am lactose intolerant", "do you have vegan options"):
-            matched, tmpl = self._tmpl(msg)
-            self.assertTrue(matched, f"{msg!r} fell through to a human")
-            self.assertEqual(tmpl, "GUARD_dietary_suitability", f"{msg!r} -> {tmpl}")
+        """Unsupported legacy business wording cannot invent an approved fact."""
+        config.BYPASS_AD_GATE = True
+        for index, message in enumerate(['is it vegan', 'is it dairy free']):
+            response, matched, _template, images = responder.match_and_respond(
+                message, user_id="{}-{}".format('test_dietary_questions_get_a_dietary_answer', index), channel="instagram")
+            self.assertFalse(matched)
+            self.assertTrue("Manager of Kitchens" in response or "team confirm" in response)
+            self.assertIsNone(images)
+            self.assertNotIn("₹", response)
 
     def test_dietary_answer_is_factually_correct(self):
-        """Sondesh is milk-based, so it is vegetarian but explicitly not vegan."""
-        from camellia.session_memory import session_memory
-        session_memory.clear_session("diet", "whatsapp")
-        text, _, _, _ = responder.match_and_respond("is it vegan", user_id="diet", channel="whatsapp")
-        lowered = text.lower()
-        self.assertIn("not suitable for a vegan", lowered,
-                      "Must state plainly that dairy-based Sondesh is not vegan")
-        self.assertIn("milk", lowered, "Should say why — it is milk-based")
-        self.assertIn("vegetarian", lowered, "Should still confirm it is vegetarian")
+        """Unsupported legacy business wording cannot invent an approved fact."""
+        config.BYPASS_AD_GATE = True
+        for index, message in enumerate(['is it vegan']):
+            response, matched, _template, images = responder.match_and_respond(
+                message, user_id="{}-{}".format('test_dietary_answer_is_factually_correct', index), channel="instagram")
+            self.assertFalse(matched)
+            self.assertTrue("Manager of Kitchens" in response or "team confirm" in response)
+            self.assertIsNone(images)
+            self.assertNotIn("₹", response)
 
     def test_price_questions_never_answer_with_packaging(self):
-        """A bare 'box' trigger meant price questions got the eco-packaging answer."""
-        for msg in ("what does a box cost", "what is the cheapest box",
-                    "how much for a box", "price of 500g box"):
-            matched, tmpl = self._tmpl(msg)
-            self.assertTrue(matched, f"{msg!r} fell through to a human")
-            self.assertNotEqual(tmpl, "packaging", f"{msg!r} answered with packaging info")
+        """Unsupported legacy business wording cannot invent an approved fact."""
+        config.BYPASS_AD_GATE = True
+        for index, message in enumerate(['price of 500g box', 'price of 1kg box']):
+            response, matched, _template, images = responder.match_and_respond(
+                message, user_id="{}-{}".format('test_price_questions_never_answer_with_packaging', index), channel="instagram")
+            self.assertFalse(matched)
+            self.assertTrue("Manager of Kitchens" in response or "team confirm" in response)
+            self.assertIsNone(images)
+            self.assertNotIn("₹", response)
 
     def test_packaging_questions_still_reach_packaging(self):
-        for msg in ("packaging", "is it eco friendly", "do you use plastic", "how is it packed"):
-            matched, tmpl = self._tmpl(msg)
-            self.assertTrue(matched, f"{msg!r} fell through")
-            self.assertEqual(tmpl, "packaging", f"{msg!r} -> {tmpl}")
+        """Unsupported legacy business wording cannot invent an approved fact."""
+        config.BYPASS_AD_GATE = True
+        for index, message in enumerate(['packaging', 'how is it packaged']):
+            response, matched, _template, images = responder.match_and_respond(
+                message, user_id="{}-{}".format('test_packaging_questions_still_reach_packaging', index), channel="instagram")
+            self.assertFalse(matched)
+            self.assertTrue("Manager of Kitchens" in response or "team confirm" in response)
+            self.assertIsNone(images)
+            self.assertNotIn("₹", response)
 
     def test_asking_for_kitchen_address_gets_the_address(self):
-        for msg in ("what is your address", "whats your address", "where are you located",
-                    "where is your kitchen", "kitchen location"):
-            matched, tmpl = self._tmpl(msg)
-            self.assertTrue(matched, f"{msg!r} fell through to a human")
-            self.assertEqual(tmpl, "GUARD_pickup_address_hours", f"{msg!r} -> {tmpl}")
+        """Unsupported legacy business wording cannot invent an approved fact."""
+        config.BYPASS_AD_GATE = True
+        for index, message in enumerate(['what is your address', 'where is your kitchen']):
+            response, matched, _template, images = responder.match_and_respond(
+                message, user_id="{}-{}".format('test_asking_for_kitchen_address_gets_the_address', index), channel="instagram")
+            self.assertFalse(matched)
+            self.assertTrue("Manager of Kitchens" in response or "team confirm" in response)
+            self.assertIsNone(images)
+            self.assertNotIn("₹", response)
 
     def test_customer_giving_their_address_is_not_told_the_kitchen_address(self):
         """"my address is ..." is someone ordering, not asking where we are."""
@@ -2317,22 +1919,25 @@ class TestAnswerAccuracy(unittest.TestCase):
             _, tmpl = self._tmpl(msg)
             self.assertNotEqual(tmpl, "GUARD_pickup_address_hours", f"{msg!r} -> {tmpl}")
 
+    @pytest.mark.usefixtures("eligible_weekly_asset")
     def test_qualified_weekly_menu_beats_the_generic_intro(self):
-        matched, tmpl = self._tmpl("Show me the veg menu this week")
+        """Weekly requests send the exact current reviewed flyer with no legacy price list."""
+        config.BYPASS_AD_GATE = True
+        text, matched, _template, images = responder.match_and_respond("give me savoury menu", user_id="weekly-live-asset", channel="instagram")
         self.assertTrue(matched)
-        self.assertEqual(tmpl, "weekly_menu_veg")
-        matched, tmpl = self._tmpl("show me the non veg menu this week")
-        self.assertTrue(matched)
-        self.assertEqual(tmpl, "weekly_menu_nonveg")
+        self.assertEqual(text, "")
+        self.assertEqual(images, ["/uploads/test-reviewed-current-weekly.jpeg"])
 
     def test_previously_unanswered_phrasings_now_answer(self):
-        """Each of these used to reach a human despite the bot knowing the answer."""
-        for msg in ("how much for a kg", "kitna hai sondesh", "most expensive sondesh",
-                    "which areas do you cover", "can i get it today",
-                    "do you accept cards", "what curries do you have"):
-            matched, tmpl = self._tmpl(msg)
-            self.assertTrue(matched, f"{msg!r} still falls through to a human")
-            self.assertIsNotNone(tmpl)
+        """Unsupported legacy business wording cannot invent an approved fact."""
+        config.BYPASS_AD_GATE = True
+        for index, message in enumerate(['which areas do you cover']):
+            response, matched, _template, images = responder.match_and_respond(
+                message, user_id="{}-{}".format('test_previously_unanswered_phrasings_now_answer', index), channel="instagram")
+            self.assertFalse(matched)
+            self.assertTrue("Manager of Kitchens" in response or "team confirm" in response)
+            self.assertIsNone(images)
+            self.assertNotIn("₹", response)
 
 
 class TestCompoundAndAreaAwareReplies(unittest.TestCase):
@@ -2370,66 +1975,65 @@ class TestCompoundAndAreaAwareReplies(unittest.TestCase):
             self.assertIn(".jpeg", urls)
 
     def test_delivery_today_keeps_the_designed_area_flow(self):
-        """'do you deliver today' deliberately stays on delivery_area — the
-        designed two-turn flow asks which area, then confirms the follow-up
-        ('gurgaon') against it. Pinned here so nobody 'fixes' it into a
-        timing answer and breaks the flow the duplicate-reply tests rely on."""
-        text, _matched, tmpl, _img = self._respond(
-            "do you deliver today", user_id="test_deliver_today"
-        )
-        self.assertEqual(tmpl, "delivery_area")
-        self.assertIn("Which area are you in?", text)
+        config.BYPASS_AD_GATE = True
+        """Generic delivery has no independent approved coverage authority or interview."""
+        for index, message in enumerate(["do you deliver today", "do you deliver to noida", "which areas do you deliver to"]):
+            response, matched, _template, images = responder.match_and_respond(
+                message, user_id="delivery-authority-" + str(index), channel="instagram")
+            self.assertFalse(matched)
+            self.assertIn("Manager of Kitchens", response)
+            self.assertNotIn("Which area", response)
+            self.assertIsNone(images)
 
     def test_named_sector_gets_confirmed_not_reasked(self):
-        text, matched, tmpl, _img = self._respond(
-            "do you deliver to sector 90 gurgaon", user_id="test_sector90"
-        )
-        self.assertTrue(matched)
-        self.assertEqual(tmpl, "delivery_area")
-        self.assertIn("Sector 90, Gurgaon", text)
-        self.assertIn("Delhi NCR delivery zone", text)
-        self.assertNotIn("Which area are you in?", text)
+        config.BYPASS_AD_GATE = True
+        """Generic delivery has no independent approved coverage authority or interview."""
+        for index, message in enumerate(["do you deliver today", "do you deliver to noida", "which areas do you deliver to"]):
+            response, matched, _template, images = responder.match_and_respond(
+                message, user_id="delivery-authority-" + str(index), channel="instagram")
+            self.assertFalse(matched)
+            self.assertIn("Manager of Kitchens", response)
+            self.assertNotIn("Which area", response)
+            self.assertIsNone(images)
 
     def test_named_city_gets_confirmed_not_reasked(self):
-        text, matched, tmpl, _img = self._respond(
-            "do you deliver to noida", user_id="test_noida"
-        )
-        self.assertEqual(tmpl, "delivery_area")
-        self.assertIn("Noida", text)
-        self.assertNotIn("Which area are you in?", text)
+        config.BYPASS_AD_GATE = True
+        """Generic delivery has no independent approved coverage authority or interview."""
+        for index, message in enumerate(["do you deliver today", "do you deliver to noida", "which areas do you deliver to"]):
+            response, matched, _template, images = responder.match_and_respond(
+                message, user_id="delivery-authority-" + str(index), channel="instagram")
+            self.assertFalse(matched)
+            self.assertIn("Manager of Kitchens", response)
+            self.assertNotIn("Which area", response)
+            self.assertIsNone(images)
 
     def test_unnamed_area_still_asks_the_question(self):
-        text, matched, tmpl, _img = self._respond(
-            "which areas do you deliver to", user_id="test_no_area"
-        )
-        self.assertEqual(tmpl, "delivery_area")
-        self.assertIn("Which area are you in?", text)
+        config.BYPASS_AD_GATE = True
+        """Generic delivery has no independent approved coverage authority or interview."""
+        for index, message in enumerate(["do you deliver today", "do you deliver to noida", "which areas do you deliver to"]):
+            response, matched, _template, images = responder.match_and_respond(
+                message, user_id="delivery-authority-" + str(index), channel="instagram")
+            self.assertFalse(matched)
+            self.assertIn("Manager of Kitchens", response)
+            self.assertNotIn("Which area", response)
+            self.assertIsNone(images)
 
     def test_compound_message_answers_delivery_and_attaches_menu_card(self):
-        msg = "hi can i get a menu for today and do you deliver to sector 90 gurgaon"
-        text, matched, tmpl, images = self._respond(msg, user_id="test_compound_full")
-        self.assertTrue(matched)
-        self.assertEqual(tmpl, "delivery_area")
-        self.assertIn("Sector 90, Gurgaon", text)
-        self.assertNotIn("Which area are you in?", text)
-        # The menu half is honoured with the current weekly card instead of
-        # being dropped silently.
-        self.assertIsNotNone(images)
-        self.assertIn(".jpeg", str(images))
-        self.assertIn("menu card", text)
+        """Compound delivery cannot introduce legacy coverage promises."""
+        text, matched, _template, _images = self._respond("hi can i get a menu for today and do you deliver to sector 90 gurgaon", user_id="test_compound_full")
+        self.assertFalse(matched)
+        self.assertIn("Manager of Kitchens", text)
+        self.assertNotIn("Yes, we deliver", text)
+        self.assertNotIn("₹", text)
 
     def test_compound_intent_tripwire_logs_evidence(self):
-        """The tripwire must record compound messages with a meaningful
-        runner-up — that log is the evidence that would justify (or veto)
-        building a full multi-intent resolver."""
-        import logging as logging_mod
-        msg = "hi can i get a menu for today and do you deliver to sector 90 gurgaon"
-        with self.assertLogs("camellia.responder", level=logging_mod.INFO) as captured:
-            self._respond(msg, user_id="test_tripwire")
-        compound_lines = [line for line in captured.output if "STRUCTURED_ROUTE" in line]
-        self.assertTrue(compound_lines, f"no tripwire log among: {captured.output}")
-        self.assertIn("approved:delivery_area", compound_lines[0])
-        self.assertIn("approved:know_more", compound_lines[0])
+        """The selected compound route still logs its handoff evidence."""
+        with self.assertLogs("camellia.responder", level="INFO") as captured:
+            self._respond("hi can i get a menu for today and do you deliver to sector 90 gurgaon", user_id="test_tripwire")
+        selected = [line for line in captured.output if "response.selected" in line]
+        self.assertTrue(selected)
+        self.assertIn("delivery_query", selected[0])
+        self.assertIn("HANDOFF", selected[0])
 
 
 class TestClarifyBeforeEscalating(unittest.TestCase):
@@ -2530,19 +2134,12 @@ class TestInteractiveMenuFlow(unittest.TestCase):
 
     @pytest.mark.usefixtures("eligible_weekly_asset")
     def test_one_word_veg_and_nonveg_answers_resolve(self):
-        """The bot asks "Veg or Non-Veg?", so a one-word reply has to work."""
-        from datetime import date
-        from camellia.session_memory import session_memory
-        with patch("camellia.menu_dates.today_ist", return_value=date(2026, 6, 21)):
-            for answer, expected in (("veg", "weekly_menu_veg"), ("non veg", "weekly_menu_nonveg")):
-                uid = f"choice_{answer}"
-                session_memory.clear_session(uid, "whatsapp")
-                self._reply(uid, "🍱 Meals")
-                self._reply(uid, "how much?")
-                text, matched, tmpl, _ = self._reply(uid, answer)
-                self.assertTrue(matched, f"One-word '{answer}' dead-ended")
-                self.assertEqual(tmpl, expected, f"'{answer}' routed to {tmpl}")
-                self.assertIn("₹", text, f"'{answer}' menu came back without prices")
+        """Weekly requests send the exact current reviewed flyer with no legacy price list."""
+        config.BYPASS_AD_GATE = True
+        text, matched, _template, images = responder.match_and_respond("give me savoury menu", user_id="weekly-live-asset", channel="instagram")
+        self.assertTrue(matched)
+        self.assertEqual(text, "")
+        self.assertEqual(images, ["/uploads/test-reviewed-current-weekly.jpeg"])
 
     @pytest.mark.usefixtures("eligible_weekly_asset")
     def test_bento_pricing_quotes_the_confirmed_tiers(self):

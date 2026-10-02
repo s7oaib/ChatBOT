@@ -9,6 +9,7 @@ from camellia.instagram_routing import validate_route_payload
 
 
 OWNER_ID = "17841455615744812"
+GRAPH_OWNER_ID = "28206314108997745"
 OWNER_USERNAME = "camellia.artisanal"
 BASE = "https://graph.instagram.com/v25.0"
 MEDIA_URL = f"{BASE}/me/media"
@@ -63,6 +64,7 @@ def _install_graph(monkeypatch, pages, *, identity=None):
     monkeypatch.setattr(config, "INSTAGRAM_AUTH_MODE", "instagram_login", raising=False)
     monkeypatch.setattr(config, "INSTAGRAM_ACCESS_TOKEN", "test-token")
     monkeypatch.setattr(config, "INSTAGRAM_ACCOUNT_ID", OWNER_ID)
+    monkeypatch.setattr(config, "INSTAGRAM_GRAPH_ACCOUNT_ID", OWNER_ID)
     monkeypatch.setattr(config, "INSTAGRAM_EXPECTED_USERNAME", OWNER_USERNAME)
     monkeypatch.setattr(config, "INSTAGRAM_API_VERSION", "v25.0")
     return client
@@ -94,6 +96,103 @@ def test_complete_paginated_sync_stamps_owner_and_finds_exact_permalink(tmp_path
     assert owned["last_sync_generation"]
     assert owned["inventory_state"] == "CURRENT"
     assert database.list_instagram_media(owner_account_id=OWNER_ID)[1] == 2
+    assert database.has_successful_instagram_media_inventory_sync(OWNER_ID) is True
+
+
+def test_legacy_gallery_is_visible_as_unverified_before_first_owner_sync(tmp_path):
+    database = Database(str(tmp_path / "inventory.db"))
+    database.upsert_instagram_media({
+        "instagram_media_id": "legacy-1", "media_type": "IMAGE",
+        "permalink": "https://www.instagram.com/p/LEGACY1/", "shortcode": "LEGACY1",
+    })
+
+    items, total = database.list_instagram_media(owner_account_id=OWNER_ID)
+
+    assert total == 1
+    assert items[0]["instagram_media_id"] == "legacy-1"
+    assert items[0]["inventory_state"] == "UNVERIFIED"
+    assert items[0]["inventory_verification"] == "LEGACY_UNVERIFIED"
+    assert items[0]["owner_instagram_account_id"] is None
+    assert items[0]["owner_username"] is None
+    assert database.has_successful_instagram_media_inventory_sync(OWNER_ID) is False
+
+
+def test_failed_first_owner_sync_keeps_legacy_gallery_visible(tmp_path, monkeypatch):
+    database = Database(str(tmp_path / "inventory.db"))
+    database.upsert_instagram_media({
+        "instagram_media_id": "legacy-1", "media_type": "IMAGE",
+        "permalink": "https://www.instagram.com/p/LEGACY1/", "shortcode": "LEGACY1",
+    })
+    _install_graph(monkeypatch, {}, identity={"id": "999999999999", "username": OWNER_USERNAME})
+
+    result = sync_instagram_media(database)
+    items, total = database.list_instagram_media(owner_account_id=OWNER_ID)
+
+    assert result["failure_category"] == "linked_account_mismatch"
+    assert total == 1
+    assert items[0]["inventory_verification"] == "LEGACY_UNVERIFIED"
+    assert items[0]["owner_instagram_account_id"] is None
+    assert database.get_instagram_media_by_meta_id("legacy-1")["inventory_state"] == "UNVERIFIED"
+
+
+def test_partial_first_owner_sync_keeps_legacy_gallery_visible_and_unverified(tmp_path, monkeypatch):
+    database = Database(str(tmp_path / "inventory.db"))
+    database.upsert_instagram_media({
+        "instagram_media_id": "legacy-1", "media_type": "IMAGE",
+        "permalink": "https://www.instagram.com/p/LEGACY1/", "shortcode": "LEGACY1",
+    })
+    next_page = f"{BASE}/me/media?after=broken"
+    _install_graph(monkeypatch, {
+        MEDIA_URL: FakeResponse({
+            "data": [_media("partial-1", "https://www.instagram.com/p/PARTIAL1/")],
+            "paging": {"next": next_page},
+        }),
+        next_page: FakeResponse({}, status_code=503),
+    })
+
+    result = sync_instagram_media(database)
+    items, total = database.list_instagram_media(owner_account_id=OWNER_ID)
+    by_id = {item["instagram_media_id"]: item for item in items}
+
+    assert result["status"] == "FAILED"
+    assert result["pagination_complete"] is False
+    assert total == 1
+    assert set(by_id) == {"legacy-1"}
+    assert database.get_instagram_media_by_meta_id("partial-1") is None
+    assert all(item["inventory_state"] == "UNVERIFIED" for item in items)
+    assert all(item["inventory_verification"] == "LEGACY_UNVERIFIED" for item in items)
+    assert all(item["owner_instagram_account_id"] is None for item in items)
+    assert database.has_successful_instagram_media_inventory_sync(OWNER_ID) is False
+
+
+def test_first_complete_owner_sync_hides_legacy_and_enters_strict_gallery(tmp_path, monkeypatch):
+    database = Database(str(tmp_path / "inventory.db"))
+    database.upsert_instagram_media({
+        "instagram_media_id": "legacy-1", "media_type": "IMAGE",
+        "permalink": "https://www.instagram.com/p/LEGACY1/", "shortcode": "LEGACY1",
+    })
+    database.upsert_instagram_media({
+        "instagram_media_id": "foreign-1", "media_type": "IMAGE",
+        "permalink": "https://www.instagram.com/p/FOREIGN1/", "shortcode": "FOREIGN1",
+        "owner_instagram_account_id": "111111111111", "owner_username": "old.account",
+        "inventory_state": "CURRENT",
+    })
+    _install_graph(monkeypatch, {
+        MEDIA_URL: FakeResponse({"data": [_media("owned-1", "https://www.instagram.com/p/OWNED1/")]}),
+    })
+
+    result = sync_instagram_media(database)
+    items, total = database.list_instagram_media(owner_account_id=OWNER_ID)
+
+    assert result["status"] == "COMPLETED"
+    assert result["pagination_complete"] is True
+    assert total == 1
+    assert items[0]["instagram_media_id"] == "owned-1"
+    assert items[0]["inventory_state"] == "CURRENT"
+    assert "inventory_verification" not in items[0]
+    assert database.get_instagram_media_by_meta_id("legacy-1")["inventory_state"] == "STALE"
+    assert database.get_instagram_media_by_meta_id("foreign-1")["inventory_state"] == "FOREIGN"
+    assert database.has_successful_instagram_media_inventory_sync(OWNER_ID) is True
 
 
 def test_complete_sync_hides_foreign_and_stale_rows_without_deleting_routes(tmp_path, monkeypatch):
@@ -133,26 +232,32 @@ def test_complete_sync_hides_foreign_and_stale_rows_without_deleting_routes(tmp_
 
 def test_failed_later_page_never_reconciles_existing_inventory(tmp_path, monkeypatch):
     database = Database(str(tmp_path / "inventory.db"))
-    foreign = database.upsert_instagram_media({
-        "instagram_media_id": "foreign", "owner_instagram_account_id": "111111111111",
-        "inventory_state": "CURRENT",
-    })
-    legacy = database.upsert_instagram_media({
-        "instagram_media_id": "legacy", "inventory_state": "UNVERIFIED",
-    })
-    next_page = f"{BASE}/me/media?after=broken"
     _install_graph(monkeypatch, {
-        MEDIA_URL: FakeResponse({"data": [], "paging": {"next": next_page}}),
+        MEDIA_URL: FakeResponse({"data": [_media("known-good", "https://www.instagram.com/p/GOOD001/")]}),
+    })
+    first = sync_instagram_media(database)
+    assert first["status"] == "COMPLETED"
+    known_good = database.get_instagram_media_by_meta_id("known-good")
+    next_page = f"{BASE}/me/media?after=broken"
+    client = FakeClient({
+        f"{BASE}/me": FakeResponse({"id": OWNER_ID, "username": OWNER_USERNAME}),
+        MEDIA_URL: FakeResponse({"data": [{**_media("known-good", "https://www.instagram.com/p/GOOD001/"), "caption": "partial change"}, _media("new-partial", "https://www.instagram.com/p/NEW001/")], "paging": {"next": next_page}}),
         next_page: FakeResponse({}, status_code=503),
     })
+    monkeypatch.setattr("camellia.instagram_media.httpx.Client", lambda **_kwargs: client)
 
     result = sync_instagram_media(database)
+    items, total = database.list_instagram_media(owner_account_id=OWNER_ID)
 
     assert result["status"] == "FAILED"
     assert result["pagination_complete"] is False
     assert result["hidden_foreign"] == result["hidden_stale"] == 0
-    assert database.get_instagram_media(foreign["id"])["inventory_state"] == "CURRENT"
-    assert database.get_instagram_media(legacy["id"])["inventory_state"] == "UNVERIFIED"
+    assert database.has_successful_instagram_media_inventory_sync(OWNER_ID) is True
+    assert total == 1
+    assert items[0]["instagram_media_id"] == "known-good"
+    assert items[0]["inventory_state"] == "CURRENT"
+    assert database.get_instagram_media(known_good["id"]) == known_good
+    assert database.get_instagram_media_by_meta_id("new-partial") is None
 
 
 def test_untrusted_pagination_link_is_rejected_without_reconciliation(tmp_path, monkeypatch):
@@ -202,3 +307,90 @@ def test_missing_exact_permalink_is_reported_only_after_owned_media_pagination(t
         "status": "NOT_RETURNED_BY_OWNED_MEDIA_PAGINATION",
     }
     assert "caption" not in result["diagnostic_permalink"]
+
+
+def test_webhook_and_instagram_login_graph_identity_ids_are_separately_bound(tmp_path, monkeypatch):
+    from camellia import app as app_module, home_table_native_reels
+
+    database = Database(str(tmp_path / "split-identities.db"))
+    _install_graph(monkeypatch, {
+        MEDIA_URL: FakeResponse({"data": [_media("graph-owned", "https://www.instagram.com/p/GRAPH001/")]}),
+    }, identity={"id": GRAPH_OWNER_ID, "username": OWNER_USERNAME})
+    monkeypatch.setattr(config, "INSTAGRAM_ACCOUNT_ID", OWNER_ID)
+    monkeypatch.setattr(config, "INSTAGRAM_GRAPH_ACCOUNT_ID", GRAPH_OWNER_ID)
+
+    result = sync_instagram_media(database)
+
+    assert result["status"] == "COMPLETED"
+    assert result["current_account_id"] == GRAPH_OWNER_ID
+    assert database.get_instagram_media_by_meta_id("graph-owned")["owner_instagram_account_id"] == GRAPH_OWNER_ID
+    assert config.INSTAGRAM_ACCOUNT_ID == OWNER_ID
+    assert app_module._instagram_account_guard_matches(OWNER_ID, config.INSTAGRAM_ACCOUNT_ID)
+    assert not app_module._instagram_account_guard_matches(GRAPH_OWNER_ID, config.INSTAGRAM_ACCOUNT_ID)
+    assert home_table_native_reels.VERIFIED_ACCOUNT_ID == OWNER_ID
+
+
+def test_instagram_login_graph_identity_must_be_explicitly_bound(tmp_path, monkeypatch):
+    database = Database(str(tmp_path / "unbound-graph-id.db"))
+    client = _install_graph(monkeypatch, {
+        MEDIA_URL: FakeResponse({"data": [_media("must-not-fetch", "https://www.instagram.com/p/NOPE001/")]}),
+    }, identity={"id": GRAPH_OWNER_ID, "username": OWNER_USERNAME})
+    monkeypatch.setattr(config, "INSTAGRAM_GRAPH_ACCOUNT_ID", "")
+
+    result = sync_instagram_media(database)
+
+    assert result["status"] == "FAILED"
+    assert result["failure_category"] == "linked_account_not_configured"
+    assert result["pages"] == 0
+    assert client.calls == []  # no Graph media/identity request without an explicit ID binding
+    assert database.get_instagram_media_by_meta_id("must-not-fetch") is None
+
+
+def test_wrong_graph_id_or_username_fails_closed(tmp_path, monkeypatch):
+    cases = (
+        ({"id": "999999999999", "username": OWNER_USERNAME}, GRAPH_OWNER_ID, OWNER_USERNAME),
+        ({"id": GRAPH_OWNER_ID, "username": "different.account"}, GRAPH_OWNER_ID, OWNER_USERNAME),
+    )
+    for index, (identity, expected_graph_id, expected_username) in enumerate(cases):
+        database = Database(str(tmp_path / f"wrong-identity-{index}.db"))
+        _install_graph(monkeypatch, {
+            MEDIA_URL: FakeResponse({"data": [_media("must-not-fetch", "https://www.instagram.com/p/NOPE002/")]}),
+        }, identity=identity)
+        monkeypatch.setattr(config, "INSTAGRAM_GRAPH_ACCOUNT_ID", expected_graph_id)
+        monkeypatch.setattr(config, "INSTAGRAM_EXPECTED_USERNAME", expected_username)
+
+        result = sync_instagram_media(database)
+
+        assert result["status"] == "FAILED"
+        assert result["failure_category"] == "linked_account_mismatch"
+        assert result["pages"] == 0
+        assert database.get_instagram_media_by_meta_id("must-not-fetch") is None
+
+
+def test_missing_graph_binding_preserves_unverified_legacy_gallery(tmp_path):
+    database = Database(str(tmp_path / "inventory.db"))
+    database.upsert_instagram_media({"instagram_media_id": "legacy-unbound", "media_type": "IMAGE"})
+    items, total = database.list_instagram_media(owner_account_id="")
+    assert total == 1
+    assert items[0]["inventory_verification"] == "LEGACY_UNVERIFIED"
+    assert items[0]["owner_instagram_account_id"] is None
+
+
+def test_complete_inventory_publish_rolls_back_on_write_failure(tmp_path, monkeypatch):
+    database = Database(str(tmp_path / "inventory.db"))
+    database.upsert_instagram_media({"instagram_media_id": "legacy", "caption": "original"})
+    before = database.get_instagram_media_by_meta_id("legacy")
+    original = database.upsert_instagram_media
+    def fail_second(row, **kwargs):
+        if row["instagram_media_id"] == "broken":
+            raise ValueError("failed write")
+        return original(row, **kwargs)
+    monkeypatch.setattr(database, "upsert_instagram_media", fail_second)
+    import pytest
+    with pytest.raises(ValueError, match="failed write"):
+        database.apply_instagram_media_inventory([
+            {"instagram_media_id": "legacy", "caption": "changed"},
+            {"instagram_media_id": "broken"},
+        ], OWNER_ID, "new-generation")
+    assert database.get_instagram_media_by_meta_id("legacy") == before
+    assert not database.has_successful_instagram_media_inventory_sync(OWNER_ID)

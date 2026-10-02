@@ -68,12 +68,13 @@ def test_live_menu_uses_only_the_documented_deterministic_menu_source(eligible_w
         )
 
     assert matched is True
-    assert template_id == "weekly_menu_veg"
-    assert "This Week's Vegetarian Menu" in text
+    assert template_id == "approved_menu"
+    assert text == ""
+    assert _images
     assert "*Packaging*:" not in text and "*Delivery*:" not in text
     facts = session_memory.get_facts(user_id, "instagram")
-    assert facts["last_route_source"] == "APPROVED_MENU_SOURCE"
-    assert facts["last_grounding"] == "menu_json_deterministic"
+    assert facts["last_route_source"] == "APPROVED_MENU"
+    assert facts["last_grounding"] == "approved_menu_flyer"
     assert facts["last_llm_called"] is False
     rag.assert_not_called()
     groq.assert_not_called()

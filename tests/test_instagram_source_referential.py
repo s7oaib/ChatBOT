@@ -327,9 +327,9 @@ def test_composite_greeting_keeps_menu_and_handoff_intents(deterministic_respond
     session_memory.clear_session(uid, "instagram")
     reply, matched, template_id, _images = _reply(uid, "hey show me this week's menu")
     assert matched is True
-    assert template_id in {"weekly_menu_veg", "weekly_menu_nonveg", "know_more", "product_overview"}
-    assert "meals" in reply.lower()
-    assert "place an order" in reply.lower()
+    assert template_id == "approved_menu"
+    assert reply == ""
+    assert _images
 
     uid = "composite_handoff"
     session_memory.clear_session(uid, "instagram")
@@ -380,8 +380,9 @@ def test_explicit_weekly_menu_precedes_generic_detail_nlu(deterministic_responde
     )
     reply, matched, template_id, _images = _reply(uid, "can you tell me more about the weekly menu")
     assert matched is True
-    assert template_id in {"weekly_menu_veg", "weekly_menu_nonveg", "savoury_food_intro"}
-    assert "menu" in reply.lower()
+    assert template_id == "approved_menu"
+    assert reply == ""
+    assert _images
 
 
 def test_explicit_home_table_precedes_generic_detail_nlu(deterministic_responder, monkeypatch):

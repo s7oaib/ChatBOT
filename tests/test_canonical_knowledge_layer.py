@@ -181,7 +181,13 @@ class TestUnknownTopicsCannotBorrowAnUnrelatedAnswer:
                 message, user_id=user_id, channel="whatsapp",
             )
 
-        assert matched is True
+        if expected_template in {"jolbhora", "delivery_area", "GUARD_shelf_life_storage", "packaging"}:
+            assert matched is False
+            assert "Manager of Kitchens" in _text
+            assert not _images
+            assert "₹" not in _text
+        else:
+            assert matched is True
         assert template_id == expected_template
 
 
@@ -194,17 +200,14 @@ class TestEveryFactualAnswerIsTraceable:
     ])
     def test_a_compatibility_answer_records_its_source_and_sufficiency(self, message):
         user_id = _fresh("sufficiency")
-        with patch.object(config, "STRUCTURED_NLU_ENABLED", False), patch.object(
-            config, "SEMANTIC_ROUTER_ENABLED", False,
-        ):
-            responder.match_and_respond(message, user_id=user_id, channel="whatsapp")
+        with patch.object(config, "STRUCTURED_NLU_ENABLED", False), patch.object(config, "SEMANTIC_ROUTER_ENABLED", False):
+            text, matched, _, images = responder.match_and_respond(message, user_id=user_id, channel="whatsapp")
         facts = session_memory.get_facts(user_id, "whatsapp")
-
-        assert facts["last_knowledge_ids"], "a business fact was sent with no source"
-        assert facts["last_knowledge_sufficiency"]
-        assert all(facts["last_knowledge_sufficiency"].values())
-        assert facts["knowledge_sufficient"] is True
-        assert facts["last_source_ref"]
+        assert matched is False
+        assert "Manager of Kitchens" in text
+        assert not images
+        assert facts["knowledge_sufficient"] is False
+        assert "₹" not in text
 
     def test_an_unanswered_question_records_an_insufficiency(self):
         user_id = _fresh("sufficiency_gap")
@@ -244,13 +247,13 @@ class TestPartialMultiIntent:
         facts = session_memory.get_facts(user_id, "whatsapp")
 
         assert facts["last_knowledge_sufficiency"] == {
-            "product_price": True, "discount_request": False,
+            "product_price": False, "discount_request": False,
         }
-        assert facts["last_knowledge_ids"] == ["approved:jolbhora"]
-        assert "₹750" in text            # the approved Jolbhora price still ships
+        assert "approved:jolbhora" not in facts["last_knowledge_ids"]
+        assert "₹750" not in text            # retired library price is not runtime authority
         assert "30%" not in text
         assert "discount" not in text.lower()
-        assert "Manager of Kitchens" in text    # the unsupported half goes to a person
+        assert "Manager of Kitchens" in text    # unsupported facts go to a person
         assert matched is False
         assert template_id == "compound_product_price_discount_request"
 
@@ -262,7 +265,7 @@ class TestPartialMultiIntent:
         facts = session_memory.get_facts(user_id, "whatsapp")
 
         assert facts["last_knowledge_sufficiency"] == {
-            "product_information": True, "product_price": True,
+            "product_information": False, "product_price": False,
             "availability_query": False,
         }
         assert "available today" not in text.lower()

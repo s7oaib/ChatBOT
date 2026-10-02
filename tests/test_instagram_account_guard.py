@@ -53,32 +53,26 @@ def test_approved_opening_hours_variants_use_canonical_answer(message, monkeypat
     monkeypatch.setattr(config, "BYPASS_AD_GATE", True)
     user_id = "hours-" + uuid.uuid4().hex[:8]
     session_memory.clear_session(user_id, "instagram")
-
-    response, matched, template_id, _images = responder.match_and_respond(
-        message, user_id=user_id, channel="instagram",
-    )
-
-    facts = session_memory.get_facts(user_id, "instagram")
-    assert matched is True
+    response, matched, template_id, images = responder.match_and_respond(message, user_id=user_id, channel="instagram")
+    assert matched is False
     assert template_id == "opening_hours"
-    assert response == "Our kitchen is open 10:00 AM – 7:30 PM every day."
-    assert facts["last_route_source"] == "explicit_rule"
-    assert facts["last_grounding"] == "grounded_approved"
+    assert "Manager of Kitchens" in response
+    assert "10:00" not in response and "7:30" not in response
+    assert not images
+    assert session_memory.get_facts(user_id, "instagram")["knowledge_sufficient"] is False
 
 
 def test_approved_opening_hours_does_not_create_a_handoff(monkeypatch):
     monkeypatch.setattr(config, "BYPASS_AD_GATE", True)
-    user_id = "hours-no-escalation-" + uuid.uuid4().hex[:8]
+    user_id = "hours-escalation-" + uuid.uuid4().hex[:8]
     session_memory.clear_session(user_id, "instagram")
-    with patch.object(app_module, "send_instagram_reply") as send, patch.object(
-        app_module.escalator, "handle_escalation"
-    ) as escalate:
+    with patch.object(app_module, "send_instagram_reply") as send, patch.object(app_module.escalator, "handle_escalation") as escalate:
         app_module._process_instagram_event(user_id, "opening hours", None)
-
-    assert send.called
-    assert not escalate.called
-    assert send.call_args.args[1] == "Our kitchen is open 10:00 AM – 7:30 PM every day."
+    assert send.call_count == 1
+    assert escalate.call_count == 1
+    assert "Manager of Kitchens" in send.call_args.args[1]
     assert "wa.me" not in send.call_args.args[1]
+    assert "10:00" not in send.call_args.args[1]
 
 
 def test_matching_instagram_account_entry_is_processed(monkeypatch):

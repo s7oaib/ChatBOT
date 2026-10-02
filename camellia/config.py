@@ -253,6 +253,12 @@ class Config:
     # When set, webhook entries must belong to this exact Instagram account.
     # Leaving it blank preserves compatibility with existing integrations.
     INSTAGRAM_ACCOUNT_ID: str = os.getenv("INSTAGRAM_ACCOUNT_ID", "").strip()
+    # The authenticated Instagram Login Graph /me identity used to enumerate
+    # owned media can be a distinct ID namespace from webhook entry.id. Keep
+    # this explicit and never infer it from a matching username. For legacy
+    # Page-token integrations, the existing Instagram account ID remains the
+    # fallback unless this Graph identity is explicitly configured.
+    INSTAGRAM_GRAPH_ACCOUNT_ID: str = os.getenv("INSTAGRAM_GRAPH_ACCOUNT_ID", "").strip()
     # Instagram Login has its own app credentials. Do not silently reuse the
     # webhook/Page app secret: a code issued for one app cannot be exchanged by
     # another app, even when both are owned by the same Meta account.
@@ -390,6 +396,12 @@ class Config:
             allowed = ", ".join(sorted(_INSTAGRAM_AUTH_MODES))
             raise ValueError(f"INSTAGRAM_AUTH_MODE must be one of: {allowed}.")
         return mode
+
+    def instagram_media_owner_id(self) -> str:
+        """Return the explicitly bound ID namespace for the selected media API."""
+        if self.instagram_auth_mode() == "instagram_login":
+            return str(self.INSTAGRAM_GRAPH_ACCOUNT_ID or "").strip()
+        return str(self.INSTAGRAM_GRAPH_ACCOUNT_ID or self.INSTAGRAM_ACCOUNT_ID or "").strip()
 
 config = Config()
 

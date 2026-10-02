@@ -39,6 +39,9 @@ def test_named_topic_preserves_description_and_source_owns_new_copy(tmp_path, mo
     monkeypatch.setattr(app_module, "db", database)
     monkeypatch.setattr(config, "ADMIN_API_KEY", "ui-topic-key-123456")
     monkeypatch.setattr(config, "BYPASS_AD_GATE", True)
+    owner_id = "17841455615744812"
+    monkeypatch.setattr(config, "INSTAGRAM_ACCOUNT_ID", owner_id)
+    monkeypatch.setattr(config, "INSTAGRAM_GRAPH_ACCOUNT_ID", owner_id)
     client = TestClient(app_module.app)
     headers = {"x-admin-key": config.ADMIN_API_KEY}
     created = client.post("/admin/instagram-topics", headers=headers, json={
@@ -56,7 +59,10 @@ def test_named_topic_preserves_description_and_source_owns_new_copy(tmp_path, mo
     media = database.upsert_instagram_media({
         "instagram_media_id": "exact-ui-post", "media_type": "IMAGE",
         "permalink": "https://www.instagram.com/p/EXACTUI/", "shortcode": "EXACTUI",
+        "owner_instagram_account_id": owner_id, "owner_username": "camellia.artisanal",
+        "last_sync_generation": "verified-ui-test", "inventory_state": "CURRENT",
     })
+    database.reconcile_instagram_media_inventory(owner_id, "verified-ui-test")
     menu = database.list_menu_catalogue()[0]
     mapped = client.put(f"/admin/instagram-media/{media['id']}/mapping", headers=headers, json={
         "topic_id": legacy["topic_id"], "source_description": "Only this post's description.",

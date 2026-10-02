@@ -64,7 +64,11 @@ class TestTheDefaultsAreAnswerable:
         session_memory.clear_session(user_id, "whatsapp")
         reply = responder.match_and_respond(question, user_id=user_id, channel="whatsapp")
 
-        assert reply[1] is True
+        if expected_template == "delivery_area":
+            assert reply[1] is False
+            assert "Manager of Kitchens" in reply[0]
+        else:
+            assert reply[1] is True
         assert reply[2] == expected_template
 
     def test_every_default_fits_metas_character_limit(self):

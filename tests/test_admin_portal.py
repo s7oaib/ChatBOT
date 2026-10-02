@@ -1058,7 +1058,7 @@ def test_expired_menu_is_never_shown_to_a_customer():
         ).json()
 
         text = reply.get("response", "")
-        assert "finalising this week" in text
+        assert "Manager of Kitchens" in text
         assert "₹" not in text, "an expired menu must not quote prices a customer could order against"
         assert not (reply.get("image_url") or []), "an expired menu must not send a photo"
     finally:

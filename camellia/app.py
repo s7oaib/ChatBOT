@@ -86,6 +86,7 @@ from camellia.session_memory import session_memory
 from camellia.monitoring import get_logger, delivery_monitor, latency_monitor, classify_instagram_delivery
 from camellia import instagram_chatbot_control
 from camellia import home_table_native_reels
+from camellia import approved_response_alignment
 from camellia.admin_security import (
     digest as security_digest,
     new_token,
@@ -221,6 +222,18 @@ async def lifespan(app: FastAPI):
     # stored until an explicit operator workflow changes them.
 
     db.init_db()
+    try:
+        alignment = approved_response_alignment.apply_approved_qa_alignment(
+            db, responder.qa_data.get("templates", []),
+        )
+        log.info(
+            "Approved Q&A response alignment complete: aligned=%s unchanged=%s failed=%s",
+            sum(value == "ALIGNED" for value in alignment.values()),
+            sum(value == "UNCHANGED" for value in alignment.values()),
+            sum(value == "FAILED" for value in alignment.values()),
+        )
+    except Exception:
+        log.exception("Approved Q&A response alignment failed; protected copy remains versioned.")
     story_cleanup = db.cleanup_legacy_instagram_story_history()
     log.info(
         "story_cleanup_history_rows_found=%s "
@@ -882,6 +895,13 @@ def _process_instagram_event(
             "source_media_present": source_media_present,
             "customer_text_accompanied_media": customer_text_accompanied_media,
         })
+        if source_media_present and not source_route and shared_source_type in {"post", "reel"}:
+            _handoff_unmapped_shared_media(
+                sender_id, source_type=shared_source_type,
+                media_id=shared_post_id or trace.get("media_id"),
+                shortcode=(shared_reel or {}).get("shortcode"),
+            )
+            return
         if source_media_present and not str(message_text or "").strip():
             # A media-only webhook is context, not a customer question. Exact
             # mapped state was saved above; unmapped media remains unmapped.
@@ -950,7 +970,7 @@ def _process_instagram_event(
             template_id and template_id.startswith("client_approved_")
             and template_id != "client_approved_order_ready_handoff"
         )
-        informational_answer = template_id in informational_templates or client_approved_answer
+        informational_answer = bool(was_matched and (template_id in informational_templates or client_approved_answer))
         explicit_human_help = is_human_help_request(customer_message)
         needs_escalation = (
             (not was_matched and not informational_answer)
@@ -1187,6 +1207,71 @@ def _reply_to_unreadable_attachment(
             raise
 
 
+def _handoff_unmapped_shared_media(
+    sender_id: str,
+    *,
+    source_type: str,
+    media_id: Optional[str] = None,
+    shortcode: Optional[str] = None,
+) -> None:
+    """Create one durable human handoff for an identifiable unmapped Post/Reel."""
+    if not instagram_chatbot_control.is_sender_allowed(sender_id, database=db):
+        return
+    source_label = "Reel" if source_type == "reel" else "Post"
+    customer_message = f"[shared Instagram {source_label.lower()}]"
+    facts = session_memory.get_facts(sender_id, "instagram")
+    facts.update({
+        "source_route": None,
+        "source_context_superseded": True,
+        "unmapped_shared_attachment": True,
+        "source_context_used": False,
+    })
+    identity = _cached_instagram_identity(sender_id, {"customer_external_id": sender_id}, lookup=False)
+    active = db.get_active_handoff("instagram", sender_id)
+    if active:
+        db.log_conversation(
+            sender_id, "instagram", customer_message, "", False, "waiting_for_human",
+            message_source="shared_media", source_type=source_type, media_id=media_id,
+            shortcode=shortcode, source_match_method="shared_media_unmapped",
+            source_context_available=False, source_context_used=False,
+            source_media_present=True, customer_text_accompanied_media=False,
+        )
+        return
+
+    reason = f"Unmapped shared Instagram {source_label}"
+    handoff = get_or_create_handoff(
+        user_id=sender_id, channel="instagram", reason=reason,
+        user_message=customer_message, facts=facts,
+        query_summary=f"Help the customer with the shared Instagram {source_label.lower()}.",
+        customer_identity=identity,
+    )
+    if handoff.get("newly_created", True):
+        escalator.handle_escalation(
+            user_id=sender_id, channel="instagram", user_message=customer_message,
+            reason=reason, context_data={
+                "sender_id": sender_id,
+                "customer_username": identity.get("customer_username"),
+                "customer_external_id": identity.get("customer_external_id"),
+                "handoff_ref": handoff["handoff_ref"],
+                "handoff_summary": staff_summary(handoff),
+                "source_type": source_type, "media_id": media_id, "shortcode": shortcode,
+            },
+        )
+    mark_referred(handoff["handoff_ref"])
+    notice = customer_facing_notice()
+    session_memory.add_turn(sender_id, "instagram", customer_message, notice)
+    conversation_id = db.log_conversation(
+        sender_id, "instagram", customer_message, notice, True, "shared_media_handoff",
+        message_source="shared_media", source_type=source_type, media_id=media_id,
+        shortcode=shortcode, source_match_method="shared_media_unmapped",
+        source_context_available=False, source_context_used=False,
+        source_media_present=True, customer_text_accompanied_media=False,
+    )
+    _send_or_queue_instagram_reply(
+        sender_id, notice, inbound_message_id=conversation_id, response_type="handoff",
+    )
+
+
 def _apply_source_context(sender_id: str, route: Dict[str, Any], match_method: str) -> None:
     """Writes a resolved route into the session for the next message to use.
 
@@ -1341,13 +1426,9 @@ def _handle_shared_attachment(
                 route = session_memory.get_facts(sender_id, "instagram").get("source_route")
             if not route:
                 _mark_unmapped_shared_attachment(sender_id)
-                _reply_to_unreadable_attachment(
-                    sender_id,
-                    source_type="reel" if reel_identity else "post",
-                    media_id=post_media_id,
-                    shortcode=(reel_identity or {}).get("shortcode"),
-                    source_match_method="shared_media_unmapped",
-                    source_media_present=True,
+                _handoff_unmapped_shared_media(
+                    sender_id, source_type="reel" if reel_identity else "post",
+                    media_id=post_media_id, shortcode=(reel_identity or {}).get("shortcode"),
                 )
                 return
             _process_instagram_event(
@@ -1362,13 +1443,9 @@ def _handle_shared_attachment(
                 "Could not resolve shared media for sender_hash=%s.",
                 _safe_identifier_hash(sender_id),
             )
-            _reply_to_unreadable_attachment(
-                sender_id,
-                source_type="reel" if reel_identity else "post",
-                media_id=post_media_id,
-                shortcode=(reel_identity or {}).get("shortcode"),
-                source_match_method="shared_media_resolution_error",
-                source_media_present=True,
+            _handoff_unmapped_shared_media(
+                sender_id, source_type="reel" if reel_identity else "post",
+                media_id=post_media_id, shortcode=(reel_identity or {}).get("shortcode"),
             )
         return
     _mark_unmapped_shared_attachment(sender_id)
@@ -3546,12 +3623,19 @@ def list_instagram_media(
     items, total = db.list_instagram_media(page=page, page_size=page_size, media_type=media_type,
         route_mode=route_mode, needs_review=needs_review, topic_id=topic_id, search=search,
         sort=sort, source_type=source_type, mapping_status=mapping_status,
-        context_active=context_active, owner_account_id=config.INSTAGRAM_ACCOUNT_ID)
+        context_active=context_active, owner_account_id=config.instagram_media_owner_id())
+    owner_account_id = config.instagram_media_owner_id()
+    inventory_verification = (
+        "OWNER_SCOPED_CURRENT" if owner_account_id and db.has_successful_instagram_media_inventory_sync(owner_account_id)
+        else "LEGACY_UNVERIFIED" if owner_account_id
+        else "OWNER_NOT_CONFIGURED"
+    )
     for item in items:
         item["needs_review"] = bool(item["needs_review"])
         item["active"] = bool(item["active"])
     return {"status": "success", "items": items, "page": page, "page_size": page_size,
-            "total": total, "has_more": page * page_size < total}
+            "total": total, "has_more": page * page_size < total,
+            "inventory_verification": inventory_verification}
 
 
 @app.get("/admin/instagram-media/{item_id}")
@@ -3562,6 +3646,15 @@ def get_instagram_media(item_id: int, x_admin_key: Optional[str] = Header(None),
         raise HTTPException(status_code=404, detail="Instagram media not found.")
     item["needs_review"] = bool(item["needs_review"]); item["active"] = bool(item["active"])
     return {"status": "success", "item": item}
+
+
+def _require_verified_current_instagram_media(item: Dict[str, Any]) -> None:
+    owner_account_id = config.instagram_media_owner_id()
+    if (not owner_account_id
+            or not db.has_successful_instagram_media_inventory_sync(owner_account_id)
+            or str(item.get("owner_instagram_account_id") or "") != owner_account_id
+            or str(item.get("inventory_state") or "").upper() != "CURRENT"):
+        raise HTTPException(status_code=409, detail="Instagram media ownership is unverified or not current; mapping changes require verified current-account media.")
 
 
 @app.post("/admin/instagram-media/sync")
@@ -3582,6 +3675,10 @@ def instagram_media_sync_status(x_admin_key: Optional[str] = Header(None), x_adm
 @app.patch("/admin/instagram-media/{item_id}")
 async def update_instagram_media(item_id: int, request: Request, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
     require_admin(x_admin_key, x_admin_pin)
+    item = db.get_instagram_media(item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Instagram media not found.")
+    _require_verified_current_instagram_media(item)
     body = await request.json()
     mode = str(body.get("route_mode") or "").upper()
     if mode not in {"DEFAULT", "CUSTOM", "DISABLED"}:
@@ -3611,6 +3708,7 @@ async def save_instagram_media_mapping(item_id: int, request: Request, x_admin_k
     item = db.get_instagram_media(item_id)
     if not item:
         raise HTTPException(status_code=404, detail="Instagram media not found.")
+    _require_verified_current_instagram_media(item)
     body = await request.json()
     topic_id = str(body.get("topic_id") or "").strip()
     if not topic_id and body.get("response_mode", "CUSTOM") != "APPROVED_QA":
@@ -3653,6 +3751,7 @@ def delete_instagram_media_mapping(item_id: int, x_admin_key: Optional[str] = He
     item = db.get_instagram_media(item_id)
     if not item:
         raise HTTPException(status_code=404, detail="Instagram media not found.")
+    _require_verified_current_instagram_media(item)
     route = db.get_instagram_source_route(int(item["custom_route_id"])) if item.get("custom_route_id") else None
     if route is None:
         route = next((candidate for candidate in db.list_instagram_source_routes()
@@ -4948,12 +5047,17 @@ def _system_template_public(template: Dict[str, Any], override: Optional[Dict[st
     template_id = str(template.get("id") or "")
     responses = template.get("responses") or []
     answer = (override or {}).get("response") or template.get("response") or (responses[0] if responses else "")
+    delegated = approved_response_alignment.runtime_template(template)
+    if delegated is not None:
+        answer = delegated["response"]
     # Keep every shipped greeting variant searchable while presenting one
     # canonical answer.  This lets an operator find legacy copy by its exact
     # phrase without creating a duplicate Response Library row.
     response_variants = list(responses) if responses else [answer]
     if override and override.get("response"):
         response_variants.insert(0, str(override["response"]))
+    if delegated is not None:
+        response_variants = [answer]
     trigger_list = [str(t).strip() for t in (template.get("triggers") or []) if str(t).strip()]
     title = str(template.get("name") or template_id.replace("_", " ").title())
     category = str(template.get("category") or "System")
@@ -5190,6 +5294,11 @@ async def edit_response_library_system_template(
     actor = body.get("updated_by") or "client_admin_dashboard"
     if not response:
         raise HTTPException(status_code=400, detail="response is required")
+    if template_id in approved_response_alignment.HANDOFF_ONLY_TEMPLATE_IDS | approved_response_alignment.MENU_DELEGATION_TEMPLATE_IDS:
+        _qa_id, canonical = approved_response_alignment.effective_binding(template_id)
+        canonical = canonical or customer_facing_notice()
+        if response != canonical:
+            raise HTTPException(status_code=409, detail="This protected response is aligned to effective Approved Q&A and cannot carry separate business wording.")
     _validate_custom_qa_answer(response)
     status = str(body.get("status") or "ACTIVE").upper()
     default_response = template.get("response") or ((template.get("responses") or [""])[0])
@@ -5236,6 +5345,13 @@ async def restore_response_library_system_version(
     except Exception:
         body = {}
     actor = body.get("actor") or "client_admin_dashboard"
+    if template_id in approved_response_alignment.HANDOFF_ONLY_TEMPLATE_IDS | approved_response_alignment.MENU_DELEGATION_TEMPLATE_IDS:
+        _qa_id, canonical = approved_response_alignment.effective_binding(template_id)
+        canonical = canonical or customer_facing_notice()
+        version = next((row for row in db.get_response_template_override_versions(template_id)
+                        if int(row.get("version_id") or 0) == version_id), None)
+        if version and str(version.get("response") or "").strip() != canonical:
+            raise HTTPException(status_code=409, detail="This protected response must remain aligned to effective Approved Q&A.")
     if not db.restore_response_template_override_version(template_id, version_id, actor):
         raise HTTPException(status_code=404, detail="Version or system template not found")
     return {"status": "restored", "template_id": template_id, "version_id": version_id}
@@ -7328,6 +7444,7 @@ def get_admin_dashboard():
                 <button class="ig-media-filter" data-content-map-filter="unmapped" type="button" onclick="setInstagramContentMappingFilter('unmapped')">Unmapped</button>
                 <label class="ig-media-muted" for="igContentSort">Sort</label><select class="field-control" id="igContentSort" style="width:auto;min-width:140px"><option value="newest">Newest</option><option value="oldest">Oldest</option><option value="recently_edited">Recently edited</option></select>
             </div>
+            <div id="igContentInventoryNotice" class="result-box info" role="status" style="display:none;margin:12px 0;"></div>
             <div id="igContentGallery" class="instagram-gallery"><span class="ig-media-muted">Open Posts &amp; Reels to load content.</span></div>
             <div class="gallery-toolbar" style="justify-content:center;margin-top:16px"><span id="igContentPageSummary" class="ig-media-muted"></span><button class="btn-secondary" id="igContentLoadMore" type="button" onclick="loadInstagramContentGallery(false)" style="display:none">Load more</button></div>
         </div>
@@ -8680,6 +8797,7 @@ THIS WEEK'S BENGAL SPECIALS
         let handoffPollTimer = null;
         let handoffSnapshotReady = false;
         let igContentRoutes = [];
+        let igContentInventoryVerification = 'UNKNOWN';
         let igContentFilter = 'all';
         let igContentMappingFilter = 'all';
         let igContentView = 'gallery';
@@ -8913,7 +9031,9 @@ THIS WEEK'S BENGAL SPECIALS
         function renderInstagramContentCard(route) {
             const status = instagramContentStatus(route); const label = route.gallery_media ? (route.media_type === 'VIDEO' ? 'REEL' : route.media_type === 'CAROUSEL_ALBUM' ? 'CAROUSEL' : 'POST') : (route.source_type === 'reel' ? 'REEL' : 'POST'); const image = route.preview_url || route.admin_preview_url;
             const preview = image ? `<img class="ig-media-thumb" loading="lazy" decoding="async" src="${escapeHtml(image)}" alt="${label} preview" onerror="this.style.display='none';this.nextElementSibling.style.display='flex';"><div class="ig-media-placeholder" style="display:none;"><span class="ig-media-placeholder-icon">◎</span><span>${label}</span></div>` : `<div class="ig-media-placeholder"><span class="ig-media-placeholder-icon">◎</span><span>${label}</span></div>`;
-            return `<article class="ig-media-card" tabindex="0" data-content-route-id="${escapeHtml(String(route.routing_id || ''))}"><div class="ig-media-preview">${preview}<span class="ig-media-badge">${label}</span></div><div class="ig-media-main"><div class="ig-media-title"><b class="ig-media-topic">${escapeHtml(route.routing_topic || 'Unmapped')}</b></div><div class="ig-media-summary">${escapeHtml(route.source_description || 'No description added.')}</div><div class="ig-media-facts"><span>${route.mapping_route?.active || (!route.mapping_route && route.topic_id && route.route_mode !== 'DISABLED') ? '● Context active' : '○ Context off'}</span><span>${escapeHtml(route.published_at || route.created_at || '—')}</span></div></div><div class="ig-media-actions"><button class="btn-secondary" type="button" data-content-action="details">${route.mapping_route || route.topic_id ? 'Edit Mapping' : label === 'REEL' ? 'Map Reel' : 'Map Post'}</button></div></article>`;
+            const unverified = route.inventory_verification === 'LEGACY_UNVERIFIED';
+            const action = unverified ? '<button class="btn-secondary" type="button" disabled title="Ownership is unverified until a complete owner sync succeeds">LEGACY · UNVERIFIED</button>' : `<button class="btn-secondary" type="button" data-content-action="details">${route.mapping_route || route.topic_id ? 'Edit Mapping' : label === 'REEL' ? 'Map Reel' : 'Map Post'}</button>`;
+            return `<article class="ig-media-card" tabindex="${unverified ? '-1' : '0'}" data-content-route-id="${escapeHtml(String(route.routing_id || ''))}"><div class="ig-media-preview">${preview}<span class="ig-media-badge">${label}</span></div><div class="ig-media-main"><div class="ig-media-title"><b class="ig-media-topic">${escapeHtml(route.routing_topic || 'Unmapped')}</b></div><div class="ig-media-summary">${escapeHtml(route.source_description || 'No description added.')}</div><div class="ig-media-facts"><span>${unverified ? 'LEGACY · UNVERIFIED — not verified for this account' : route.mapping_route?.active || (!route.mapping_route && route.topic_id && route.route_mode !== 'DISABLED') ? '● Context active' : '○ Context off'}</span><span>${escapeHtml(route.published_at || route.created_at || '—')}</span></div></div><div class="ig-media-actions">${action}</div></article>`;
         }
 
         function renderInstagramContentGallery() {
@@ -8929,7 +9049,7 @@ THIS WEEK'S BENGAL SPECIALS
             });
             if (!filtered.length) { list.innerHTML = '<span class="ig-media-muted">No Instagram media matches this filter.</span>'; return; }
             if (igContentView === 'table') {
-                list.className = ''; list.innerHTML = `<table class="instagram-table"><thead><tr><th>Type</th><th>Topic</th><th>Attachment</th><th>Chatbot context</th><th></th></tr></thead><tbody>${filtered.map(route => `<tr><td>${route.source_type === 'reel' ? 'Reel' : 'Post'}</td><td>${escapeHtml(route.routing_topic || 'Not mapped')}</td><td>${escapeHtml((igMenus.find(menu => menu.menu_id === route.menu_id) || {}).name || 'None')}</td><td>${route.mapping_route?.active ? 'On' : 'Off'}</td><td><button class="btn-secondary" type="button" data-content-table-id="${escapeHtml(String(route.routing_id || ''))}" style="padding:6px 9px;font-size:.72rem;">${route.mapping_route ? 'Edit Mapping' : 'Map'}</button></td></tr>`).join('')}</tbody></table>`;
+                list.className = ''; list.innerHTML = `<table class="instagram-table"><thead><tr><th>Type</th><th>Topic</th><th>Attachment</th><th>Chatbot context</th><th></th></tr></thead><tbody>${filtered.map(route => { const unverified = route.inventory_verification === 'LEGACY_UNVERIFIED'; return `<tr><td>${route.source_type === 'reel' ? 'Reel' : 'Post'}${unverified ? ' · LEGACY UNVERIFIED' : ''}</td><td>${escapeHtml(route.routing_topic || 'Not mapped')}</td><td>${escapeHtml((igMenus.find(menu => menu.menu_id === route.menu_id) || {}).name || 'None')}</td><td>${unverified ? 'Unverified' : route.mapping_route?.active ? 'On' : 'Off'}</td><td>${unverified ? '<button class="btn-secondary" type="button" disabled>LEGACY · UNVERIFIED</button>' : `<button class="btn-secondary" type="button" data-content-table-id="${escapeHtml(String(route.routing_id || ''))}" style="padding:6px 9px;font-size:.72rem;">${route.mapping_route ? 'Edit Mapping' : 'Map'}</button>`}</td></tr>`; }).join('')}</tbody></table>`;
                 list.querySelectorAll('[data-content-table-id]').forEach(button => button.addEventListener('click', () => openContentDetails('content', igContentRoutes.find(route => String(route.routing_id) === button.dataset.contentTableId))));
                 return;
             }
@@ -8954,6 +9074,13 @@ THIS WEEK'S BENGAL SPECIALS
                 const response = await fetch(`/admin/instagram-media?${params}`, { headers: getAuthHeaders() });
                 const payload = await response.json().catch(() => ({}));
                 if (!response.ok) throw new Error(payload.detail || 'Could not load Instagram media.');
+                igContentInventoryVerification = payload.inventory_verification || 'UNKNOWN';
+                const notice = document.getElementById('igContentInventoryNotice');
+                if (notice) {
+                    notice.style.display = ['LEGACY_UNVERIFIED', 'OWNER_NOT_CONFIGURED'].includes(igContentInventoryVerification) ? 'block' : 'none';
+                    notice.textContent = ['LEGACY_UNVERIFIED', 'OWNER_NOT_CONFIGURED'].includes(igContentInventoryVerification)
+                        ? 'LEGACY · UNVERIFIED — showing saved media records for continuity. Their account ownership has not been verified, they are not authoritative current-account media, and mapping edits are disabled until a complete owner sync succeeds.' : '';
+                }
                 const pageMediaIds = (payload.items || []).map(item => item.instagram_media_id).filter(Boolean);
                 const mappingParams = new URLSearchParams({ media_ids: pageMediaIds.join(',') });
                 const mappingResponse = pageMediaIds.length ? await fetch(`/admin/instagram-routes?${mappingParams}`, { headers: getAuthHeaders() }) : null;
@@ -9003,6 +9130,7 @@ THIS WEEK'S BENGAL SPECIALS
         function openContentDetails(kind, item) {
             if (!item) return;
             if (item.gallery_media) {
+                if (item.inventory_verification === 'LEGACY_UNVERIFIED') { alert('This legacy Instagram media is unverified. Mapping edits are disabled until a complete owner sync succeeds.'); return; }
                 const drawer = document.getElementById('contentDetailsDrawer'); const backdrop = document.getElementById('contentDetailsBackdrop');
                 const typeLabel = item.media_type === 'VIDEO' ? 'Instagram Reel' : item.media_type === 'CAROUSEL_ALBUM' ? 'Instagram Carousel' : 'Instagram Post';
                 document.getElementById('contentDetailsType').innerText = typeLabel; document.getElementById('contentDetailsTitle').innerText = `Edit ${item.source_type} mapping`;
@@ -12537,7 +12665,7 @@ Non-Veg:
                     ${item.status === 'ARCHIVED' ? `<button class="btn-secondary" onclick="cqaQuickPreview(${item.id})">View</button>` : `<button class="btn-secondary" onclick="cqaOpenEdit(${item.id})">Edit</button>`}
                     ${lifecycleAction}
                     <button class="btn-secondary" style="padding:4px 8px;font-size:0.72rem;" onclick="cqaOpenHistory(${item.id})">History</button>
-                    ${item.status === 'ARCHIVED' ? `<button class="btn-danger" onclick="cqaOpenDeleteConfirm(${item.id})">Delete Permanently</button>` : `<button class="btn-secondary" onclick="cqaSetStatus(${item.id},'ARCHIVED')">Archive</button>`}
+                    <button class="btn-danger" onclick="cqaOpenDeleteConfirm(${item.id})">Delete</button>
                 </td>
             </tr>`;
         }
@@ -12548,9 +12676,10 @@ Non-Veg:
                     method: 'POST', headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
                     body: JSON.stringify({ status, actor: 'client_admin_dashboard' }),
                 });
-                if (resp.ok) { loadCustomQa(); refreshAiResolutionIfVisible(); }
+                if (resp.ok) { loadCustomQa(); refreshAiResolutionIfVisible(); return true; }
                 else alert('Could not update status: ' + JSON.stringify((await resp.json()).detail));
             } catch (e) { alert('Could not update status.'); }
+            return false;
         }
 
         async function cqaQuickTest(id) {
@@ -12581,9 +12710,14 @@ Non-Veg:
             } catch (e) { alert('Preview failed.'); }
         }
 
-        function cqaOpenDeleteConfirm(id) {
+        async function cqaOpenDeleteConfirm(id) {
             const item = customQaItems.find(i => i.id === id);
             if (!item) return;
+            if (item.status !== 'ARCHIVED') {
+                if (!confirm(`"${item.primary_question}" must be archived before permanent deletion. Archive it now? No record will be deleted.`)) return;
+                await cqaSetStatus(id, 'ARCHIVED');
+                return;
+            }
             document.getElementById('cqaDeleteDetails').innerHTML = `
                 <div><b>Topic:</b> ${escapeHtml(item.topic || '')}</div>
                 <div><b>Question:</b> ${escapeHtml(item.primary_question || '')}</div>
