@@ -437,7 +437,7 @@ def one_shot_customer(monkeypatch):
             assert text.startswith(effective_entry(facts['client_qa_id']).answer + '\n\nContinue on WhatsApp:')
             assert text.count('https://wa.me/') == 1
         else:
-            assert template == 'order_intake_draft'
+            assert template in {'order_intake_draft', 'system_conversation'}
         unchanged = previous == draft_fingerprint(facts['order_intake_draft']) and not (is_link_resend_request(message) or is_order_process_question(message))
         if unchanged:
             assert 'https://wa.me/' not in text and 'ORDER DRAFT' not in text

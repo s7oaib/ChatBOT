@@ -55,10 +55,9 @@ def test_order_draft_yes_does_not_invent_missing_address_or_finalize():
 
         reply = responder.match_and_respond(acknowledgement, user_id, "instagram")
 
-        assert reply[2] == "order_intake_draft"
-        assert "ORDER DRAFT" in reply[0]
-        assert "Delivery address/area: Gurgaon\n" in reply[0]
-        assert "Receiver phone: Not provided\n" in reply[0]
+        assert reply[2] == "system_conversation"
+        assert "ORDER DRAFT" not in reply[0] and "https://wa.me/" not in reply[0]
+        assert facts["order_intake_draft"]["delivery_area"] == "Gurgaon"
         assert facts["order_intake_draft"]["delivery_address"] is None
         assert facts["order_intake_draft"]["receiver_phone"] is None
         assert facts["order_intake_draft"]["status"] == ORDER_DRAFT_INCOMPLETE

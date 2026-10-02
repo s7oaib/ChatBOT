@@ -36,13 +36,13 @@ def _reply(uid, text):
     return responder.match_and_respond(text, user_id=uid, channel="instagram")
 
 
-def _assert_controlled_handoff(result, facts):
+def _assert_controlled_handoff(result, facts, grounding="client_registry_miss"):
     reply, matched, template_id, _images = result
     assert matched is False
     assert template_id is None
     assert "Manager of Kitchens" in reply
     assert facts["last_route_source"] == "HUMAN_HANDOFF"
-    assert facts["last_grounding"] == "client_registry_miss"
+    assert facts["last_grounding"] == grounding
     assert facts["source_context_used"] is False
 
 
@@ -68,14 +68,14 @@ def test_natural_referential_followups_use_a_shared_reel(deterministic_responder
         assert result[2] == "alacarte_prebooking_steps"
         assert facts["source_context_used"] is False
     else:
-        _assert_controlled_handoff(result, facts)
+        _assert_controlled_handoff(result, facts, "source_menu_unavailable" if text == "Tell me more" else "client_registry_miss")
 
 
 @pytest.mark.parametrize("text", ["Tell me about this", "I want this"])
 def test_referential_followups_use_a_shared_post(deterministic_responder, text):
     uid = "referential_post_" + text[:4]
     facts = _set_source(uid, source_type="post")
-    _assert_controlled_handoff(_reply(uid, text), facts)
+    _assert_controlled_handoff(_reply(uid, text), facts, "source_menu_unavailable" if text == "Tell me about this" else "client_registry_miss")
 
 
 @pytest.mark.parametrize("text", ["More details please", "How much is this?"])

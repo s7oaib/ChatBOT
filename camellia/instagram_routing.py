@@ -343,7 +343,14 @@ def prepare_source_response(payload, existing=None):
         # The mapping never accepts a copied QA answer, even from a stale client.
         merged["source_description"] = (existing or {}).get("source_description") or ""
     elif mode == "CUSTOM" and not str(merged.get("source_description") or "").strip():
-        raise ValueError("Source Description is required.")
+        # Normalize the exact selection before checking response components.
+        # Topic labels/descriptions never supply missing source copy.
+        normalized = validate_route_payload(merged)
+        if not normalized.get("menu_id"):
+            raise ValueError("Source Description is required unless a valid menu is selected or inherited.")
+        from camellia.menu_images import current_url
+        if not current_url(normalized["menu_id"]):
+            raise ValueError("The selected menu has no current customer-eligible image.")
     return merged
 
 
@@ -641,7 +648,7 @@ def _slugify_topic(name: str) -> str:
 
 
 def create_topic(
-    name: str, description: str, default_menu_id: Optional[str] = None,
+    name: str, description: str = "", default_menu_id: Optional[str] = None,
     priority_products: Optional[List[str]] = None, knowledge_scope: Optional[List[str]] = None,
     active: bool = True, response_order: str = "description_first",
 ) -> Dict[str, Any]:
@@ -651,8 +658,6 @@ def create_topic(
     description = (description or "").strip()
     if not name:
         raise InstagramTopicError("Topic name is required.")
-    if not description:
-        raise InstagramTopicError("Topic description is required.")
     response_order = str(response_order or "description_first").strip().lower()
     if response_order not in RESPONSE_ORDERS:
         raise InstagramTopicError("Reply order must be Description First or Menu First.")
@@ -700,8 +705,8 @@ def update_topic(topic_id: str, **fields: Any) -> Dict[str, Any]:
         if existing and existing["topic_id"] != topic_id:
             raise InstagramTopicError(f"A topic named '{name}' already exists.")
         fields["name"] = name
-    if "description" in fields and not str(fields["description"] or "").strip():
-        raise InstagramTopicError("Topic description is required.")
+    if "description" in fields:
+        fields["description"] = str(fields["description"] or "").strip()
     default_menu_id = fields.get("default_menu_id")
     default_menu = db.get_menu_catalogue_entry(default_menu_id) if default_menu_id else None
     if default_menu_id and not default_menu:

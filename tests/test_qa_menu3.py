@@ -39,7 +39,7 @@ def test_browse_one_intent_preserves_draft(current, query):
     facts = session_memory.get_facts(uid, "instagram")
     draft = order_intake.new_order_draft()
     order_intake.update_order_draft(draft, "2 boxes Sondesh Gurgaon Friday dinner")
-    facts.update(order_intake_draft=draft, last_topic="bengali_home_table")
+    facts.update(order_intake_draft=draft, last_topic="sondesh")
     saved = copy.deepcopy(draft)
     answer = respond(query, uid)
     assert answer == ("", True, "approved_menu", [menu_images.current_weekly_url()])
@@ -47,6 +47,14 @@ def test_browse_one_intent_preserves_draft(current, query):
     assert draft == saved
     assert respond("show me my order", uid)[2] == "order_intake_draft"
     assert facts["order_intake_draft"] == saved
+
+
+@pytest.mark.parametrize("query", ["show me the weekly menu", "what's on this week's menu", "show me this week's menu", "menu for this week", "give me savoury menu"])
+def test_explicit_weekly_intent_interrupts_home_table_context(current, query):
+    uid = uuid.uuid4().hex
+    facts = session_memory.get_facts(uid, "instagram")
+    facts.update(last_topic="bengali_home_table", home_table_context=True)
+    assert respond(query, uid) == ("", True, "approved_menu", [menu_images.current_weekly_url()])
 
 
 @pytest.mark.parametrize("query,qa_id", [

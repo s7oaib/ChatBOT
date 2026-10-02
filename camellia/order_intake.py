@@ -1,6 +1,7 @@
 """Customer-provided Instagram order request drafts (never confirmations)."""
 
 import hashlib
+from datetime import date
 import re
 from urllib.parse import quote
 
@@ -26,6 +27,11 @@ _SLOT_RE = re.compile(
     re.I,
 )
 _AREA_RE = re.compile(r"\b(?:delhi\s+ncr|gurgaon|gurugram|delhi|noida|ghaziabad|faridabad|kolkata)\b", re.I)
+_DATE_RE = re.compile(
+    r"\b(?:\d{1,2}(?:st|nd|rd|th)?\s+(?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Oct|Nov|Dec)"
+    r"|(?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}(?:st|nd|rd|th)?"
+    r"|\d{1,2}[/-]\d{1,2})(?:\s+\d{4})?\b", re.I,
+)
 _PHONE_RE = re.compile(r"(?<!\w)(?:\+?\d[\d\s().-]{8,}\d)(?!\w)")
 _PIN_RE = re.compile(r"https?://(?:maps\.app\.goo\.gl|(?:www\.)?google\.[^/]+/maps|maps\.google\.[^/]+)[^\s]*", re.I)
 _PRODUCT_RE = re.compile(
@@ -42,6 +48,26 @@ _EDIT_FIELD_RE = re.compile(
     r"\bchange\s+(?:my\s+)?(quantity|item|address|delivery area|area|slot|day|receiver phone(?: number)?|phone(?: number)?|location pin)\b",
     re.I,
 )
+
+
+def _calendar_date(text: str) -> str | None:
+    """Validate supplied dates without inferring availability or a booking."""
+    months = "jan feb mar apr may jun jul aug sep oct nov dec".split()
+    for match in _DATE_RE.finditer(text):
+        value = match.group(0)
+        parts = re.sub(r"(?<=\d)(?:st|nd|rd|th)\b", "", value, flags=re.I)
+        parts = re.split(r"[\s/-]+", parts.strip())
+        try:
+            if parts[0].isalpha():
+                month, day = months.index(parts[0][:3].lower()) + 1, int(parts[1])
+            else:
+                day = int(parts[0])
+                month = int(parts[1]) if parts[1].isdigit() else months.index(parts[1][:3].lower()) + 1
+            date(int(parts[2]) if len(parts) > 2 else 2000, month, day)
+        except (ValueError, IndexError):
+            continue
+        return " ".join(value.split()).title()
+    return None
 
 
 def new_order_draft() -> dict:
@@ -88,7 +114,7 @@ def is_order_information_question(message: str) -> bool:
         return False
     return bool(
         is_price_or_payment(text) or is_unsupported_question(text)
-        or re.match(r"^(?:what|why|when|where|how|do you|does|is|are|can you|could you|tell me|i want to (?:know|see|learn))\b", text, re.I)
+        or re.match(r"^(?:what|which|why|when|where|how|do you|does|is|are|can you|could you|tell me|i want to (?:know|see|learn))\b", text, re.I)
     )
 
 
@@ -166,6 +192,9 @@ def update_order_draft(draft: dict, message: str, active_product_context=None) -
     slot_match = slot_matches[-1] if slot_matches and (correcting or len({m[0].casefold() for m in slot_matches}) == 1) else None
     if slot_match:
         draft["delivery_slot"] = " ".join(slot_match.group(0).split()).title()
+        updated_fields.add("delivery_slot")
+    elif (supplied_date := _calendar_date(text)):
+        draft["delivery_slot"] = supplied_date
         updated_fields.add("delivery_slot")
     elif re.fullmatch(r"morning|afternoon|lunch|dinner", text, re.I):
         previous_day = re.fullmatch(r"today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday", str(draft.get("delivery_slot") or ""), re.I)
@@ -279,6 +308,7 @@ def _extract_customer_item(text: str) -> str | None:
     candidate = re.sub(r"^\s*(?:need|i\s+want|i\s+would\s+like|i['’]d\s+like|please\s+order)\s+(?:to\s+order\s+)?", "", candidate, flags=re.I)
     candidate = _QUANTITY_RE.sub(" ", candidate)
     candidate = _SLOT_RE.sub(" ", candidate)
+    candidate = _DATE_RE.sub(" ", candidate)
     candidate = _PHONE_RE.sub(" ", candidate)
     candidate = _PIN_RE.sub(" ", candidate)
     # A volunteered address is a separate field, not part of an item name.
@@ -440,7 +470,8 @@ def is_link_resend_request(message: str) -> bool:
     text = " ".join(str(message or "").casefold().split()).strip(" .?!")
     return bool(re.fullmatch(
         r"(?:send (?:the )?whatsapp link(?: again)?|where is (?:the )?whatsapp link|"
-        r"whatsapp link please|send (?:the )?link(?: again)?|how do i continue on whatsapp)", text,
+        r"whatsapp link please|send (?:the )?link(?: again)?|how do i continue on whatsapp|"
+        r"(?:show|resend) (?:me )?(?:my|the) order(?: draft)?)", text,
     ))
 
 
@@ -469,8 +500,9 @@ def is_order_detail_message(message: str) -> bool:
     text = str(message or "")
     return bool(
         is_order_process_question(text) or is_order_request(text) or is_edit_request(text)
-        or _EDIT_FIELD_RE.search(text) or _QUANTITY_RE.search(text) or _SLOT_RE.search(text)
+        or _EDIT_FIELD_RE.search(text) or _QUANTITY_RE.search(text) or _SLOT_RE.search(text) or _calendar_date(text)
         or _AREA_RE.search(text) or _PHONE_RE.search(text) or _PIN_RE.search(text)
+        or _looks_like_address(text, _AREA_RE.search(text), None, None, None, None)
         or re.fullmatch(r"(?:make it |actually )?\d{1,4}|(?:today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday|lunch|dinner)", text.strip(), re.I)
     )
 

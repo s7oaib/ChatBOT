@@ -277,11 +277,10 @@ def test_duplicate_topic_name_rejected(catalogue_db):
         create_topic("Meal Subscription", "A different description.")
 
 
-def test_topic_requires_name_and_description(catalogue_db):
+def test_topic_requires_name_description_is_optional(catalogue_db):
     with pytest.raises(InstagramTopicError):
         create_topic("", "Has a description.")
-    with pytest.raises(InstagramTopicError):
-        create_topic("No Description", "")
+    assert create_topic("No Description")["description"] == ""
 
 
 def test_topic_with_unknown_default_menu_rejected(catalogue_db):
@@ -380,11 +379,12 @@ def test_shared_topic_response_renderer_keeps_both_orders_explicit():
     assert second.index(menu) < second.index(description)
 
 
-def _set_source_route_for_test(topic, *, source_type, menu_mode, menu_id=None, priority_products=None):
+def _set_source_route_for_test(topic, *, source_type, menu_mode, menu_id=None, priority_products=None, source_description=""):
     return {
         "source_type": source_type,
         "topic_id": topic["topic_id"],
         "routing_topic": topic["name"],
+        "source_description": source_description,
         "menu_id": menu_id,
         "menu_mode": menu_mode,
         "priority_products": priority_products or [],
@@ -403,6 +403,7 @@ def test_explicit_none_sends_description_only_for_every_instagram_source(catalog
     facts["source_route"] = _set_source_route_for_test(
         topic, source_type=source_type, menu_mode="NONE", priority_products=["jolbhora"],
     )
+    facts["source_route"]["source_description"] = "TEST DESCRIPTION ONLY"
     facts["source_match_method"] = "test"
 
     text, matched, template_id, _images = responder.match_and_respond(
@@ -410,7 +411,7 @@ def test_explicit_none_sends_description_only_for_every_instagram_source(catalog
     )
 
     assert matched is True
-    assert template_id == "source_topic_description_only"
+    assert template_id == "source_description"
     assert text == "TEST DESCRIPTION ONLY"
     assert "Jolbhora" not in text
     assert "₹" not in text
@@ -424,7 +425,7 @@ def test_selected_menu_does_not_turn_priority_product_into_an_answer(catalogue_d
     session_memory.clear_session(uid, "instagram")
     facts = session_memory.get_facts(uid, "instagram")
     facts["source_route"] = _set_source_route_for_test(
-        topic, source_type="post", menu_mode="SELECTED", menu_id="aamar_mishti", priority_products=["jolbhora"],
+        topic, source_type="post", menu_mode="SELECTED", menu_id="aamar_mishti", priority_products=["jolbhora"], source_description="TEST DESCRIPTION ONLY",
     )
     facts["source_match_method"] = "test"
 
@@ -445,7 +446,7 @@ def test_topic_identity_does_not_inherit_menu_when_none_is_explicit(catalogue_db
     session_memory.clear_session(uid, "instagram")
     facts = session_memory.get_facts(uid, "instagram")
     facts["source_route"] = _set_source_route_for_test(
-        topic, source_type="reel", menu_mode="NONE", priority_products=["kanchagolla"],
+        topic, source_type="reel", menu_mode="NONE", priority_products=["kanchagolla"], source_description="ANOTHER DESCRIPTION",
     )
     facts["source_match_method"] = "test"
 
@@ -474,7 +475,7 @@ def test_preview_and_runtime_use_identical_none_composition(catalogue_db, admin_
     session_memory.clear_session(uid, "instagram")
     facts = session_memory.get_facts(uid, "instagram")
     facts["source_route"] = _set_source_route_for_test(
-        topic, source_type="post", menu_mode="NONE", priority_products=["jolbhora"],
+        topic, source_type="post", menu_mode="NONE", priority_products=["jolbhora"], source_description="PREVIEW DESCRIPTION ONLY",
     )
     facts["source_match_method"] = "test"
     runtime_text, _matched, _template_id, _images = responder.match_and_respond(
@@ -490,7 +491,7 @@ def test_topic_response_order_applies_to_reel_post_and_ad_contexts(catalogue_db,
         uid = f"ordered_{source_type}"
         session_memory.clear_session(uid, "instagram")
         facts = session_memory.get_facts(uid, "instagram")
-        facts["source_route"] = {"source_type": source_type, "topic_id": topic["topic_id"], "routing_topic": topic["name"], "menu_id": "aamar_mishti", "priority_products": ["jolbhora"], "active": True}
+        facts["source_route"] = {"source_type": source_type, "topic_id": topic["topic_id"], "routing_topic": topic["name"], "menu_id": "aamar_mishti", "source_description": "Description from the Topic.", "priority_products": ["jolbhora"], "active": True}
         facts["source_match_method"] = "test"
         text, matched, _template_id, _images = responder.match_and_respond("Tell me more", user_id=uid, channel="instagram")
         assert matched is True
@@ -783,7 +784,7 @@ def bypass_ad_gate(monkeypatch):
     return True
 
 
-def test_tell_me_more_surfaces_the_topic_description(catalogue_db, bypass_ad_gate):
+def test_menu_only_source_does_not_infer_source_copy_from_topic(catalogue_db, bypass_ad_gate):
     topic = create_topic(
         "Wedding / Event Sondesh", "Explore handcrafted Bengali Sondesh for weddings and celebrations.",
         default_menu_id="aamar_mishti", priority_products=["jolbhora"],
@@ -800,7 +801,8 @@ def test_tell_me_more_surfaces_the_topic_description(catalogue_db, bypass_ad_gat
     facts["source_match_method"] = "shared_media_url"
 
     text, matched, template_id, _images = responder.match_and_respond("Tell me more", user_id=uid, channel="instagram")
-    assert "Explore handcrafted Bengali Sondesh" in text
+    assert matched and text == "" and template_id == "source_menu"
+    assert _images == [menu_images_module.current_url("aamar_mishti")]
 
 
 def test_explicit_intent_still_overrides_topic_context(catalogue_db, bypass_ad_gate):
