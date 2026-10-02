@@ -27,11 +27,13 @@ involved. Explicit admin resume remains idempotent and restores Instagram AI
 only after the handoff is closed.
 
 `INSTAGRAM_CHATBOT_ENABLED` controls Instagram channel capability. Durable Admin
-LIVE / TEST_ONLY independently controls customer access; accepted production
-is TEST_ONLY. Exact allowlisted Meta sender IDs alone may reach business
-processing and customer sending in TEST_ONLY. See [CLIENT_HANDOVER.md](CLIENT_HANDOVER.md)
-for the current Approved Q&A, Weekly Savoury and source-mapping authority. The
-WhatsApp business number is retained solely for the manual `wa.me` link.
+LIVE / TEST_ONLY independently controls customer access; accepted production at
+the 3 October 2026 handover is **LIVE**. TEST_ONLY remains available as a
+fail-closed exact-sender allowlist mode and must be treated as an operator
+control, not as the channel-capability flag. See
+[CLIENT_HANDOVER.md](CLIENT_HANDOVER.md) for current Approved Q&A, menu and
+source-mapping authority. The WhatsApp business number is retained solely for
+the manual `wa.me` link.
 
 ## Runtime boundaries
 
