@@ -56,6 +56,7 @@ def post_route(tmp_path, monkeypatch):
     import camellia.database as db_module
     monkeypatch.setattr(db_module, "db", database)
     monkeypatch.setattr(app_module, "db", database)
+    monkeypatch.setattr("camellia.handoff.db", database)
     return database, route["routing_id"]
 
 
@@ -232,21 +233,74 @@ def test_recognized_post_suppresses_the_unreadable_attachment_reply(post_route, 
     assert replied == []
 
 
-def test_unrecognized_post_still_gets_the_unreadable_attachment_reply(post_route, monkeypatch):
+def test_unrecognized_post_uses_shared_media_handoff_not_attachment_limitation(post_route, monkeypatch):
     database, routing_id = post_route
-    replied = []
-    monkeypatch.setattr(app_module, "_reply_to_unreadable_attachment", lambda uid, **_kwargs: replied.append(uid))
+    handed_off = []
+    monkeypatch.setattr(app_module, "_handoff_unmapped_shared_media", lambda uid, **kwargs: handed_off.append((uid, kwargs)))
 
     app_module._handle_shared_attachment("uid_unrec", None, THIRD_PARTY_MEDIA_ID)
-    assert replied == ["uid_unrec"]
+    assert handed_off == [("uid_unrec", {"source_type": "post", "media_id": THIRD_PARTY_MEDIA_ID, "shortcode": None})]
 
 
-def test_a_reel_share_still_gets_the_unreadable_reply_exactly_as_before(post_route, monkeypatch):
-    """Section 11: the proven reel path must not change."""
-    replied = []
-    monkeypatch.setattr(app_module, "_reply_to_unreadable_attachment", lambda uid, **_kwargs: replied.append(uid))
+def test_unmapped_reel_uses_shared_media_handoff_not_attachment_limitation(post_route, monkeypatch):
+    handed_off = []
+    monkeypatch.setattr(app_module, "_handoff_unmapped_shared_media", lambda uid, **kwargs: handed_off.append((uid, kwargs)))
     app_module._handle_shared_attachment("uid_reel", {"shortcode": "unconfigured"}, None)
-    assert replied == ["uid_reel"]
+    assert handed_off == [("uid_reel", {"source_type": "reel", "media_id": None, "shortcode": "unconfigured"})]
+
+
+@pytest.mark.parametrize("source_type,media_id,shortcode", [
+    ("post", THIRD_PARTY_MEDIA_ID, None), ("reel", None, "unmapped-reel"),
+])
+def test_unmapped_identifiable_share_creates_one_waiting_handoff_notice(post_route, monkeypatch, source_type, media_id, shortcode):
+    database, _routing_id = post_route
+    monkeypatch.setattr(app_module.instagram_chatbot_control, "is_sender_allowed", lambda *_a, **_k: True)
+    monkeypatch.setattr(app_module, "_cached_instagram_identity", lambda sender, *_a, **_k: {
+        "customer_external_id": sender, "customer_username": None,
+    })
+    monkeypatch.setattr(app_module.escalator, "handle_escalation", lambda **_kwargs: None)
+    sent = []
+    monkeypatch.setattr(app_module, "_send_or_queue_instagram_reply", lambda uid, text, **kwargs: sent.append((uid, text, kwargs)))
+    session_memory.clear_session("uid_handoff", "instagram")
+
+    app_module._handoff_unmapped_shared_media(
+        "uid_handoff", source_type=source_type, media_id=media_id, shortcode=shortcode,
+    )
+
+    handoff = database.get_active_handoff("instagram", "uid_handoff")
+    assert handoff and handoff["status"] == "WAITING_FOR_HUMAN"
+    assert len(sent) == 1
+    assert "Manager of Kitchens" in sent[0][1]
+    assert not any(phrase in sent[0][1].lower() for phrase in ("can't open", "cannot open", "can't access", "can't see"))
+
+    app_module._handoff_unmapped_shared_media(
+        "uid_handoff", source_type=source_type, media_id=media_id, shortcode=shortcode,
+    )
+    assert len(sent) == 1
+
+
+def test_text_with_unmapped_shared_post_still_sends_only_the_handoff(post_route, monkeypatch):
+    database, _routing_id = post_route
+    monkeypatch.setattr(app_module.instagram_chatbot_control, "is_sender_allowed", lambda *_a, **_k: True)
+    monkeypatch.setattr(app_module, "_cached_instagram_identity", lambda sender, *_a, **_k: {
+        "customer_external_id": sender, "customer_username": None,
+    })
+    monkeypatch.setattr(app_module.escalator, "handle_escalation", lambda **_kwargs: None)
+    monkeypatch.setattr(app_module.responder, "match_and_respond", lambda *_a, **_k: pytest.fail("unmapped share must bypass business templates"))
+    sent = []
+    monkeypatch.setattr(app_module, "_send_or_queue_instagram_reply", lambda uid, text, **kwargs: sent.append(text))
+    session_memory.clear_session("uid_text_share", "instagram")
+
+    app_module._process_instagram_event(
+        "uid_text_share", "Tell me more", None,
+        app_module.EntryPoint(source="shared_media"),
+        shared_post_id=THIRD_PARTY_MEDIA_ID, shared_source_type="post",
+    )
+
+    handoff = database.get_active_handoff("instagram", "uid_text_share")
+    assert handoff and handoff["status"] == "WAITING_FOR_HUMAN"
+    assert len(sent) == 1 and "Manager of Kitchens" in sent[0]
+    assert "can't open" not in sent[0].lower()
 
 
 # --- follow-up precedence: same guarantee as the reel fix ------------------

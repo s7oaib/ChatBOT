@@ -1,0 +1,719 @@
+{
+  "system_entry_count": 67,
+  "records": [
+    {
+      "template_id": "GUARD_allergen_nutfree_glutenfree",
+      "current_purpose": "nut allergy",
+      "classification": "NO_APPROVED_AUTHORITY",
+      "approved_qa_ids": [],
+      "action": "HANDOFF_ONLY",
+      "customer_facing_wording_changed": true,
+      "authority_resolution": "HANDOFF_ONLY",
+      "effective_runtime_authority": "HANDOFF_ONLY"
+    },
+    {
+      "template_id": "GUARD_collection_differentiation",
+      "current_purpose": "difference between collection 1 and collection 2",
+      "classification": "NO_APPROVED_AUTHORITY",
+      "approved_qa_ids": [],
+      "action": "HANDOFF_ONLY",
+      "customer_facing_wording_changed": true,
+      "authority_resolution": "HANDOFF_ONLY",
+      "effective_runtime_authority": "HANDOFF_ONLY"
+    },
+    {
+      "template_id": "GUARD_customization_flavour_mixing",
+      "current_purpose": "can i mix rose and classic",
+      "classification": "NO_APPROVED_AUTHORITY",
+      "approved_qa_ids": [],
+      "action": "HANDOFF_ONLY",
+      "customer_facing_wording_changed": true,
+      "authority_resolution": "HANDOFF_ONLY",
+      "effective_runtime_authority": "HANDOFF_ONLY"
+    },
+    {
+      "template_id": "GUARD_dietary_suitability",
+      "current_purpose": "vegan",
+      "classification": "NO_APPROVED_AUTHORITY",
+      "approved_qa_ids": [],
+      "action": "HANDOFF_ONLY",
+      "customer_facing_wording_changed": true,
+      "authority_resolution": "HANDOFF_ONLY",
+      "effective_runtime_authority": "HANDOFF_ONLY"
+    },
+    {
+      "template_id": "GUARD_halal_ingredients_oil",
+      "current_purpose": "halal",
+      "classification": "NO_APPROVED_AUTHORITY",
+      "approved_qa_ids": [],
+      "action": "HANDOFF_ONLY",
+      "customer_facing_wording_changed": true,
+      "authority_resolution": "HANDOFF_ONLY",
+      "effective_runtime_authority": "HANDOFF_ONLY"
+    },
+    {
+      "template_id": "GUARD_payment_method",
+      "current_purpose": "payment methods",
+      "classification": "APPROVED_QA_OVERLAP",
+      "approved_qa_ids": [
+        "general_payment_client"
+      ],
+      "action": "ALIGNED",
+      "customer_facing_wording_changed": true,
+      "authority_resolution": "DYNAMIC_DELEGATION",
+      "effective_runtime_authority": "APPROVED_QA_DELEGATION"
+    },
+    {
+      "template_id": "GUARD_pickup_address_hours",
+      "current_purpose": "kitchen address",
+      "classification": "NO_APPROVED_AUTHORITY",
+      "approved_qa_ids": [],
+      "action": "HANDOFF_ONLY",
+      "customer_facing_wording_changed": true,
+      "authority_resolution": "HANDOFF_ONLY",
+      "effective_runtime_authority": "HANDOFF_ONLY"
+    },
+    {
+      "template_id": "GUARD_shelf_life_storage",
+      "current_purpose": "shelf life",
+      "classification": "NO_APPROVED_AUTHORITY",
+      "approved_qa_ids": [],
+      "action": "HANDOFF_ONLY",
+      "customer_facing_wording_changed": true,
+      "authority_resolution": "HANDOFF_ONLY",
+      "effective_runtime_authority": "HANDOFF_ONLY"
+    },
+    {
+      "template_id": "GUARD_staff_names_manager_contact",
+      "current_purpose": "who is the owner",
+      "classification": "NO_APPROVED_AUTHORITY",
+      "approved_qa_ids": [],
+      "action": "HANDOFF_ONLY",
+      "customer_facing_wording_changed": true,
+      "authority_resolution": "HANDOFF_ONLY",
+      "effective_runtime_authority": "HANDOFF_ONLY"
+    },
+    {
+      "template_id": "aamar_mishti_collection",
+      "current_purpose": "collection 1",
+      "classification": "MENU_ASSET_DELEGATION",
+      "approved_qa_ids": [],
+      "action": "DYNAMIC_MENU_DELEGATION",
+      "customer_facing_wording_changed": true,
+      "authority_resolution": "MENU_ASSET_DELEGATION",
+      "effective_runtime_authority": "MENU_ASSET_DELEGATION"
+    },
+    {
+      "template_id": "alacarte_prebooking_steps",
+      "current_purpose": "how to order from menu",
+      "classification": "APPROVED_QA_OVERLAP",
+      "approved_qa_ids": [
+        "alacarte_prebook"
+      ],
+      "action": "ALIGNED",
+      "customer_facing_wording_changed": true,
+      "authority_resolution": "DYNAMIC_DELEGATION",
+      "effective_runtime_authority": "APPROVED_QA_DELEGATION"
+    },
+    {
+      "template_id": "artisanal_differentiation",
+      "current_purpose": "different from",
+      "classification": "NO_APPROVED_AUTHORITY",
+      "approved_qa_ids": [],
+      "action": "HANDOFF_ONLY",
+      "customer_facing_wording_changed": true,
+      "authority_resolution": "HANDOFF_ONLY",
+      "effective_runtime_authority": "HANDOFF_ONLY"
+    },
+    {
+      "template_id": "bengali_home_table_details",
+      "current_purpose": "bengali home table",
+      "classification": "APPROVED_QA_OVERLAP",
+      "approved_qa_ids": [
+        "home_table_details"
+      ],
+      "action": "ALIGNED",
+      "customer_facing_wording_changed": true,
+      "authority_resolution": "DYNAMIC_DELEGATION",
+      "effective_runtime_authority": "APPROVED_QA_DELEGATION"
+    },
+    {
+      "template_id": "bengali_home_table_payment",
+      "current_purpose": "bengali home table how to pay",
+      "classification": "APPROVED_QA_OVERLAP",
+      "approved_qa_ids": [
+        "home_table_payment"
+      ],
+      "action": "ALIGNED",
+      "customer_facing_wording_changed": true,
+      "authority_resolution": "DYNAMIC_DELEGATION",
+      "effective_runtime_authority": "APPROVED_QA_DELEGATION"
+    },
+    {
+      "template_id": "bengali_home_table_pricing",
+      "current_purpose": "pricing of bengali home lunch tables kolkata",
+      "classification": "APPROVED_QA_OVERLAP",
+      "approved_qa_ids": [
+        "home_table_price"
+      ],
+      "action": "ALIGNED",
+      "customer_facing_wording_changed": true,
+      "authority_resolution": "DYNAMIC_DELEGATION",
+      "effective_runtime_authority": "APPROVED_QA_DELEGATION"
+    },
+    {
+      "template_id": "bento_details",
+      "current_purpose": "bento",
+      "classification": "APPROVED_QA_OVERLAP",
+      "approved_qa_ids": [
+        "bento_details_client"
+      ],
+      "action": "ALIGNED",
+      "customer_facing_wording_changed": true,
+      "authority_resolution": "DYNAMIC_DELEGATION",
+      "effective_runtime_authority": "APPROVED_QA_DELEGATION"
+    },
+    {
+      "template_id": "bot_capabilities",
+      "current_purpose": "how can you assist me",
+      "classification": "SYSTEM_GUARD",
+      "approved_qa_ids": [],
+      "action": "PRESERVED",
+      "customer_facing_wording_changed": false,
+      "authority_resolution": "PRESERVED",
+      "effective_runtime_authority": "SYSTEM_GUARD"
+    },
+    {
+      "template_id": "bot_identity",
+      "current_purpose": "who are you",
+      "classification": "SYSTEM_GUARD",
+      "approved_qa_ids": [],
+      "action": "PRESERVED",
+      "customer_facing_wording_changed": false,
+      "authority_resolution": "PRESERVED",
+      "effective_runtime_authority": "SYSTEM_GUARD"
+    },
+    {
+      "template_id": "chicken_kosha_price",
+      "current_purpose": "chicken kosha price",
+      "classification": "APPROVED_QA_OVERLAP",
+      "approved_qa_ids": [
+        "chicken_kosha_price_client"
+      ],
+      "action": "ALIGNED",
+      "customer_facing_wording_changed": true,
+      "authority_resolution": "DYNAMIC_DELEGATION",
+      "effective_runtime_authority": "APPROVED_QA_DELEGATION"
+    },
+    {
+      "template_id": "combo_bento",
+      "current_purpose": "combo",
+      "classification": "APPROVED_QA_OVERLAP",
+      "approved_qa_ids": [
+        "bento_details_client"
+      ],
+      "action": "ALIGNED",
+      "customer_facing_wording_changed": true,
+      "authority_resolution": "DYNAMIC_DELEGATION",
+      "effective_runtime_authority": "APPROVED_QA_DELEGATION"
+    },
+    {
+      "template_id": "contact_social",
+      "current_purpose": "instagram",
+      "classification": "SYSTEM_GUARD",
+      "approved_qa_ids": [],
+      "action": "PRESERVED",
+      "customer_facing_wording_changed": false,
+      "authority_resolution": "PRESERVED",
+      "effective_runtime_authority": "SYSTEM_GUARD"
+    },
+    {
+      "template_id": "delivery_area",
+      "current_purpose": "delivery",
+      "classification": "NO_APPROVED_AUTHORITY",
+      "approved_qa_ids": [],
+      "action": "HANDOFF_ONLY",
+      "customer_facing_wording_changed": true,
+      "authority_resolution": "HANDOFF_ONLY",
+      "effective_runtime_authority": "HANDOFF_ONLY"
+    },
+    {
+      "template_id": "delivery_out_of_area",
+      "current_purpose": "bangalore",
+      "classification": "APPROVED_QA_OVERLAP",
+      "approved_qa_ids": [
+        "delivery_out_of_area_client"
+      ],
+      "action": "ALIGNED",
+      "customer_facing_wording_changed": true,
+      "authority_resolution": "DYNAMIC_DELEGATION",
+      "effective_runtime_authority": "APPROVED_QA_DELEGATION"
+    },
+    {
+      "template_id": "delivery_time",
+      "current_purpose": "how much time",
+      "classification": "NO_APPROVED_AUTHORITY",
+      "approved_qa_ids": [],
+      "action": "HANDOFF_ONLY",
+      "customer_facing_wording_changed": true,
+      "authority_resolution": "CONTEXTUAL_DELEGATION_OR_HANDOFF",
+      "effective_runtime_authority": "HANDOFF_ONLY"
+    },
+    {
+      "template_id": "freshness_ingredients",
+      "current_purpose": "fresh",
+      "classification": "NO_APPROVED_AUTHORITY",
+      "approved_qa_ids": [],
+      "action": "HANDOFF_ONLY",
+      "customer_facing_wording_changed": true,
+      "authority_resolution": "HANDOFF_ONLY",
+      "effective_runtime_authority": "HANDOFF_ONLY"
+    },
+    {
+      "template_id": "greeting",
+      "current_purpose": "hi",
+      "classification": "SYSTEM_GUARD",
+      "approved_qa_ids": [],
+      "action": "PRESERVED",
+      "customer_facing_wording_changed": false,
+      "authority_resolution": "PRESERVED",
+      "effective_runtime_authority": "SYSTEM_GUARD"
+    },
+    {
+      "template_id": "how_to_order",
+      "current_purpose": "how to order",
+      "classification": "APPROVED_QA_OVERLAP",
+      "approved_qa_ids": [
+        "order_prebook"
+      ],
+      "action": "ALIGNED",
+      "customer_facing_wording_changed": true,
+      "authority_resolution": "DYNAMIC_DELEGATION",
+      "effective_runtime_authority": "APPROVED_QA_DELEGATION"
+    },
+    {
+      "template_id": "jolbhora",
+      "current_purpose": "jolbhora",
+      "classification": "NO_APPROVED_AUTHORITY",
+      "approved_qa_ids": [],
+      "action": "HANDOFF_ONLY",
+      "customer_facing_wording_changed": true,
+      "authority_resolution": "HANDOFF_ONLY",
+      "effective_runtime_authority": "HANDOFF_ONLY"
+    },
+    {
+      "template_id": "jolbhora_talgash_details",
+      "current_purpose": "jolbhora",
+      "classification": "NO_APPROVED_AUTHORITY",
+      "approved_qa_ids": [],
+      "action": "HANDOFF_ONLY",
+      "customer_facing_wording_changed": true,
+      "authority_resolution": "HANDOFF_ONLY",
+      "effective_runtime_authority": "HANDOFF_ONLY"
+    },
+    {
+      "template_id": "kanchagolla",
+      "current_purpose": "kanchagolla",
+      "classification": "NO_APPROVED_AUTHORITY",
+      "approved_qa_ids": [],
+      "action": "HANDOFF_ONLY",
+      "customer_facing_wording_changed": true,
+      "authority_resolution": "HANDOFF_ONLY",
+      "effective_runtime_authority": "HANDOFF_ONLY"
+    },
+    {
+      "template_id": "know_more",
+      "current_purpose": "want to know more",
+      "classification": "SYSTEM_GUARD",
+      "approved_qa_ids": [],
+      "action": "PRESERVED",
+      "customer_facing_wording_changed": false,
+      "authority_resolution": "PRESERVED",
+      "effective_runtime_authority": "SYSTEM_GUARD"
+    },
+    {
+      "template_id": "kolkata_expansion_info",
+      "current_purpose": "kolkata",
+      "classification": "NO_APPROVED_AUTHORITY",
+      "approved_qa_ids": [],
+      "action": "HANDOFF_ONLY",
+      "customer_facing_wording_changed": true,
+      "authority_resolution": "HANDOFF_ONLY",
+      "effective_runtime_authority": "HANDOFF_ONLY"
+    },
+    {
+      "template_id": "mahua_signature_special",
+      "current_purpose": "mahua",
+      "classification": "NO_APPROVED_AUTHORITY",
+      "approved_qa_ids": [],
+      "action": "HANDOFF_ONLY",
+      "customer_facing_wording_changed": true,
+      "authority_resolution": "HANDOFF_ONLY",
+      "effective_runtime_authority": "HANDOFF_ONLY"
+    },
+    {
+      "template_id": "minimum_sondesh_quantity",
+      "current_purpose": "why is the minimum order 9 pieces",
+      "classification": "APPROVED_QA_OVERLAP",
+      "approved_qa_ids": [
+        "minimum_sondesh_quantity_client"
+      ],
+      "action": "ALIGNED",
+      "customer_facing_wording_changed": true,
+      "authority_resolution": "DYNAMIC_DELEGATION",
+      "effective_runtime_authority": "APPROVED_QA_DELEGATION"
+    },
+    {
+      "template_id": "name_introduction",
+      "current_purpose": "my name is",
+      "classification": "SYSTEM_GUARD",
+      "approved_qa_ids": [],
+      "action": "PRESERVED",
+      "customer_facing_wording_changed": false,
+      "authority_resolution": "PRESERVED",
+      "effective_runtime_authority": "SYSTEM_GUARD"
+    },
+    {
+      "template_id": "nolen_gur_aamar",
+      "current_purpose": "nolen gur aamar",
+      "classification": "NO_APPROVED_AUTHORITY",
+      "approved_qa_ids": [],
+      "action": "HANDOFF_ONLY",
+      "customer_facing_wording_changed": true,
+      "authority_resolution": "HANDOFF_ONLY",
+      "effective_runtime_authority": "HANDOFF_ONLY"
+    },
+    {
+      "template_id": "opening_hours",
+      "current_purpose": "opening hours",
+      "classification": "NO_APPROVED_AUTHORITY",
+      "approved_qa_ids": [],
+      "action": "HANDOFF_ONLY",
+      "customer_facing_wording_changed": true,
+      "authority_resolution": "HANDOFF_ONLY",
+      "effective_runtime_authority": "HANDOFF_ONLY"
+    },
+    {
+      "template_id": "order_next_steps",
+      "current_purpose": "final selection",
+      "classification": "APPROVED_QA_OVERLAP",
+      "approved_qa_ids": [
+        "order_ready_handoff"
+      ],
+      "action": "ALIGNED",
+      "customer_facing_wording_changed": false,
+      "authority_resolution": "DYNAMIC_DELEGATION",
+      "effective_runtime_authority": "APPROVED_QA_DELEGATION"
+    },
+    {
+      "template_id": "order_status_tracking",
+      "current_purpose": "order status",
+      "classification": "SYSTEM_GUARD",
+      "approved_qa_ids": [],
+      "action": "PRESERVED",
+      "customer_facing_wording_changed": false,
+      "authority_resolution": "PRESERVED",
+      "effective_runtime_authority": "SYSTEM_GUARD"
+    },
+    {
+      "template_id": "pack_size_1kg",
+      "current_purpose": "1kg",
+      "classification": "NO_APPROVED_AUTHORITY",
+      "approved_qa_ids": [],
+      "action": "HANDOFF_ONLY",
+      "customer_facing_wording_changed": true,
+      "authority_resolution": "HANDOFF_ONLY",
+      "effective_runtime_authority": "HANDOFF_ONLY"
+    },
+    {
+      "template_id": "pack_size_250g",
+      "current_purpose": "250g",
+      "classification": "APPROVED_QA_OVERLAP",
+      "approved_qa_ids": [
+        "sondesh_price_client"
+      ],
+      "action": "ALIGNED",
+      "customer_facing_wording_changed": true,
+      "authority_resolution": "DYNAMIC_DELEGATION",
+      "effective_runtime_authority": "APPROVED_QA_DELEGATION"
+    },
+    {
+      "template_id": "pack_size_500g",
+      "current_purpose": "500g",
+      "classification": "NO_APPROVED_AUTHORITY",
+      "approved_qa_ids": [],
+      "action": "HANDOFF_ONLY",
+      "customer_facing_wording_changed": true,
+      "authority_resolution": "HANDOFF_ONLY",
+      "effective_runtime_authority": "HANDOFF_ONLY"
+    },
+    {
+      "template_id": "packaging",
+      "current_purpose": "packaging",
+      "classification": "NO_APPROVED_AUTHORITY",
+      "approved_qa_ids": [],
+      "action": "HANDOFF_ONLY",
+      "customer_facing_wording_changed": true,
+      "authority_resolution": "HANDOFF_ONLY",
+      "effective_runtime_authority": "HANDOFF_ONLY"
+    },
+    {
+      "template_id": "previous_menus",
+      "current_purpose": "previous menu",
+      "classification": "MENU_ASSET_DELEGATION",
+      "approved_qa_ids": [],
+      "action": "DYNAMIC_MENU_DELEGATION",
+      "customer_facing_wording_changed": true,
+      "authority_resolution": "MENU_ASSET_DELEGATION",
+      "effective_runtime_authority": "MENU_ASSET_DELEGATION"
+    },
+    {
+      "template_id": "pricing_value_context",
+      "current_purpose": "price is high",
+      "classification": "APPROVED_QA_OVERLAP",
+      "approved_qa_ids": [
+        "price_is_high"
+      ],
+      "action": "ALIGNED",
+      "customer_facing_wording_changed": true,
+      "authority_resolution": "DYNAMIC_DELEGATION",
+      "effective_runtime_authority": "APPROVED_QA_DELEGATION"
+    },
+    {
+      "template_id": "product_overview",
+      "current_purpose": "tell me about your product",
+      "classification": "SYSTEM_GUARD",
+      "approved_qa_ids": [],
+      "action": "PRESERVED",
+      "customer_facing_wording_changed": false,
+      "authority_resolution": "PRESERVED",
+      "effective_runtime_authority": "SYSTEM_GUARD"
+    },
+    {
+      "template_id": "product_recommendation",
+      "current_purpose": "whats the best one",
+      "classification": "NO_APPROVED_AUTHORITY",
+      "approved_qa_ids": [],
+      "action": "HANDOFF_ONLY",
+      "customer_facing_wording_changed": true,
+      "authority_resolution": "HANDOFF_ONLY",
+      "effective_runtime_authority": "HANDOFF_ONLY"
+    },
+    {
+      "template_id": "recall_name",
+      "current_purpose": "what is my name",
+      "classification": "SYSTEM_GUARD",
+      "approved_qa_ids": [],
+      "action": "PRESERVED",
+      "customer_facing_wording_changed": false,
+      "authority_resolution": "PRESERVED",
+      "effective_runtime_authority": "SYSTEM_GUARD"
+    },
+    {
+      "template_id": "recall_order_flavour",
+      "current_purpose": "earlier flavour choice",
+      "classification": "SYSTEM_GUARD",
+      "approved_qa_ids": [],
+      "action": "PRESERVED",
+      "customer_facing_wording_changed": false,
+      "authority_resolution": "PRESERVED",
+      "effective_runtime_authority": "SYSTEM_GUARD"
+    },
+    {
+      "template_id": "savoury_best_time_to_book",
+      "current_purpose": "best time to order",
+      "classification": "APPROVED_QA_OVERLAP",
+      "approved_qa_ids": [
+        "best_time_to_book"
+      ],
+      "action": "ALIGNED",
+      "customer_facing_wording_changed": true,
+      "authority_resolution": "DYNAMIC_DELEGATION",
+      "effective_runtime_authority": "APPROVED_QA_DELEGATION"
+    },
+    {
+      "template_id": "savoury_crosssell_sondesh",
+      "current_purpose": "savoury crosssell",
+      "classification": "NO_APPROVED_AUTHORITY",
+      "approved_qa_ids": [],
+      "action": "HANDOFF_ONLY",
+      "customer_facing_wording_changed": true,
+      "authority_resolution": "HANDOFF_ONLY",
+      "effective_runtime_authority": "HANDOFF_ONLY"
+    },
+    {
+      "template_id": "savoury_delivery_time",
+      "current_purpose": "savoury delivery time",
+      "classification": "APPROVED_QA_OVERLAP",
+      "approved_qa_ids": [
+        "savoury_delivery_time"
+      ],
+      "action": "ALIGNED",
+      "customer_facing_wording_changed": true,
+      "authority_resolution": "DYNAMIC_DELEGATION",
+      "effective_runtime_authority": "APPROVED_QA_DELEGATION"
+    },
+    {
+      "template_id": "savoury_food_intro",
+      "current_purpose": "lunch menu",
+      "classification": "APPROVED_QA_OVERLAP",
+      "approved_qa_ids": [
+        "general_details"
+      ],
+      "action": "ALIGNED",
+      "customer_facing_wording_changed": true,
+      "authority_resolution": "DYNAMIC_DELEGATION",
+      "effective_runtime_authority": "APPROVED_QA_DELEGATION"
+    },
+    {
+      "template_id": "signature_collection",
+      "current_purpose": "collection 2",
+      "classification": "MENU_ASSET_DELEGATION",
+      "approved_qa_ids": [],
+      "action": "DYNAMIC_MENU_DELEGATION",
+      "customer_facing_wording_changed": true,
+      "authority_resolution": "MENU_ASSET_DELEGATION",
+      "effective_runtime_authority": "MENU_ASSET_DELEGATION"
+    },
+    {
+      "template_id": "sondesh_classic_rose",
+      "current_purpose": "what is the price of rose sondesh",
+      "classification": "NO_APPROVED_AUTHORITY",
+      "approved_qa_ids": [],
+      "action": "HANDOFF_ONLY",
+      "customer_facing_wording_changed": true,
+      "authority_resolution": "HANDOFF_ONLY",
+      "effective_runtime_authority": "HANDOFF_ONLY"
+    },
+    {
+      "template_id": "sondesh_crosssell_savoury",
+      "current_purpose": "sondesh crosssell",
+      "classification": "NO_APPROVED_AUTHORITY",
+      "approved_qa_ids": [],
+      "action": "HANDOFF_ONLY",
+      "customer_facing_wording_changed": true,
+      "authority_resolution": "HANDOFF_ONLY",
+      "effective_runtime_authority": "HANDOFF_ONLY"
+    },
+    {
+      "template_id": "sondesh_details",
+      "current_purpose": "tell me more about sondesh",
+      "classification": "APPROVED_QA_OVERLAP",
+      "approved_qa_ids": [
+        "sondesh_details_client"
+      ],
+      "action": "ALIGNED",
+      "customer_facing_wording_changed": true,
+      "authority_resolution": "DYNAMIC_DELEGATION",
+      "effective_runtime_authority": "APPROVED_QA_DELEGATION"
+    },
+    {
+      "template_id": "sondesh_dispatch_time",
+      "current_purpose": "how long to deliver",
+      "classification": "APPROVED_QA_OVERLAP",
+      "approved_qa_ids": [
+        "sondesh_delivery_time"
+      ],
+      "action": "ALIGNED",
+      "customer_facing_wording_changed": true,
+      "authority_resolution": "DYNAMIC_DELEGATION",
+      "effective_runtime_authority": "APPROVED_QA_DELEGATION"
+    },
+    {
+      "template_id": "sondesh_mango_kesar",
+      "current_purpose": "mango sondesh",
+      "classification": "NO_APPROVED_AUTHORITY",
+      "approved_qa_ids": [],
+      "action": "HANDOFF_ONLY",
+      "customer_facing_wording_changed": true,
+      "authority_resolution": "HANDOFF_ONLY",
+      "effective_runtime_authority": "HANDOFF_ONLY"
+    },
+    {
+      "template_id": "sondesh_nolen_gur",
+      "current_purpose": "nolen gur sondesh",
+      "classification": "NO_APPROVED_AUTHORITY",
+      "approved_qa_ids": [],
+      "action": "HANDOFF_ONLY",
+      "customer_facing_wording_changed": true,
+      "authority_resolution": "HANDOFF_ONLY",
+      "effective_runtime_authority": "HANDOFF_ONLY"
+    },
+    {
+      "template_id": "sondesh_price_detailed",
+      "current_purpose": "how much is sondesh",
+      "classification": "APPROVED_QA_OVERLAP",
+      "approved_qa_ids": [
+        "sondesh_price_client"
+      ],
+      "action": "ALIGNED",
+      "customer_facing_wording_changed": true,
+      "authority_resolution": "DYNAMIC_DELEGATION",
+      "effective_runtime_authority": "APPROVED_QA_DELEGATION"
+    },
+    {
+      "template_id": "sondesh_unfamiliar",
+      "current_purpose": "sondesh unfamiliar",
+      "classification": "APPROVED_QA_OVERLAP",
+      "approved_qa_ids": [
+        "sondesh_unfamiliar_client"
+      ],
+      "action": "ALIGNED",
+      "customer_facing_wording_changed": true,
+      "authority_resolution": "DYNAMIC_DELEGATION",
+      "effective_runtime_authority": "APPROVED_QA_DELEGATION"
+    },
+    {
+      "template_id": "subscription_booking_steps",
+      "current_purpose": "how to book subscription",
+      "classification": "NO_APPROVED_AUTHORITY",
+      "approved_qa_ids": [],
+      "action": "HANDOFF_ONLY",
+      "customer_facing_wording_changed": true,
+      "authority_resolution": "HANDOFF_ONLY",
+      "effective_runtime_authority": "HANDOFF_ONLY"
+    },
+    {
+      "template_id": "subscription_details",
+      "current_purpose": "subscription",
+      "classification": "APPROVED_QA_OVERLAP",
+      "approved_qa_ids": [
+        "subscription_details_client"
+      ],
+      "action": "ALIGNED",
+      "customer_facing_wording_changed": true,
+      "authority_resolution": "DYNAMIC_DELEGATION",
+      "effective_runtime_authority": "APPROVED_QA_DELEGATION"
+    },
+    {
+      "template_id": "sugar_free_options",
+      "current_purpose": "sugar free",
+      "classification": "NO_APPROVED_AUTHORITY",
+      "approved_qa_ids": [],
+      "action": "HANDOFF_ONLY",
+      "customer_facing_wording_changed": true,
+      "authority_resolution": "HANDOFF_ONLY",
+      "effective_runtime_authority": "HANDOFF_ONLY"
+    },
+    {
+      "template_id": "weekly_menu_nonveg",
+      "current_purpose": "non veg menu",
+      "classification": "MENU_ASSET_DELEGATION",
+      "approved_qa_ids": [],
+      "action": "DYNAMIC_MENU_DELEGATION",
+      "customer_facing_wording_changed": true,
+      "authority_resolution": "MENU_ASSET_DELEGATION",
+      "effective_runtime_authority": "MENU_ASSET_DELEGATION"
+    },
+    {
+      "template_id": "weekly_menu_veg",
+      "current_purpose": "veg menu",
+      "classification": "MENU_ASSET_DELEGATION",
+      "approved_qa_ids": [],
+      "action": "DYNAMIC_MENU_DELEGATION",
+      "customer_facing_wording_changed": true,
+      "authority_resolution": "MENU_ASSET_DELEGATION",
+      "effective_runtime_authority": "MENU_ASSET_DELEGATION"
+    }
+  ]
+}

@@ -54,7 +54,7 @@ def test_content_integrity_preserves_opening_hours_and_quarantines_delivery_time
     )
 
 
-def test_production_equivalent_runtime_quarantine_keeps_opening_hours(monkeypatch, tmp_path):
+def test_runtime_does_not_promote_legacy_hours_without_effective_qa(monkeypatch, tmp_path):
     seed_path = tmp_path / "qa_templates.json"
     _write_json(seed_path, _seed_data())
     monkeypatch.setenv("CONTENT_INTEGRITY_REMEDIATION", "true")
@@ -69,12 +69,13 @@ def test_production_equivalent_runtime_quarantine_keeps_opening_hours(monkeypatc
         "What are your opening hours?", user_id=user_id, channel="instagram",
     )
 
-    assert matched is True
+    assert matched is False
     assert template_id == "opening_hours"
-    assert text == OPENING_HOURS
+    assert "Manager of Kitchens" in text
+    assert OPENING_HOURS not in text
 
 
-def test_opening_hours_route_does_not_call_nlu_or_groq(monkeypatch):
+def test_unsupported_opening_hours_handoff_does_not_call_nlu_or_groq(monkeypatch):
     monkeypatch.setattr(config, "BYPASS_AD_GATE", True)
     user_id = "opening-hours-no-model"
     session_memory.clear_session(user_id, "instagram")
@@ -86,13 +87,14 @@ def test_opening_hours_route_does_not_call_nlu_or_groq(monkeypatch):
             "What are your opening hours?", user_id=user_id, channel="instagram",
         )
 
-    assert matched is True
+    assert matched is False
     assert template_id == "opening_hours"
-    assert text == OPENING_HOURS
+    assert "Manager of Kitchens" in text
+    assert OPENING_HOURS not in text
     assert not analyze.called
 
 
-def test_opening_hours_overrides_stale_home_table_story_context(monkeypatch):
+def test_unsupported_hours_handoff_overrides_stale_home_table_context(monkeypatch):
     monkeypatch.setattr(config, "BYPASS_AD_GATE", True)
     user_id = "opening-hours-stale-story"
     session_memory.clear_session(user_id, "instagram")
@@ -111,12 +113,13 @@ def test_opening_hours_overrides_stale_home_table_story_context(monkeypatch):
         "What are your opening hours?", user_id=user_id, channel="instagram",
     )
 
-    assert matched is True
+    assert matched is False
     assert template_id == "opening_hours"
-    assert text == OPENING_HOURS
+    assert "Manager of Kitchens" in text
+    assert OPENING_HOURS not in text
 
 
-def test_opening_hours_kitchen_paraphrase_overrides_stale_story_context(monkeypatch):
+def test_unsupported_hours_paraphrase_handoff_overrides_stale_story_context(monkeypatch):
     monkeypatch.setattr(config, "BYPASS_AD_GATE", True)
     user_id = "opening-hours-kitchen-paraphrase"
     session_memory.clear_session(user_id, "instagram")
@@ -131,9 +134,10 @@ def test_opening_hours_kitchen_paraphrase_overrides_stale_story_context(monkeypa
         "When is the kitchen open?", user_id=user_id, channel="instagram",
     )
 
-    assert matched is True
+    assert matched is False
     assert template_id == "opening_hours"
-    assert text == OPENING_HOURS
+    assert "Manager of Kitchens" in text
+    assert OPENING_HOURS not in text
 
 
 def _resolve_delivery_time(entities):

@@ -204,9 +204,9 @@ def test_sondesh_topic_does_not_capture_explicit_weekly_menu(customer, monkeypat
 
     reply, _facts = customer(followup)
 
-    assert reply[2] == "asset_request_weekly_menu"
+    assert reply[2] == ("approved_menu" if eligible_url else "asset_request_weekly_menu")
     if eligible_url:
-        assert reply[3] == eligible_url
+        assert reply[3] == [eligible_url]
     else:
         assert "finalising this week's menu" in reply[0]
         assert reply[3] is None

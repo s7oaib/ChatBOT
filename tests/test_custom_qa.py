@@ -185,6 +185,12 @@ class TestLibraryManagement:
                        'SYSTEM · PROTECTED', 'CUSTOM</span>', 'Edit Response', 'Export Full Library',
                        'Import Custom Q&amp;A', 'Download CSV Template', 'FINAL CONFIRMATION', 'Delete Permanently']:
             assert marker in page
+        custom_row = page[page.index('function renderCustomQaRow'):page.index('async function cqaSetStatus')]
+        assert 'onclick="cqaOpenDeleteConfirm(${item.id})">Delete</button>' in custom_row
+        assert "item.status !== 'ARCHIVED'" in page
+        assert 'must be archived before permanent deletion' in page
+        system_card = page[page.index('function renderSystemResponseCard'):page.index('function renderResponseLibrarySuggestions')]
+        assert 'Delete' not in system_card
 
 
 def _auth():

@@ -257,9 +257,18 @@ def test_mapping_endpoints_require_admin_and_preview_is_read_only(store):
 
 
 @pytest.mark.parametrize('media_type', ['IMAGE', 'VIDEO'])
-def test_gallery_approved_mapping_edit_and_custom_restore(store, media_type):
+def test_gallery_approved_mapping_edit_and_custom_restore(store, media_type, monkeypatch):
     database, _, client, headers = store
-    media = database.upsert_instagram_media({'instagram_media_id':'gallery-'+media_type,'media_type':media_type})
+    from camellia.config import config
+    owner_id = "17841455615744812"
+    monkeypatch.setattr(config, "INSTAGRAM_ACCOUNT_ID", owner_id)
+    monkeypatch.setattr(config, "INSTAGRAM_GRAPH_ACCOUNT_ID", owner_id)
+    media = database.upsert_instagram_media({
+        'instagram_media_id':'gallery-'+media_type,'media_type':media_type,
+        'owner_instagram_account_id':owner_id, 'owner_username':'camellia.artisanal',
+        'last_sync_generation':'approved-mapping-test', 'inventory_state':'CURRENT',
+    })
+    database.reconcile_instagram_media_inventory(owner_id, "approved-mapping-test")
     path = f"/admin/instagram-media/{media['id']}/mapping"
     response = client.put(path,headers=headers,json={'response_mode':'APPROVED_QA','approved_qa_id':'home_table_details','menu_mode':'NONE'})
     assert response.status_code==200,response.text

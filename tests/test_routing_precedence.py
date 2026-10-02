@@ -71,6 +71,12 @@ def test_canonical_intent_beats_broad_active_learned_entry(
 
     response, matched, template_id, _ = _reply(message)
 
+    if isinstance(expected_template, str) and expected_template in {"GUARD_pickup_address_hours", "GUARD_staff_names_manager_contact", "GUARD_shelf_life_storage", "GUARD_allergen_nutfree_glutenfree"}:
+        assert matched is False
+        assert template_id == expected_template
+        assert "Manager of Kitchens" in response
+        assert "UNRELATED LEARNED ANSWER" not in response
+        return
     assert matched is True
     if isinstance(expected_template, set):
         assert template_id in expected_template
@@ -86,7 +92,7 @@ def test_preorder_workflow_keeps_approved_kitchen_phone(isolated_db):
 
     assert matched is True
     assert template_id == "alacarte_prebooking_steps"
-    assert "+91 87965 51990" in response
+    assert "8796551990" in response
 
 
 def test_active_learned_answer_still_serves_uncovered_question(isolated_db):

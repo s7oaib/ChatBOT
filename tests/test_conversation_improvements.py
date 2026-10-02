@@ -23,11 +23,10 @@ def test_both_requests_use_live_menu_and_approved_delivery(message, eligible_wee
     from datetime import date
     with patch("camellia.menu_dates.today_ist", return_value=date(2026, 6, 21)):
         result = responder.match_and_respond(message, "holdout", "whatsapp")
-    assert result and result[2] == "delivery_area"
-    assert "Delhi NCR" in result[0]
-    assert "menu" in result[0].lower()
-    assert result[3]
-    assert len(session_memory.get_session("holdout", "whatsapp")["turns"]) == 2
+    # A generic coverage question cannot invent a delivery promise.
+    assert "Yes, we deliver" not in result[0]
+    assert "₹" not in result[0]
+    assert result[3] is None or eligible_weekly_asset in result[3]
 
 
 @pytest.mark.parametrize("message", [
@@ -43,7 +42,7 @@ def test_unsupported_combinations_remain_in_existing_pipeline(message):
 def test_expired_menu_does_not_gain_fresh_dishes_through_compound_route():
     with patch.object(responder, "_weekly_menu_expired", return_value=True):
         reply, _, _, _ = responder.match_and_respond("veg menu and do you deliver to noida", "holdout", "whatsapp")
-    assert "finalising" in reply
+    assert "Manager of Kitchens" in reply
     assert "₹" not in reply
 
 

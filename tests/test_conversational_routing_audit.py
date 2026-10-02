@@ -32,10 +32,8 @@ def test_price_clarification_selection_continues_original_intent(selection, elig
     second = ask(user_id, selection)
     assert second[1] is True
     assert second[2] == "savoury_food_intro"
-    approved = next(
-        item for item in responder.qa_data["templates"]
-        if item.get("id") == "savoury_food_intro"
-    )["response"]
+    from camellia import client_qa
+    approved = client_qa.resolve_effective_approved_qa_by_id("general_details").entry.answer
     assert approved in second[0]
     facts = session_memory.get_facts(user_id, "whatsapp")
     assert facts["pending_clarification"] is None

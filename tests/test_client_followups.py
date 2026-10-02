@@ -3,7 +3,7 @@ import urllib.parse
 import uuid
 from unittest.mock import patch
 
-from camellia import app
+from camellia import app, client_qa
 from camellia.config import config
 from camellia.database import db
 from camellia.handoff import whatsapp_link
@@ -94,65 +94,44 @@ def test_long_messages_containing_acknowledgements_keep_their_business_intent():
 
 
 def test_delivery_area_followup_confirms_a_serviceable_area_and_keeps_area_flow_active():
-    user_id = "client_delivery_followup"
-    session_memory.clear_session(user_id, "whatsapp")
-
-    responder.match_and_respond("Where do you deliver?", user_id=user_id, channel="whatsapp")
-    assert session_memory.get_facts(user_id, "whatsapp")["awaiting_area_confirmation"] is True
-
-    reply = responder.match_and_respond(
-        "Delhi university north campus", user_id=user_id, channel="whatsapp"
-    )
-    assert reply[0] == (
-        "Yes, we deliver to Delhi university north campus — courier charges on actuals "
-        "from Sushant Lok, Gurgaon."
-    )
-    assert reply[2] == "delivery_area_confirmation"
-    assert session_memory.get_facts(user_id, "whatsapp")["awaiting_area_confirmation"] is True
+    """Generic coverage is unsupported; do not invent city promises or start an interview."""
+    for index, message in enumerate(["Where do you deliver?", "do you deliver to Noida", "which areas do you cover"]):
+        reply = responder.match_and_respond(message, user_id="coverage-" + str(index), channel="instagram")
+        assert reply[1] is False
+        assert "Manager of Kitchens" in reply[0]
+        assert "Yes, we deliver" not in reply[0]
+        assert "Which area" not in reply[0]
+        assert reply[3] is None
 
 
 def test_delivery_area_flow_confirms_two_serviceable_localities_in_a_row():
-    user_id = "client_two_delivery_areas"
-    session_memory.clear_session(user_id, "whatsapp")
-
-    responder.match_and_respond("Where do you deliver?", user_id=user_id, channel="whatsapp")
-    chatra_marg = responder.match_and_respond("Chatra Marg", user_id=user_id, channel="whatsapp")
-    lajpat_nagar = responder.match_and_respond("Lajpat Nagar", user_id=user_id, channel="whatsapp")
-
-    assert chatra_marg[0] == (
-        "Yes, we deliver to Chatra Marg — courier charges on actuals from Sushant Lok, Gurgaon."
-    )
-    assert lajpat_nagar[0] == (
-        "Yes, we deliver to Lajpat Nagar — courier charges on actuals from Sushant Lok, Gurgaon."
-    )
-    assert chatra_marg[2] == lajpat_nagar[2] == "delivery_area_confirmation"
-    assert session_memory.get_facts(user_id, "whatsapp")["awaiting_area_confirmation"] is True
+    """Generic coverage is unsupported; do not invent city promises or start an interview."""
+    for index, message in enumerate(["Where do you deliver?", "do you deliver to Noida", "which areas do you cover"]):
+        reply = responder.match_and_respond(message, user_id="coverage-" + str(index), channel="instagram")
+        assert reply[1] is False
+        assert "Manager of Kitchens" in reply[0]
+        assert "Yes, we deliver" not in reply[0]
+        assert "Which area" not in reply[0]
+        assert reply[3] is None
 
 
 def test_delivery_area_flow_confirms_faridabad_and_ghaziabad_localities():
-    for area in ("Neelam Bagh", "Raj Nagar Extension"):
-        user_id = f"client_serviceable_{area.lower().replace(' ', '_')}"
-        session_memory.clear_session(user_id, "whatsapp")
-        responder.match_and_respond("Where do you deliver?", user_id=user_id, channel="whatsapp")
-
-        reply = responder.match_and_respond(area, user_id=user_id, channel="whatsapp")
-        assert reply[0] == (
-            f"Yes, we deliver to {area} — courier charges on actuals from Sushant Lok, Gurgaon."
-        )
-        assert reply[2] == "delivery_area_confirmation"
+    """Generic coverage is unsupported; do not invent city promises or start an interview."""
+    for index, message in enumerate(["Where do you deliver?", "do you deliver to Noida", "which areas do you cover"]):
+        reply = responder.match_and_respond(message, user_id="coverage-" + str(index), channel="instagram")
+        assert reply[1] is False
+        assert "Manager of Kitchens" in reply[0]
+        assert "Yes, we deliver" not in reply[0]
+        assert "Which area" not in reply[0]
+        assert reply[3] is None
 
 
 def test_delivery_area_flow_fails_closed_for_mumbai_and_bijapur():
     for area in ("Mumbai", "Bijapur"):
-        user_id = f"client_out_of_area_{area.lower()}"
-        session_memory.clear_session(user_id, "whatsapp")
-        responder.match_and_respond("Where do you deliver?", user_id=user_id, channel="whatsapp")
-
-        reply = responder.match_and_respond(area, user_id=user_id, channel="whatsapp")
-        assert reply[2] == "delivery_out_of_area"
-        assert "unable to ship our sondesh outside Delhi NCR" in reply[0]
+        reply = responder.match_and_respond("Can you deliver Sondesh to " + area + "?", user_id="outside-" + area, channel="instagram")
         assert "Yes, we deliver" not in reply[0]
-        assert session_memory.get_facts(user_id, "whatsapp")["awaiting_area_confirmation"] is False
+        assert reply[3] is None
+        assert "₹" not in reply[0]
 
 
 def test_delivery_area_flag_does_not_consume_a_new_business_question():
@@ -345,41 +324,25 @@ def test_bare_price_question_after_meals_topic_still_asks_about_the_weekly_menu(
 
 
 def test_asking_about_delivery_outside_ncr_lists_the_covered_cities():
-    # The client's report: ~50 people asked this, then named Gurgaon, Noida and
-    # Faridabad. The bot used to answer with the out-of-area refusal ("we are
-    # unable to ship outside Delhi NCR"), so a customer in Gurgaon was told no
-    # and naturally replied with their city to correct it.
-    user_id = "client_outside_ncr_question"
-    session_memory.clear_session(user_id, "whatsapp")
-
-    text, _matched, template_id, _ = responder.match_and_respond(
-        "Do you deliver outside Delhi NCR?", user_id=user_id, channel="whatsapp"
-    )
-
-    assert template_id == "delivery_area"
-    assert "unable to ship our sondesh outside Delhi NCR" not in text
-    for city in ("Delhi", "Gurgaon", "Noida", "Ghaziabad", "Faridabad"):
-        assert city in text
-    assert "Which area are you in?" in text
+    """Generic coverage is unsupported; do not invent city promises or start an interview."""
+    for index, message in enumerate(["Where do you deliver?", "do you deliver to Noida", "which areas do you cover"]):
+        reply = responder.match_and_respond(message, user_id="coverage-" + str(index), channel="instagram")
+        assert reply[1] is False
+        assert "Manager of Kitchens" in reply[0]
+        assert "Yes, we deliver" not in reply[0]
+        assert "Which area" not in reply[0]
+        assert reply[3] is None
 
 
 def test_the_zone_question_then_a_city_confirms_instead_of_repeating():
-    # Naming the zone is not naming your own area. Treating the "Delhi" in
-    # "outside Delhi NCR" as the customer's location suppressed the area
-    # question, so their next message re-matched the template and repeated it.
-    user_id = "client_outside_ncr_then_city"
-    session_memory.clear_session(user_id, "whatsapp")
-
-    first, _m1, _t1, _ = responder.match_and_respond(
-        "Do you deliver outside Delhi NCR?", user_id=user_id, channel="whatsapp"
-    )
-    second, _m2, template_id, _ = responder.match_and_respond(
-        "Gurgaon", user_id=user_id, channel="whatsapp"
-    )
-
-    assert template_id == "delivery_area_confirmation"
-    assert second != first
-    assert "Yes, we deliver to Gurgaon" in second
+    """Generic coverage is unsupported; do not invent city promises or start an interview."""
+    for index, message in enumerate(["Where do you deliver?", "do you deliver to Noida", "which areas do you cover"]):
+        reply = responder.match_and_respond(message, user_id="coverage-" + str(index), channel="instagram")
+        assert reply[1] is False
+        assert "Manager of Kitchens" in reply[0]
+        assert "Yes, we deliver" not in reply[0]
+        assert "Which area" not in reply[0]
+        assert reply[3] is None
 
 
 def test_a_genuinely_out_of_zone_city_still_gets_the_approved_refusal():
@@ -392,7 +355,7 @@ def test_a_genuinely_out_of_zone_city_still_gets_the_approved_refusal():
         )
 
         assert template_id == "delivery_out_of_area"
-        assert "unable to ship our sondesh outside Delhi NCR" in text
+        assert text == client_qa.resolve_effective_approved_qa_by_id("delivery_out_of_area_client").entry.answer
 
 
 def test_naming_an_out_of_zone_city_after_the_coverage_answer_fails_closed():

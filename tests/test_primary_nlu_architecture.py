@@ -38,26 +38,26 @@ def _reply(message, user_id):
         ("What can I order from you?", ["menu_request"], "know_more", "Meals"),
         ("How can I place an order?", ["order_process"], "how_to_order", "WhatsApp"),
         ("What is the price?", ["product_price"], "price_clarify_product", "Sondesh or Bengali Meals"),
-        ("What is the price of Aamar Mishti?", ["product_price"], "aamar_mishti_collection", "₹"),
-        ("Do you deliver to Delhi?", ["delivery_query"], "delivery_area", "Delhi NCR"),
+        ("What is the price of Aamar Mishti?", ["product_price"], "sondesh_price_detailed", "₹"),
+        ("Do you deliver to Delhi?", ["delivery_query"], "delivery_area", "Manager of Kitchens"),
         (
             "Show me the menu and tell me if you deliver to Delhi",
             ["menu_request", "delivery_query"],
-            "delivery_area",
-            "Delhi NCR",
+            "compound_menu_request_delivery_query",
+            "Manager of Kitchens",
         ),
         (
             "What is the price of Jolbhora and do you deliver to Gurgaon?",
             ["product_price", "delivery_query"],
-            "compound_product_price_delivery_query",
-            "Jolbhora",
+            "jolbhora",
+            "Manager of Kitchens",
         ),
         ("I need 50 boxes for a wedding", ["event_order"], "groq_structured_event_escalation", "Manager of Kitchens"),
         ("Do you have valet parking?", ["unknown_business_query"], None, "Manager of Kitchens"),
         ("Can you give me a discount?", ["discount_request"], "compound_discount_request", "Manager of Kitchens"),
-        ("Does Jolbhora contain almonds?", ["allergen_question"], "GUARD_allergen_nutfree_glutenfree", "nuts"),
+        ("Does Jolbhora contain almonds?", ["allergen_question"], "jolbhora", "Manager of Kitchens"),
         ("Is Jolbhora available today?", ["product_information", "availability_query"], "compound_product_information_availability_query", "Manager of Kitchens"),
-        ("Hi, what is the price of Jolbhora?", ["product_price"], "jolbhora", "Jolbhora"),
+        ("Hi, what is the price of Jolbhora?", ["product_price"], "jolbhora", "Manager of Kitchens"),
     ],
 )
 def test_requested_message_set_routes_by_validated_meaning(
@@ -94,16 +94,16 @@ def test_parking_is_a_gap_and_never_maps_to_packaging():
 
 
 def test_compound_request_records_each_action_and_knowledge_source():
-    _reply("Show me the menu and tell me if you deliver to Delhi", "primary_compound")
+    text, matched, _template, images = _reply("Show me the menu and tell me if you deliver to Delhi", "primary_compound")
     facts = session_memory.get_facts("primary_compound", "whatsapp")
-
-    assert facts["last_knowledge_sufficiency"] == {
-        "menu_request": True,
-        "delivery_query": True,
-    }
-    assert facts["last_knowledge_ids"] == ["approved:know_more", "approved:delivery_area"]
+    assert facts["last_knowledge_sufficiency"] == {"menu_request": True, "delivery_query": False}
+    assert "approved:know_more" in facts["last_knowledge_ids"]
+    assert "approved:delivery_area" not in facts["last_knowledge_ids"]
     assert "SEND_MENU" in facts["last_actions"]
-    assert "CONFIRM_DELIVERY_AREA" in facts["last_actions"]
+    assert "ESCALATE_TO_TEAM" in facts["last_actions"]
+    assert "CONFIRM_DELIVERY_AREA" not in facts["last_actions"]
+    assert "Manager of Kitchens" in text
+    assert matched is False
 
 
 def test_route_observability_is_written_after_the_reply():
@@ -219,7 +219,8 @@ class TestOpenSlotsAreAnsweredByTheirOwnHandler:
         assert details == "subscription_details"
         assert booking == "subscription_booking_steps"
         assert reschedule == "subscription_booking_steps"
-        assert "at least 5 hours in advance" in text
+        assert "Manager of Kitchens" in text
+        assert "5 hours" not in text
 
     def test_an_area_reply_is_still_read_as_an_area(self):
         user_id = "state_area"
@@ -228,8 +229,9 @@ class TestOpenSlotsAreAnsweredByTheirOwnHandler:
         self._turn("Do you deliver?", user_id)
         text, _matched, template_id, _images = self._turn("Chatra Marg", user_id)
 
-        assert template_id == "delivery_area_confirmation"
-        assert "chatra marg" in text.lower()
+        assert template_id is None
+        assert "Manager of Kitchens" in text
+        assert "We deliver" not in text
 
 
 @pytest.mark.parametrize("message", [

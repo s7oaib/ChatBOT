@@ -72,13 +72,15 @@ class TestASubtopicIsNotImpliedByItsDomain:
     def test_a_subtopic_the_copy_does_mention_is_still_answered(
         self, message, expected_template,
     ):
-        user_id = _fresh("subtopic_ok")
+        user_id = _fresh("subtopic_retired")
         if expected_template == "subscription_booking_steps":
             _outage_reply("tell me about the subscription", user_id)
-        _text, matched, template_id, _images = _outage_reply(message, user_id)
-
-        assert matched is True
-        assert template_id == expected_template
+        text, matched, _template, images = _outage_reply(message, user_id)
+        assert matched is False
+        assert "Manager of Kitchens" in text
+        assert "cornstarch" not in text.lower()
+        assert "5 hours" not in text
+        assert images is None
 
     def test_the_evidence_is_the_approved_copy_itself(self):
         """Change the copy and the answer changes with it — no second list."""
@@ -93,17 +95,13 @@ class TestASubtopicIsNotImpliedByItsDomain:
 class TestPartialFulfilmentSurvivesSubtopicGaps:
     def test_a_verified_price_ships_while_gift_wrap_is_escalated(self):
         user_id = _fresh("partial_wrap")
-        text, matched, _template_id, _images = _outage_reply(
-            "What's Jolbhora price and do you gift wrap?", user_id,
-        )
+        text, matched, _template, images = _outage_reply("What's Jolbhora price and do you gift wrap?", user_id)
         facts = session_memory.get_facts(user_id, "whatsapp")
-
-        assert facts["last_knowledge_sufficiency"] == {
-            "product_price": True, "packaging_question": False,
-        }
-        assert "₹750" in text          # the approved Jolbhora price still ships
-        assert "wrap" not in text.lower().split("team")[0] or "team" in text.lower()
-        assert matched is False        # the unsupported half reaches a person
+        assert facts["last_knowledge_sufficiency"] == {"product_price": False, "packaging_question": False}
+        assert "₹750" not in text
+        assert "Manager of Kitchens" in text
+        assert matched is False
+        assert images is None
 
 
 @pytest.mark.parametrize("message", [
@@ -436,20 +434,14 @@ class TestAmenityWordsOverrideACooccurringDomainKeyword:
         assert "manager of kitchens" in text.lower()
 
     def test_a_genuine_reader_gap_still_defers_to_the_compatibility_floor(self):
-        """Not every unknown_business_query is an amenity override — a real
-        on-domain topic the reader simply has no concept for yet ("previous
-        menus" has no modelled concept, since only singular "menu" is a
-        token) must keep reaching the deterministic templates that already
-        answer it, or this fix would have widened into the same false
-        positive the earlier structured-relevance guard caused and was
-        reverted for."""
+        # An empty archive has a supported deterministic system response.
         user_id = _fresh("genuine_gap")
-        _text, matched, template_id, _images = _outage_reply(
-            "show me previous menus", user_id,
-        )
-
+        with patch("camellia.responder.weekly_flyer.list_archive", return_value=[]):
+            text, matched, template_id, images = _outage_reply("show me previous menus", user_id)
         assert matched is True
         assert template_id == "previous_menus"
+        assert "don't have any earlier menus" in text
+        assert images is None
 
 
 class TestFlavourPriceQuestionsAreCanonical:

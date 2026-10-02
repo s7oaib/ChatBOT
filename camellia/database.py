@@ -3,6 +3,7 @@ import re
 import sqlite3
 import json
 import time
+from contextlib import nullcontext
 from difflib import SequenceMatcher
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -896,6 +897,13 @@ class Database:
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_instagram_media_shortcode ON instagram_media(shortcode)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_instagram_media_gallery ON instagram_media(media_type, route_mode, needs_review, published_at DESC)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_instagram_media_owner_gallery ON instagram_media(owner_instagram_account_id, inventory_state, media_type, published_at DESC)")
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS instagram_media_inventory_syncs (
+                owner_account_id TEXT PRIMARY KEY,
+                generation TEXT NOT NULL,
+                completed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
 
             # A Story reply is useful evidence even before an operator maps it
             # to a Topic. Keep this registry separate from routes so an
@@ -1532,13 +1540,13 @@ class Database:
             conn.commit()
             return dict(conn.execute("SELECT * FROM menu_image_versions WHERE id = ?", (version_id,)).fetchone())
 
-    def upsert_instagram_media(self, media: Dict[str, Any]) -> Dict[str, Any]:
+    def upsert_instagram_media(self, media: Dict[str, Any], *, connection=None) -> Dict[str, Any]:
         """Upsert Graph metadata without changing an operator's route mode."""
         now = datetime.utcnow().isoformat()
         media_id = str(media.get("instagram_media_id") or "").strip()
         if not media_id:
             raise ValueError("instagram_media_id is required")
-        with self.get_connection() as conn:
+        with (nullcontext(connection) if connection is not None else self.get_connection()) as conn:
             existing = conn.execute(
                 "SELECT * FROM instagram_media WHERE instagram_media_id=?", (media_id,)
             ).fetchone()
@@ -1570,16 +1578,17 @@ class Database:
                      media.get("owner_username"), media.get("last_sync_generation"),
                      media.get("inventory_state", "UNVERIFIED"), now, now, now, now),
                 )
-            conn.commit()
+            if connection is None:
+                conn.commit()
             return dict(conn.execute("SELECT * FROM instagram_media WHERE instagram_media_id=?", (media_id,)).fetchone())
 
-    def reconcile_instagram_media_inventory(self, owner_account_id: str, generation: str) -> Dict[str, int]:
+    def reconcile_instagram_media_inventory(self, owner_account_id: str, generation: str, *, connection=None) -> Dict[str, int]:
         """Hide only media excluded by a complete, verified owner-scoped sync.
 
         Rows and their routing/history remain durable. Callers must invoke this
         only after every Graph pagination page has completed successfully.
         """
-        with self.get_connection() as conn:
+        with (nullcontext(connection) if connection is not None else self.get_connection()) as conn:
             now = datetime.utcnow().isoformat()
             foreign = conn.execute(
                 """UPDATE instagram_media SET inventory_state='FOREIGN', updated_at=?
@@ -1594,8 +1603,34 @@ class Database:
                      AND COALESCE(last_sync_generation, '')!=? AND inventory_state!='STALE'""",
                 (now, owner_account_id, generation),
             ).rowcount
-            conn.commit()
+            conn.execute(
+                """INSERT INTO instagram_media_inventory_syncs (owner_account_id, generation, completed_at)
+                   VALUES (?, ?, ?)
+                   ON CONFLICT(owner_account_id) DO UPDATE SET
+                     generation=excluded.generation, completed_at=excluded.completed_at""",
+                (owner_account_id, generation, now),
+            )
+            if connection is None:
+                conn.commit()
         return {"hidden_foreign": int(foreign), "hidden_stale": int(stale)}
+
+    def apply_instagram_media_inventory(self, media, owner_account_id: str, generation: str) -> Dict[str, int]:
+        """Atomically publish a complete verified inventory and its reconciliation."""
+        with self.get_connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            for row in media:
+                self.upsert_instagram_media(row, connection=conn)
+            return self.reconcile_instagram_media_inventory(owner_account_id, generation, connection=conn)
+
+    def has_successful_instagram_media_inventory_sync(self, owner_account_id: str) -> bool:
+        if not str(owner_account_id or "").strip():
+            return False
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM instagram_media_inventory_syncs WHERE owner_account_id=?",
+                (str(owner_account_id).strip(),),
+            ).fetchone()
+        return row is not None
 
     def list_instagram_media(self, *, page: int = 1, page_size: int = 24, media_type: Optional[str] = None,
                              route_mode: Optional[str] = None, needs_review: Optional[bool] = None,
@@ -1604,42 +1639,61 @@ class Database:
                              mapping_status: Optional[str] = None,
                              context_active: Optional[bool] = None,
                              owner_account_id: Optional[str] = None) -> tuple[List[Dict[str, Any]], int]:
-        if not str(owner_account_id or "").strip():
-            return [], 0
-        clauses, params = ["owner_instagram_account_id=?", "inventory_state='CURRENT'"], [str(owner_account_id).strip()]
-        if source_type == "reel":
-            clauses.append("media_type='VIDEO'")
-        elif source_type == "post":
-            clauses.append("media_type!='VIDEO'")
-        if media_type:
-            clauses.append("media_type=?"); params.append(media_type.upper())
-        if route_mode:
-            clauses.append("route_mode=?"); params.append(route_mode.upper())
-        if needs_review is not None:
-            clauses.append("needs_review=?"); params.append(int(needs_review))
-        if topic_id:
-            clauses.append("topic_id=?"); params.append(topic_id)
-        if mapping_status == "mapped":
-            clauses.append("(topic_id IS NOT NULL OR route_mode IN ('CUSTOM','DISABLED') OR EXISTS (SELECT 1 FROM instagram_source_routes r WHERE r.media_id=instagram_media.instagram_media_id AND r.source_type IN ('post','reel') AND r.archived_at IS NULL))")
-        elif mapping_status == "unmapped":
-            clauses.append("(topic_id IS NULL AND route_mode='DEFAULT' AND NOT EXISTS (SELECT 1 FROM instagram_source_routes r WHERE r.media_id=instagram_media.instagram_media_id AND r.source_type IN ('post','reel') AND r.archived_at IS NULL))")
-        if context_active is not None:
-            clauses.append("EXISTS (SELECT 1 FROM instagram_source_routes r WHERE r.media_id=instagram_media.instagram_media_id AND r.source_type IN ('post','reel') AND r.archived_at IS NULL AND r.active=?)")
-            params.append(int(context_active))
-        if search:
-            pattern = f"%{search[:200]}%"
-            clauses.append("(instagram_media_id LIKE ? OR permalink LIKE ? OR caption LIKE ? OR EXISTS (SELECT 1 FROM instagram_source_routes r WHERE r.media_id=instagram_media.instagram_media_id AND r.source_type IN ('post','reel') AND r.archived_at IS NULL AND (r.routing_topic LIKE ? OR r.source_description LIKE ?)))")
-            params.extend([pattern] * 5)
-        where = " AND ".join(clauses)
+        owner_account_id = str(owner_account_id or "").strip()
         direction = "ASC" if sort == "oldest" else "DESC"
         order_column = "updated_at" if sort == "recently_edited" else "published_at"
         with self.get_connection() as conn:
+            bootstrapped = conn.execute(
+                "SELECT 1 FROM instagram_media_inventory_syncs WHERE owner_account_id=?",
+                (owner_account_id,),
+            ).fetchone() is not None
+            if bootstrapped:
+                clauses, params = ["owner_instagram_account_id=?", "inventory_state='CURRENT'"], [owner_account_id]
+            else:
+                # Until a complete verified sync succeeds, keep legacy rows
+                # visible to Admin as unverified. Explicitly foreign/stale
+                # rows stay hidden, and rows tagged to another owner are never
+                # presented as current-account media.
+                clauses = ["inventory_state NOT IN ('FOREIGN','STALE')",
+                           "(owner_instagram_account_id IS NULL OR owner_instagram_account_id=?)"]
+                params = [owner_account_id]
+            if source_type == "reel":
+                clauses.append("media_type='VIDEO'")
+            elif source_type == "post":
+                clauses.append("media_type!='VIDEO'")
+            if media_type:
+                clauses.append("media_type=?"); params.append(media_type.upper())
+            if route_mode:
+                clauses.append("route_mode=?"); params.append(route_mode.upper())
+            if needs_review is not None:
+                clauses.append("needs_review=?"); params.append(int(needs_review))
+            if topic_id:
+                clauses.append("topic_id=?"); params.append(topic_id)
+            if mapping_status == "mapped":
+                clauses.append("(topic_id IS NOT NULL OR route_mode IN ('CUSTOM','DISABLED') OR EXISTS (SELECT 1 FROM instagram_source_routes r WHERE r.media_id=instagram_media.instagram_media_id AND r.source_type IN ('post','reel') AND r.archived_at IS NULL))")
+            elif mapping_status == "unmapped":
+                clauses.append("(topic_id IS NULL AND route_mode='DEFAULT' AND NOT EXISTS (SELECT 1 FROM instagram_source_routes r WHERE r.media_id=instagram_media.instagram_media_id AND r.source_type IN ('post','reel') AND r.archived_at IS NULL))")
+            if context_active is not None:
+                clauses.append("EXISTS (SELECT 1 FROM instagram_source_routes r WHERE r.media_id=instagram_media.instagram_media_id AND r.source_type IN ('post','reel') AND r.archived_at IS NULL AND r.active=?)")
+                params.append(int(context_active))
+            if search:
+                pattern = f"%{search[:200]}%"
+                clauses.append("(instagram_media_id LIKE ? OR permalink LIKE ? OR caption LIKE ? OR EXISTS (SELECT 1 FROM instagram_source_routes r WHERE r.media_id=instagram_media.instagram_media_id AND r.source_type IN ('post','reel') AND r.archived_at IS NULL AND (r.routing_topic LIKE ? OR r.source_description LIKE ?)))")
+                params.extend([pattern] * 5)
+            where = " AND ".join(clauses)
             total = int(conn.execute(f"SELECT COUNT(*) AS n FROM instagram_media WHERE {where}", params).fetchone()["n"])
             rows = conn.execute(
                 f"SELECT * FROM instagram_media WHERE {where} ORDER BY {order_column} {direction}, id {direction} LIMIT ? OFFSET ?",
                 [*params, page_size, (page - 1) * page_size],
             ).fetchall()
-        return [dict(row) for row in rows], total
+        items = [dict(row) for row in rows]
+        if not bootstrapped:
+            for item in items:
+                item["inventory_state"] = "UNVERIFIED"
+                item["owner_instagram_account_id"] = None
+                item["owner_username"] = None
+                item["inventory_verification"] = "LEGACY_UNVERIFIED"
+        return items, total
 
     def get_instagram_media(self, item_id: int) -> Optional[Dict[str, Any]]:
         with self.get_connection() as conn:

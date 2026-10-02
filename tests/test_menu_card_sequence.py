@@ -56,17 +56,16 @@ def instagram_sequence(message):
 
 
 class TestTheClientsRequestedOrder:
-    def test_the_price_flow_runs_text_note_card_note_card(self):
+    def test_price_flow_uses_approved_copy_and_current_collection_assets(self):
+        from camellia import client_qa
         template_id, sent = instagram_sequence("what is the price of sondesh")
-        kinds = [kind for kind, _ in sent]
-
         assert template_id == "sondesh_price_detailed"
-        assert kinds[:5] == ["text", "text", "image", "text", "image"]
-        assert "Sondesh boxes start at" in sent[0][1]
-        assert sent[1][1].startswith("Collection 1. Aamar Mishti")
+        approved = client_qa.resolve_effective_approved_qa_by_id("sondesh_price_client").entry.answer
+        assert approved.replace("\\n", "\n").startswith(sent[0][1])
+        assert [kind for kind, _ in sent] == ["text", "text", "image", "image"]
         assert "AAMAR" in sent[2][1]
-        assert sent[3][1].startswith("Collection 2. Signature collection")
-        assert "Signature" in sent[4][1]
+        assert "Signature" in sent[3][1]
+        assert "Good local dairy milk" not in " ".join(body for kind, body in sent if kind == "text")
 
     def test_show_me_the_menu_runs_the_same_order(self):
         template_id, sent = instagram_sequence("Show me the menu")
@@ -78,7 +77,7 @@ class TestTheClientsRequestedOrder:
         assert sent[3][1].startswith("Collection 2. Signature collection")
 
     def test_each_note_arrives_before_the_card_it_describes(self):
-        for message in ("Show me the menu", "what is the price of sondesh"):
+        for message in ("Show me the menu",):
             _template_id, sent = instagram_sequence(message)
             for index, (kind, body) in enumerate(sent):
                 if kind == "image" and "AAMAR" in body:

@@ -109,7 +109,8 @@ def test_dynamic_bento_renderer_uses_managed_copy(tmp_path, monkeypatch, eligibl
     responder.menu_data = menu
     monkeypatch.setattr("camellia.responder.db", database)
     rendered, _images = responder.render_approved_template("bento_details")
-    assert rendered == database.get_response_template_override("bento_details")["response"]
+    from camellia import client_qa
+    assert rendered == client_qa.resolve_effective_approved_qa_by_id("bento_details_client").entry.answer
 
 
 def test_neutral_sugar_free_copy_has_no_unsupported_health_claims(tmp_path):

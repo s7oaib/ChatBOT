@@ -78,16 +78,19 @@ def test_known_legacy_runtime_bypasses_override_until_startup_reconciliation(mon
 
     text, images = responder.render_approved_template(SUBSCRIPTION_ID)
 
-    assert text == _subscription_template()["response"]
+    from camellia import client_qa
+    assert text == client_qa.resolve_effective_approved_qa_by_id("subscription_details_client").entry.answer
     assert images == ["/images/Everyday%20Meal%20Subscription%20Rate%20Chart.jpeg"]
     assert "₹1,500" not in text
 
 
-def test_distinct_operator_override_is_not_bypassed(monkeypatch, tmp_path):
+def test_system_operator_override_cannot_replace_effective_approved_qa(monkeypatch, tmp_path):
     database = Database(str(tmp_path / "operator-copy.db"))
     custom = "CLIENT APPROVED SUBSCRIPTION COPY"
     database.save_response_template_override(SUBSCRIPTION_ID, custom, "operator")
     monkeypatch.setattr("camellia.responder.db", database)
     responder = DeterministicResponder()
 
-    assert responder._template_by_id(SUBSCRIPTION_ID)["response"] == custom
+    from camellia import client_qa
+    assert responder._template_by_id(SUBSCRIPTION_ID)["response"] == client_qa.resolve_effective_approved_qa_by_id("subscription_details_client").entry.answer
+    assert database.get_response_template_override(SUBSCRIPTION_ID)["response"] == custom

@@ -26,6 +26,7 @@ from camellia import weekly_flyer
 from camellia import weekly_savoury
 from camellia import menu_dates
 from camellia import client_qa
+from camellia import approved_response_alignment
 from camellia import menu_review
 from camellia import handoff as human_handoff
 from camellia import order_intake
@@ -2832,11 +2833,54 @@ class DeterministicResponder:
         if channel == "instagram" and menu_review.weekly_menu_browsing(user_message):
             facts["order_intake_declined"] = "explicit_menu_browsing"
 
+        source = facts.get("source_route") if isinstance(facts.get("source_route"), dict) else {}
+        source_active = bool(source.get("routing_id") and source.get("active", True)
+                             and not facts.get("source_context_superseded"))
+        context_delivery_match = None
         primary_qa = mapped_qa_match or client_qa.match(user_message, facts)
+        # Named menu requests delegate to existing asset authority, never seed prose.
+        collection_request = re.fullmatch(
+            r"\s*(?:(?:please|pls)\s+)?(?:(?:show|send|share|give)(?:\s+me)?\s+)?"
+            r"(?:the\s+)?(aamar(?:\s+mishti)?|signature(?:\s+sondesh)?|collection\s*[12])"
+            r"(?:\s+(?:menu|collection|images?|photos?|options))?\s*[?!.]*", user_message, re.I)
+        if collection_request and not primary_qa:
+            template_id = ("aamar_mishti_collection" if (collection_request.group(1).lower().startswith("aamar") or re.fullmatch(r"collection\s*1", collection_request.group(1), re.I))
+                           else "signature_collection")
+            text, images = self._format_dynamic_response(template_id, "", user_id, channel, user_message)
+            if images:
+                topic = "aamar_mishti" if template_id == "aamar_mishti_collection" else "signature"
+                facts.update(active_topic=topic, last_topic=topic,
+                             last_route_source="deterministic_asset_request",
+                             last_grounding="deterministic_approved_asset",
+                             last_actions=[BusinessAction.SEND_PRODUCT_IMAGE.value], knowledge_sufficient=True)
+                session_memory.add_turn(user_id, channel, user_message, text)
+                return text, True, template_id, images
+            return self._generic_fallback(), False, template_id, None
+        if (channel == "instagram" and approved_response_alignment.unsupported_pack_request(user_message)
+                and not order_intake.is_order_request(user_message, facts.get("active_product_context"))
+                and not (facts.get("order_intake_draft") and order_intake.is_order_detail_message(user_message))):
+            text = self._generic_fallback()
+            facts.update(last_route_source="HUMAN_HANDOFF", last_grounding="pack_size_not_approved",
+                         last_actions=[BusinessAction.ESCALATE_TO_TEAM.value], knowledge_sufficient=False)
+            session_memory.add_turn(user_id, channel, user_message, text)
+            return text, False, None, None
+        if channel == "instagram" and re.fullmatch(
+                r"\s*(?:how\s+much\s+time|how\s+long(?:\s+does\s+it\s+take)?|delivery\s+time|how\s+soon|when\s+will\s+it\s+arrive|dispatch\s+time)\s*[?!.]*", user_message, re.I):
+            context = " ".join(str(facts.get(key) or "") for key in (
+                "active_topic", "last_topic", "active_product_context"))
+            context += " " + str(source.get("routing_topic") or "") if source_active else ""
+            delivery_subject = ("sondesh" if re.search(r"sondesh|sandesh|mishti", context, re.I)
+                                else "savoury" if re.search(r"savoury|savory|bento|cooked|meal", context, re.I)
+                                else None)
+            primary_qa = client_qa.match(f"{delivery_subject} delivery time", facts) if delivery_subject else None
+            context_delivery_match = primary_qa
+            if not primary_qa:
+                text = self._generic_fallback()
+                facts.update(last_route_source="HUMAN_HANDOFF", last_grounding="delivery_subject_unavailable",
+                             last_actions=[BusinessAction.ESCALATE_TO_TEAM.value], knowledge_sufficient=False)
+                session_memory.add_turn(user_id, channel, user_message, text)
+                return text, False, None, None
         if channel == "instagram":
-            source = facts.get("source_route") if isinstance(facts.get("source_route"), dict) else {}
-            source_active = bool(source.get("routing_id") and source.get("active", True)
-                                 and not facts.get("source_context_superseded"))
             named_other_menu = bool(re.search(
                 r"\b(?:weekly|this\s+week|current\s+week|savoury|savory|sondesh|sandesh|mishti|bento|subscription|aamar|signature)\b",
                 lowered_text,
@@ -3268,6 +3312,16 @@ class DeterministicResponder:
                 return source_description, True, "source_description", None
 
         if channel == "instagram" and menu_review.weekly_menu_browsing(user_message):
+            image = current_weekly_url()
+            if image:
+                facts.update(last_route_source="APPROVED_MENU", last_grounding="approved_menu_flyer",
+                             active_topic="savoury", last_topic="savoury", knowledge_sufficient=True,
+                             source_context_superseded=True, source_context_used=False,
+                             last_intents=[menu_review.WEEKLY_SAVOURY_BROWSE],
+                             last_llm_called=False, last_fallback_used=False,
+                             last_actions=[BusinessAction.SEND_PRODUCT_IMAGE.value])
+                session_memory.add_turn(user_id, channel, user_message, "")
+                return "", True, "approved_menu", [image]
             # A fresh explicit intent outranks an old order or source topic.
             # Resolve approved rows and their associated flyer on every turn.
             versions = [v for v in menu_review.customer_versions()
@@ -3488,7 +3542,7 @@ class DeterministicResponder:
             "bento" if context_topic == "bento" else ""
         ) if details_followup else ""
         contextual_topic = contextual_price_topic or contextual_details_topic
-        client_qa_candidate = mapped_qa_match or client_qa.match(
+        client_qa_candidate = context_delivery_match or mapped_qa_match or client_qa.match(
             (
                 "tell me more about subscription"
                 if source_subscription_asset_request
@@ -5217,6 +5271,21 @@ class DeterministicResponder:
             {w for w in cleaned_words if w not in VAGUE_FILLER_WORDS} - STOP_WORDS
         )
 
+        if channel == "instagram" and not primary_qa:
+            legacy_business_trigger = approved_response_alignment.matching_handoff_only_template(
+                user_message, self._customer_templates(),
+            )
+            if legacy_business_trigger:
+                text = self._generic_fallback()
+                facts.update({
+                    "last_route_source": "HUMAN_HANDOFF",
+                    "last_grounding": "approved_qa_unavailable" if legacy_business_trigger in approved_response_alignment.APPROVED_QA_BINDINGS else "no_approved_qa_authority",
+                    "last_actions": [BusinessAction.ESCALATE_TO_TEAM.value],
+                    "knowledge_sufficient": False, "last_llm_called": False,
+                })
+                session_memory.add_turn(user_id, channel, user_message, text)
+                return text, False, None, None
+
         templates = self._templates_with_overrides()
 
         # Priority Tier Definitions
@@ -5627,7 +5696,10 @@ class DeterministicResponder:
             # 1. Any template marked escalate: true triggers escalation.
             # 2. If a template has response: null (or empty string), it must NEVER be auto-sent — force escalation.
             is_null_or_empty_response = (raw_response is None) or (isinstance(raw_response, str) and not raw_response.strip())
-            force_escalate = (best_template.get("escalate") is True) or is_null_or_empty_response
+            force_escalate = (best_template.get("escalate") is True) or (
+                is_null_or_empty_response
+                and tmpl_id not in approved_response_alignment.MENU_DELEGATION_TEMPLATE_IDS
+            )
 
             if force_escalate:
                 escalate_image = None
@@ -6019,7 +6091,8 @@ class DeterministicResponder:
 
     def _customer_templates(self):
         from camellia.template_retirement import customer_templates
-        return customer_templates(self.qa_data.get("templates", []))
+        return approved_response_alignment.runtime_templates(
+            customer_templates(self.qa_data.get("templates", [])))
 
     def _template_by_id(self, template_id: str) -> Dict[str, Any]:
         """Return protected template logic plus an optional managed copy override."""
@@ -6029,6 +6102,8 @@ class DeterministicResponder:
         )
         if not template:
             return {}
+        if template_id in approved_response_alignment.HANDOFF_ONLY_TEMPLATE_IDS | approved_response_alignment.MENU_DELEGATION_TEMPLATE_IDS:
+            return template
         collection_keys = {"aamar_mishti_collection": "aamar_mishti",
                            "signature_collection": "signature"}
         if template_id in collection_keys:
@@ -6101,6 +6176,9 @@ class DeterministicResponder:
         for template in self._customer_templates():
             template_id = template.get("id")
             if not template_id:
+                continue
+            if template_id in approved_response_alignment.HANDOFF_ONLY_TEMPLATE_IDS | approved_response_alignment.MENU_DELEGATION_TEMPLATE_IDS:
+                result.append(template)
                 continue
             if template_id in {"aamar_mishti_collection", "signature_collection"}:
                 result.append(self._template_by_id(template_id))
@@ -6268,6 +6346,8 @@ class DeterministicResponder:
             template_id, response, user_id="__response_library_preview__",
             channel=channel, user_message=(template.get("triggers") or [""])[0],
         )
+        if template_id in approved_response_alignment.APPROVED_QA_BINDINGS or template_id in approved_response_alignment.MENU_DELEGATION_TEMPLATE_IDS:
+            return rendered, images
         if runtime_quarantine_enabled(getattr(db, "db_path", "")):
             rendered = quarantine_template_response(
                 template_id,
@@ -6282,6 +6362,30 @@ class DeterministicResponder:
         self, template_id: str, default_response: str, user_id: str = None, channel: str = None, user_message: str = ""
     ) -> Tuple[str, Optional[Any]]:
         """Attaches the exact photo card(s) a template should send alongside its text whenever requested."""
+        if template_id in approved_response_alignment.MENU_DELEGATION_TEMPLATE_IDS:
+            if template_id == "previous_menus":
+                # Archive assets use the existing history authority below.
+                default_response = ""
+            else:
+                collection = {"aamar_mishti_collection": "aamar_mishti",
+                              "signature_collection": "signature"}.get(template_id)
+                image = current_menu_image(collection) if collection else current_weekly_url()
+                return ("", [image]) if image else (self._generic_fallback(), None)
+        if template_id in approved_response_alignment.APPROVED_QA_BINDINGS:
+            qa_id, answer = approved_response_alignment.effective_binding(template_id)
+            match = client_qa.resolve_effective_approved_qa_by_id(qa_id) if qa_id else None
+            if not match:
+                return self._generic_fallback(), None
+            assets = {
+                "aamar_menu": current_menu_image("aamar_mishti", "/images/AAMAR%20MISHTI.jpeg"),
+                "signature_menu": current_menu_image("signature", "/images/Signature%20Sondesh.jpeg"),
+                "weekly_menu": current_weekly_url(),
+                "subscription_rate_chart": "/images/Everyday%20Meal%20Subscription%20Rate%20Chart.jpeg",
+            }
+            images = [assets[key] for key in match.asset_keys if assets.get(key)]
+            return answer, images or None
+        if template_id in approved_response_alignment.HANDOFF_ONLY_TEMPLATE_IDS:
+            return self._generic_fallback(), None
         img_signature_sondesh = current_menu_image("signature", "/images/Signature%20Sondesh.jpeg")
         img_aamar_mishti = current_menu_image("aamar_mishti", "/images/AAMAR%20MISHTI.jpeg")
 
@@ -6641,11 +6745,23 @@ class DeterministicResponder:
         facts_after_route = session_memory.get_facts(
             user_id or "default_user", channel or "default_channel",
         )
+        if (template_id in approved_response_alignment.HANDOFF_ONLY_TEMPLATE_IDS
+                and not approved_response_alignment.effective_binding(template_id)[0]):
+            facts_after_route.update(last_route_source="HUMAN_HANDOFF",
+                                     last_actions=[BusinessAction.ESCALATE_TO_TEAM.value],
+                                     knowledge_sufficient=False)
+            return self._generic_fallback(), False, template_id, None
+        if (
+            template_id in approved_response_alignment.MENU_DELEGATION_TEMPLATE_IDS
+            and template_id != "previous_menus"
+            and not image_url
+        ):
+            return self._generic_fallback(), False, template_id, None
         client_exact_route = bool(
             facts_after_route.get("client_qa_id")
             and facts_after_route.get("last_grounding") == "exact_approved"
         )
-        if client_exact_route or facts_after_route.get("last_route_source") in {
+        if client_exact_route or template_id in approved_response_alignment.APPROVED_QA_BINDINGS or template_id in approved_response_alignment.MENU_DELEGATION_TEMPLATE_IDS or facts_after_route.get("last_route_source") in {
             "SYSTEM_CONVERSATION", "GROUNDED_DERIVED", "SOURCE_DESCRIPTION"
         }:
             # The client-QA registry is itself the authoritative, versioned

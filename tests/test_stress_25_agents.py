@@ -57,17 +57,22 @@ class Test25AgentStressScenarios(unittest.TestCase):
         """Agent 1: Speaks in Bengali script and Banglish asking for Nolen Gur Sondesh."""
         user_id = "user_bengali_01"
         channel = "whatsapp"
-        
+
         # Turn 1: Bengali script query
         resp1 = self.responder.respond("নলেন গুড়ের সন্দেশ পাওয়া যাবে?", user_id=user_id, channel=channel)
-        self.assertTrue(resp1.was_matched)
-        self.assertIn("Nolen Gur", resp1.text)
-        self.assertIn("₹600", resp1.text)
+        self.assertFalse(resp1.was_matched)
+        self.assertIn("Manager of Kitchens", resp1.text)
+        self.assertNotIn("₹", resp1.text)
+        self.assertNotIn("500g", resp1.text)
+        self.assertNotIn("1kg", resp1.text)
 
         # Turn 2: Banglish delivery query
         resp2 = self.responder.respond("Delhi te deliver hoy?", user_id=user_id, channel=channel)
-        self.assertTrue(resp2.was_matched)
-        self.assertIn("Delhi NCR", resp2.text)
+        self.assertFalse(resp2.was_matched)
+        self.assertIn("Manager of Kitchens", resp2.text)
+        self.assertNotIn("₹", resp2.text)
+        self.assertNotIn("500g", resp2.text)
+        self.assertNotIn("1kg", resp2.text)
 
     def test_agent_02_corporate_bulk_buyer_escalation(self):
         """Agent 2: Corporate client wanting 100 boxes with custom branding and price discount."""
@@ -91,7 +96,9 @@ class Test25AgentStressScenarios(unittest.TestCase):
         # Turn 1: Why expensive / compare with Bhikharam
         resp1 = self.responder.respond("Why is your sondesh more expensive than Bhikharam Chandmal?", user_id=user_id, channel=channel)
         self.assertTrue(resp1.was_matched)
-        self.assertIn("pure dairy", resp1.text.lower())
+        from camellia import client_qa
+        approved = client_qa.resolve_effective_approved_qa_by_id("sondesh_price_client").entry.answer
+        self.assertTrue(resp1.text.startswith(approved))
         self.assertIn("desi a2", resp1.text.lower())
 
         # Turn 2: Attempting to negotiate price
@@ -106,16 +113,19 @@ class Test25AgentStressScenarios(unittest.TestCase):
 
         # Turn 1: Diabetic / sugar free
         resp1 = self.responder.respond("Do you have sugar free or diabetic friendly options?", user_id=user_id, channel=channel)
-        self.assertTrue(resp1.was_matched)
-        self.assertNotIn("glycemic", resp1.text.lower())
-        self.assertNotIn("diabetic-friendly", resp1.text.lower())
+        self.assertFalse(resp1.was_matched)
+        self.assertIn("Manager of Kitchens", resp1.text)
+        self.assertNotIn("₹", resp1.text)
+        self.assertNotIn("500g", resp1.text)
+        self.assertNotIn("1kg", resp1.text)
 
         # Turn 2: Halal & Mustard oil check (Confirmed with client: Mutton is Halal, Mustard oil from farmer)
         resp2 = self.responder.respond("Is your meat halal and which oil do you cook in?", user_id=user_id, channel=channel)
-        self.assertTrue(resp2.was_matched)
-        self.assertEqual(resp2.template_id, "GUARD_halal_ingredients_oil")
-        self.assertIn("mutton is halal", resp2.text)
-        self.assertIn("mustard oil", resp2.text)
+        self.assertFalse(resp2.was_matched)
+        self.assertIn("Manager of Kitchens", resp2.text)
+        self.assertNotIn("₹", resp2.text)
+        self.assertNotIn("500g", resp2.text)
+        self.assertNotIn("1kg", resp2.text)
 
     def test_agent_05_strict_vegan_inquirer(self):
         """Agent 5: Asking if Sondesh can be made vegan / plant-based."""
@@ -127,43 +137,35 @@ class Test25AgentStressScenarios(unittest.TestCase):
         self.assertTrue(resp.was_matched or "manager of kitchens" in resp.text.lower())
 
     def test_agent_06_multi_turn_order_with_session_memory(self):
-        """Agent 6: 4-turn order with name introduction and slot memory recall."""
+        # Customer-supplied choices persist; unsupported prices/pack availability do not.
         user_id = "user_memory_06"
         channel = "whatsapp"
-
-        # Turn 1: Introduction
         resp1 = self.responder.respond("Hi, my name is Priya Sen! What are your Rose Sondesh prices?", user_id=user_id, channel=channel)
-        self.assertIn("Priya Sen", resp1.text)
-        self.assertIn("Rose Sondesh", resp1.text)
-        self.assertIn("₹450", resp1.text)
-
-        # Turn 2: Specific flavour choice
+        self.assertFalse(resp1.was_matched)
+        self.assertIn("Manager of Kitchens", resp1.text)
+        self.assertNotIn("₹450", resp1.text)
         resp2 = self.responder.respond("I want the rose flavour in signature collection", user_id=user_id, channel=channel)
         self.assertTrue(resp2.was_matched)
-        self.assertIn("Signature", resp2.text)
-
-        # Turn 3: Inquire sizes
+        self.assertEqual(resp2.text, "")
+        self.assertEqual(resp2.template_id, "signature_collection")
+        self.assertTrue(resp2.image_url)
+        self.assertNotIn("₹", resp2.text)
         resp3 = self.responder.respond("What are the 500g box options?", user_id=user_id, channel=channel)
-        self.assertTrue(resp3.was_matched)
-        self.assertIn("500g", resp3.text)
-
-        # Turn 4: Memory check of earlier choice
+        self.assertFalse(resp3.was_matched)
+        self.assertIn("Manager of Kitchens", resp3.text)
+        self.assertNotIn("500g", resp3.text)
         resp4 = self.responder.respond("ok and does that come to my earlier flavour choice or do I need to repeat it", user_id=user_id, channel=channel)
         self.assertTrue(resp4.was_matched)
         self.assertIn("Rose", resp4.text)
         self.assertIn("no need to repeat", resp4.text.lower())
+        self.assertNotIn("₹", resp4.text)
 
     def test_agent_07_out_of_area_bangalore_inquiry(self):
-        """Agent 7: Customer from Bangalore asking for home delivery."""
-        user_id = "user_blr_07"
-        channel = "whatsapp"
-
-        resp = self.responder.respond("Can you deliver 2 boxes of Nolen Gur Sondesh to Bangalore?", user_id=user_id, channel=channel)
+        from camellia import client_qa
+        resp = self.responder.respond("Can you deliver 2 boxes of Nolen Gur Sondesh to Bangalore?", user_id="user_blr_07", channel="whatsapp")
         self.assertTrue(resp.was_matched)
-        self.assertIn("Norom Pak Sondesh", resp.text)
-        self.assertIn("cold-chain", resp.text)
-        self.assertIn("unable to ship our sondesh outside Delhi NCR", resp.text)
-        self.assertIn("friends or family travelling", resp.text)
+        approved = next(entry.answer for entry in client_qa.REGISTRY if entry.qa_id == "delivery_out_of_area_client")
+        self.assertTrue(resp.text.startswith(approved))
 
     def test_agent_08_typo_and_slang_comprehension(self):
         """Agent 8: Customer with heavy typos and phonetic Bengali terms."""
@@ -171,8 +173,11 @@ class Test25AgentStressScenarios(unittest.TestCase):
         channel = "whatsapp"
 
         resp = self.responder.respond("whast is teh proce of jol bhora and kancha gola?", user_id=user_id, channel=channel)
-        self.assertTrue(resp.was_matched)
-        self.assertTrue("Jolbhora" in resp.text or "Kanchagolla" in resp.text)
+        self.assertFalse(resp.was_matched)
+        self.assertIn("Manager of Kitchens", resp.text)
+        self.assertNotIn("₹", resp.text)
+        self.assertNotIn("500g", resp.text)
+        self.assertNotIn("1kg", resp.text)
 
     def test_agent_09_angry_complaint_escalation(self):
         """Agent 9: Customer with missing items or transaction problem."""
@@ -219,8 +224,11 @@ class Test25AgentStressScenarios(unittest.TestCase):
 
         for loc in ["Do you deliver to Dwarka Sector 12?", "Is delivery available in Indirapuram Ghaziabad?", "Can you send to CR Park Delhi?"]:
             resp = self.responder.respond(loc, user_id=user_id, channel=channel)
-            self.assertTrue(resp.was_matched, f"Failed on locality: {loc}")
-            self.assertIn("Delhi NCR", resp.text)
+            self.assertFalse(resp.was_matched)
+            self.assertIn("Manager of Kitchens", resp.text)
+            self.assertNotIn("₹", resp.text)
+            self.assertNotIn("500g", resp.text)
+            self.assertNotIn("1kg", resp.text)
 
     def test_agent_12_kitchen_self_pickup(self):
         """Agent 12: Customer wanting to collect directly from kitchen (Confirmed address & hours)."""
@@ -228,10 +236,11 @@ class Test25AgentStressScenarios(unittest.TestCase):
         channel = "whatsapp"
 
         resp = self.responder.respond("Can I pick up my order from your kitchen? What is the address and timings?", user_id=user_id, channel=channel)
-        self.assertTrue(resp.was_matched)
-        self.assertEqual(resp.template_id, "GUARD_pickup_address_hours")
-        self.assertIn("Sushant Arcade", _plain(resp.text))
-        self.assertIn("10:00 AM – 7:30 PM", _plain(resp.text))
+        self.assertFalse(resp.was_matched)
+        self.assertIn("Manager of Kitchens", resp.text)
+        self.assertNotIn("₹", resp.text)
+        self.assertNotIn("500g", resp.text)
+        self.assertNotIn("1kg", resp.text)
 
     def test_agent_13_artisanal_differentiation(self):
         """Agent 13: Customer asking what makes Camellia special."""
@@ -239,10 +248,11 @@ class Test25AgentStressScenarios(unittest.TestCase):
         channel = "whatsapp"
 
         resp = self.responder.respond("How are you different from other sweet shops?", user_id=user_id, channel=channel)
-        self.assertTrue(resp.was_matched)
-        self.assertIn("100% pure dairy", resp.text)
-        self.assertIn("Nolen Gur", resp.text)
-        self.assertIn("all-women kitchen", _plain(resp.text))
+        self.assertFalse(resp.was_matched)
+        self.assertIn("Manager of Kitchens", resp.text)
+        self.assertNotIn("₹", resp.text)
+        self.assertNotIn("500g", resp.text)
+        self.assertNotIn("1kg", resp.text)
 
     def test_agent_14_custom_assorted_box(self):
         """Agent 14: Mixing flavours in a 500g box (Escalated per custom box policy)."""
@@ -260,41 +270,36 @@ class Test25AgentStressScenarios(unittest.TestCase):
         channel = "whatsapp"
 
         resp1 = self.responder.respond("What is the price of Mahua Sondesh?", user_id=user_id, channel=channel)
-        self.assertTrue(resp1.was_matched)
-        self.assertIn("Mahua", resp1.text)
-        self.assertIn("₹900", resp1.text)
+        self.assertFalse(resp1.was_matched)
+        self.assertIn("Manager of Kitchens", resp1.text)
+        self.assertNotIn("₹", resp1.text)
+        self.assertNotIn("500g", resp1.text)
+        self.assertNotIn("1kg", resp1.text)
 
         resp2 = self.responder.respond("Tell me about Jolbhora with liquid filling", user_id=user_id, channel=channel)
-        self.assertTrue(resp2.was_matched)
-        self.assertIn("Jolbhora", resp2.text)
-        self.assertIn("₹750", resp2.text)
-        self.assertIn("₹900", resp2.text)
+        self.assertFalse(resp2.was_matched)
+        self.assertIn("Manager of Kitchens", resp2.text)
+        self.assertNotIn("₹", resp2.text)
+        self.assertNotIn("500g", resp2.text)
+        self.assertNotIn("1kg", resp2.text)
 
     @pytest.mark.usefixtures("eligible_weekly_asset")
     def test_agent_16_weekly_rotation_dishes(self):
-        """Agent 16: Reads only this week's approved Instagram menu data."""
-        user_id = "user_foodie_16"
-        channel = "instagram"
-
-        resp_veg = self.responder.respond("Show this week's vegetarian menu", user_id=user_id, channel=channel)
-        self.assertTrue(resp_veg.was_matched)
-        self.assertIn("Vegetarian Menu", resp_veg.text)
-
-        resp_nv = self.responder.respond("Show this week's non-veg menu", user_id=user_id, channel=channel)
-        self.assertTrue(resp_nv.was_matched)
-        self.assertIn("Bhetki Paturi", resp_nv.text)
+        from camellia.menu_images import current_weekly_url
+        for message in ["Show this week's vegetarian menu", "Show this week's non-veg menu"]:
+            text, matched, route, images = self.responder.match_and_respond(message, user_id="user_foodie_16", channel="instagram")
+            self.assertTrue(matched)
+            self.assertEqual(route, "approved_menu")
+            self.assertEqual(text, "")
+            self.assertEqual(images, [current_weekly_url()])
 
     def test_agent_17_payment_methods_and_qr_code(self):
-        """Agent 17: Inquiring how to pay, UPI QR, and COD (Confirmed: UPI/bank transfer only, No COD)."""
-        user_id = "user_pay_17"
-        channel = "whatsapp"
-
-        resp = self.responder.respond("Can I pay via UPI QR code or COD?", user_id=user_id, channel=channel)
+        from camellia import client_qa
+        resp = self.responder.respond("Can I pay via UPI QR code or COD?", user_id="user_pay_17", channel="whatsapp")
         self.assertTrue(resp.was_matched)
         self.assertEqual(resp.template_id, "GUARD_payment_method")
-        self.assertIn("UPI at 9625083171", resp.text)
-        self.assertIn("Yummraj Culinary Expeditions Pvt Ltd", resp.text)
-        self.assertIn("credit card at https://razorpay.me/@camelliaartisanal", resp.text)
+        approved = next(entry.answer for entry in client_qa.REGISTRY if entry.qa_id == "general_payment_client")
+        self.assertTrue(resp.text.startswith(approved))
 
     def test_agent_18_shelf_life_and_storage(self):
         """Agent 18: Inquiring how long Sondesh lasts and storage guidelines (Confirmed: 1 week refrigerated)."""
@@ -302,10 +307,11 @@ class Test25AgentStressScenarios(unittest.TestCase):
         channel = "whatsapp"
 
         resp = self.responder.respond("How long can I store the sondesh and does it need refrigeration?", user_id=user_id, channel=channel)
-        self.assertTrue(resp.was_matched)
-        self.assertEqual(resp.template_id, "GUARD_shelf_life_storage")
-        self.assertIn("week refrigerated", resp.text)
-        self.assertIn("12 seconds", resp.text)
+        self.assertFalse(resp.was_matched)
+        self.assertIn("Manager of Kitchens", resp.text)
+        self.assertNotIn("₹", resp.text)
+        self.assertNotIn("500g", resp.text)
+        self.assertNotIn("1kg", resp.text)
 
     def test_agent_19_spam_and_gibberish_filter(self):
         """Agent 19: Malicious bot sending spam links and gibberish."""
@@ -348,9 +354,11 @@ class Test25AgentStressScenarios(unittest.TestCase):
         channel = "whatsapp"
 
         resp = self.responder.respond("Are your classic and rose sondesh safe for someone with a severe nut allergy?", user_id=user_id, channel=channel)
-        self.assertTrue(resp.was_matched)
-        self.assertEqual(resp.template_id, "GUARD_allergen_nutfree_glutenfree")
-        self.assertIn("Sondesh is made from milk & sugar only — no nuts.", resp.text)
+        self.assertFalse(resp.was_matched)
+        self.assertIn("Manager of Kitchens", resp.text)
+        self.assertNotIn("₹", resp.text)
+        self.assertNotIn("500g", resp.text)
+        self.assertNotIn("1kg", resp.text)
 
     def test_agent_23_collection_comparison(self):
         """Agent 23: Comparing Collection 1 vs Collection 2 (Confirmed collection differences)."""
@@ -358,10 +366,11 @@ class Test25AgentStressScenarios(unittest.TestCase):
         channel = "whatsapp"
 
         resp = self.responder.respond("What is the difference between Collection 1 and Collection 2?", user_id=user_id, channel=channel)
-        self.assertTrue(resp.was_matched)
-        self.assertEqual(resp.template_id, "GUARD_collection_differentiation")
-        self.assertIn("Aamar Mishti", resp.text)
-        self.assertIn("Signature Sondesh", resp.text)
+        self.assertFalse(resp.was_matched)
+        self.assertIn("Manager of Kitchens", resp.text)
+        self.assertNotIn("₹", resp.text)
+        self.assertNotIn("500g", resp.text)
+        self.assertNotIn("1kg", resp.text)
 
     def test_agent_24_packaging_sustainability(self):
         """Agent 24: Asking about eco-friendly packaging and plastic usage."""
@@ -369,9 +378,11 @@ class Test25AgentStressScenarios(unittest.TestCase):
         channel = "whatsapp"
 
         resp = self.responder.respond("Is your packaging plastic-free and eco-friendly?", user_id=user_id, channel=channel)
-        self.assertTrue(resp.was_matched)
-        self.assertIn("plastic-free", resp.text.lower())
-        self.assertIn("cornstarch", resp.text.lower())
+        self.assertFalse(resp.was_matched)
+        self.assertIn("Manager of Kitchens", resp.text)
+        self.assertNotIn("₹", resp.text)
+        self.assertNotIn("500g", resp.text)
+        self.assertNotIn("1kg", resp.text)
 
     def test_agent_25_general_greeting_and_menu_browse(self):
         """Agent 25: First-time visitor greeting and asking for full catalog."""
@@ -397,7 +408,8 @@ class Test25AgentStressScenarios(unittest.TestCase):
         resp1 = self.responder.respond("Do you have any lunch or dinner options today?", user_id=user_id, channel=channel)
         self.assertTrue(resp1.was_matched)
         self.assertEqual(resp1.template_id, "savoury_food_intro")
-        self.assertIn("three ways to order", resp1.text)
+        from camellia import client_qa
+        self.assertTrue(resp1.text.startswith(client_qa.resolve_effective_approved_qa_by_id("general_details").entry.answer))
 
         # Turn 2: Specific Bento box details (client-confirmed 2026-09-03 -> answers with the three tiers)
         resp2 = self.responder.respond("Tell me more about the Bengali Bento meal box", user_id=user_id, channel=channel)
@@ -420,9 +432,10 @@ class Test25AgentStressScenarios(unittest.TestCase):
 
         # Turn 2: Follow up with booking steps
         resp2 = self.responder.respond("How do I book the subscription plan?", user_id=user_id, channel=channel)
-        self.assertTrue(resp2.was_matched)
+        self.assertFalse(resp2.was_matched)
         self.assertEqual(resp2.template_id, "subscription_booking_steps")
-        self.assertIn("Choose Option 1, 2 or 3", resp2.text)
+        self.assertIn("Manager of Kitchens", resp2.text)
+        self.assertNotIn("Choose Option 1, 2 or 3", resp2.text)
         self.assertNotIn("how_to_order", resp2.template_id)
 
     def test_agent_28_first_time_vs_returning_customer_savoury_intro(self):
@@ -458,7 +471,9 @@ class Test25AgentStressScenarios(unittest.TestCase):
 
         # Turn 1: User introduces name and asks about Jolbhora Sondesh (creating order draft & facts)
         resp1 = self.responder.respond("Hi, my name is Priya. What is the price of Jolbhora Sondesh?", user_id=gap_uid, channel=channel)
-        self.assertTrue(resp1.was_matched)
+        self.assertFalse(resp1.was_matched)
+        self.assertIn("Manager of Kitchens", resp1.text)
+        self.assertNotIn("₹750", resp1.text)
         sess = session_memory.get_session(gap_uid, channel)
         self.assertEqual(sess["facts"]["name"], "Priya")
         self.assertEqual(sess["facts"]["order_draft"]["flavour"], "jolbhora")

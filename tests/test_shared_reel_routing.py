@@ -235,14 +235,16 @@ def test_unconfigured_reel_leaves_the_session_untouched(routed_db, monkeypatch):
 
 
 def test_context_failure_never_breaks_the_attachment_reply(monkeypatch):
-    replied = []
-    monkeypatch.setattr(app_module, "_reply_to_unreadable_attachment", lambda uid, **_kwargs: replied.append(uid))
+    handed_off = []
+    monkeypatch.setattr(app_module, "_handoff_unmapped_shared_media", lambda uid, **kwargs: handed_off.append((uid, kwargs)))
     monkeypatch.setattr(
         app_module, "route_for_inbound",
         lambda **kwargs: (_ for _ in ()).throw(RuntimeError("database down")),
     )
     app_module._handle_shared_attachment("sender_1", {"shortcode": CONFIGURED_SHORTCODE})
-    assert replied == ["sender_1"]
+    assert handed_off == [("sender_1", {
+        "source_type": "reel", "media_id": None, "shortcode": CONFIGURED_SHORTCODE,
+    })]
 
 
 # --- dispatch keeps its existing shape -------------------------------------

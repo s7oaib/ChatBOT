@@ -233,7 +233,8 @@ def test_subscription_runtime_uses_canonical_copy_and_only_rate_chart(monkeypatc
     responder.menu_data = menu
     text, images = responder.render_approved_template(SUBSCRIPTION_ID)
 
-    assert text == _subscription(templates)["response"]
+    from camellia import client_qa
+    assert text == client_qa.resolve_effective_approved_qa_by_id("subscription_details_client").entry.answer
     assert images == ["/images/Everyday%20Meal%20Subscription%20Rate%20Chart.jpeg"]
     for forbidden in ("₹1,500", "₹1,750", "₹2,000", "luchi", "polao", "11th", "à la carte"):
         assert forbidden.casefold() not in text.casefold()

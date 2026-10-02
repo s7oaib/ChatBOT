@@ -172,7 +172,7 @@ def test_explicit_new_subject_overrides_home_table(monkeypatch, question, eligib
         "bengali_home_table_details", "bengali_home_table_pricing", "bengali_home_table_payment",
     }, reply
     if question == "Show this week's Savoury menu":
-        assert reply["template_id"] == "asset_request_weekly_menu", reply
+        assert reply["template_id"] == "approved_menu", reply
 
 
 def test_sondesh_topic_switch_does_not_resurrect_home_table(monkeypatch):

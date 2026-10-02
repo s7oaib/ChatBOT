@@ -114,11 +114,14 @@ def _sync_instagram_media(db, diagnostic_permalink: Optional[str] = None) -> Dic
                       message="Instagram credentials are not configured; no Graph request was made.")
         return result
 
-    expected_id = str(config.INSTAGRAM_ACCOUNT_ID or "").strip()
+    # Instagram Login's authenticated /me id is not the webhook account guard
+    # id. It must be explicitly bound; matching a username is not sufficient.
+    expected_id = config.instagram_media_owner_id()
     expected_username = str(config.INSTAGRAM_EXPECTED_USERNAME or "").strip().lstrip("@").casefold()
     if not expected_id or not expected_username:
         result = _base_result("FAILED")
-        result.update(failures=1, failure_category="linked_account_not_configured")
+        result.update(failures=1, pages=0, pagination_complete=False,
+                      failure_category="linked_account_not_configured")
         return result
 
     counts = {"discovered": 0, "updated": 0, "unchanged": 0,
@@ -129,24 +132,28 @@ def _sync_instagram_media(db, diagnostic_permalink: Optional[str] = None) -> Dic
     generation = str(uuid.uuid4())
     pages = 0
     visited_pages = set()
+    inventory_rows = {}
     try:
         with httpx.Client(timeout=12.0) as client:
             current_id, current_username, verified_media_url, identity_failure = _resolve_current_account(client, token, version)
             if identity_failure:
                 result = _base_result("FAILED", current_account_id=current_id,
                                       current_username=current_username, diagnostic_permalink=diagnostic)
-                result.update(failures=1, failure_category=identity_failure)
+                result.update(failures=1, pages=0, pagination_complete=False,
+                              failure_category=identity_failure)
                 return result
             media_url = verified_media_url
             if not media_url:
                 result = _base_result("FAILED", current_account_id=current_id,
                                       current_username=current_username, diagnostic_permalink=diagnostic)
-                result.update(failures=1, failure_category="linked_account_unavailable")
+                result.update(failures=1, pages=0, pagination_complete=False,
+                              failure_category="linked_account_unavailable")
                 return result
             if current_id != expected_id or current_username.casefold() != expected_username:
                 result = _base_result("FAILED", current_account_id=current_id,
                                       current_username=current_username, diagnostic_permalink=diagnostic)
-                result.update(failures=1, failure_category="linked_account_mismatch")
+                result.update(failures=1, pages=0, pagination_complete=False,
+                              failure_category="linked_account_mismatch")
                 return result
             url = media_url
             params = {"fields": _FIELDS, "limit": 100, "access_token": token}
@@ -154,7 +161,8 @@ def _sync_instagram_media(db, diagnostic_permalink: Optional[str] = None) -> Dic
             if expected_host not in _GRAPH_HOSTS:
                 result = _base_result("FAILED", current_account_id=current_id,
                                       current_username=current_username, diagnostic_permalink=diagnostic)
-                result.update(failures=1, failure_category="linked_account_unavailable")
+                result.update(failures=1, pages=0, pagination_complete=False,
+                              failure_category="linked_account_unavailable")
                 return result
             while url:
                 if url in visited_pages:
@@ -195,7 +203,6 @@ def _sync_instagram_media(db, diagnostic_permalink: Optional[str] = None) -> Dic
                     if diagnostic and canonical_permalink == target:
                         diagnostic = {"canonical_permalink": target, "status": "FOUND",
                                       "media_id": media_id, "media_type": raw.get("media_type")}
-                    before = db.get_instagram_media_by_meta_id(media_id)
                     preview_url = raw.get("thumbnail_url") or raw.get("media_url")
                     values = {
                         "media_type": raw.get("media_type") or "IMAGE",
@@ -211,20 +218,7 @@ def _sync_instagram_media(db, diagnostic_permalink: Optional[str] = None) -> Dic
                         "inventory_state": "CURRENT",
                         "sync_status": "SYNCED",
                     }
-                    db.upsert_instagram_media({"instagram_media_id": media_id, **values})
-                    if before is None:
-                        counts["discovered"] += 1
-                    elif any(before.get(key) != value for key, value in {
-                        "media_type": values["media_type"], "permalink": values["permalink"],
-                        "shortcode": values["shortcode"], "caption": values["caption"],
-                        "media_url": values["media_url"], "thumbnail_url": values["thumbnail_url"],
-                        "published_at": values["published_at"],
-                        "owner_instagram_account_id": current_id, "owner_username": current_username,
-                        "inventory_state": "CURRENT",
-                    }.items()):
-                        counts["updated"] += 1
-                    else:
-                        counts["unchanged"] += 1
+                    inventory_rows[media_id] = {"instagram_media_id": media_id, **values}
                 paging = payload.get("paging")
                 if paging is None:
                     paging = {}
@@ -235,16 +229,29 @@ def _sync_instagram_media(db, diagnostic_permalink: Optional[str] = None) -> Dic
                     raise ValueError("malformed pagination link")
                 url = next_url.strip() if isinstance(next_url, str) else None
 
-        counts.update(db.reconcile_instagram_media_inventory(current_id, generation))
+        for media_id, row in inventory_rows.items():
+            before = db.get_instagram_media_by_meta_id(media_id)
+            if before is None:
+                counts["discovered"] += 1
+            elif any(before.get(key) != value for key, value in row.items()
+                     if key not in {"last_sync_generation", "sync_status"}):
+                counts["updated"] += 1
+            else:
+                counts["unchanged"] += 1
+        counts.update(db.apply_instagram_media_inventory(inventory_rows.values(), current_id, generation))
         result = _base_result("COMPLETED", current_account_id=current_id,
                               current_username=current_username, diagnostic_permalink=diagnostic)
         result.update(counts, pagination_complete=True, pages=pages)
         return result
-    except (httpx.HTTPError, ValueError, TypeError):
+    except (httpx.HTTPError, ValueError, TypeError) as exc:
+        category = ("timeout" if isinstance(exc, httpx.TimeoutException) else
+                    "network" if isinstance(exc, httpx.HTTPError) else
+                    "paging_failure" if isinstance(exc, ValueError) and "pagination" in str(exc) else
+                    "malformed_response")
         result = _base_result("FAILED", current_account_id=current_id,
                               current_username=current_username, diagnostic_permalink=diagnostic)
         result.update(counts, failures=1, pages=pages,
-                      failure_category="network or response unavailable")
+                      failure_category=category)
         return result
 
 

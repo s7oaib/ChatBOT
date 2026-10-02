@@ -155,12 +155,13 @@ class TestHybridRAGArchitecture(unittest.TestCase):
         self.assertTrue("sondesh" in text.lower() or "Manager of Kitchens" in text)
 
     def test_scenario_j_qa_templates_vs_rag_conflict(self):
-        """Scenario J: Conflict between qa_templates.json and RAG source -> qa_templates.json wins deterministically."""
-        user_msg = "Where is your kitchen located?"
-        text, was_matched, tmpl_id, img = responder.match_and_respond(user_msg, user_id=self.user_id, channel=self.channel)
-        
-        self.assertTrue(was_matched)
-        self.assertIn("Sushant Lok", text)
+        """A Response Library location claim cannot become business authority."""
+        text, matched, template_id, images = responder.match_and_respond("Where is your kitchen located?", user_id=self.user_id, channel=self.channel)
+        self.assertFalse(matched)
+        self.assertEqual(template_id, "GUARD_pickup_address_hours")
+        self.assertIn("Manager of Kitchens", text)
+        self.assertNotIn("Sushant Lok", text)
+        self.assertIsNone(images)
 
     def test_forbidden_facts_block_rag_auto_response(self):
         """

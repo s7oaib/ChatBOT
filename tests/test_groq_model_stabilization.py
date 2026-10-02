@@ -250,7 +250,8 @@ def test_both_model_failures_keep_the_deterministic_compound_route():
         )
 
     assert query.call_count == 2
-    assert matched is True
-    assert template_id == "compound_product_price_delivery_query"
-    assert "Jolbhora" in text
-    assert "Delhi NCR" in text
+    assert matched is False
+    assert template_id == "jolbhora"
+    assert "Manager of Kitchens" in text
+    assert "₹" not in text
+    assert "Delhi NCR" not in text

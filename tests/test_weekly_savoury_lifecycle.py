@@ -232,7 +232,7 @@ def test_unavailable_weekly_price_never_uses_expired_or_upcoming(weekly_env, mon
     assert result.auto_response == ""
     assert result.proposed_intent == "approved_menu"
     reply, image = responder.render_approved_template("weekly_menu_veg")
-    assert "finalising this week's menu" in reply.lower()
+    assert "Manager of Kitchens" in reply
     assert "₹850" not in reply
     assert image is None
 

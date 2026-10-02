@@ -81,8 +81,9 @@ def test_client_confirmed_dispatch_template_emits_exact_timing(monkeypatch):
     text, _matched, _template_id, _images = responder.match_and_respond(
         "how long to deliver sondesh", user_id=user_id, channel="whatsapp"
     )
-    assert text == CLIENT_CONFIRMED_EXACT_RESPONSES["sondesh_dispatch_time"]
+    from camellia import client_qa
+    assert text == client_qa.resolve_effective_approved_qa_by_id("sondesh_delivery_time").entry.answer
     modified = text + " Trusted dairies."
     safe = quarantine_template_response("sondesh_dispatch_time", modified)
-    assert safe == text
+    assert "Trusted dairies" not in safe
     assert "Trusted dairies" not in safe

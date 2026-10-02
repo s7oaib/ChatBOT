@@ -61,6 +61,12 @@ def _facts():
                               "menu_versions", "menu_drafts", "menu_catalogue", "menu_image_versions")}
 
 
+def _menu_facts():
+    with db.get_connection() as conn:
+        return {table: [tuple(row) for row in conn.execute(f"SELECT * FROM {table} ORDER BY 1")]
+                for table in ("menu_versions", "menu_drafts", "menu_catalogue", "menu_image_versions")}
+
+
 @pytest.mark.asyncio
 async def test_repeated_real_lifespan_preserves_all_menu_facts(isolated, monkeypatch):
     for key in ("weekly_menu_veg", "weekly_menu_nonveg"):
@@ -88,13 +94,23 @@ async def test_repeated_real_lifespan_preserves_all_menu_facts(isolated, monkeyp
 
     monkeypatch.setattr(app_module, "_human_notification_loop", idle)
     monkeypatch.setattr(app_module, "_instagram_job_loop", idle)
-    before, raw = _facts(), isolated.read_bytes()
-    for _ in range(2):
+    menu_before, raw = _menu_facts(), isolated.read_bytes()
+    aligned_facts = None
+    for pass_index in range(2):
         async with app_module.lifespan(app_module.app):
-            assert _facts() == before
+            assert _menu_facts() == menu_before
             assert isolated.read_bytes() == raw
-        assert _facts() == before
+        assert _menu_facts() == menu_before
         assert isolated.read_bytes() == raw
+        if pass_index == 0:
+            for template_id in ("weekly_menu_veg", "weekly_menu_nonveg"):
+                # Preserve historical copy; runtime delegates to the current flyer.
+                assert db.get_response_template_override(template_id)["response"] == "Synthetic stored price ₹400"
+                text, _images = responder.render_approved_template(template_id)
+                assert "400" not in text and "450" not in text
+            aligned_facts = _facts()
+        else:
+            assert _facts() == aligned_facts
 
 
 @pytest.mark.parametrize("state", ["current", "pending", "expired"])
@@ -110,7 +126,7 @@ def test_stale_weekly_override_never_beats_reviewed_authority(isolated, state):
     text, _ = responder.render_approved_template("weekly_menu_veg")
     result = rag_fallback_engine.retrieve_approved_menu("Synthetic dish price")
     if state == "current":
-        assert "450" in text and "400" not in text
+        assert "450" not in text and "400" not in text
         assert "450" in result.auto_response and "400" not in result.auto_response
     else:
         assert "400" not in text and "450" not in text

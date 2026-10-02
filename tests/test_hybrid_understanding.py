@@ -38,6 +38,11 @@ def _reply(message, user_id, channel="whatsapp"):
 def test_natural_phrasings_are_understood_without_a_literal_trigger(message, expected_template):
     text, was_matched, template_id, _ = _reply(message, f"hybrid_{abs(hash(message))}")
 
+    if expected_template == "delivery_area":
+        assert was_matched is False
+        assert template_id == "delivery_area"
+        assert "Manager of Kitchens" in text
+        return
     assert was_matched is True
     assert text.strip()
     if expected_template:
@@ -189,11 +194,11 @@ def test_a_matched_reply_still_keeps_its_answer_under_the_slow_notice():
     with patch.object(responder, "_should_send_slow_notice", return_value=True), patch.object(
         responder,
         "_resolve_response",
-        return_value=("We deliver across Delhi NCR.", True, "delivery_area", None),
+        return_value=("Here is the approved response.", True, "supported_test", None),
     ):
         text, _was_matched, _template_id, _ = responder.match_and_respond(
-            "do you deliver", user_id=user_id, channel="instagram"
+            "supported deterministic request", user_id=user_id, channel="instagram"
         )
 
     assert text.startswith(config.SLOW_REPLY_NOTICE_TEXT)
-    assert "We deliver across Delhi NCR." in text
+    assert "Here is the approved response." in text

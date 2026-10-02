@@ -167,7 +167,9 @@ def test_a_named_flavour_price_is_still_answered_during_an_outage():
     with _outage(PROVIDER_FAILURES[0]):
         _text, matched, template_id, _images = _ask("real vanilla price", user_id)
 
-    assert matched is True
+    assert matched is False
+    assert "Manager of Kitchens" in _text
+    assert "₹" not in _text
     assert template_id == "sondesh_mango_kesar"
 
 
@@ -178,8 +180,9 @@ class TestOpenStatesKeepTheirOwnFlow:
             _ask("Do you deliver?", user_id)
             text, _matched, template_id, _images = _ask("Chatra Marg", user_id)
 
-        assert template_id == "delivery_area_confirmation"
-        assert "chatra marg" in text.lower()
+        assert template_id is None
+        assert "Manager of Kitchens" in text
+        assert "Delhi NCR" not in text
 
     def test_a_price_question_inside_the_delivery_slot_is_not_read_as_an_area(self):
         user_id = _fresh("outage_area_price")
@@ -209,7 +212,8 @@ class TestOpenStatesKeepTheirOwnFlow:
             )
 
         assert template_id == "subscription_booking_steps"
-        assert "at least 5 hours in advance" in text
+        assert "Manager of Kitchens" in text
+        assert "5 hours" not in text
 
 
 def test_the_audit_row_records_the_failure_instead_of_claiming_a_model_answer():

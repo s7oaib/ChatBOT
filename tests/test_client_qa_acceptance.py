@@ -27,8 +27,13 @@ def test_client_questions_use_the_specific_approved_route(message, template_id, 
         message, user_id=user_id, channel="instagram", referral_source="ADS",
     )
     assert matched is True
-    assert actual_template == template_id
-    assert response.strip()
+    if message == "share weekly menu":
+        assert actual_template == "approved_menu"
+        assert response == ""
+        assert images
+    else:
+        assert actual_template == template_id
+        assert response.strip()
     assert "INSERT " not in response
     assert "ATTACH " not in response
     assert "ADD LINK" not in response

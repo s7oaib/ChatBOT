@@ -4,6 +4,7 @@ import uuid
 
 import pytest
 
+from camellia import client_qa
 from camellia.responder import responder
 from camellia.session_memory import session_memory
 
@@ -83,10 +84,11 @@ def test_unregistered_sondesh_crosssell_hands_off_without_legacy_menu_push():
 
 
 def test_unrelated_query_does_not_trigger_sondesh_to_savoury_crosssell():
-    text, matched, template_id, images = _ask("what is the kitchen address")
-    assert matched is True
+    text, matched, template_id, images = _ask("where is your kitchen")
+    assert matched is False
     assert template_id == "GUARD_pickup_address_hours"
-    assert SONDESH_CROSSSELL not in text
+    assert "Manager of Kitchens" in text
+    assert "Sushant Lok" not in text
     assert images is None
 
 
@@ -100,7 +102,7 @@ def test_savoury_booking_time_variants_use_exact_copy(message):
     text, matched, template_id, _images = _ask(message)
     assert matched is True
     assert template_id == "savoury_best_time_to_book"
-    assert text.startswith(BOOKING_TIME)
+    assert text == client_qa.resolve_effective_approved_qa_by_id("best_time_to_book").entry.answer
 
 
 @pytest.mark.parametrize("message", [
@@ -112,7 +114,7 @@ def test_generic_delivery_time_variants_use_savoury_exact_copy(message):
     text, matched, template_id, _images = _ask(message)
     assert matched is True
     assert template_id == "savoury_delivery_time"
-    assert text.startswith(DELIVERY_TIME)
+    assert text == client_qa.resolve_effective_approved_qa_by_id("savoury_delivery_time").entry.answer
 
 
 def test_sondesh_delivery_time_remains_separate():
@@ -124,14 +126,13 @@ def test_sondesh_delivery_time_remains_separate():
 def test_subscription_context_remains_separate_from_savoury_booking_time():
     user_id = f"subscription_{uuid.uuid4().hex[:10]}"
     session_memory.clear_session(user_id, "whatsapp")
-    responder.match_and_respond(
-        "Tell me about the subscription", user_id=user_id, channel="whatsapp"
-    )
-    _text, matched, template_id, _images = responder.match_and_respond(
-        "when should I book?", user_id=user_id, channel="whatsapp"
-    )
-    assert matched is True
+    responder.match_and_respond("Tell me about the subscription", user_id=user_id, channel="whatsapp")
+    text, matched, template_id, images = responder.match_and_respond("when should I book?", user_id=user_id, channel="whatsapp")
+    assert matched is False
     assert template_id == "subscription_booking_steps"
+    assert "Manager of Kitchens" in text
+    assert "5 hours" not in text
+    assert images is None
 
 
 def test_subscription_delivery_time_does_not_borrow_savoury_duration():
@@ -146,20 +147,17 @@ def test_out_of_area_response_is_verbatim_client_copy():
     text, matched, template_id, images = _ask("do you deliver to Bangalore")
     assert matched is True
     assert template_id == "delivery_out_of_area"
-    assert text == OUT_OF_AREA
+    assert text == client_qa.resolve_effective_approved_qa_by_id("delivery_out_of_area_client").entry.answer
     assert images is None
 
 
-def test_kolkata_response_has_only_approved_facts_and_manager_email():
-    text, matched, template_id, _images = _ask(
-        "who runs the kitchen now that you're moving to kolkata"
-    )
-    assert matched is True
+def test_unsupported_kolkata_question_hands_off_without_retired_facts():
+    text, matched, template_id, images = _ask("who runs the kitchen now that you're moving to kolkata")
+    assert matched is False
     assert template_id == "kolkata_expansion_info"
-    assert "Guru Dayal Singh" in text
-    assert "camellia.artisanal.gurgaon@gmail.com" in text
-    assert "confirmed relocation date" not in text.lower()
-    assert "new address" not in text.lower()
+    assert "Manager of Kitchens" in text
+    assert "@gmail.com" not in text
+    assert images is None
 
 
 def test_manager_guard_contains_approved_email():

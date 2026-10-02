@@ -233,7 +233,11 @@ def test_reviewed_template_price_cannot_be_overridden_by_old_response_copy(autho
     _approved("aamar_mishti", price=777, item="Kanchagolla")
     monkeypatch.setattr(db, "get_response_template_override", lambda *_: {"status": "ACTIVE", "response": "OLD PRICE ₹400"})
     template = responder._template_by_id("aamar_mishti_collection")
-    assert "₹777" in template["response"] and "₹400" not in template["response"]
+    assert template["response"] == ""
+    # Library copy is not a price authority. Reviewed menu retrieval remains authoritative.
+    result = rag_fallback_engine.retrieve_approved_menu("What is the price of Kanchagolla?")
+    assert "₹777" in result.auto_response
+    assert "₹400" not in result.auto_response
 
 
 def test_materialized_templates_cannot_bypass_reviewed_price(authority, monkeypatch):
@@ -242,7 +246,11 @@ def test_materialized_templates_cannot_bypass_reviewed_price(authority, monkeypa
     monkeypatch.setattr(db, "get_response_template_override", lambda *_: override)
     monkeypatch.setattr(db, "list_response_template_overrides", lambda: {"aamar_mishti_collection": override})
     template = next(row for row in responder._templates_with_overrides() if row["id"] == "aamar_mishti_collection")
-    assert "₹777" in template["response"] and "₹400" not in template["response"]
+    assert template["response"] == ""
+    # Library copy is not a price authority. Reviewed menu retrieval remains authoritative.
+    result = rag_fallback_engine.retrieve_approved_menu("What is the price of Kanchagolla?")
+    assert "₹777" in result.auto_response
+    assert "₹400" not in result.auto_response
 
 
 def test_inactive_menu_with_approved_history_cannot_quote_template_price(authority):

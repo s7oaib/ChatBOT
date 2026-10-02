@@ -28,10 +28,15 @@ def test_client_approved_routing_golden(case, monkeypatch, eligible_weekly_asset
     facts = session_memory.get_facts(user_id, "instagram")
 
     assert facts["decision_lane"] == case["lane"]
-    assert template_id == case["template"]
+    assert template_id == ("approved_menu" if case["id"] == "weekly_veg_menu" else case["template"])
     assert bool(not matched) == bool(case["handoff"])
-    for required in case["contains_any"]:
-        assert required.lower() in response.lower()
+    if case["id"] == "weekly_veg_menu":
+        from camellia.menu_images import current_weekly_url
+        assert response == ""
+        assert _images == [current_weekly_url()]
+    else:
+        for required in case["contains_any"]:
+            assert required.lower() in response.lower()
     if case["handoff"]:
         assert facts["knowledge_sufficient"] is False
     if not case["whatsapp_allowed"]:
