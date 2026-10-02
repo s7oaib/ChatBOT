@@ -100,8 +100,7 @@ def is_order_request(message: str, active_product_context=None) -> bool:
         "sondesh", "sondesh_general", "bento", "subscription",
     }
     return bool(
-        _PRODUCT_RE.fullmatch(text.strip())
-        or (has_quantity and _extract_customer_item(text))
+        (has_quantity and _extract_customer_item(text))
         or (_ORDER_REQUEST_RE.search(text) and (_extract_customer_item(text) or context_known))
         or (context_known and has_quantity and re.search(r"\b(?:i\s+want|need|make\s+it)\b", text, re.I))
     )

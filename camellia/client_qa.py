@@ -287,6 +287,11 @@ def _match_existing(message: str, facts: Optional[Dict[str, Any]] = None) -> Opt
         entry = _find(entry_id)
         return ApprovedMatch(entry, kind, entry.asset_keys) if entry else None
 
+    bare_product = {"sondesh": "sondesh_details_client", "sandesh": "sondesh_details_client",
+                    "bento": "bento_details_client", "subscription": "subscription_details_client"}.get(normalized)
+    if bare_product:
+        return result(bare_product)
+
     # Explicit subject intent outranks stale state and generic old triggers.
     if re.search(r"\b(?:bengali\s+home\s+table|home\s+table|kolkata\s+home\s+lunch)\b", text, re.I):
         home = True

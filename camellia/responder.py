@@ -2355,6 +2355,9 @@ class DeterministicResponder:
             learned_match = db.search_learned_knowledge(user_message)
             learned_answer = (learned_match or {}).get("verified_answer", "").strip()
             if learned_answer:
+                sequence_reply = self._custom_sequence_reply(learned_match, facts, user_id, channel, user_message)
+                if sequence_reply is not None:
+                    return sequence_reply
                 facts["knowledge_sufficient"] = True
                 facts["last_knowledge_ids"] = [f"learned_knowledge#{learned_match.get('id')}"]
                 facts["last_knowledge_sufficiency"] = {intent: True for intent in intents}
@@ -3978,6 +3981,17 @@ class DeterministicResponder:
                 })
                 session_memory.add_turn(user_id, channel, user_message, derived["answer"])
                 return derived["answer"], True, "grounded_derived", None
+            # Optional operator-authored sequences have last refusal only after
+            # canonical, menu, source and system authorities. Retired business
+            # triggers cannot be revived through a Custom Q&A sequence.
+            if not approved_response_alignment.matching_handoff_only_template(user_message, self._customer_templates()):
+                custom = db.search_learned_knowledge(user_message, count_usage=False)
+                if custom and custom.get("source") == "client_admin" and custom.get("response_sequence") not in (None, "", "[]"):
+                    sequence_reply = self._custom_sequence_reply(custom, facts, user_id, channel, user_message)
+                    if sequence_reply is not None:
+                        if sequence_reply[1]:
+                            db.record_learned_knowledge_usage(custom["id"])
+                        return sequence_reply
             fallback = self._generic_fallback()
             facts.update({
                 "last_route_source": "HUMAN_HANDOFF",
@@ -5864,6 +5878,9 @@ class DeterministicResponder:
             learned_match = db.search_learned_knowledge(user_message)
             learned_answer = (learned_match or {}).get("verified_answer", "").strip()
             if learned_answer:
+                sequence_reply = self._custom_sequence_reply(learned_match, facts, user_id, channel, user_message)
+                if sequence_reply is not None:
+                    return sequence_reply
                 if intro_greeting_prefix:
                     learned_answer = intro_greeting_prefix + learned_answer
                 session_memory.add_turn(user_id, channel, user_message, learned_answer)
@@ -6358,6 +6375,25 @@ class DeterministicResponder:
             rendered = _strip_flower_emoji(rendered)
         return rendered, _quarantine_image_claims(images)
 
+    def _custom_sequence_reply(self, row, facts, user_id, channel, message):
+        from camellia import custom_response_sequence
+        if not row.get("response_sequence") or row["response_sequence"] == "[]":
+            return None
+        try:
+            blocks = custom_response_sequence.resolve(row["response_sequence"])
+        except (ValueError, TypeError):
+            facts.pop("ordered_response_blocks", None)
+            facts.update(last_route_source="HUMAN_HANDOFF", knowledge_sufficient=False)
+            return self._generic_fallback(), False, None, None
+        if not blocks:
+            return None
+        facts.update(ordered_response_blocks=blocks, last_route_source="CUSTOM_SEQUENCE",
+                     knowledge_sufficient=True, last_grounding="learned_knowledge",
+                     last_knowledge_ids=[f"learned_knowledge#{row['id']}"])
+        text = "\n\n".join(b["text"] for b in blocks if b["kind"] == "TEXT")
+        session_memory.add_turn(user_id, channel, message, text)
+        return text, True, f"learned_{row['id']}", None
+
     def _format_dynamic_response(
         self, template_id: str, default_response: str, user_id: str = None, channel: str = None, user_message: str = ""
     ) -> Tuple[str, Optional[Any]]:
@@ -6762,7 +6798,7 @@ class DeterministicResponder:
             and facts_after_route.get("last_grounding") == "exact_approved"
         )
         if client_exact_route or template_id in approved_response_alignment.APPROVED_QA_BINDINGS or template_id in approved_response_alignment.MENU_DELEGATION_TEMPLATE_IDS or facts_after_route.get("last_route_source") in {
-            "SYSTEM_CONVERSATION", "GROUNDED_DERIVED", "SOURCE_DESCRIPTION"
+            "SYSTEM_CONVERSATION", "GROUNDED_DERIVED", "SOURCE_DESCRIPTION", "CUSTOM_SEQUENCE"
         }:
             # The client-QA registry is itself the authoritative, versioned
             # source copy.  Replacing it with the older template quarantine

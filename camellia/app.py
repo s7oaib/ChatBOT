@@ -87,6 +87,7 @@ from camellia.monitoring import get_logger, delivery_monitor, latency_monitor, c
 from camellia import instagram_chatbot_control
 from camellia import home_table_native_reels
 from camellia import approved_response_alignment
+from camellia import custom_response_sequence
 from camellia.admin_security import (
     digest as security_digest,
     new_token,
@@ -1094,7 +1095,7 @@ def _process_instagram_event(
             template_id, **trace,
         )
 
-        ordered_blocks = facts.get("ordered_response_blocks") if facts.get("last_route_source") in {"EXACT_APPROVED", "SOURCE_DESCRIPTION"} else None
+        ordered_blocks = facts.get("ordered_response_blocks") if facts.get("last_route_source") in {"EXACT_APPROVED", "SOURCE_DESCRIPTION", "CUSTOM_SEQUENCE"} else None
         if ordered_blocks and not needs_escalation:
             send_instagram_response_blocks(sender_id, ordered_blocks, inbound_message_id=conversation_id)
         else:
@@ -2361,7 +2362,7 @@ def send_instagram_response_blocks(recipient_id: str, blocks: list, *, inbound_m
             )
         else:
             result = _send_or_queue_instagram_reply(
-                recipient_id, "", image_url=block.get("urls") or [],
+                recipient_id, "", image_url=block.get("urls") or ([block["url"]] if block.get("kind") == "IMAGE" else []),
                 inbound_message_id=inbound_message_id, response_type="reply",
             )
         if (isinstance(result, dict) and result.get("status") in {"failed", "blocked"}) or (
@@ -3638,6 +3639,41 @@ def list_instagram_media(
             "inventory_verification": inventory_verification}
 
 
+@app.post("/admin/instagram-media/manual-link")
+async def add_manual_instagram_link(request: Request, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    from camellia.instagram_routing import normalize_instagram_url
+    body = await request.json()
+    try:
+        identity = normalize_instagram_url(str(body.get("url") or ""))
+        if identity["source_type"] not in {"post", "reel"}:
+            raise ValueError("Choose an exact /p/ or /reel/ link")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    with db.get_connection() as conn:
+        existing = conn.execute("SELECT * FROM instagram_media WHERE permalink=?", (identity["canonical_url"],)).fetchone()
+    if existing:
+        item = dict(existing)
+        verified_current = (item.get("inventory_state") == "CURRENT"
+                            and str(item.get("owner_instagram_account_id") or "") == config.instagram_media_owner_id()
+                            and db.has_successful_instagram_media_inventory_sync(config.instagram_media_owner_id()))
+        if not verified_current:
+            # The explicit operator link can make a historical card usable as
+            # unverified manual context, without changing its ID or mappings.
+            with db.get_connection() as conn:
+                conn.execute("UPDATE instagram_media SET sync_status='MANUAL_EXACT_LINK', inventory_state='COLLABORATOR_UNVERIFIED' WHERE id=?", (item["id"],))
+                conn.commit()
+            item = db.get_instagram_media(item["id"])
+        return {"status": "success", "item": item}
+    item = db.upsert_instagram_media({
+        "instagram_media_id": "manual:" + identity["source_type"] + ":" + identity["shortcode"],
+        "permalink": identity["canonical_url"], "shortcode": identity["shortcode"],
+        "media_type": "VIDEO" if identity["source_type"] == "reel" else "IMAGE",
+        "sync_status": "MANUAL_EXACT_LINK", "inventory_state": "COLLABORATOR_UNVERIFIED",
+    })
+    return {"status": "success", "item": item}
+
+
 @app.get("/admin/instagram-media/{item_id}")
 def get_instagram_media(item_id: int, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
     require_admin(x_admin_key, x_admin_pin)
@@ -3649,6 +3685,8 @@ def get_instagram_media(item_id: int, x_admin_key: Optional[str] = Header(None),
 
 
 def _require_verified_current_instagram_media(item: Dict[str, Any]) -> None:
+    if item.get("sync_status") == "MANUAL_EXACT_LINK" and item.get("inventory_state") == "COLLABORATOR_UNVERIFIED":
+        return
     owner_account_id = config.instagram_media_owner_id()
     if (not owner_account_id
             or not db.has_successful_instagram_media_inventory_sync(owner_account_id)
@@ -3709,22 +3747,23 @@ async def save_instagram_media_mapping(item_id: int, request: Request, x_admin_k
     if not item:
         raise HTTPException(status_code=404, detail="Instagram media not found.")
     _require_verified_current_instagram_media(item)
+    manual = item.get("sync_status") == "MANUAL_EXACT_LINK"
     body = await request.json()
     topic_id = str(body.get("topic_id") or "").strip()
     if not topic_id and body.get("response_mode", "CUSTOM") != "APPROVED_QA":
         raise HTTPException(status_code=400, detail="Choose a Topic.")
     existing = db.get_instagram_source_route(int(item["custom_route_id"])) if item.get("custom_route_id") else None
-    if existing and existing.get("media_id") != item["instagram_media_id"]:
+    if existing and existing.get("media_id") != item["instagram_media_id"] and existing.get("canonical_url") != item.get("permalink"):
         existing = None
     source_type = "reel" if item["media_type"] == "VIDEO" else "post"
     if existing is None:
         existing = next((route for route in db.list_instagram_source_routes()
-                         if route.get("media_id") == item["instagram_media_id"] and route.get("source_type") == source_type), None)
+                         if (route.get("media_id") == item["instagram_media_id"] or (manual and route.get("canonical_url") == item.get("permalink"))) and route.get("source_type") == source_type), None)
     route_body = {
         "source_type": source_type, "url": item.get("permalink") or "",
         "response_mode": body.get("response_mode") or (existing or {}).get("response_mode") or "CUSTOM",
         "approved_qa_id": body.get("approved_qa_id"),
-        "media_id": item["instagram_media_id"], "shortcode": item.get("shortcode"),
+        "media_id": (existing or {}).get("media_id") if manual else item["instagram_media_id"], "shortcode": item.get("shortcode"),
         "topic_id": topic_id, "source_description": body.get("source_description") or "",
         "menu_id": body.get("menu_id"), "menu_mode": body.get("menu_mode") or "NONE",
         "preview_url": item.get("thumbnail_url") or item.get("media_url"),
@@ -3757,7 +3796,7 @@ def delete_instagram_media_mapping(item_id: int, x_admin_key: Optional[str] = He
         route = next((candidate for candidate in db.list_instagram_source_routes()
                       if candidate.get("media_id") == item["instagram_media_id"]
                       and candidate.get("source_type") == ("reel" if item["media_type"] == "VIDEO" else "post")), None)
-    if route and route.get("media_id") == item["instagram_media_id"]:
+    if route and (route.get("media_id") == item["instagram_media_id"] or (route.get("canonical_url") == item.get("permalink"))):
         db.archive_instagram_source_route(int(route["routing_id"]))
     db.update_instagram_media_route(item_id, route_mode="DEFAULT", topic_id=None, custom_route_id=None, needs_review=False)
     return {"status": "success", "mapping_removed": True, "instagram_media_id": item["instagram_media_id"]}
@@ -5020,6 +5059,7 @@ def _custom_qa_public(item: Dict[str, Any]) -> Dict[str, Any]:
         "primary_question": item.get("question_pattern"),
         "aliases": library.alias_texts(item.get("aliases", [])),
         "approved_answer": item.get("verified_answer"),
+        "response_sequence": json.loads(item.get("response_sequence") or "[]"),
         "priority": item.get("priority") or "NORMAL",
         "status": item.get("status") or "ACTIVE",
         "source": item.get("source"),
@@ -5454,6 +5494,14 @@ def _validate_custom_qa_answer(answer: str) -> None:
         raise HTTPException(status_code=400, detail=error)
 
 
+@app.get("/admin/custom-qa/assets")
+def custom_qa_assets(x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    return {"assets": [{"menu_id": m["menu_id"], "name": m["name"]}
+                       for m in menu_catalogue.list_menus(include_inactive=False)
+                       if menu_images.current_url(m["menu_id"])]}
+
+
 @app.post("/admin/custom-qa")
 async def create_custom_qa(
     request: Request,
@@ -5490,6 +5538,13 @@ async def create_custom_qa(
         raise HTTPException(status_code=400, detail="status must be ACTIVE, DISABLED, or ARCHIVED")
 
     _validate_custom_qa_answer(answer)
+    try:
+        sequence = custom_response_sequence.validate(body.get("response_sequence", []))
+        for block in sequence:
+            if block["type"] == "text":
+                _validate_custom_qa_answer(block["text"])
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
     _check_custom_conflicts(primary_question, aliases)
     dupes = db.find_learned_knowledge_duplicates(primary_question, aliases)
@@ -5505,7 +5560,7 @@ async def create_custom_qa(
             "existing": system_conflicts,
         })
 
-    warnings = detect_business_commitment_warnings(answer)
+    warnings = detect_business_commitment_warnings(answer) + custom_response_sequence.attachment_warning(answer, sequence)
     if (dupes["similar"] or warnings) and not force_save:
         return {
             "status": "warning",
@@ -5515,7 +5570,7 @@ async def create_custom_qa(
 
     knowledge_id = db.add_learned_knowledge(
         topic, primary_question, answer, source="client_admin", confidence=1.0,
-        priority=priority, status=status, created_by=created_by, aliases=aliases,
+        priority=priority, status=status, created_by=created_by, aliases=aliases, response_sequence=sequence,
     )
     return {"status": "success", "id": knowledge_id}
 
@@ -5558,6 +5613,13 @@ async def edit_custom_qa(
         raise HTTPException(status_code=400, detail="status must be ACTIVE, DISABLED, or ARCHIVED")
 
     _validate_custom_qa_answer(answer)
+    try:
+        sequence = custom_response_sequence.validate(body.get("response_sequence", json.loads(existing.get("response_sequence") or "[]")))
+        for block in sequence:
+            if block["type"] == "text":
+                _validate_custom_qa_answer(block["text"])
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
     _check_custom_conflicts(primary_question, aliases, knowledge_id)
     dupes = db.find_learned_knowledge_duplicates(primary_question, aliases, exclude_id=knowledge_id)
@@ -5573,7 +5635,7 @@ async def edit_custom_qa(
             "existing": system_conflicts,
         })
 
-    warnings = detect_business_commitment_warnings(answer)
+    warnings = detect_business_commitment_warnings(answer) + custom_response_sequence.attachment_warning(answer, sequence)
     if (dupes["similar"] or warnings) and not force_save:
         return {
             "status": "warning",
@@ -5581,7 +5643,7 @@ async def edit_custom_qa(
             "commitment_warnings": warnings,
         }
 
-    db.update_custom_qa(knowledge_id, topic, primary_question, answer, aliases, priority, status, updated_by)
+    db.update_custom_qa(knowledge_id, topic, primary_question, answer, aliases, priority, status, updated_by, response_sequence=sequence)
     return {"status": "success", "id": knowledge_id}
 
 
@@ -5604,6 +5666,13 @@ async def set_custom_qa_status(
         item = db.get_custom_qa(knowledge_id)
         if not item:
             raise HTTPException(status_code=404, detail="Custom Q&A not found")
+        try:
+            custom_response_sequence.resolve(item.get("response_sequence") or "[]")
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        warnings = custom_response_sequence.attachment_warning(item["verified_answer"], json.loads(item.get("response_sequence") or "[]"))
+        if warnings and not body.get("force_save"):
+            return {"status": "warning", "commitment_warnings": warnings}
         _check_custom_conflicts(item["question_pattern"], library.alias_texts(item["aliases"]), knowledge_id)
     if not db.set_custom_qa_status(knowledge_id, status, actor):
         raise HTTPException(status_code=400, detail="Could not update status (bad status value or Q&A not found)")
@@ -5660,6 +5729,10 @@ async def restore_custom_qa_version(
     if version:
         _check_custom_conflicts(version["primary_question"], version["aliases_snapshot"], knowledge_id)
         _validate_custom_qa_answer(version["answer"])
+        try:
+            custom_response_sequence.resolve(version.get("response_sequence") or "[]")
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
     if not db.restore_learned_knowledge_version(knowledge_id, version_id, actor):
         raise HTTPException(status_code=404, detail="Version or Q&A not found")
     return {"status": "restored", "id": knowledge_id, "version_id": version_id}
@@ -5702,6 +5775,13 @@ async def test_custom_qa_match(
 
     winner, matched_via, score = db._rank_learned_knowledge(message)
     focus_id = body.get("focus_id")
+    preview_blocks = []
+    sequence_error = None
+    if winner:
+        try:
+            preview_blocks = custom_response_sequence.resolve(winner.get("response_sequence") or "[]")
+        except (ValueError, TypeError) as exc:
+            sequence_error = str(exc)
 
     if not winner:
         return {
@@ -5711,6 +5791,9 @@ async def test_custom_qa_match(
 
     result = {
         "would_match": True,
+        "response_blocks": preview_blocks or ([{"kind":"TEXT", "text":winner["verified_answer"]}] if not sequence_error else []),
+        "sequence_error": sequence_error,
+        "would_send": not bool(sequence_error),
         "matched": _custom_qa_public(winner),
         "matched_via": matched_via,
         "score": round(score, 3),
@@ -5749,6 +5832,7 @@ async def preview_custom_qa_reply(
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON body")
 
+    item = {}
     knowledge_id = body.get("id")
     answer = body.get("approved_answer")
     if answer is None and knowledge_id is not None:
@@ -5759,7 +5843,12 @@ async def preview_custom_qa_reply(
     if answer is None:
         raise HTTPException(status_code=400, detail="Provide either id or approved_answer")
 
-    return {"preview_text": answer, "note": "Preview only — nothing has been sent."}
+    try:
+        sequence = body.get("response_sequence", json.loads(item.get("response_sequence") or "[]"))
+        blocks = custom_response_sequence.resolve(sequence)
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"preview_text": answer, "response_blocks": blocks or [{"kind": "TEXT", "text": answer}], "note": "Preview only — nothing has been sent."}
 
 
 _CSV_COLUMNS = library.COLUMNS
@@ -7433,7 +7522,7 @@ def get_admin_dashboard():
         <div id="tab-instagram-content" class="panel-card" data-group="instagram_content" style="display:none;">
             <div class="admin-page-heading"><div><h2>Instagram Media</h2><p>Visual workspace for exact Meta content IDs. Captions are context only; they never establish routing facts.</p></div><div style="display:flex;gap:8px;"><button class="btn-secondary" type="button" onclick="syncInstagramMediaNow()">↻ Sync Now</button><button class="btn-secondary" type="button" onclick="loadInstagramContentGallery()">Refresh</button></div></div>
             <div class="result-box info" id="igMediaSyncStatus" style="display:block;">Auto Sync: OFF · Auto Route: OFF</div>
-            <div class="gallery-toolbar" aria-label="Instagram media sync diagnostics"><label class="ig-media-muted" for="igMediaDiagnosticPermalink">Optional exact Post/Reel permalink diagnostic</label><input class="field-control" id="igMediaDiagnosticPermalink" type="url" placeholder="https://www.instagram.com/p/.../"></div>
+            <div class="gallery-toolbar" aria-label="Instagram media sync diagnostics"><label class="ig-media-muted" for="igMediaDiagnosticPermalink">Exact Post / Reel link (owned or collaborator)</label><input class="field-control" id="igMediaDiagnosticPermalink" type="url" placeholder="https://www.instagram.com/p/.../"><button type="button" class="btn-secondary" onclick="addManualInstagramLink()">+ Add Post / Reel by Link</button></div>
             <div class="gallery-toolbar" aria-label="Post and Reel filters">
                 <input class="field-control" id="igContentSearch" type="search" placeholder="Search Posts, Reels, or Topics..." autocomplete="off">
                 <button class="ig-media-filter active" data-content-filter="all" type="button" onclick="setInstagramContentFilter('all')">All</button>
@@ -8310,6 +8399,13 @@ THIS WEEK'S BENGAL SPECIALS
             <div style="margin-bottom:12px;">
                 <label class="field-label">Approved Answer *</label>
                 <textarea class="field-control" id="cqaAnswer" rows="4" placeholder="The exact reply the bot should send."></textarea>
+                <section aria-label="Response Sequence / Menu & Images" style="margin-top:12px;">
+                    <b>Response Sequence / Menu & Images (optional)</b>
+                    <p class="source-map-help">Leave empty to keep the existing text reply. With blocks, the sequence is sent in the order shown. Menu assets resolve from the current eligible catalogue.</p>
+                    <button type="button" class="btn-secondary" onclick="addCqaSequenceBlock('text')">+ Add Text Block</button>
+                    <button type="button" class="btn-secondary" onclick="addCqaSequenceBlock('menu')">+ Add Menu / Image</button>
+                    <div id="cqaSequenceBlocks"></div>
+                </section>
             </div>
 
             <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:12px;">
@@ -9031,9 +9127,9 @@ THIS WEEK'S BENGAL SPECIALS
         function renderInstagramContentCard(route) {
             const status = instagramContentStatus(route); const label = route.gallery_media ? (route.media_type === 'VIDEO' ? 'REEL' : route.media_type === 'CAROUSEL_ALBUM' ? 'CAROUSEL' : 'POST') : (route.source_type === 'reel' ? 'REEL' : 'POST'); const image = route.preview_url || route.admin_preview_url;
             const preview = image ? `<img class="ig-media-thumb" loading="lazy" decoding="async" src="${escapeHtml(image)}" alt="${label} preview" onerror="this.style.display='none';this.nextElementSibling.style.display='flex';"><div class="ig-media-placeholder" style="display:none;"><span class="ig-media-placeholder-icon">◎</span><span>${label}</span></div>` : `<div class="ig-media-placeholder"><span class="ig-media-placeholder-icon">◎</span><span>${label}</span></div>`;
-            const unverified = route.inventory_verification === 'LEGACY_UNVERIFIED';
+            const unverified = route.inventory_verification === 'LEGACY_UNVERIFIED'; const manual = route.sync_status === 'MANUAL_EXACT_LINK';
             const action = unverified ? '<button class="btn-secondary" type="button" disabled title="Ownership is unverified until a complete owner sync succeeds">LEGACY · UNVERIFIED</button>' : `<button class="btn-secondary" type="button" data-content-action="details">${route.mapping_route || route.topic_id ? 'Edit Mapping' : label === 'REEL' ? 'Map Reel' : 'Map Post'}</button>`;
-            return `<article class="ig-media-card" tabindex="${unverified ? '-1' : '0'}" data-content-route-id="${escapeHtml(String(route.routing_id || ''))}"><div class="ig-media-preview">${preview}<span class="ig-media-badge">${label}</span></div><div class="ig-media-main"><div class="ig-media-title"><b class="ig-media-topic">${escapeHtml(route.routing_topic || 'Unmapped')}</b></div><div class="ig-media-summary">${escapeHtml(route.source_description || 'No description added.')}</div><div class="ig-media-facts"><span>${unverified ? 'LEGACY · UNVERIFIED — not verified for this account' : route.mapping_route?.active || (!route.mapping_route && route.topic_id && route.route_mode !== 'DISABLED') ? '● Context active' : '○ Context off'}</span><span>${escapeHtml(route.published_at || route.created_at || '—')}</span></div></div><div class="ig-media-actions">${action}</div></article>`;
+            return `<article class="ig-media-card" tabindex="${unverified ? '-1' : '0'}" data-content-route-id="${escapeHtml(String(route.routing_id || ''))}"><div class="ig-media-preview">${preview}<span class="ig-media-badge">${label}${manual ? " · MANUAL/COLLABORATOR UNVERIFIED" : ""}</span></div><div class="ig-media-main"><div class="ig-media-title"><b class="ig-media-topic">${escapeHtml(route.routing_topic || 'Unmapped')}</b></div><div class="ig-media-summary">${escapeHtml(route.source_description || 'No description added.')}</div><div class="ig-media-facts"><span>${unverified ? 'LEGACY · UNVERIFIED — not verified for this account' : route.mapping_route?.active || (!route.mapping_route && route.topic_id && route.route_mode !== 'DISABLED') ? '● Context active' : '○ Context off'}</span><span>${escapeHtml(route.published_at || route.created_at || '—')}</span></div></div><div class="ig-media-actions">${action}</div></article>`;
         }
 
         function renderInstagramContentGallery() {
@@ -9049,7 +9145,7 @@ THIS WEEK'S BENGAL SPECIALS
             });
             if (!filtered.length) { list.innerHTML = '<span class="ig-media-muted">No Instagram media matches this filter.</span>'; return; }
             if (igContentView === 'table') {
-                list.className = ''; list.innerHTML = `<table class="instagram-table"><thead><tr><th>Type</th><th>Topic</th><th>Attachment</th><th>Chatbot context</th><th></th></tr></thead><tbody>${filtered.map(route => { const unverified = route.inventory_verification === 'LEGACY_UNVERIFIED'; return `<tr><td>${route.source_type === 'reel' ? 'Reel' : 'Post'}${unverified ? ' · LEGACY UNVERIFIED' : ''}</td><td>${escapeHtml(route.routing_topic || 'Not mapped')}</td><td>${escapeHtml((igMenus.find(menu => menu.menu_id === route.menu_id) || {}).name || 'None')}</td><td>${unverified ? 'Unverified' : route.mapping_route?.active ? 'On' : 'Off'}</td><td>${unverified ? '<button class="btn-secondary" type="button" disabled>LEGACY · UNVERIFIED</button>' : `<button class="btn-secondary" type="button" data-content-table-id="${escapeHtml(String(route.routing_id || ''))}" style="padding:6px 9px;font-size:.72rem;">${route.mapping_route ? 'Edit Mapping' : 'Map'}</button>`}</td></tr>`; }).join('')}</tbody></table>`;
+                list.className = ''; list.innerHTML = `<table class="instagram-table"><thead><tr><th>Type</th><th>Topic</th><th>Attachment</th><th>Chatbot context</th><th></th></tr></thead><tbody>${filtered.map(route => { const unverified = route.inventory_verification === 'LEGACY_UNVERIFIED'; return `<tr><td>${route.source_type === 'reel' ? 'Reel' : 'Post'}${route.sync_status === 'MANUAL_EXACT_LINK' ? ' · MANUAL/COLLABORATOR UNVERIFIED' : unverified ? ' · LEGACY UNVERIFIED' : ''}</td><td>${escapeHtml(route.routing_topic || 'Not mapped')}</td><td>${escapeHtml((igMenus.find(menu => menu.menu_id === route.menu_id) || {}).name || 'None')}</td><td>${unverified ? 'Unverified' : route.mapping_route?.active ? 'On' : 'Off'}</td><td>${unverified ? '<button class="btn-secondary" type="button" disabled>LEGACY · UNVERIFIED</button>' : `<button class="btn-secondary" type="button" data-content-table-id="${escapeHtml(String(route.routing_id || ''))}" style="padding:6px 9px;font-size:.72rem;">${route.mapping_route ? 'Edit Mapping' : 'Map'}</button>`}</td></tr>`; }).join('')}</tbody></table>`;
                 list.querySelectorAll('[data-content-table-id]').forEach(button => button.addEventListener('click', () => openContentDetails('content', igContentRoutes.find(route => String(route.routing_id) === button.dataset.contentTableId))));
                 return;
             }
@@ -9087,7 +9183,7 @@ THIS WEEK'S BENGAL SPECIALS
                 const mappingPayload = mappingResponse ? await mappingResponse.json().catch(() => ({})) : { routes: [] };
                 if (mappingResponse && !mappingResponse.ok) throw new Error(mappingPayload.detail || 'Could not load source mappings.');
                 window.igGalleryCustomRoutes = mappingPayload.routes || [];
-                const pageItems = (payload.items || []).map(item => { const mapping = (window.igGalleryCustomRoutes || []).find(route => route.media_id === item.instagram_media_id && !route.archived_at); const topicId = (mapping || {}).topic_id || item.topic_id; const topic = igTopics.find(t => t.topic_id === topicId); return { ...item, gallery_media: true, routing_id: item.id, media_id: item.instagram_media_id, preview_url: item.thumbnail_url || item.media_url, canonical_url: item.permalink, source_type: item.media_type === 'VIDEO' ? 'reel' : 'post', routing_topic: topic?.name || mapping?.routing_topic || '', source_description: mapping?.source_description || '', menu_id: mapping?.menu_id || null, mapping_route: mapping || null }; });
+                const pageItems = (payload.items || []).map(item => { const mapping = (window.igGalleryCustomRoutes || []).find(route => (route.routing_id === item.custom_route_id || route.media_id === item.instagram_media_id) && !route.archived_at); const topicId = (mapping || {}).topic_id || item.topic_id; const topic = igTopics.find(t => t.topic_id === topicId); return { ...item, gallery_media: true, routing_id: item.id, media_id: item.instagram_media_id, preview_url: item.thumbnail_url || item.media_url, canonical_url: item.permalink, source_type: item.media_type === 'VIDEO' ? 'reel' : 'post', routing_topic: topic?.name || mapping?.routing_topic || '', source_description: mapping?.source_description || '', menu_id: mapping?.menu_id || null, mapping_route: mapping || null }; });
                 igContentRoutes = reset ? pageItems : [...igContentRoutes, ...pageItems];
                 igContentHasMore = Boolean(payload.has_more); igContentTotal = Number(payload.total || 0); igContentPage += 1;
                 window.igContentRoutes = igContentRoutes; renderInstagramContentGallery();
@@ -9095,6 +9191,14 @@ THIS WEEK'S BENGAL SPECIALS
                 const more = document.getElementById('igContentLoadMore'); if (more) more.style.display = igContentHasMore ? '' : 'none';
             } catch (error) { list.innerHTML = `<span style="color:var(--danger);">${escapeHtml(error.message || 'Could not load Instagram content.')}</span>`; }
             finally { igContentLoadInFlight = false; }
+        }
+
+        async function addManualInstagramLink() {
+            const url = document.getElementById('igMediaDiagnosticPermalink').value.trim();
+            const response = await fetch('/admin/instagram-media/manual-link', {method:'POST', headers:{...getAuthHeaders(), 'Content-Type':'application/json'}, body:JSON.stringify({url})});
+            const data = await response.json();
+            if (!response.ok) { alert(data.detail || 'Could not add exact link'); return; }
+            await loadInstagramContentGallery(true);
         }
 
         async function syncInstagramMediaNow() {
@@ -9135,7 +9239,7 @@ THIS WEEK'S BENGAL SPECIALS
                 const typeLabel = item.media_type === 'VIDEO' ? 'Instagram Reel' : item.media_type === 'CAROUSEL_ALBUM' ? 'Instagram Carousel' : 'Instagram Post';
                 document.getElementById('contentDetailsType').innerText = typeLabel; document.getElementById('contentDetailsTitle').innerText = `Edit ${item.source_type} mapping`;
                 const image = item.preview_url; document.getElementById('contentDetailsPreview').innerHTML = image ? `<img src="${escapeHtml(image)}" alt="${escapeHtml(typeLabel)} preview">` : '<div style="font-size:3rem;color:#8b97a8;">◎</div>';
-                document.getElementById('contentDetailsFacts').innerHTML = [['Published', item.published_at || 'Not supplied'], ['Instagram permalink', item.permalink || 'Not supplied'], ['Exact Meta Media ID', item.instagram_media_id], ['Caption', 'Instagram caption — context only'], ['Caption text', item.caption || 'Not supplied']].map(([label, value]) => `<div class="drawer-fact"><span class="drawer-fact-label">${escapeHtml(label)}</span><span class="drawer-fact-value">${escapeHtml(value)}</span></div>`).join('');
+                document.getElementById('contentDetailsFacts').innerHTML = [['Published', item.published_at || 'Not supplied'], ['Instagram permalink', item.permalink || 'Not supplied'], ['Identity', item.sync_status === 'MANUAL_EXACT_LINK' ? 'MANUAL / COLLABORATOR UNVERIFIED — not owned media' : item.instagram_media_id], ['Caption', 'Instagram caption — context only'], ['Caption text', item.caption || 'Not supplied']].map(([label, value]) => `<div class="drawer-fact"><span class="drawer-fact-label">${escapeHtml(label)}</span><span class="drawer-fact-value">${escapeHtml(value)}</span></div>`).join('');
                 const selectedTopic = item.mapping_route?.topic_id || item.topic_id;
                 const topicOptions = ['<option value="">Select Topic</option>', ...igTopics.filter(t => t.active || t.topic_id === selectedTopic).map(t => `<option value="${escapeHtml(t.topic_id)}" ${t.topic_id === selectedTopic ? 'selected' : ''}>${escapeHtml(t.name)}</option>`)].join('');
                 const selectedMenu = item.mapping_route?.menu_mode === 'INHERIT' ? '__inherit__' : item.mapping_route?.menu_mode === 'NONE' ? '__none__' : item.menu_id || '__none__';
@@ -9146,6 +9250,7 @@ THIS WEEK'S BENGAL SPECIALS
                     <div class="source-map-field"><label class="field-label" for="igMediaDescription">Description for this ${item.source_type}</label><p class="source-map-help">Used when someone asks what this ${item.source_type} is about.</p><textarea class="field-control" id="igMediaDescription" rows="5">${escapeHtml(item.source_description || '')}</textarea></div>
                     <div class="source-map-field"><label class="field-label" for="igMediaMenu">Menu / Image <span class="ig-media-muted">Optional</span></label><select class="field-control" id="igMediaMenu" onchange="renderSourceAssetCard('igMediaMenu','igMediaMenuSelected')">${menuOptions}</select><div class="source-secondary-actions"><button class="btn-secondary" type="button" onclick="openMenuModal('igMediaMenu')">+ Add Menu / Image</button></div><div class="source-asset-card" id="igMediaMenuSelected"></div></div>
                     <div class="source-map-field"><b>Use as chatbot context</b><div class="source-switch-row"><span class="source-map-help">Use this mapped Story, Post or Reel to understand short follow-up messages like “tell me more” or “price?”. This does not send a message automatically.</span><label class="source-switch"><input type="checkbox" id="igMediaAutoReply" aria-label="Use as chatbot context" ${item.mapping_route?.active || (!item.mapping_route && item.route_mode !== 'DISABLED') ? 'checked' : ''}><span></span></label></div></div>
+                    ${item.sync_status === 'MANUAL_EXACT_LINK' && item.source_type === 'post' && item.mapping_route ? `<div><button class="btn-secondary" type="button" onclick="pairInstagramPost(${Number(item.mapping_route.routing_id)})">Pair exact shared Post</button><div id="igPairingStatus-${Number(item.mapping_route.routing_id)}"></div></div>` : ''}
                     <div><button class="btn-primary source-save" type="button" onclick="saveInstagramMediaRoute(${Number(item.id)})">Save Mapping</button>${item.permalink ? `<div style="margin-top:16px;"><a class="btn-secondary" target="_blank" rel="noopener" href="${escapeHtml(item.permalink)}">Open on Instagram</a></div>` : ''}</div>
                     ${item.mapping_route || item.topic_id ? `<div class="source-danger"><b>Delete Mapping</b><p class="source-map-help">Removes chatbot mapping only. The Instagram ${item.source_type} will not be deleted.</p><button class="btn-danger" type="button" onclick="deleteInstagramMediaMapping(${Number(item.id)})">Delete Mapping</button></div>` : ''}
                 </div>`;
@@ -12676,7 +12781,11 @@ Non-Veg:
                     method: 'POST', headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
                     body: JSON.stringify({ status, actor: 'client_admin_dashboard' }),
                 });
-                if (resp.ok) { loadCustomQa(); refreshAiResolutionIfVisible(); return true; }
+                if (resp.ok) {
+                    const data = await resp.json();
+                    if (data.status === 'warning') { alert((data.commitment_warnings || []).join('\n')); return false; }
+                    loadCustomQa(); refreshAiResolutionIfVisible(); return true;
+                }
                 else alert('Could not update status: ' + JSON.stringify((await resp.json()).detail));
             } catch (e) { alert('Could not update status.'); }
             return false;
@@ -12695,19 +12804,17 @@ Non-Veg:
                 let text = `Would Match: YES\nMatched Q&A: ${data.matched.topic} — ${data.matched.primary_question}\nMatched Via: ${data.matched_via}\nScore: ${Math.round(data.score * 100)}%\nWould This Q&A Win: ${data.would_win ? 'YES' : 'NO'}`;
                 if (!data.would_win) text += `\nWinning Q&A: ${data.winning_qa.topic} — ${data.winning_qa.primary_question}\nReason: ${data.reason}`;
                 if (data.ambiguous) text += '\n\n⚠ Two answers are close in score — consider making the question more specific.';
-                alert(text);
+                const item = customQaItems.find(row => row.id === id);
+                if (item) openCustomQaModal(item);
+                document.getElementById('cqaTestResult').innerHTML = `<div style="white-space:pre-wrap;">${escapeHtml(text)}</div>` + cqaSequencePreviewHtml(data.response_blocks || []) + (data.sequence_error ? `<div>${escapeHtml(data.sequence_error)} — human handoff required</div>` : '') + '<small>Test only — nothing has been sent.</small>';
             } catch (e) { alert('Test failed.'); }
         }
 
         async function cqaQuickPreview(id) {
-            try {
-                const resp = await fetch('/admin/custom-qa/preview', {
-                    method: 'POST', headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ id }),
-                });
-                const data = await resp.json();
-                alert(`${data.preview_text}\n\n(${data.note})`);
-            } catch (e) { alert('Preview failed.'); }
+            const item = customQaItems.find(row => row.id === id);
+            if (!item) return;
+            openCustomQaModal(item);
+            await runCqaPreview();
         }
 
         async function cqaOpenDeleteConfirm(id) {
@@ -12803,7 +12910,36 @@ Non-Veg:
         }
         function removeCqaAlias(idx) { cqaAliasesDraft.splice(idx, 1); renderCqaAliasList(); }
 
+        function cqaSequencePreviewHtml(blocks) {
+            return blocks.map(block => block.kind === 'TEXT' ? `<div style="white-space:pre-wrap;padding:10px;">${escapeHtml(block.text)}</div>` : `<img src="${escapeHtml(block.url)}" alt="${escapeHtml(block.menu_id)}" style="max-width:100%;max-height:300px;">`).join('');
+        }
+        let cqaSequenceDraft = [], cqaSequenceAssets = [];
+        async function loadCqaSequenceAssets() {
+            const response = await fetch('/admin/custom-qa/assets', {headers:getAuthHeaders()});
+            if (!response.ok) { cqaSequenceAssets = []; renderCqaSequence(); return; }
+            cqaSequenceAssets = (await response.json()).assets || []; renderCqaSequence();
+        }
+        function addCqaSequenceBlock(type) {
+            cqaSequenceDraft.push(type === 'text' ? {type, text:''} : {type, menu_id:''}); renderCqaSequence();
+        }
+        function moveCqaSequenceBlock(index, step) {
+            const target = index + step; if (target < 0 || target >= cqaSequenceDraft.length) return;
+            [cqaSequenceDraft[index], cqaSequenceDraft[target]] = [cqaSequenceDraft[target], cqaSequenceDraft[index]]; renderCqaSequence();
+        }
+        function deleteCqaSequenceBlock(index) { cqaSequenceDraft.splice(index,1); renderCqaSequence(); }
+        function renderCqaSequence() {
+            document.getElementById('cqaSequenceBlocks').innerHTML = cqaSequenceDraft.map((block,index) => `<div style="border:1px solid var(--border);padding:10px;margin-top:8px;">
+                <label class="field-label">${index+1}. ${block.type === 'text' ? 'Edit Text Block' : 'Edit Menu / Image'}</label>
+                ${block.type === 'text' ? `<textarea class="field-control" aria-label="Text block ${index+1}" oninput="cqaSequenceDraft[${index}].text=this.value">${escapeHtml(block.text)}</textarea>` : `<select class="field-control" aria-label="Menu block ${index+1}" onchange="cqaSequenceDraft[${index}].menu_id=this.value"><option value="">Select eligible menu/image</option>${!cqaSequenceAssets.some(asset => asset.menu_id === block.menu_id) && block.menu_id ? `<option selected value="${escapeHtml(block.menu_id)}">${escapeHtml(block.menu_id)} — unavailable</option>` : ''}${cqaSequenceAssets.map(asset => `<option value="${escapeHtml(asset.menu_id)}" ${asset.menu_id === block.menu_id ? 'selected' : ''}>${escapeHtml(asset.name)}</option>`).join('')}</select>`}
+                <button type="button" class="btn-secondary" onclick="moveCqaSequenceBlock(${index},-1)" ${index===0?'disabled':''}>Move Up</button>
+                <button type="button" class="btn-secondary" onclick="moveCqaSequenceBlock(${index},1)" ${index===cqaSequenceDraft.length-1?'disabled':''}>Move Down</button>
+                <button type="button" class="btn-danger" onclick="deleteCqaSequenceBlock(${index})">Delete Block</button>
+            </div>`).join('');
+        }
+
         function openCustomQaModal(item) {
+            cqaSequenceDraft = JSON.parse(JSON.stringify(item?.response_sequence || []));
+            renderCqaSequence(); loadCqaSequenceAssets();
             document.getElementById('cqaEditingId').value = item ? item.id : '';
             document.getElementById('customQaModalTitle').innerText = item ? 'Edit Custom Q&A' : '+ Add Custom Q&A';
             const topicSelect = document.getElementById('cqaTopicSelect');
@@ -12858,12 +12994,17 @@ Non-Veg:
                 if (!data.would_win) html += `<br><b>Winning Q&A:</b> ${escapeHtml(data.winning_qa.topic)} — ${escapeHtml(data.winning_qa.primary_question)}<br><b>Reason:</b> ${escapeHtml(data.reason)}`;
                 if (data.ambiguous) html += '<br>⚠ Two answers are close in score.';
                 resultBox.innerHTML = html;
+                if (data.response_blocks) resultBox.innerHTML += cqaSequencePreviewHtml(data.response_blocks);
+                if (data.sequence_error) resultBox.innerHTML += `<div>${escapeHtml(data.sequence_error)} — human handoff required</div>`;
             } catch (e) { resultBox.innerHTML = 'Test failed.'; }
         }
 
-        function runCqaPreview() {
-            const answer = document.getElementById('cqaAnswer').value;
-            document.getElementById('cqaTestResult').innerHTML = `<div style="white-space:pre-wrap; background:#F8FAFC; border:1px solid var(--border); border-radius:8px; padding:10px;">${escapeHtml(answer)}</div><small style="color:var(--text-muted);">Preview only — nothing has been sent.</small>`;
+        async function runCqaPreview() {
+            const resultBox = document.getElementById('cqaTestResult');
+            const response = await fetch('/admin/custom-qa/preview', {method:'POST', headers:{...getAuthHeaders(),'Content-Type':'application/json'},body:JSON.stringify({approved_answer:document.getElementById('cqaAnswer').value,response_sequence:cqaSequenceDraft})});
+            const data = await response.json();
+            if (!response.ok) {resultBox.innerText=data.detail || 'Preview unavailable';return;}
+            resultBox.innerHTML = data.response_blocks.map(block => block.kind === 'TEXT' ? `<div style="white-space:pre-wrap;padding:10px;">${escapeHtml(block.text)}</div>` : `<img src="${escapeHtml(block.url)}" alt="${escapeHtml(block.menu_id)}" style="max-width:100%;max-height:300px;">`).join('') + '<small>Preview only — nothing has been sent.</small>';
         }
 
         async function saveCustomQa(forceSave) {
@@ -12872,6 +13013,7 @@ Non-Veg:
                 topic: currentCqaTopic(),
                 primary_question: document.getElementById('cqaPrimaryQuestion').value.trim(),
                 approved_answer: document.getElementById('cqaAnswer').value.trim(),
+                response_sequence: cqaSequenceDraft,
                 aliases: cqaAliasesDraft,
                 priority: document.getElementById('cqaPriority').value,
                 status: document.getElementById('cqaStatus').value,

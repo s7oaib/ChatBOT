@@ -454,6 +454,9 @@ class Database:
             );
             """)
 
+            self._ensure_column(cursor, "learned_knowledge", "response_sequence", "TEXT DEFAULT '[]'")
+            self._ensure_column(cursor, "learned_knowledge_versions", "response_sequence", "TEXT DEFAULT '[]'")
+
             # Customer-editable copy for system templates.  This is an
             # override layer, not a duplicate template/knowledge store: the
             # protected qa_templates.json record remains authoritative for
@@ -1550,6 +1553,10 @@ class Database:
             existing = conn.execute(
                 "SELECT * FROM instagram_media WHERE instagram_media_id=?", (media_id,)
             ).fetchone()
+            if not existing and media.get("permalink") and media.get("sync_status", "SYNCED") != "MANUAL_EXACT_LINK":
+                existing = conn.execute("SELECT * FROM instagram_media WHERE permalink=? AND sync_status='MANUAL_EXACT_LINK'", (media["permalink"],)).fetchone()
+                if existing:
+                    conn.execute("UPDATE instagram_media SET instagram_media_id=? WHERE id=?", (media_id, existing["id"]))
             if existing:
                 conn.execute(
                     """UPDATE instagram_media SET media_type=?, permalink=?, shortcode=?, caption=?,
@@ -1592,13 +1599,13 @@ class Database:
             now = datetime.utcnow().isoformat()
             foreign = conn.execute(
                 """UPDATE instagram_media SET inventory_state='FOREIGN', updated_at=?
-                   WHERE sync_status!='DEMO' AND owner_instagram_account_id IS NOT NULL
+                   WHERE sync_status NOT IN ('DEMO','MANUAL_EXACT_LINK') AND owner_instagram_account_id IS NOT NULL
                      AND owner_instagram_account_id!=? AND inventory_state!='FOREIGN'""",
                 (now, owner_account_id),
             ).rowcount
             stale = conn.execute(
                 """UPDATE instagram_media SET inventory_state='STALE', updated_at=?
-                   WHERE sync_status!='DEMO'
+                   WHERE sync_status NOT IN ('DEMO','MANUAL_EXACT_LINK')
                      AND (owner_instagram_account_id IS NULL OR owner_instagram_account_id=?)
                      AND COALESCE(last_sync_generation, '')!=? AND inventory_state!='STALE'""",
                 (now, owner_account_id, generation),
@@ -1648,7 +1655,7 @@ class Database:
                 (owner_account_id,),
             ).fetchone() is not None
             if bootstrapped:
-                clauses, params = ["owner_instagram_account_id=?", "inventory_state='CURRENT'"], [owner_account_id]
+                clauses, params = ["((owner_instagram_account_id=? AND inventory_state='CURRENT') OR (sync_status='MANUAL_EXACT_LINK' AND inventory_state='COLLABORATOR_UNVERIFIED'))"], [owner_account_id]
             else:
                 # Until a complete verified sync succeeds, keep legacy rows
                 # visible to Admin as unverified. Explicitly foreign/stale
@@ -1670,15 +1677,15 @@ class Database:
             if topic_id:
                 clauses.append("topic_id=?"); params.append(topic_id)
             if mapping_status == "mapped":
-                clauses.append("(topic_id IS NOT NULL OR route_mode IN ('CUSTOM','DISABLED') OR EXISTS (SELECT 1 FROM instagram_source_routes r WHERE r.media_id=instagram_media.instagram_media_id AND r.source_type IN ('post','reel') AND r.archived_at IS NULL))")
+                clauses.append("(topic_id IS NOT NULL OR route_mode IN ('CUSTOM','DISABLED') OR EXISTS (SELECT 1 FROM instagram_source_routes r WHERE (r.media_id=instagram_media.instagram_media_id OR r.routing_id=instagram_media.custom_route_id) AND r.source_type IN ('post','reel') AND r.archived_at IS NULL))")
             elif mapping_status == "unmapped":
-                clauses.append("(topic_id IS NULL AND route_mode='DEFAULT' AND NOT EXISTS (SELECT 1 FROM instagram_source_routes r WHERE r.media_id=instagram_media.instagram_media_id AND r.source_type IN ('post','reel') AND r.archived_at IS NULL))")
+                clauses.append("(topic_id IS NULL AND route_mode='DEFAULT' AND NOT EXISTS (SELECT 1 FROM instagram_source_routes r WHERE (r.media_id=instagram_media.instagram_media_id OR r.routing_id=instagram_media.custom_route_id) AND r.source_type IN ('post','reel') AND r.archived_at IS NULL))")
             if context_active is not None:
-                clauses.append("EXISTS (SELECT 1 FROM instagram_source_routes r WHERE r.media_id=instagram_media.instagram_media_id AND r.source_type IN ('post','reel') AND r.archived_at IS NULL AND r.active=?)")
+                clauses.append("EXISTS (SELECT 1 FROM instagram_source_routes r WHERE (r.media_id=instagram_media.instagram_media_id OR r.routing_id=instagram_media.custom_route_id) AND r.source_type IN ('post','reel') AND r.archived_at IS NULL AND r.active=?)")
                 params.append(int(context_active))
             if search:
                 pattern = f"%{search[:200]}%"
-                clauses.append("(instagram_media_id LIKE ? OR permalink LIKE ? OR caption LIKE ? OR EXISTS (SELECT 1 FROM instagram_source_routes r WHERE r.media_id=instagram_media.instagram_media_id AND r.source_type IN ('post','reel') AND r.archived_at IS NULL AND (r.routing_topic LIKE ? OR r.source_description LIKE ?)))")
+                clauses.append("(instagram_media_id LIKE ? OR permalink LIKE ? OR caption LIKE ? OR EXISTS (SELECT 1 FROM instagram_source_routes r WHERE (r.media_id=instagram_media.instagram_media_id OR r.routing_id=instagram_media.custom_route_id) AND r.source_type IN ('post','reel') AND r.archived_at IS NULL AND (r.routing_topic LIKE ? OR r.source_description LIKE ?)))")
                 params.extend([pattern] * 5)
             where = " AND ".join(clauses)
             total = int(conn.execute(f"SELECT COUNT(*) AS n FROM instagram_media WHERE {where}", params).fetchone()["n"])
@@ -1689,10 +1696,16 @@ class Database:
         items = [dict(row) for row in rows]
         if not bootstrapped:
             for item in items:
+                if item.get("sync_status") == "MANUAL_EXACT_LINK":
+                    item["inventory_verification"] = "MANUAL_EXACT_LINK"
+                    continue
                 item["inventory_state"] = "UNVERIFIED"
                 item["owner_instagram_account_id"] = None
                 item["owner_username"] = None
                 item["inventory_verification"] = "LEGACY_UNVERIFIED"
+        for item in items:
+            if item.get("sync_status") == "MANUAL_EXACT_LINK":
+                item["inventory_verification"] = "MANUAL_EXACT_LINK"
         return items, total
 
     def get_instagram_media(self, item_id: int) -> Optional[Dict[str, Any]]:
@@ -4172,6 +4185,7 @@ class Database:
         status: str = "ACTIVE",
         created_by: Optional[str] = None,
         aliases: Optional[List[str]] = None,
+        response_sequence: Optional[List[Dict[str, Any]]] = None,
     ) -> Optional[int]:
         """
         Adds a verified knowledge item to the self-healing knowledge base.
@@ -4210,6 +4224,7 @@ class Database:
                 INSERT INTO learned_knowledge_aliases (learned_knowledge_id, alias_text, normalized_alias, created_at, created_by)
                 VALUES (?, ?, ?, ?, ?)
                 """, (new_id, alias, normalize_question(alias), now, created_by))
+            conn.execute("UPDATE learned_knowledge SET response_sequence=? WHERE id=?", (json.dumps(response_sequence or []), new_id))
             conn.commit()
             return new_id
 
@@ -4637,12 +4652,12 @@ class Database:
         conn.execute("""
         INSERT INTO learned_knowledge_versions (
             learned_knowledge_id, version_number, topic, primary_question, answer,
-            priority, status, aliases_snapshot, changed_at, changed_by, change_reason
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            priority, status, aliases_snapshot, changed_at, changed_by, change_reason, response_sequence
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             knowledge_id, next_version, current.get("topic"), current.get("question_pattern"),
             current.get("verified_answer"), current.get("priority"), current.get("status"),
-            json.dumps(aliases), datetime.utcnow().isoformat(), changed_by, reason,
+            json.dumps(aliases), datetime.utcnow().isoformat(), changed_by, reason, current.get("response_sequence") or "[]",
         ))
 
     def update_custom_qa(
@@ -4656,6 +4671,7 @@ class Database:
         status: str,
         updated_by: Optional[str],
         change_reason: str = "edited",
+        response_sequence: Optional[List[Dict[str, Any]]] = None,
     ) -> bool:
         """
         Edits the SAME learned_knowledge record — never a new one. The prior
@@ -4689,6 +4705,8 @@ class Database:
                 INSERT INTO learned_knowledge_aliases (learned_knowledge_id, alias_text, normalized_alias, created_at, created_by)
                 VALUES (?, ?, ?, ?, ?)
                 """, (knowledge_id, alias, normalize_question(alias), now, updated_by))
+            if response_sequence is not None:
+                conn.execute("UPDATE learned_knowledge SET response_sequence=? WHERE id=?", (json.dumps(response_sequence), knowledge_id))
             conn.commit()
             return True
 
@@ -4767,6 +4785,7 @@ class Database:
                 INSERT INTO learned_knowledge_aliases (learned_knowledge_id, alias_text, normalized_alias, created_at, created_by)
                 VALUES (?, ?, ?, ?, ?)
                 """, (knowledge_id, alias, normalize_question(alias), now, actor))
+            conn.execute("UPDATE learned_knowledge SET response_sequence=? WHERE id=?", (version["response_sequence"] or "[]", knowledge_id))
             conn.commit()
             return True
 
