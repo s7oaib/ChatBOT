@@ -88,7 +88,7 @@ def test_admin_catalogue_exposes_current_image_metadata_without_mutating_lifecyc
     menus = {menu["menu_id"]: menu for menu in response.json()["menus"]}
     assert menus["aamar_mishti"]["image_url"] == published["image_path"]
     assert menus["aamar_mishti"]["image_status"] == "Published"
-    assert menus["signature"]["image_url"] == "/images/Signature%20Sondesh.jpeg"
+    assert menus["signature"]["image_url"] == menu_images_module.current_url("signature")
     assert menus["signature"]["image_status"] == "Built-in"
     assert menu_images_module.history("aamar_mishti") == history_before
     assert catalogue_db.get_menu_image_draft("aamar_mishti") == draft_before

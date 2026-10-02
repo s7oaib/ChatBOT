@@ -3686,8 +3686,8 @@ class DeterministicResponder:
                 "subscription_rate_chart": [
                     "/images/Everyday%20Meal%20Subscription%20Rate%20Chart.jpeg",
                 ],
-                "aamar_menu": ["/images/AAMAR%20MISHTI.jpeg"],
-                "signature_menu": ["/images/Signature%20Sondesh.jpeg"],
+                "aamar_menu": [current_menu_image("aamar_mishti")],
+                "signature_menu": [current_menu_image("signature")],
                 "weekly_menu": [current_weekly_url()],
             }
             weekly_missing = "weekly_menu" in entry.asset_keys and not asset_map["weekly_menu"][0]
@@ -6286,8 +6286,11 @@ class DeterministicResponder:
     def _detect_relevant_images(self, user_message: str) -> Optional[Any]:
         """Attaches relevant menu photo cards when user inquires about products or menus in AI-First mode."""
         lowered = user_message.lower().strip()
-        img_signature_sondesh = current_menu_image("signature", "/images/Signature%20Sondesh.jpeg")
-        img_aamar_mishti = current_menu_image("aamar_mishti", "/images/AAMAR%20MISHTI.jpeg")
+        img_signature_sondesh = current_menu_image("signature")
+        img_aamar_mishti = current_menu_image("aamar_mishti")
+        eligible_sondesh_images = [
+            image for image in (img_aamar_mishti, img_signature_sondesh) if image
+        ]
 
         import datetime, zoneinfo
         try:
@@ -6298,15 +6301,15 @@ class DeterministicResponder:
         current_weekly_img, _ = self._current_weekly_image(today_weekday)
 
         if any(w in lowered for w in ["collection 1", "collection1", "1st collection", "first collection", "aamar mishti", "col 1", "option 1"]):
-            return [img_aamar_mishti]
+            return [img_aamar_mishti] if img_aamar_mishti else None
         elif any(w in lowered for w in ["collection 2", "collection2", "2nd collection", "second collection", "signature", "desi a2", "col 2", "option 2", "mahua"]):
-            return [img_signature_sondesh]
+            return [img_signature_sondesh] if img_signature_sondesh else None
         elif any(w in lowered for w in ["product", "all products", "what do you have", "what do you sell", "overview", "know more", "full menu", "both collections", "difference", "custom", "customize", "customise", "assorted", "mix"]):
             # The Sondesh cards are undated and always valid; only the weekly
             # card drops out when its week has ended.
-            return [i for i in [img_aamar_mishti, img_signature_sondesh, current_weekly_img] if i]
+            return [*eligible_sondesh_images, *([current_weekly_img] if current_weekly_img else [])]
         elif any(w in lowered for w in ["sondesh", "mishti", "sweet", "sweets", "kanchagolla", "jolbhora", "nolen gur", "250g", "500g", "1kg", "rose", "classic", "mango", "kesar", "price"]):
-            return [img_aamar_mishti, img_signature_sondesh]
+            return eligible_sondesh_images or None
         elif any(w in lowered for w in ["menu", "veg", "non veg", "non-veg", "bento", "combo", "meal", "meals", "lunch", "dinner", "halal", "oil", "ghee", "savoury"]):
             return current_weekly_img
         return None
@@ -6413,8 +6416,8 @@ class DeterministicResponder:
             if not match:
                 return self._generic_fallback(), None
             assets = {
-                "aamar_menu": current_menu_image("aamar_mishti", "/images/AAMAR%20MISHTI.jpeg"),
-                "signature_menu": current_menu_image("signature", "/images/Signature%20Sondesh.jpeg"),
+                "aamar_menu": current_menu_image("aamar_mishti"),
+                "signature_menu": current_menu_image("signature"),
                 "weekly_menu": current_weekly_url(),
                 "subscription_rate_chart": "/images/Everyday%20Meal%20Subscription%20Rate%20Chart.jpeg",
             }
@@ -6422,8 +6425,8 @@ class DeterministicResponder:
             return answer, images or None
         if template_id in approved_response_alignment.HANDOFF_ONLY_TEMPLATE_IDS:
             return self._generic_fallback(), None
-        img_signature_sondesh = current_menu_image("signature", "/images/Signature%20Sondesh.jpeg")
-        img_aamar_mishti = current_menu_image("aamar_mishti", "/images/AAMAR%20MISHTI.jpeg")
+        img_signature_sondesh = current_menu_image("signature")
+        img_aamar_mishti = current_menu_image("aamar_mishti")
 
         import datetime, zoneinfo
         try:

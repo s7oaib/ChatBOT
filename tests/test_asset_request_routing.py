@@ -8,6 +8,7 @@ import pytest
 
 from camellia.config import config
 from camellia.responder import responder
+from camellia import menu_images
 from camellia.session_memory import session_memory
 
 
@@ -100,7 +101,7 @@ def test_explicit_current_asset_overrides_stale_story_context():
     })
     result = ask(user_id, "share Aamar Mishti menu", "instagram")
     assert result[2] == "asset_request_aamar_mishti_menu"
-    assert "AAMAR%20MISHTI.jpeg" in asset_urls(result)[0]
+    assert asset_urls(result) == [menu_images.current_url("aamar_mishti")]
     assert session_memory.get_facts(user_id, "instagram")["source_context_used"] is False
 
 

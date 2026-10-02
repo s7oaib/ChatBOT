@@ -165,7 +165,7 @@ def test_customer_image_excludes_pending_or_inactive_menu(authority, pending, in
         _pending("aamar_mishti", "Test sweet")
     if inactive:
         menu_catalogue.update_menu("aamar_mishti", active=False)
-    assert menu_images.current_url("aamar_mishti", "/images/AAMAR%20MISHTI.jpeg") is None
+    assert menu_images.current_url("aamar_mishti") is None
     assert not menu_review.canonical_menu()["collections"]["aamar_mishti"]["products"]
 
 

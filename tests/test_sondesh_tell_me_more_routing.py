@@ -6,11 +6,12 @@ from camellia import client_qa
 from camellia.config import config
 from camellia.responder import responder
 from camellia.session_memory import session_memory
+from camellia import menu_images
 
 
 EXPECTED_ASSETS = [
-    "/images/AAMAR%20MISHTI.jpeg",
-    "/images/Signature%20Sondesh.jpeg",
+    menu_images.current_url("aamar_mishti"),
+    menu_images.current_url("signature"),
     "/uploads/test-reviewed-current-weekly.jpeg",
 ]
 

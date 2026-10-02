@@ -14,6 +14,8 @@ from camellia.config import config
 from camellia.database import db, Database
 from camellia.ad_gate import ad_gate
 from camellia.responder import responder
+from camellia import menu_images
+from camellia import menu_images
 from camellia.escalator import escalator
 from camellia.app import app
 
@@ -672,7 +674,7 @@ class TestCamelliaBot(unittest.TestCase):
                 message, user_id='test_aamar_mishti_250g_query_and_repeat_image_delivery', channel="instagram")
             self.assertTrue(matched)
             self.assertEqual(response, "")
-            expected = "/images/Signature%20Sondesh.jpeg" if "2" in message else "/images/AAMAR%20MISHTI.jpeg"
+            expected = menu_images.current_url("signature" if "2" in message else "aamar_mishti")
             self.assertEqual(images, [expected])
             self.assertNotIn("₹", response)
 
@@ -823,7 +825,7 @@ class TestCamelliaBot(unittest.TestCase):
                 message, user_id='test_collection_1_and_2_matching', channel="instagram")
             self.assertTrue(matched)
             self.assertEqual(response, "")
-            expected = "/images/Signature%20Sondesh.jpeg" if "2" in message else "/images/AAMAR%20MISHTI.jpeg"
+            expected = menu_images.current_url("signature" if "2" in message else "aamar_mishti")
             self.assertEqual(images, [expected])
             self.assertNotIn("₹", response)
 
@@ -848,7 +850,7 @@ class TestCamelliaBot(unittest.TestCase):
             self.assertTrue(matched)
             self.assertEqual(template, "signature_collection")
             self.assertEqual(response, "")
-            self.assertEqual(images, ["/images/Signature%20Sondesh.jpeg"])
+            self.assertEqual(images, [menu_images.current_url("signature")])
             mock_httpx_cls.return_value.__enter__.return_value.post.assert_not_called()
 
     def test_duplicate_reply_is_never_sent_twice_when_ai_is_down(self):
@@ -1255,7 +1257,7 @@ class TestCamelliaBot(unittest.TestCase):
                 message, user_id='test_collection_2_and_collection_1_full_precision_menu_details', channel="instagram")
             self.assertTrue(matched)
             self.assertEqual(response, "")
-            expected = "/images/Signature%20Sondesh.jpeg" if "2" in message else "/images/AAMAR%20MISHTI.jpeg"
+            expected = menu_images.current_url("signature" if "2" in message else "aamar_mishti")
             self.assertEqual(images, [expected])
             self.assertNotIn("₹", response)
 
