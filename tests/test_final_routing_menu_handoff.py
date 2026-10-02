@@ -213,6 +213,13 @@ def test_source_menu_first_uses_existing_ordered_sender(customer):
     assert send.call_args_list[1].args[1] == "Authored copy"
 
 
+def test_fresh_exact_non_home_source_supersedes_old_home_flags(customer):
+    source(customer, description="New exact source copy")
+    customer[1].update(home_table_context=True, last_topic="bengali_home_table", active_topic="bengali_home_table", client_qa_id="home_table_details")
+    answer = reply(customer, "show me the menu")
+    assert answer == ("New exact source copy", True, "source_menu", ["/uploads/exact-source.jpg"])
+
+
 @pytest.mark.parametrize("question", ["Is this available?", "What allergens does this menu contain?", "which part of diamond park are you located"])
 def test_source_state_cannot_supply_unsupported_business_facts(customer, question):
     source(customer, description="Exact approved source description")

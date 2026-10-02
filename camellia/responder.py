@@ -2843,11 +2843,12 @@ class DeterministicResponder:
             ) or _ALACARTE_DIRECT_QUERY_RE.search(lowered_text))
             menu_request = bool(re.search(r"\bmenu\b|\bwhat food (?:will be|is) served\b", lowered_text))
             home_context = bool(
-                facts.get("home_table_context")
-                or facts.get("active_topic") == "bengali_home_table"
-                or facts.get("last_topic") == "bengali_home_table"
-                or str(facts.get("client_qa_id") or "").startswith("home_table_")
-                or (source_active and (
+                (not source_active and (
+                    facts.get("home_table_context")
+                    or facts.get("active_topic") == "bengali_home_table"
+                    or facts.get("last_topic") == "bengali_home_table"
+                    or str(facts.get("client_qa_id") or "").startswith("home_table_")
+                )) or (source_active and (
                     HOME_TABLE_RE.search(str(source.get("routing_topic") or ""))
                     or str(source.get("approved_qa_id") or "").startswith("home_table_")
                 ))
