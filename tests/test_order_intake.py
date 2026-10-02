@@ -499,7 +499,7 @@ def test_partial_order_immediately_hands_off_with_explicit_missing_values(one_sh
 
 
 def test_sequential_item_area_and_slot_preserve_prior_values_without_questions(one_shot_customer):
-    _, draft = one_shot_customer('Sondesh')
+    _, draft = one_shot_customer('I want to order Sondesh')
     assert draft['item'] == 'Sondesh' and draft['quantity'] is None
     one_shot_customer('2 boxes')
     first, _ = one_shot_customer('Gurgaon')
@@ -536,7 +536,7 @@ def test_order_process_area_only_does_not_invent_item(one_shot_customer):
 
 
 def test_day_slot_and_bare_quantity_are_captured_in_separate_messages(one_shot_customer):
-    one_shot_customer('Sondesh')
+    one_shot_customer('I want to order Sondesh')
     one_shot_customer('2')
     one_shot_customer('Gurgaon')
     one_shot_customer('Friday')
@@ -592,7 +592,7 @@ def test_messy_customer_orders_have_literal_fields_and_manual_link(one_shot_cust
 
 @pytest.mark.parametrize("quantity", ["1 box", "2 boxes", "1 pack", "2 packs", "1 piece", "2 pieces", "2 pcs", "1 portion", "2 portions", "1 serving", "2 servings", "1 plate", "2 plates", "1kg", "0.5 kg", "250g", "250 gm", "250 grams", "2"])
 def test_quantity_units_accumulate_without_changing_existing_item(one_shot_customer, quantity):
-    one_shot_customer("Chicken Kosha")
+    one_shot_customer("I want to order Chicken Kosha")
     text, draft = one_shot_customer(quantity)
     assert draft["item"] == "Chicken Kosha" and draft["quantity"] == quantity
     assert "Items & quantity: " + quantity + " Chicken Kosha" in unquote(text)

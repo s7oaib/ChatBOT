@@ -153,7 +153,74 @@ class TestLibraryManagement:
                         {'response': 'Safe greeting.', 'triggers': ['hacked']}]:
             assert client.patch('/admin/response-library/system/greeting', json=payload, headers=_auth()).status_code == 400
         assert client.delete('/admin/response-library/system/greeting', headers=_auth()).status_code == 405
+        no_override = client.post('/admin/response-library/system/greeting/reset-override', json={'confirm_reset': True}, headers=_auth())
+        assert no_override.status_code == 404
         assert client.get('/admin/response-library?status=ALL', headers=_auth()).json()['counts'] == {'all': 67, 'system': 67, 'custom': 0}
+
+    def test_system_override_reset_preserves_template_and_audit_history(self, isolated_db):
+        import copy
+
+        template = next(row for row in responder.qa_data['templates'] if row['id'] == 'greeting')
+        original_template = copy.deepcopy(template)
+        default_responses = original_template.get('responses') or [original_template.get('response')]
+        before = responder.match_and_respond('hi', user_id='greeting-before-reset', channel='whatsapp')
+        assert before[2] == 'greeting' and before[0] in default_responses
+
+        listed = client.get('/admin/response-library?source=system_template&status=ALL', headers=_auth()).json()
+        card = next(row for row in listed['items'] if row['template_id'] == 'greeting')
+        assert card['protected_runtime'] is True and card['has_override'] is False
+
+        replacement = 'Temporary operator greeting copy.'
+        assert client.patch('/admin/response-library/system/greeting', json={'response': replacement}, headers=_auth()).status_code == 200
+        listed = client.get('/admin/response-library?source=system_template&status=ALL', headers=_auth()).json()
+        card = next(row for row in listed['items'] if row['template_id'] == 'greeting')
+        assert card['has_override'] is True and card['protected_runtime'] is True
+        active = responder.match_and_respond('hi', user_id='greeting-override-active', channel='whatsapp')
+        assert active[0] == replacement and active[2] == 'greeting'
+
+        missing_confirmation = client.post('/admin/response-library/system/greeting/reset-override', json={}, headers=_auth())
+        assert missing_confirmation.status_code == 400
+        assert isolated_db.get_response_template_override('greeting')['response'] == replacement
+        assert client.delete('/admin/response-library/system/greeting', headers=_auth()).status_code == 405
+
+        reset = client.post('/admin/response-library/system/greeting/reset-override',
+                            json={'confirm_reset': True, 'actor': 'reviewer'}, headers=_auth())
+        assert reset.status_code == 200 and reset.json()['status'] == 'reset'
+        assert reset.json()['item']['has_override'] is False
+        assert isolated_db.get_response_template_override('greeting') is None
+        versions = isolated_db.get_response_template_override_versions('greeting')
+        assert [row['change_reason'] for row in versions] == ['reset_override', 'initial_override_default']
+        assert versions[0]['response'] == replacement and versions[0]['changed_by'] == 'reviewer'
+        after_templates = responder._templates_with_overrides()
+        restored_template = next(row for row in after_templates if row['id'] == 'greeting')
+        assert restored_template['responses'] == original_template['responses']
+        after = responder.match_and_respond('hi', user_id='greeting-after-reset', channel='whatsapp')
+        assert after[2] == before[2] == 'greeting' and after[0] in default_responses
+        assert template == original_template
+        assert client.get('/admin/response-library/system/greeting/versions', headers=_auth()).json()['versions'] == versions
+
+    def test_reset_keeps_effective_approved_qa_delegation(self, isolated_db):
+        from camellia import approved_response_alignment
+        template_id = 'sondesh_details'
+        qa_id, canonical = approved_response_alignment.effective_binding(template_id)
+        assert qa_id == 'sondesh_details_client' and canonical
+        assert client.patch('/admin/response-library/system/' + template_id,
+                           json={'response': canonical}, headers=_auth()).status_code == 200
+        assert isolated_db.get_response_template_override(template_id)['response'] == canonical
+        before = app_module._system_template_public(
+            next(row for row in responder.qa_data['templates'] if row['id'] == template_id),
+            isolated_db.get_response_template_override(template_id),
+        )
+        reset = client.post('/admin/response-library/system/' + template_id + '/reset-override',
+                            json={'confirm_reset': True}, headers=_auth())
+        assert reset.status_code == 200
+        after = reset.json()['item']
+        assert before['approved_answer'] == after['approved_answer'] == canonical
+        assert before['triggers'] == after['triggers']
+        assert after['has_override'] is False
+        assert approved_response_alignment.effective_binding(template_id) == (qa_id, canonical)
+        assert isolated_db.get_response_template_override(template_id) is None
+        assert isolated_db.get_response_template_override_versions(template_id)
 
     def test_server_metadata_ignored_and_confirm_revalidates(self, isolated_db):
         lib = app_module.library
@@ -190,7 +257,9 @@ class TestLibraryManagement:
         assert "item.status !== 'ARCHIVED'" in page
         assert 'must be archived before permanent deletion' in page
         system_card = page[page.index('function renderSystemResponseCard'):page.index('function renderResponseLibrarySuggestions')]
-        assert 'Delete' not in system_card
+        assert "item.has_override ? `<button class=\"btn-danger\"" in system_card
+        assert 'Reset / Delete Override' in system_card
+        assert 'item.has_override' in system_card
 
 
 def _auth():
