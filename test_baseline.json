@@ -1,10 +1,10 @@
 {
-  "known_good_sha": "4071402099390dafc28c22c8c2a35920e385d470",
+  "known_good_sha": "f58b1f4157e32361487320f6db2ec72bcdba3342",
   "full_regression_passed": true,
-  "full_regression_test_count": 3432,
+  "full_regression_test_count": 3715,
   "production_validated": true,
-  "production_deployment_id": "709ed586-3b7a-4137-9de7-d0cd0667e9c1",
+  "production_deployment_id": "5b1abab4-c414-4662-9a2f-ce41000eb3bb",
   "evidence_source": "Explicit operator attestation; utility does not execute tests or verify production",
-  "promoted_at_utc": "2026-10-01T23:14:59.546393+00:00",
-  "previous_known_good_sha": "b2d2b485c6c4e8b7c35d6908b75ce489a251d4bd"
+  "promoted_at_utc": "2026-10-02T22:55:59+00:00",
+  "previous_known_good_sha": "4071402099390dafc28c22c8c2a35920e385d470"
 }
