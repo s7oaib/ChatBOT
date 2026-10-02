@@ -2838,9 +2838,9 @@ class DeterministicResponder:
             source_active = bool(source.get("routing_id") and source.get("active", True)
                                  and not facts.get("source_context_superseded"))
             named_other_menu = bool(re.search(
-                r"\b(?:weekly|savoury|savory|sondesh|sandesh|mishti|bento|subscription|aamar|signature)\b",
+                r"\b(?:weekly|this\s+week|current\s+week|savoury|savory|sondesh|sandesh|mishti|bento|subscription|aamar|signature)\b",
                 lowered_text,
-            ))
+            ) or _ALACARTE_DIRECT_QUERY_RE.search(lowered_text))
             menu_request = bool(re.search(r"\bmenu\b|\bwhat food (?:will be|is) served\b", lowered_text))
             home_context = bool(
                 facts.get("home_table_context")
@@ -2870,7 +2870,12 @@ class DeterministicResponder:
             mode = str(source.get("menu_mode") or "INHERIT").upper()
             topic = db.get_instagram_topic(source["topic_id"]) if source_active and source.get("topic_id") else None
             menu_id = ((topic or {}).get("default_menu_id") if mode == "INHERIT" else source.get("menu_id"))
-            if home_menu or (source_menu_request and (menu_request or menu_id or mode == "SELECTED")):
+            legacy_subscription_request = bool(
+                mode == "INHERIT" and not menu_id and not source.get("source_description")
+                and str(source.get("routing_topic") or "").casefold() in {"subscription", "everyday meal subscription"}
+                and client_qa.effective_entry("subscription_details_client")
+            )
+            if home_menu or (source_menu_request and not legacy_subscription_request and (menu_request or menu_id or mode == "SELECTED")):
                 menu = db.get_menu_catalogue_entry(str(menu_id)) if menu_id and not home_menu else None
                 image = current_menu_image(str(menu_id)) if mode != "NONE" and menu and menu.get("active") else None
                 description = str(source.get("source_description") or "").strip()

@@ -121,6 +121,14 @@ def test_bare_date_does_not_start_order(customer):
     assert not customer[1].get("order_intake_draft")
 
 
+def test_explicit_draft_review_preserves_fields_and_resends_link(customer):
+    reply(customer, "2 boxes Sondesh Gurgaon Friday dinner")
+    before = deepcopy(customer[1]["order_intake_draft"])
+    answer = reply(customer, "show me my order")
+    assert answer[2] == "order_intake_draft" and "https://wa.me/" in answer[0]
+    assert customer[1]["order_intake_draft"] == before
+
+
 @pytest.mark.parametrize("value", ["32 October", "31 February", "11/13"])
 def test_invalid_date_is_not_order_data(customer, value):
     reply(customer, "2 boxes Sondesh Gurgaon Friday dinner")

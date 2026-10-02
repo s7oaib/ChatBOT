@@ -470,7 +470,8 @@ def is_link_resend_request(message: str) -> bool:
     text = " ".join(str(message or "").casefold().split()).strip(" .?!")
     return bool(re.fullmatch(
         r"(?:send (?:the )?whatsapp link(?: again)?|where is (?:the )?whatsapp link|"
-        r"whatsapp link please|send (?:the )?link(?: again)?|how do i continue on whatsapp)", text,
+        r"whatsapp link please|send (?:the )?link(?: again)?|how do i continue on whatsapp|"
+        r"(?:show|resend) (?:me )?(?:my|the) order(?: draft)?)", text,
     ))
 
 

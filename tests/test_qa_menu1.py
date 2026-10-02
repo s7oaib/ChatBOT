@@ -57,7 +57,7 @@ def test_menu_browsing_preserves_order_draft_and_ignores_old_topic(current_menu,
     facts = session_memory.get_facts(uid, "instagram")
     draft = order_intake.new_order_draft()
     order_intake.update_order_draft(draft, "2 boxes Sondesh Gurgaon Friday dinner")
-    facts.update(order_intake_draft=draft, last_topic="bengali_home_table", active_topic="subscription")
+    facts.update(order_intake_draft=draft, last_topic="sondesh", active_topic="subscription")
     before = copy.deepcopy(draft)
     answer = respond(query, uid)
     assert answer[2] is None  # A text-only approval has no flyer to send.
