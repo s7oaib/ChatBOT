@@ -7317,6 +7317,7 @@ def get_admin_dashboard():
         <div id="tab-instagram-content" class="panel-card" data-group="instagram_content" style="display:none;">
             <div class="admin-page-heading"><div><h2>Instagram Media</h2><p>Visual workspace for exact Meta content IDs. Captions are context only; they never establish routing facts.</p></div><div style="display:flex;gap:8px;"><button class="btn-secondary" type="button" onclick="syncInstagramMediaNow()">↻ Sync Now</button><button class="btn-secondary" type="button" onclick="loadInstagramContentGallery()">Refresh</button></div></div>
             <div class="result-box info" id="igMediaSyncStatus" style="display:block;">Auto Sync: OFF · Auto Route: OFF</div>
+            <div class="gallery-toolbar" aria-label="Instagram media sync diagnostics"><label class="ig-media-muted" for="igMediaDiagnosticPermalink">Optional exact Post/Reel permalink diagnostic</label><input class="field-control" id="igMediaDiagnosticPermalink" type="url" placeholder="https://www.instagram.com/p/.../"></div>
             <div class="gallery-toolbar" aria-label="Post and Reel filters">
                 <input class="field-control" id="igContentSearch" type="search" placeholder="Search Posts, Reels, or Topics..." autocomplete="off">
                 <button class="ig-media-filter active" data-content-filter="all" type="button" onclick="setInstagramContentFilter('all')">All</button>
@@ -8972,11 +8973,31 @@ THIS WEEK'S BENGAL SPECIALS
         async function syncInstagramMediaNow() {
             const status = document.getElementById('igMediaSyncStatus');
             status.className = 'result-box info'; status.innerText = 'Syncing Instagram media…';
-            const response = await fetch('/admin/instagram-media/sync', { method: 'POST', headers: getAuthHeaders() });
-            const data = await response.json().catch(() => ({}));
-            status.className = `result-box ${response.ok && data.status !== 'FAILED' ? 'success' : 'error'}`;
-            status.innerText = data.status === 'NOT_CONFIGURED' ? 'NOT_CONFIGURED · Auto Sync: OFF · Auto Route: OFF' : `${data.status || 'FAILED'} · ${data.discovered || 0} new, ${data.updated || 0} updated, ${data.unchanged || 0} unchanged`;
-            await loadInstagramContentGallery();
+            const diagnostic = document.getElementById('igMediaDiagnosticPermalink')?.value.trim() || '';
+            const params = new URLSearchParams();
+            if (diagnostic) params.set('diagnostic_permalink', diagnostic);
+            const endpoint = `/admin/instagram-media/sync${params.size ? `?${params}` : ''}`;
+            try {
+                const response = await fetch(endpoint, { method: 'POST', headers: getAuthHeaders() });
+                const data = await response.json().catch(() => ({}));
+                const completed = response.ok && data.status === 'COMPLETED' && data.pagination_complete === true;
+                status.className = `result-box ${completed ? 'success' : response.ok && data.status === 'NOT_CONFIGURED' ? 'info' : 'error'}`;
+                if (data.status === 'NOT_CONFIGURED') {
+                    status.innerText = 'NOT_CONFIGURED · Auto Sync: OFF · Auto Route: OFF';
+                } else {
+                    const identity = data.current_username && data.current_account_id
+                        ? ` · Account @${data.current_username} (${data.current_account_id})` : '';
+                    const pagination = ` · Pagination ${data.pagination_complete ? 'complete' : 'incomplete'} (${Number(data.pages || 0)} pages)`;
+                    const cause = data.failure_category ? ` · Cause: ${String(data.failure_category).replace(/[^A-Za-z0-9 _-]/g, '').slice(0, 80)}` : '';
+                    const target = data.diagnostic_permalink
+                        ? ` · Exact permalink: ${data.diagnostic_permalink.status || 'unknown'} (${data.diagnostic_permalink.canonical_permalink || 'invalid'})` : '';
+                    status.innerText = `${data.status || 'FAILED'} · ${data.discovered || 0} new, ${data.updated || 0} updated, ${data.unchanged || 0} unchanged${identity}${pagination}${cause}${target}`;
+                }
+                await loadInstagramContentGallery();
+            } catch (_error) {
+                status.className = 'result-box error';
+                status.innerText = 'FAILED · Admin could not reach the media sync endpoint.';
+            }
         }
 
         function openContentDetails(kind, item) {

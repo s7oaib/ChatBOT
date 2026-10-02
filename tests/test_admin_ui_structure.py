@@ -672,6 +672,19 @@ def test_admin_redesign_has_dashboard_gallery_and_drawer(page):
     assert "function openContentDetails" in page
 
 
+def test_instagram_media_sync_shows_sanitized_failure_category_and_permalink_result(page):
+    assert 'id="igMediaDiagnosticPermalink"' in page
+    sync = page[page.index("async function syncInstagramMediaNow"):]
+    sync = sync[:sync.index("function openContentDetails")]
+    assert "diagnostic_permalink" in sync
+    assert "data.failure_category" in sync
+    assert "data.current_username" in sync
+    assert "data.current_account_id" in sync
+    assert "data.pagination_complete" in sync
+    assert "data.diagnostic_permalink.status" in sync
+    assert "access_token" not in sync
+
+
 def test_handoff_notifications_are_global_and_persistent(page):
     assert 'id="handoffBell"' in page
     assert 'id="handoffSidebarBadge"' in page
