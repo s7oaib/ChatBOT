@@ -4,11 +4,12 @@ Previously validated unrelated application code is **frozen**. Change only what 
 
 ## Current baselines
 
-- Accepted application/runtime and comparison baseline: `4071402099390dafc28c22c8c2a35920e385d470`.
-- Production acceptance: Railway `709ed586-3b7a-4137-9de7-d0cd0667e9c1`, SUCCESS, health/Admin 200.
-- Final exact-candidate manual (merge tree identical) [full CI 36938786442](https://github.com/s7oaib/ChatBOT/actions/runs/36938786442): 3432 passed, zero failed, one existing Starlette/httpx warning; critical flake8 and schema checks PASS.
-- Merge tree `99a560be27af38f9ce95a555a3eb0338d6a33b53` equals tested feature head `72150044d5222b279170bf656021a154076dc59d`.
-- The later handover docs/metadata merge/tag is distinct from this runtime baseline. Do not advance the baseline for each docs-only commit or rerun full merely for Markdown.
+- Accepted application/runtime and comparison baseline: `f58b1f4157e32361487320f6db2ec72bcdba3342`.
+- Production acceptance: Railway `5b1abab4-c414-4662-9a2f-ce41000eb3bb`, SUCCESS, exact accepted runtime SHA deployed with normal application startup.
+- Final complete regression: **3715 passed, 0 failed**, one existing Starlette/httpx warning, on tested HEAD `113aaec38fdb32c2f3f530e00b5a37e032f98a01`.
+- Tested HEAD tree `b0e8882c602a376862d5b76121ff31fd654af15d` is identical to accepted merge `f58b1f4157e32361487320f6db2ec72bcdba3342`.
+- Final focused suites: **399 passed**. Mandatory smoke: **68 passed**. GitHub fast current-contract gate completed successfully for the final HEAD.
+- Later handover documentation/baseline metadata commits are non-runtime and distinct from this runtime baseline. Do not advance the application baseline for each docs-only commit or rerun the full suite merely for Markdown/metadata.
 
 `test_baseline.json` records the comparison baseline used by `scripts/run_impacted_tests.py`. It never auto-advances.
 
