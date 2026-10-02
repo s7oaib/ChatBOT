@@ -4545,6 +4545,32 @@ class Database:
             conn.commit()
             return True
 
+    def reset_response_template_override(self, template_id: str, actor: Optional[str] = None) -> bool:
+        """Remove only the editable copy, preserving it as an auditable version."""
+        template_id = (template_id or "").strip()
+        if not template_id:
+            return False
+        with self.get_connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            current = conn.execute(
+                "SELECT * FROM response_template_overrides WHERE template_id = ?",
+                (template_id,),
+            ).fetchone()
+            if not current:
+                conn.rollback()
+                return False
+            current = dict(current)
+            conn.execute(
+                "INSERT INTO response_template_override_versions "
+                "(template_id, response, status, changed_at, changed_by, change_reason) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (template_id, current["response"], current.get("status") or "ACTIVE",
+                 datetime.utcnow().isoformat(), actor, "reset_override"),
+            )
+            conn.execute("DELETE FROM response_template_overrides WHERE template_id = ?", (template_id,))
+            conn.commit()
+            return True
+
     def get_response_template_override_versions(self, template_id: str) -> List[Dict[str, Any]]:
         with self.get_connection() as conn:
             rows = conn.execute(

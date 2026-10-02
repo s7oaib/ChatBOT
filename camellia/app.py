@@ -5119,6 +5119,7 @@ def _system_template_public(template: Dict[str, Any], override: Optional[Dict[st
         "priority": "PROTECTED",
         "editable": bool(answer) and not bool(template.get("escalate")),
         "protected_runtime": True,
+        "has_override": bool(override),
         "created_at": None,
         "updated_at": (override or {}).get("updated_at"),
         "updated_by": (override or {}).get("updated_by"),
@@ -5345,6 +5346,34 @@ async def edit_response_library_system_template(
     if not db.save_response_template_override(template_id, response, actor, status=status, previous_response=default_response):
         raise HTTPException(status_code=400, detail="Could not save response override")
     return {"status": "success", "item": _system_template_public(template, db.get_response_template_override(template_id))}
+
+
+@app.post("/admin/response-library/system/{template_id}/reset-override")
+async def reset_response_library_system_override(
+    template_id: str,
+    request: Request,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """Explicitly remove only a managed override; the JSON SYSTEM template is immutable."""
+    require_admin(x_admin_key, x_admin_pin)
+    template = next((t for t in (responder.qa_data or {}).get("templates", []) if t.get("id") == template_id), None)
+    if not template:
+        raise HTTPException(status_code=404, detail="System template not found")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if body.get("confirm_reset") is not True:
+        raise HTTPException(status_code=400, detail="Explicit confirmation is required to reset this response override")
+    actor = body.get("actor") or "client_admin_dashboard"
+    if not db.reset_response_template_override(template_id, actor):
+        raise HTTPException(status_code=404, detail="No operator response override exists")
+    return {
+        "status": "reset",
+        "override_removed": True,
+        "item": _system_template_public(template, None),
+    }
 
 
 @app.get("/admin/response-library/system/{template_id}/versions")
@@ -12583,6 +12612,7 @@ Non-Veg:
                 ${expandButton}
                 <div style="display:flex;gap:6px;flex-wrap:wrap;">
                     ${editButton}
+                    ${item.has_override ? `<button class="btn-danger" style="padding:4px 8px;font-size:.72rem;" onclick="resetSystemResponseOverride('${escapeHtml(item.template_id)}')">Reset / Delete Override</button>` : ''}
                     <button class="btn-secondary" style="padding:4px 8px;font-size:.72rem;" onclick="previewSystemResponse('${escapeHtml(item.template_id)}')">Preview</button>
                     <button class="btn-secondary" style="padding:4px 8px;font-size:.72rem;" onclick="testSystemResponse('${escapeHtml(item.template_id)}')">Test</button>
                     <button class="btn-secondary" style="padding:4px 8px;font-size:.72rem;" onclick="historySystemResponse('${escapeHtml(item.template_id)}')">History</button>
@@ -12690,6 +12720,22 @@ Non-Veg:
                 await loadCustomQa();
                 alert('Response saved and active for the next matching customer message.');
             } catch (e) { alert('Could not save response.'); }
+        }
+
+        async function resetSystemResponseOverride(templateId) {
+            const item = systemResponseItems.find(row => row.template_id === templateId);
+            if (!item || !item.has_override) return;
+            if (!window.confirm('Reset / Delete Override for this protected SYSTEM response? Only the operator override will be removed. The protected template, triggers and audit history will remain.')) return;
+            try {
+                const resp = await fetch(`/admin/response-library/system/${encodeURIComponent(templateId)}/reset-override`, {
+                    method: 'POST', headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ confirm_reset: true, actor: 'client_admin_dashboard' }),
+                });
+                const data = await resp.json().catch(() => ({}));
+                if (!resp.ok) { alert(data.detail || 'Could not reset response override.'); return; }
+                await loadCustomQa();
+                alert('Override removed. The protected SYSTEM response is active again; history was preserved.');
+            } catch (e) { alert('Could not reset response override.'); }
         }
 
         async function previewSystemResponse(templateId) {
