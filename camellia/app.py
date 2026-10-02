@@ -10255,7 +10255,11 @@ THIS WEEK'S BENGAL SPECIALS
             const products = document.getElementById('igStoryPriorityPicker');
             const scopes = document.getElementById('igStoryKnowledgeScope');
             const activeTopics = igTopics.filter(topic => topic.active !== false);
-            if (topics) topics.innerHTML = '<option value="">Select Topic</option>' + activeTopics.map(topic => `<option value="${escapeHtml(topic.topic_id)}">${escapeHtml(topic.name)}</option>`).join('');
+            const selectedTopicId = topics?.value || '';
+            if (topics) {
+                topics.innerHTML = '<option value="">Select Topic</option>' + activeTopics.map(topic => `<option value="${escapeHtml(topic.topic_id)}">${escapeHtml(topic.name)}</option>`).join('');
+                if (activeTopics.some(topic => topic.topic_id === selectedTopicId)) topics.value = selectedTopicId;
+            }
             const emptyHelp = document.getElementById('igStoryTopicEmptyHelp');
             if (emptyHelp) emptyHelp.style.display = activeTopics.length ? 'none' : 'block';
             if (menus) refreshMenuChoicePicker('igStoryMenuPicker', topics ? topics.value : '', menus.value || '__inherit__');

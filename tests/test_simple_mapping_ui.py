@@ -26,6 +26,9 @@ def test_mapping_ui_uses_one_source_description_and_manage_topics():
     assert 'id="igStoryMenuSelected"' in page
     assert 'id="igMenuSelected"' in page
     assert 'id="igStoryDeleteSection"' in page
+    story_picker = page[page.index('function populateInstagramStoryPickers()'):page.index('function onInstagramStoryTopicChange()')]
+    assert "const selectedTopicId = topics?.value || '';" in story_picker
+    assert "topics.value = selectedTopicId" in story_picker
     assert '.source-map-form' in page and '@media (max-width:660px)' in page
     assert 'id="igMediaAutoReply"' in page and 'id="igStoryActive"' in page
 
