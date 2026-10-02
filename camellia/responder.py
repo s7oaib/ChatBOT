@@ -2876,7 +2876,7 @@ class DeterministicResponder:
                 and str(source.get("routing_topic") or "").casefold() in {"subscription", "everyday meal subscription"}
                 and client_qa.effective_entry("subscription_details_client")
             )
-            if home_menu or (source_menu_request and not legacy_subscription_request and (menu_request or menu_id or mode == "SELECTED")):
+            if home_menu or (source_menu_request and not legacy_subscription_request and (menu_request or menu_id or mode == "SELECTED" or not str(source.get("source_description") or "").strip())):
                 menu = db.get_menu_catalogue_entry(str(menu_id)) if menu_id and not home_menu else None
                 image = current_menu_image(str(menu_id)) if mode != "NONE" and menu and menu.get("active") else None
                 description = str(source.get("source_description") or "").strip()
@@ -3321,9 +3321,9 @@ class DeterministicResponder:
             and source_detail_request
             and source_route.get("response_mode", "CUSTOM") == "CUSTOM"
             and source_topic
-            and str(source_topic.get("description") or "").strip()
+            and str(source_route.get("source_description") or "").strip()
         ):
-            description = str(source_topic["description"]).strip()
+            description = str(source_route["source_description"]).strip()
             mode = str(source_route.get("menu_mode") or "INHERIT").strip().upper()
             menu_id = source_route.get("menu_id")
             if mode == "INHERIT" and not menu_id:

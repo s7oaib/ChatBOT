@@ -163,6 +163,14 @@ def test_description_only_uses_own_copy_not_topic(customer):
     assert answer[0] == "Source copy" and answer[3] is None
 
 
+def test_empty_legacy_custom_route_cannot_borrow_topic_description(customer):
+    route, topic = source(customer, mode="NONE")
+    instagram_routing.update_topic(topic["topic_id"], description="Topic classification text")
+    answer = reply(customer, "tell me more")
+    assert not answer[1] and answer[3] is None
+    assert "Topic classification text" not in answer[0]
+
+
 def test_faq_and_unknown_question_escape_preserve_draft(customer, eligible_weekly_asset):
     reply(customer, "2 boxes Sondesh Gurgaon Friday dinner")
     before = deepcopy(customer[1]["order_intake_draft"])
