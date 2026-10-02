@@ -57,23 +57,103 @@ def test_chatbot_picks_up_a_published_image_with_no_restart(image_store, monkeyp
     monkeypatch.setattr(responder_module, "db", image_store)
 
     # Before any publish, the responder falls back to the built-in default.
-    assert responder_module.current_menu_image("aamar_mishti", "/images/AAMAR%20MISHTI.jpeg") == "/images/AAMAR%20MISHTI.jpeg"
+    assert responder_module.current_menu_image("aamar_mishti") == "/images/AAMAR%20MISHTI.jpeg"
 
     menu_images.save_draft("aamar_mishti", _png(), "image/png", "tester")
     first = menu_images.publish("aamar_mishti")
-    assert responder_module.current_menu_image("aamar_mishti", "/images/AAMAR%20MISHTI.jpeg") == first["image_path"]
+    assert responder_module.current_menu_image("aamar_mishti") == first["image_path"]
 
     # A second publish supersedes the first, and the lookup reflects it at once.
     menu_images.save_draft("aamar_mishti", _png("blue"), "image/png", "tester")
     second = menu_images.publish("aamar_mishti")
     assert second["image_path"] != first["image_path"]
-    assert responder_module.current_menu_image("aamar_mishti", "/images/AAMAR%20MISHTI.jpeg") == second["image_path"]
+    assert responder_module.current_menu_image("aamar_mishti") == second["image_path"]
 
     # Restoring the first (now archived) version immediately restores it as
     # the chatbot's answer too — no code edit, no redeploy.
     restored = menu_images.restore("aamar_mishti", first["id"])
-    lookup = responder_module.current_menu_image("aamar_mishti", "/images/AAMAR%20MISHTI.jpeg")
+    lookup = responder_module.current_menu_image("aamar_mishti")
     assert lookup == restored["image_path"] == first["image_path"]
+
+
+@pytest.mark.parametrize("menu_key", ["aamar_mishti", "signature"])
+def test_customer_template_uses_only_the_latest_published_menu_version(menu_key, image_store, monkeypatch):
+    from camellia import responder as responder_module
+
+    monkeypatch.setattr(responder_module, "db", image_store)
+    template_id = {
+        "aamar_mishti": "aamar_mishti_collection",
+        "signature": "signature_collection",
+    }[menu_key]
+    bot = responder_module.DeterministicResponder.__new__(responder_module.DeterministicResponder)
+
+    menu_images.save_draft(menu_key, _png("red"), "image/png", "tester")
+    first = menu_images.publish(menu_key)
+    _, first_images = bot._format_dynamic_response(template_id, "", user_message=menu_key)
+    assert first_images == [first["image_path"]]
+
+    menu_images.save_draft(menu_key, _png("blue"), "image/png", "tester")
+    second = menu_images.publish(menu_key)
+    _, second_images = bot._format_dynamic_response(template_id, "", user_message=menu_key)
+    assert second_images == [second["image_path"]]
+    assert first["image_path"] not in second_images
+
+
+def test_customer_template_fails_closed_when_menu_is_inactive(image_store, monkeypatch):
+    from camellia import menu_catalogue, responder as responder_module
+
+    monkeypatch.setattr(responder_module, "db", image_store)
+    monkeypatch.setattr(menu_catalogue, "db", image_store)
+    bot = responder_module.DeterministicResponder.__new__(responder_module.DeterministicResponder)
+    menu_images.save_draft("aamar_mishti", _png(), "image/png", "tester")
+    menu_images.publish("aamar_mishti")
+    menu_catalogue.update_menu("aamar_mishti", active=False)
+
+    _, images = bot._format_dynamic_response("aamar_mishti_collection", "", user_message="Collection 1 menu")
+    assert images is None
+
+
+def test_customer_template_never_cross_substitutes_a_collection(image_store, monkeypatch):
+    from camellia import menu_catalogue, responder as responder_module
+
+    monkeypatch.setattr(responder_module, "db", image_store)
+    monkeypatch.setattr(menu_catalogue, "db", image_store)
+    bot = responder_module.DeterministicResponder.__new__(responder_module.DeterministicResponder)
+    menu_images.save_draft("signature", _png(), "image/png", "tester")
+    menu_images.publish("signature")
+    menu_catalogue.update_menu("aamar_mishti", active=False)
+
+    _, collection_1 = bot._format_dynamic_response("aamar_mishti_collection", "", user_message="Collection 1 menu")
+    _, collection_2 = bot._format_dynamic_response("signature_collection", "", user_message="Collection 2 menu")
+    assert collection_1 is None
+    assert collection_2 == [menu_images.current_url("signature")]
+
+
+@pytest.mark.parametrize("menu_key", ["aamar_mishti", "signature"])
+def test_approved_qa_menu_blocks_use_current_published_version(menu_key, image_store, monkeypatch):
+    from camellia import responder as responder_module
+
+    monkeypatch.setattr(responder_module, "db", image_store)
+    bot = responder_module.DeterministicResponder.__new__(responder_module.DeterministicResponder)
+    template_id = "sondesh_details"
+    qa_id = "sondesh_details_client"
+    key = "aamar_menu" if menu_key == "aamar_mishti" else "signature_menu"
+
+    menu_images.save_draft(menu_key, _png("red"), "image/png", "tester")
+    first = menu_images.publish(menu_key)
+    match = type("Match", (), {"asset_keys": (key,)})()
+    monkeypatch.setattr(responder_module.client_qa, "resolve_effective_approved_qa_by_id", lambda _qa_id: match)
+    monkeypatch.setattr(responder_module.approved_response_alignment, "effective_binding", lambda _template: (qa_id, "approved"))
+    monkeypatch.setattr(responder_module.approved_response_alignment, "APPROVED_QA_BINDINGS", {template_id: (qa_id, "approved")})
+
+    _, first_images = bot._format_dynamic_response(template_id, "approved")
+    assert first_images == [first["image_path"]]
+
+    menu_images.save_draft(menu_key, _png("blue"), "image/png", "tester")
+    second = menu_images.publish(menu_key)
+    _, second_images = bot._format_dynamic_response(template_id, "approved")
+    assert second_images == [second["image_path"]]
+    assert first["image_path"] not in second_images
 
 
 def test_weekly_vegetarian_publish_overrides_the_flyer_rotation(image_store, monkeypatch):

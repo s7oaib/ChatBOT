@@ -260,7 +260,8 @@ def test_sondesh_without_weekly_menu_preserves_all_other_approved_text(
     assert [
         block["asset_key"] for block in facts["ordered_response_blocks"] if block["kind"] != "TEXT"
     ] == ["aamar_menu", "signature_menu"]
-    assert result[3] == ["/images/AAMAR%20MISHTI.jpeg", "/images/Signature%20Sondesh.jpeg"]
+    from camellia import menu_images
+    assert result[3] == [menu_images.current_url("aamar_mishti"), menu_images.current_url("signature")]
 
 
 def test_sondesh_topic_survives_reload_but_not_global_ttl(tmp_path, monkeypatch):

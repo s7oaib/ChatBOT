@@ -391,4 +391,9 @@ def current_url(menu_key: str, fallback: Optional[str] = None) -> Optional[str]:
         return row.get("image_path")
     if db.has_menu_image_archive(menu_key):
         return None
+    # Built-in menu assets are resolved here so callers never carry a stale
+    # customer-facing fallback path. An explicit fallback remains supported
+    # for legacy non-Sondesh menus.
+    if menu_key in _BUILTIN_DEFAULT_IMAGES:
+        return _fallback(menu_key)
     return fallback if fallback is not None else _fallback(menu_key)
