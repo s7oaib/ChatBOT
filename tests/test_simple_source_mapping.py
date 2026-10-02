@@ -8,6 +8,7 @@ from camellia import app as app_module, client_qa
 from camellia.config import config
 from camellia.database import Database
 from camellia.instagram_routing import decode_route, route_for_inbound, validate_route_payload
+from camellia import menu_images
 from camellia.responder import responder
 from camellia.session_memory import session_memory
 
@@ -167,7 +168,15 @@ def test_explicit_subscription_price_keeps_approved_copy_and_relevant_mapped_ass
     facts = session_memory.get_facts(user_id, "instagram")
     facts["source_route"] = {**_source("reel", "meta-reel"), "routing_id": 44,
                              "menu_mode": "SELECTED", "menu_id": "subscription_rate_chart"}
-    monkeypatch.setattr("camellia.responder.current_menu_image", lambda menu_id: "/images/mapped-chart.jpg")
+    import camellia.responder as responder_module
+    real_current_menu_image = responder_module.current_menu_image
+
+    def mapped_asset_resolver(menu_id, *args, **kwargs):
+        if menu_id == "subscription_rate_chart":
+            return "/images/mapped-chart.jpg"
+        return real_current_menu_image(menu_id, *args, **kwargs)
+
+    monkeypatch.setattr(responder_module, "current_menu_image", mapped_asset_resolver)
     answer, matched, _template, images = responder.match_and_respond(
         "What is the subscription price?", user_id=user_id, channel="instagram"
     )
@@ -178,6 +187,8 @@ def test_explicit_subscription_price_keeps_approved_copy_and_relevant_mapped_ass
     )
     assert matched and answer == client_qa.REGISTRY_BY_ID["sondesh_details_client"].answer
     assert "/images/mapped-chart.jpg" not in (images or [])
+    assert menu_images.current_url("aamar_mishti") in (images or [])
+    assert menu_images.current_url("signature") in (images or [])
 
 
 def test_greeting_does_not_use_source_description():
