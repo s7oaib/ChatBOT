@@ -327,8 +327,10 @@ def test_client_mapping_ui_hides_route_mode():
     assert "igStoryFilter === 'HISTORY'" not in html
 
 
-def test_media_admin_list_paginates_bounds_page_size_and_searches_topics(mapping_db):
+def test_media_admin_list_paginates_bounds_page_size_and_searches_topics(mapping_db, monkeypatch):
     database, _path = mapping_db
+    owner_id = "17841455615744812"
+    monkeypatch.setattr(config, "INSTAGRAM_ACCOUNT_ID", owner_id)
     client = TestClient(app_module.app)
     headers = {"x-admin-key": config.ADMIN_API_KEY}
     topic = client.post(
@@ -341,6 +343,8 @@ def test_media_admin_list_paginates_bounds_page_size_and_searches_topics(mapping
             "instagram_media_id": f"page-media-{index:02d}", "media_type": "IMAGE",
             "permalink": f"https://www.instagram.com/p/PAGE{index:02d}/", "shortcode": f"PAGE{index:02d}",
             "published_at": f"2026-09-{(index % 28) + 1:02d}T00:00:00",
+            "owner_instagram_account_id": owner_id, "owner_username": "camellia.artisanal",
+            "inventory_state": "CURRENT",
         })
         media_ids.append(media["id"])
     route = database.save_instagram_source_route(validate_route_payload({

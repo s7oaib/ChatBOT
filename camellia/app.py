@@ -3546,7 +3546,7 @@ def list_instagram_media(
     items, total = db.list_instagram_media(page=page, page_size=page_size, media_type=media_type,
         route_mode=route_mode, needs_review=needs_review, topic_id=topic_id, search=search,
         sort=sort, source_type=source_type, mapping_status=mapping_status,
-        context_active=context_active)
+        context_active=context_active, owner_account_id=config.INSTAGRAM_ACCOUNT_ID)
     for item in items:
         item["needs_review"] = bool(item["needs_review"])
         item["active"] = bool(item["active"])
@@ -3565,9 +3565,12 @@ def get_instagram_media(item_id: int, x_admin_key: Optional[str] = Header(None),
 
 
 @app.post("/admin/instagram-media/sync")
-def sync_instagram_media_route(x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+def sync_instagram_media_route(
+    diagnostic_permalink: Optional[str] = Query(None, max_length=500),
+    x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None),
+):
     require_admin(x_admin_key, x_admin_pin)
-    return sync_instagram_media(db)
+    return sync_instagram_media(db, diagnostic_permalink=diagnostic_permalink)
 
 
 @app.get("/admin/instagram-media/sync-status")
@@ -3836,10 +3839,20 @@ async def save_instagram_route(
         existing = db.get_instagram_source_route(routing_id) if routing_id else None
         if not existing and routing_id is None:
             url = str(body.get("canonical_url") or body.get("url") or "").strip()
-            identities = {"canonical_url": normalize_instagram_url(url).get("canonical_url") if url else None,
-                          "media_id": body.get("story_media_id") or body.get("media_id"), "ad_id": body.get("ad_id")}
-            existing = next((row for row in db.list_instagram_source_routes()
-                             if any(value and row.get(key) == value for key, value in identities.items())), None)
+            identities = {
+                "canonical_url": normalize_instagram_url(url).get("canonical_url") if url else None,
+                "media_id": body.get("story_media_id") or body.get("media_id"),
+                "ad_id": body.get("ad_id"),
+            }
+            routes = db.list_instagram_source_routes()
+            # A supplied Post/Reel identity owns route editing. The Ad ID is
+            # an explicit alias/binding to that source, never a reason to
+            # overwrite a different source route that happens to use it.
+            existing = next((row for key in ("canonical_url", "media_id")
+                             if identities[key]
+                             for row in routes if row.get(key) == identities[key]), None)
+            if existing is None and identities["ad_id"]:
+                existing = next((row for row in routes if row.get("ad_id") == identities["ad_id"]), None)
             if existing:
                 routing_id = int(existing["routing_id"])
         route = validate_route_payload(prepare_source_response(body, existing))
