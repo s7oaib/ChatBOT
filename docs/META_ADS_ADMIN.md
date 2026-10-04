@@ -5,13 +5,24 @@ Ads is the paid inventory workspace. Posts & Reels and Stories manage source map
 ## Operator workflow
 
 1. Open Ads and select **Sync Now**. Check last successful sync and any warning.
-2. Choose Active, Unmapped, Mapped, Inactive or All. Only Meta `effective_status=ACTIVE` counts as active.
-3. Verify the exact creative media ID or canonical Instagram permalink. Names and thumbnails are display data.
-4. If an exact, unambiguous existing source is found, choose **Use Existing Mapping**. Otherwise Map Ad opens cards showing active existing source identities, topics and descriptions.
-5. Confirm the existing source. PR #58's bind endpoint attaches the exact Ad ID to that route; it creates no route. Re-read MAPPED and BOUND/Binding ON.
-6. Change Mapping, Disable/Enable Binding and History operate on local bindings. Edit Mapping opens the existing source editor. Inactive ads keep mapping and history.
+2. Choose Active, Unmapped, Mapped, Inactive or All. Active shows unique promoted identity groups among Meta `effective_status=ACTIVE` objects; the summary separately reports raw ACTIVE Ad IDs. This is configured status, not proof of current delivery or Ads Library visibility. All, Unmapped, Mapped and Inactive retain individual Ad objects.
+3. Enter an exact Meta Ad ID to locate its group in Active, or its individual card in other views. Expand **Manage one exact Ad ID** to inspect member status and use that member's controls. A search never selects a sibling Ad ID for binding.
+4. Verify the exact creative media ID or canonical Instagram permalink. Names and thumbnails are display data.
+5. If an exact, unambiguous existing source is found, choose **Use Existing Mapping**. Otherwise Map Ad opens cards showing active existing source identities, topics and descriptions.
+6. Confirm the existing source. PR #58's bind endpoint attaches the exact Ad ID to that route; it creates no route. Re-read MAPPED and BOUND/Binding ON.
+7. Change Mapping, Disable/Enable Binding and History operate on local bindings. Edit Mapping opens the existing source editor. Inactive ads keep mapping and history.
 
 No automatic binding or Marketing write is performed. Sync failure does not interrupt customer replies: customer routing reads only local exact bindings and the existing approved-answer/menu/source pipeline. A previous human-handoff conversation must be resumed by an authorized operator before it can serve as a fresh automated-reply acceptance test.
+
+Presentation grouping prefers exact Instagram media ID, then canonical permalink, then creative ID when Instagram identity is absent, then the individual Ad ID. Conflicting exact media/permalink identities remain separate. An unambiguous permalink-only member may join its media group. Titles, captions, thumbnails and bindings never establish group identity. Group membership is not routing authority: each action still submits one exact Ad ID through PR #58.
+
+## Production grouping diagnostic — 5 October 2026 IST
+
+Read-only inspection of the existing production Admin inventory before this change found **129 raw ACTIVE Ad IDs → 129 unique creative IDs → 94 unique exact Instagram media IDs / canonical permalinks**. Every active row had both Instagram identity fields, with one-to-one media/permalink pairs. There were 94 presentation groups: 35 additional Ad objects repeat existing promoted posts. No Meta request, sync, binding, source update or credential change was needed for this diagnostic.
+
+The Norom Pak Sondesh group has exact media `18132043057680460` and permalink `https://www.instagram.com/p/DdnULrmA3J2/`. Its five members are `120246207525530540`, `120246242722460540`, `120246291802650540`, `120246338108980540` and `120246385008280540`.
+
+This snapshot supports Active=94, not 3. Duplicate grouping explains 129 versus 94; the reported three visible Ads Library creatives cannot be explained by deduplicating these stored authoritative fields. Determining the remaining difference requires matching Ads Library account/filter/time scope and current delivery evidence; this release neither guesses delivery nor manufactures a count of three.
 
 ## Server configuration and diagnostics
 
