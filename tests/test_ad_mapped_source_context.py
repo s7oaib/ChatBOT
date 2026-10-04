@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
+from starlette.background import BackgroundTasks
 
 from camellia import app as app_module, database, handoff, instagram_chatbot_control
 from camellia import instagram_routing, menu_catalogue, menu_images, menu_review, responder as responder_module
@@ -70,6 +72,15 @@ def _process(ad_customer, text, entry):
          patch.object(app_module.escalator, "handle_escalation"):
         app_module._process_instagram_event(sender, text, entry.ad_id, entry_point=entry)
     return send
+
+
+def _dispatch_durable_instagram_events(events):
+    background_tasks = BackgroundTasks()
+    durable_tasks = app_module._DurableInstagramTasks(background_tasks)
+    app_module._dispatch_instagram_payload(
+        {"entry": [{"id": "test-account", "messaging": events}]}, durable_tasks,
+    )
+    asyncio.run(background_tasks())
 
 
 @pytest.mark.parametrize("kind,ad_id", [("post", "ad-post-42"), ("reel", "ad-reel-42")])
@@ -173,6 +184,7 @@ def test_ad_id_binding_is_durable_and_cannot_be_ambiguous(ad_customer):
         conn.execute("UPDATE instagram_source_routes SET ad_id=? WHERE routing_id=?", ("durable-ad", other["routing_id"]))
         conn.commit()
     assert route_for_inbound(ad_id="durable-ad", media_id=None) == (None, None)
+    assert ad_customer[2].instagram_ad_binding_status("durable-ad") == "AMBIGUOUS"
 
 
 def test_admin_can_persist_an_exact_ad_binding_on_an_existing_mapped_source(ad_customer):
@@ -201,6 +213,181 @@ def test_admin_can_persist_an_exact_ad_binding_on_an_existing_mapped_source(ad_c
     assert saved["source_description"] == source_payload["source_description"]
     assert saved["menu_id"] == "aamar_mishti"
     assert route_for_inbound(ad_id="admin-exact-ad-123", media_id=None)[0]["routing_id"] == route_id
+
+
+def test_multiple_ads_can_share_one_exact_source_mapping(ad_customer):
+    route = _mapped_source(ad_customer, "post", "ad-alias-primary")
+    db = ad_customer[2]
+    db.bind_instagram_ad("ad-alias-secondary", route["routing_id"], bound_by="test")
+    db.bind_instagram_ad("ad-alias-tertiary", route["routing_id"], bound_by="test")
+
+    for ad_id in ("ad-alias-primary", "ad-alias-secondary", "ad-alias-tertiary"):
+        resolved, method = route_for_inbound(ad_id=ad_id, media_id=None)
+        assert method == "ad_id"
+        assert resolved["routing_id"] == route["routing_id"]
+    assert {item["ad_id"] for item in db.list_instagram_ad_bindings(route["routing_id"])} == {
+        "ad-alias-primary", "ad-alias-secondary", "ad-alias-tertiary",
+    }
+
+
+def test_one_ad_id_cannot_bind_to_two_active_routes(ad_customer):
+    first = _mapped_source(ad_customer, "post", "unique-bind-ad")
+    second_topic = instagram_routing.create_topic("Second exact mapping")
+    second = ad_customer[2].save_instagram_source_route(validate_route_payload({
+        "source_type": "reel", "url": "https://www.instagram.com/reel/SECOND123/",
+        "topic_id": second_topic["topic_id"], "source_description": "Second source", "active": True,
+    }))
+    with pytest.raises(ValueError, match="already bound"):
+        ad_customer[2].bind_instagram_ad("unique-bind-ad", second["routing_id"], bound_by="test")
+    assert route_for_inbound(ad_id="unique-bind-ad", media_id=None)[0]["routing_id"] == first["routing_id"]
+
+
+def test_unknown_ads_are_observed_and_can_be_bound_by_admin(ad_customer):
+    sender = ad_customer[0]
+    db = ad_customer[2]
+    route = _mapped_source(ad_customer, "post", "known-source-ad")
+    event = {
+        "sender": {"id": sender},
+        "message": {"mid": "unknown-ad-event-1", "text": "Hello", "referral": {
+            "source": "ADS", "ad_id": "new-unmapped-ad", "ads_context_data": {"ad_title": "Untrusted name"},
+        }},
+    }
+    app_module._dispatch_instagram_payload({"entry": [{"id": "test-account", "messaging": [event]}]}, BackgroundTasks())
+
+    observed = db.list_observed_instagram_ads()
+    assert any(item["ad_id"] == "new-unmapped-ad" and item["display_title"] == "Untrusted name" for item in observed)
+    assert route_for_inbound(ad_id="new-unmapped-ad", media_id=None) == (None, None)
+
+    client = TestClient(app_module.app)
+    response = client.post("/admin/instagram-ads/new-unmapped-ad/bind",
+                           headers={"x-admin-key": config.ADMIN_API_KEY},
+                           json={"routing_id": route["routing_id"]})
+    assert response.status_code == 200, response.text
+    assert route_for_inbound(ad_id="new-unmapped-ad", media_id=None)[0]["routing_id"] == route["routing_id"]
+    assert db.list_instagram_ad_binding_history("new-unmapped-ad")[-1]["action"] == "BOUND"
+
+
+@pytest.mark.parametrize("same_payload,order", [
+    (False, "post_first"), (False, "ad_first"),
+    (True, "post_first"), (True, "ad_first"),
+])
+def test_both_ad_post_race_orders_use_durable_dispatch_and_are_idempotent(ad_customer, same_payload, order):
+    sender = ad_customer[0]
+    db = ad_customer[2]
+    route = _mapped_source(ad_customer, "post", "race-bound-ad")
+    suffix = uuid.uuid4().hex
+    post = {
+        "sender": {"id": sender}, "timestamp": 1700000000000,
+        "message": {"mid": f"shared-post-{suffix}", "attachments": [{"type": "ig_post", "payload": {
+            "ig_post_media_id": "race-post-media-123", "title": "non-authoritative",
+        }}]},
+    }
+    ads = {
+        "sender": {"id": sender}, "timestamp": 1700000000100,
+        "message": {"mid": f"ads-referral-{suffix}", "text": "What is the price?", "referral": {
+            "source": "ADS", "ad_id": "race-bound-ad",
+        }},
+    }
+    ordered = [post, ads] if order == "post_first" else [ads, post]
+    with patch.object(app_module, "send_instagram_reply", return_value={"status": "sent", "message_id": "sent-test-mid"}) as send, \
+         patch.object(app_module.escalator, "handle_escalation"):
+        if same_payload:
+            _dispatch_durable_instagram_events(ordered)
+        else:
+            _dispatch_durable_instagram_events([ordered[0]])
+            _dispatch_durable_instagram_events([ordered[1]])
+        # Meta retries both deliveries with the same message IDs. Durable job
+        # identity and the consumed media state must make the replay inert.
+        if same_payload:
+            _dispatch_durable_instagram_events(ordered)
+        else:
+            _dispatch_durable_instagram_events([ordered[0]])
+            _dispatch_durable_instagram_events([ordered[1]])
+
+    assert db.get_active_handoff("instagram", sender) is None
+    assert ad_customer[1]["last_route_source"] == "EXACT_APPROVED"
+    assert ad_customer[1]["source_route"]["routing_id"] == route["routing_id"]
+    stored = db.get_conversations(limit=1, channel="instagram", user_id=sender)[0]
+    assert stored["bot_response"]
+    assert "Operator-authored" not in stored["bot_response"]
+    query_rows = [row for row in db.get_conversations(limit=20, channel="instagram", user_id=sender)
+                  if row["user_message"] == "What is the price?"]
+    assert len(query_rows) == 1
+    assert query_rows[0]["template_id"] != "waiting_for_human"
+    assert send.call_count >= 1
+
+    assert db.get_pending_instagram_media_status(sender, "race-post-media-123") == "CONSUMED"
+
+
+def test_consumed_media_handler_is_defensively_terminal(ad_customer):
+    sender = ad_customer[0]
+    db = ad_customer[2]
+    db.record_instagram_ads_referral_seen(sender, "observed-ad", "ad-before-post-event")
+    pending = db.record_pending_instagram_media("post-after-ad-event", sender, "consumed-post-123")
+    assert pending["status"] == "CONSUMED"
+
+    app_module._handle_shared_attachment(sender, None, "consumed-post-123")
+
+    assert db.get_active_handoff("instagram", sender) is None
+    assert db.get_pending_instagram_media_status(sender, "consumed-post-123") == "CONSUMED"
+
+
+def test_ads_referral_does_not_cancel_or_resume_an_older_unrelated_handoff(ad_customer):
+    sender = ad_customer[0]
+    db = ad_customer[2]
+    route = _mapped_source(ad_customer, "post", "handoff-protection-ad")
+    handoff_row, created = db.get_or_create_handoff(
+        handoff_ref="CAM-OLD-UNRELATED", source_channel="instagram", source_user_id=sender,
+        reason="CUSTOMER_REQUESTED_HUMAN", summary="Earlier independent support request.",
+        known_entities={}, unresolved_topic="refund question", escalation_id=None,
+        expires_at=None,
+    )
+    assert created
+    post = {
+        "sender": {"id": sender}, "timestamp": 1700000000300,
+        "message": {"mid": "post-after-old-handoff", "attachments": [{"type": "ig_post", "payload": {
+            "ig_post_media_id": "post-after-old-handoff-123",
+        }}]},
+    }
+    ads = {
+        "sender": {"id": sender}, "timestamp": 1700000000400,
+        "message": {"mid": "ad-after-old-handoff", "text": "How much does it cost?", "referral": {
+            "source": "ADS", "ad_id": "handoff-protection-ad",
+        }},
+    }
+    payload = lambda event: {"entry": [{"id": "test-account", "messaging": [event]}]}
+    app_module._dispatch_instagram_payload(payload(post), BackgroundTasks())
+    app_module._dispatch_instagram_payload(payload(ads), BackgroundTasks())
+    current = db.get_active_handoff("instagram", sender)
+    assert current["handoff_ref"] == handoff_row["handoff_ref"]
+    assert current["reason"] == "CUSTOMER_REQUESTED_HUMAN"
+    assert current["status"] not in {"RESUMED", "RESOLVED", "EXPIRED"}
+    assert route_for_inbound(ad_id="handoff-protection-ad", media_id=None)[0]["routing_id"] == route["routing_id"]
+
+
+def test_unpaired_post_is_finalized_after_grace_period(ad_customer):
+    sender = ad_customer[0]
+    db = ad_customer[2]
+    event = {
+        "sender": {"id": sender}, "timestamp": 1700000000200,
+        "message": {"mid": "unpaired-post-mid", "attachments": [{"type": "ig_post", "payload": {
+            "ig_post_media_id": "unpaired-post-media-123",
+        }}]},
+    }
+    app_module._dispatch_instagram_payload({"entry": [{"id": "test-account", "messaging": [event]}]}, BackgroundTasks())
+    with db.get_connection() as conn:
+        conn.execute("UPDATE instagram_pending_media_events SET expires_at=0 WHERE media_id=?", ("unpaired-post-media-123",))
+        conn.commit()
+    with patch.object(app_module, "send_instagram_reply", return_value={"status": "sent", "message_id": "handoff-notice"}), \
+         patch.object(app_module.escalator, "handle_escalation"):
+        app_module._finalize_expired_unmapped_posts()
+
+    handoff = db.get_active_handoff("instagram", sender)
+    assert handoff
+    assert "Unmapped shared Instagram Post" in handoff["reason"]
+    with db.get_connection() as conn:
+        assert conn.execute("SELECT status FROM instagram_pending_media_events WHERE media_id=?",
+                            ("unpaired-post-media-123",)).fetchone()[0] == "FINALIZED"
 
 
 def test_home_table_menu_from_bound_ad_still_hands_off_without_source_asset(ad_customer):

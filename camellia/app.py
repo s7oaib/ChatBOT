@@ -823,6 +823,11 @@ def _process_instagram_event(
             post_media_id=shared_post_id,
             source_type="story_reply" if entry.source == "story_reply" else shared_source_type,
         )
+        if trace.get("ad_id") and source_route:
+            log.info(
+                "INSTAGRAM_AD_ROUTE ad_present=true ad_id_hash=%s binding_status=BOUND routing_id=%s source_type=%s",
+                _safe_identifier_hash(trace["ad_id"]), source_route.get("routing_id"), source_route.get("source_type"),
+            )
         if not source_route and shared_post_id:
             # Preserve the existing admin-open pairing window for Posts. Once
             # bound, the exact attachment ID follows the same source flow as
@@ -897,6 +902,10 @@ def _process_instagram_event(
             "customer_text_accompanied_media": customer_text_accompanied_media,
         })
         if source_media_present and not source_route and shared_source_type in {"post", "reel"}:
+            if shared_source_type == "post" and db.has_pending_instagram_media(sender_id, shared_post_id or ""):
+                # Webhook ingress persisted the Post event before queuing this
+                # worker. Give an adjacent ADS referral a bounded race window.
+                return
             _handoff_unmapped_shared_media(
                 sender_id, source_type=shared_source_type,
                 media_id=shared_post_id or trace.get("media_id"),
@@ -1410,6 +1419,10 @@ def _handle_shared_attachment(
     """
     if not instagram_chatbot_control.is_sender_allowed(sender_id, database=db):
         return
+    if post_media_id and db.get_pending_instagram_media_status(sender_id, post_media_id) == "CONSUMED":
+        log.info("AD_MEDIA_RACE sender_hash=%s pending_post=true ads_referral_followed=true result=CONSUMED_BY_AD",
+                 _safe_identifier_hash(sender_id))
+        return
     if reel_identity or post_media_id:
         # Use the same route/responder path as a share with accompanying text.
         # A mapped source gets its approved default response; only an
@@ -1427,6 +1440,10 @@ def _handle_shared_attachment(
                 route = session_memory.get_facts(sender_id, "instagram").get("source_route")
             if not route:
                 _mark_unmapped_shared_attachment(sender_id)
+                if post_media_id and db.has_pending_instagram_media(sender_id, post_media_id):
+                    log.info("AD_MEDIA_RACE sender_hash=%s pending_post=true ads_referral_followed=false result=WAIT_FOR_EXPIRY",
+                             _safe_identifier_hash(sender_id))
+                    return
                 _handoff_unmapped_shared_media(
                     sender_id, source_type="reel" if reel_identity else "post",
                     media_id=post_media_id, shortcode=(reel_identity or {}).get("shortcode"),
@@ -1451,6 +1468,21 @@ def _handle_shared_attachment(
         return
     _mark_unmapped_shared_attachment(sender_id)
     _reply_to_unreadable_attachment(sender_id)
+
+
+def _finalize_expired_unmapped_posts() -> None:
+    """Lazily finalize durable unpaired Post events after the ad-race window."""
+    for event in db.claim_expired_pending_instagram_media(limit=100):
+        try:
+            _handoff_unmapped_shared_media(
+                event["sender_id"], source_type="post", media_id=event["media_id"],
+            )
+            db.finish_pending_instagram_media(int(event["id"]))
+            log.info("AD_MEDIA_RACE sender_hash=%s pending_post=true ads_referral_followed=false result=HANDOFF",
+                     _safe_identifier_hash(event["sender_id"]))
+        except Exception:
+            log.exception("Could not finalize expired shared Post for sender_hash=%s.",
+                          _safe_identifier_hash(event["sender_id"]))
 
 
 def _mark_unmapped_shared_attachment(sender_id: str) -> None:
@@ -1933,6 +1965,7 @@ async def _instagram_job_loop(stop_event: asyncio.Event) -> None:
     while not stop_event.is_set():
         try:
             await asyncio.to_thread(_process_instagram_inbound_jobs)
+            await asyncio.to_thread(_finalize_expired_unmapped_posts)
             await asyncio.to_thread(_process_instagram_outbound_jobs)
         except asyncio.CancelledError:
             raise
@@ -2028,6 +2061,27 @@ def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks
             shared_reel = shared_reel_identity(message)
             shared_post_id = shared_post_media_id(message) if not shared_reel else None
             shared_source_type = _shared_source_type(message)
+            if entry_point.from_ad_click and entry_point.ad_id:
+                try:
+                    consumed_posts = db.record_instagram_ads_referral_seen(
+                        sender_id, str(entry_point.ad_id), _instagram_event_key(entry_id, messaging_event),
+                    )
+                    exact_route, _ = route_for_inbound(ad_id=str(entry_point.ad_id), media_id=None)
+                    binding_status = db.instagram_ad_binding_status(str(entry_point.ad_id))
+                    if binding_status == "UNBOUND":
+                        db.observe_instagram_ad(str(entry_point.ad_id), entry_point.ad_title)
+                    log.info(
+                        "INSTAGRAM_AD_ROUTE ad_present=true ad_id_hash=%s binding_status=%s routing_id=%s source_type=%s",
+                        _safe_identifier_hash(entry_point.ad_id), binding_status,
+                        (exact_route or {}).get("routing_id", "none"),
+                        (exact_route or {}).get("source_type", "none"),
+                    )
+                    if consumed_posts:
+                        log.info("AD_MEDIA_RACE sender_hash=%s pending_post=true ads_referral_followed=true result=CONSUMED_BY_AD count=%d",
+                                 _safe_identifier_hash(sender_id), len(consumed_posts))
+                except ValueError:
+                    log.info("INSTAGRAM_AD_ROUTE ad_present=true ad_id_hash=%s binding_status=INVALID routing_id=none source_type=none",
+                             _safe_identifier_hash(entry_point.ad_id))
 
             # A contact-card attachment used to be read as a WhatsApp number
             # the customer was asked to share. Channel policy retired that
@@ -2063,6 +2117,23 @@ def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks
                 # log existing.
                 if (shared_source_type or (entry_point.source == "story_reply" and entry_point.media_id)) and is_ad_qualified:
                     if shared_source_type:
+                        if shared_source_type == "post" and shared_post_id:
+                            pending = db.record_pending_instagram_media(
+                                _instagram_event_key(entry_id, messaging_event), sender_id, shared_post_id,
+                                grace_seconds=5,
+                            )
+                            if pending.get("status") == "CONSUMED":
+                                log.info("AD_MEDIA_RACE sender_hash=%s pending_post=false ads_referral_followed=true result=CONSUMED_BY_AD",
+                                         _safe_identifier_hash(sender_id))
+                                results.append({
+                                    "sender_id": sender_id,
+                                    "action": "consumed_ad_creative",
+                                    "shared_post_media_id": shared_post_id,
+                                })
+                                continue
+                            log.info("AD_MEDIA_RACE sender_hash=%s pending_post=%s ads_referral_followed=false result=%s",
+                                     _safe_identifier_hash(sender_id), pending.get("status") == "PENDING",
+                                     "PENDING" if pending.get("status") == "PENDING" else "CONSUMED_BY_AD")
                         background_fn = _handle_shared_attachment
                         background_args = (sender_id, shared_reel, shared_post_id)
                     else:
@@ -3592,12 +3663,51 @@ def list_instagram_routes(
     return {
         "status": "success",
         "routes": routes,
+        "observed_ads": db.list_observed_instagram_ads(),
+        "ad_bindings": [
+            {**binding, "history": db.list_instagram_ad_binding_history(binding["ad_id"])}
+            for binding in db.list_instagram_ad_bindings()
+        ],
         "story_sources": db.list_instagram_story_sources(),
         "legacy_ad_routes": db.list_ad_product_routes(),
         "product_catalogue": product_catalogue(),
         "knowledge_scopes": sorted(SOURCE_MAP),
         "inbound_identifiers": ["ad_id", "story_media_id"],
     }
+
+
+@app.post("/admin/instagram-ads/{ad_id}/bind")
+async def bind_observed_instagram_ad(
+    ad_id: str, request: Request,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    require_admin(x_admin_key, x_admin_pin)
+    body = await request.json()
+    try:
+        routing_id = int(body.get("routing_id"))
+        allow_rebind = body.get("change_binding") is True
+        binding = db.bind_instagram_ad(
+            ad_id, routing_id, bound_by=x_admin_key or "admin", allow_rebind=allow_rebind,
+        )
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"status": "success", "binding": binding}
+
+
+@app.patch("/admin/instagram-ads/{ad_id}/active")
+async def set_instagram_ad_binding_active(
+    ad_id: str, request: Request,
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    require_admin(x_admin_key, x_admin_pin)
+    body = await request.json()
+    if not isinstance(body.get("active"), bool):
+        raise HTTPException(status_code=400, detail="active must be true or false.")
+    if not db.set_instagram_ad_binding_active(ad_id, body["active"], actor=x_admin_key or "admin"):
+        raise HTTPException(status_code=404, detail="Ad binding not found.")
+    return {"status": "success", "ad_id": ad_id, "active": body["active"]}
 
 
 @app.get("/admin/instagram-media")
@@ -7711,6 +7821,7 @@ def get_admin_dashboard():
 
             <div><button class="btn-primary source-save" id="igSaveButton" type="button" onclick="saveInstagramRoute()">Save Mapping</button><div class="source-secondary-actions" style="margin-top:12px;"><button class="btn-secondary" type="button" onclick="resetInstagramRouteForm()">Cancel</button></div></div></div>
             <div id="adRouteResult" class="result-box"></div>
+            <section id="igObservedAds" style="margin-top:16px;"><h3>Observed / Unmapped Ads</h3><p class="source-map-help">Ad titles are display-only and never determine routing. Bind each exact Meta Ad ID to an existing active source.</p><div id="igObservedAdsList" class="ad-route-list"></div></section>
             <div style="display:flex; gap:8px; margin-top:16px; border-bottom:1px solid var(--border);">
                 <button class="tab-btn active" type="button" id="igRouteTabActiveBtn" onclick="switchIgRouteTab('active')" style="border-radius:8px 8px 0 0;">Active</button>
             </div>
@@ -10489,9 +10600,10 @@ THIS WEEK'S BENGAL SPECIALS
             const priority = (route.priority_products || []).map(id => ((igProducts.find(p => p.id === id) || {}).label || id)).join(' → ') || 'Normal conversation routing';
             const link = route.canonical_url ? `<a class="ig-media-link" href="${escapeHtml(route.canonical_url)}" target="_blank" rel="noopener noreferrer">Open Instagram · ${escapeHtml(instagramShortUrl(route.canonical_url))}</a>` : route.source_type === 'story' ? `<span class="ig-media-muted">Story media ID: ${escapeHtml(route.media_id || '—')}</span>` : '<span class="ig-media-muted">Instagram link unavailable</span>';
             const pairingNote = route.source_type === 'post' && route.media_id && route.pairing_status === 'bound' ? '<span class="ig-media-muted">Connected via Post Pairing</span>' : '';
+            const adBindings = (route.ad_bindings || []).map(binding => `<span class="ig-media-muted">Ad ID ${escapeHtml(binding.ad_id)} · ${binding.active ? 'On' : 'Off'} <button class="btn-secondary" type="button" onclick="changeInstagramAdBinding('${escapeHtml(binding.ad_id)}')">Change Binding</button> <button class="btn-secondary" type="button" onclick="setInstagramAdBindingActive('${escapeHtml(binding.ad_id)}',${!binding.active})">${binding.active ? 'Disable' : 'Enable'}</button> <button class="btn-secondary" type="button" onclick="showInstagramAdBindingHistory('${escapeHtml(binding.ad_id)}')">History (${(binding.history || []).length})</button></span>`).join(' ');
             const detailsImage = (route.preview_url || route.admin_preview_url) ? instagramPreview(route, true) : '<span class="ig-media-muted">Preview unavailable; route remains active.</span>';
             const previewSource = route.preview_url ? 'Meta-provided preview' : route.admin_preview_url ? 'Admin preview fallback' : 'Placeholder';
-            const details = `<details class="ig-media-details"><summary style="cursor:pointer;">Details</summary>${detailsImage}<div>Topic: ${escapeHtml(route.routing_topic || 'Not mapped')}<br>Description: ${escapeHtml(route.source_description || 'No description added.')}<br>Updated: ${escapeHtml(route.updated_at || route.created_at || '—')}</div></details>`;
+            const details = `<details class="ig-media-details"><summary style="cursor:pointer;">Details</summary>${detailsImage}<div>Topic: ${escapeHtml(route.routing_topic || 'Not mapped')}<br>Description: ${escapeHtml(route.source_description || 'No description added.')}<br>Updated: ${escapeHtml(route.updated_at || route.created_at || '—')}<br>Exact ad bindings: ${adBindings || 'None'}</div></details>`;
             let actions = '';
             if (route.archived_at) {
                 actions = `<button class="btn-secondary" type="button" onclick="restoreInstagramRoute(${route.routing_id})">Restore</button> <button class="btn-danger" type="button" onclick="openIgRemoveModal(${route.routing_id})">Delete</button>`;
@@ -10898,11 +11010,48 @@ THIS WEEK'S BENGAL SPECIALS
         function renderInstagramMediaRegistry() {
             const list = document.getElementById('adRouteList');
             if (!list) return;
+            renderObservedInstagramAds();
             const all = [...(window.igRoutes || [])].filter(route => route.source_type !== 'story');
             if (igRouteTab === 'active') all.push(...(window.igLegacyAds || []));
             const filtered = all.filter(instagramRouteMatches);
             if (!filtered.length) { list.innerHTML=`<p style="color:var(--text-muted);font-size:0.84rem;">${all.length ? 'No connected media matches this search or filter.' : igRouteTab === 'archived' ? 'No archived routes.' : 'No Instagram routes added yet.'}</p>`; return; }
             list.innerHTML = filtered.map(renderInstagramMediaCard).join('');
+        }
+        function renderObservedInstagramAds() {
+            const box = document.getElementById('igObservedAdsList');
+            if (!box) return;
+            const observed = window.igObservedAds || [];
+            const routes = (window.igRoutes || []).filter(route => route.active && !route.archived_at && ['post','reel','story'].includes(route.source_type));
+            if (!observed.length) { box.innerHTML = '<p class="ig-media-muted">No unmapped ad IDs observed.</p>'; return; }
+            box.innerHTML = observed.map(ad => `<article class="ig-media-card"><div class="ig-media-main"><b>Meta Ad ID:</b> ${escapeHtml(ad.ad_id)}<div class="ig-media-summary">Title (NON-AUTHORITATIVE): ${escapeHtml(ad.display_title || 'Not provided')}</div><div class="ig-media-facts">First seen ${escapeHtml(ad.first_seen_at || '—')} · Last seen ${escapeHtml(ad.last_seen_at || '—')} · ${Number(ad.occurrence_count || 0)} observations</div></div><div class="ig-media-actions"><select class="field-control" id="igObservedRoute-${escapeHtml(ad.ad_id)}"><option value="">Select existing mapping</option>${routes.map(route => `<option value="${route.routing_id}">${escapeHtml(route.routing_topic || route.canonical_url || route.source_type)} · #${route.routing_id}</option>`).join('')}</select><button class="btn-primary" type="button" onclick="bindObservedInstagramAd('${escapeHtml(ad.ad_id)}')">Bind to Existing Mapping</button></div></article>`).join('');
+        }
+        async function bindObservedInstagramAd(adId) {
+            const selected = document.getElementById(`igObservedRoute-${adId}`)?.value;
+            if (!selected) { alert('Select an existing active mapping first.'); return; }
+            const response = await fetch(`/admin/instagram-ads/${encodeURIComponent(adId)}/bind`, { method:'POST', headers:{...getAuthHeaders(),'Content-Type':'application/json'}, body:JSON.stringify({routing_id:Number(selected)}) });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) { alert(data.detail || 'Could not bind this Ad ID.'); return; }
+            await loadAdRoutes();
+        }
+        async function setInstagramAdBindingActive(adId, active) {
+            const response = await fetch(`/admin/instagram-ads/${encodeURIComponent(adId)}/active`, { method:'PATCH', headers:{...getAuthHeaders(),'Content-Type':'application/json'}, body:JSON.stringify({active}) });
+            if (!response.ok) { alert('Could not update Ad ID binding.'); return; }
+            await loadAdRoutes();
+        }
+        async function changeInstagramAdBinding(adId) {
+            const routes = (window.igRoutes || []).filter(route => route.active && !route.archived_at && ['post','reel','story'].includes(route.source_type));
+            const options = routes.map(route => `${route.routing_id}: ${route.routing_topic || route.canonical_url || route.source_type}`).join('\n');
+            const selected = prompt(`Enter an existing active source mapping ID for Ad ${adId}:\n${options}`);
+            if (selected === null || !/^\\d+$/.test(selected.trim())) return;
+            const response = await fetch(`/admin/instagram-ads/${encodeURIComponent(adId)}/bind`, { method:'POST', headers:{...getAuthHeaders(),'Content-Type':'application/json'}, body:JSON.stringify({routing_id:Number(selected.trim()),change_binding:true}) });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) { alert(data.detail || 'Could not change Ad ID binding.'); return; }
+            await loadAdRoutes();
+        }
+        function showInstagramAdBindingHistory(adId) {
+            const binding = (window.igRoutes || []).flatMap(route => route.ad_bindings || []).find(item => item.ad_id === adId);
+            const history = binding?.history || [];
+            alert(history.length ? history.map(item => `${item.occurred_at}: ${item.action} · route ${item.routing_id || 'unbound'} · ${item.actor || 'unknown operator'}`).join('\n') : 'No binding changes recorded.');
         }
         async function loadAdRoutes() {
             const list = document.getElementById('adRouteList');
@@ -10913,6 +11062,10 @@ THIS WEEK'S BENGAL SPECIALS
                 const data = await resp.json();
                 if (!resp.ok) throw new Error(data.detail || 'Could not load saved routes.');
                 window.igRoutes = data.routes || []; window.igLegacyAds = data.legacy_ad_routes || []; igProducts = data.product_catalogue || [];
+                window.igObservedAds = data.observed_ads || [];
+                const bindingsByRoute = new Map();
+                (data.ad_bindings || []).forEach(binding => { const rows=bindingsByRoute.get(binding.routing_id)||[]; rows.push(binding); bindingsByRoute.set(binding.routing_id,rows); });
+                window.igRoutes.forEach(route => { route.ad_bindings = bindingsByRoute.get(route.routing_id)||[]; });
                 document.getElementById('igProductPicker').innerHTML='<option value="">Choose an approved product…</option>'+igProducts.map(item=>`<option value="${escapeHtml(item.id)}">${escapeHtml(item.label)}</option>`).join('');
                 document.getElementById('topicProductPicker') && (document.getElementById('topicProductPicker').innerHTML=document.getElementById('igProductPicker').innerHTML);
                 document.getElementById('igKnowledgeScope').innerHTML=(data.knowledge_scopes||[]).map(id=>`<option value="${escapeHtml(id)}">${escapeHtml(id)}</option>`).join('');
