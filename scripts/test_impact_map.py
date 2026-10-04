@@ -118,9 +118,46 @@ CORE_FILES = {
     "camellia/instagram_oauth.py", "camellia/__init__.py", "main.py",
     "pytest.ini", "tests/conftest.py",
     "scripts/run_impacted_tests.py", "scripts/test_impact_map.py", "scripts/update_test_baseline.py",
+    "scripts/test_execution.py", "scripts/test_parallel_policy.json", "requirements-test.txt",
 }
 AREA_RISK = {area: "HIGH" for area in AREA_TESTS}
 AREA_RISK["menu_admin"] = "MEDIUM"
 
 # Deliberately narrow non-executable allow-list, not a catch-all for unknown data.
 LOW_ROOT_FILES = {"LICENSE", ".gitignore", ".gitattributes", ".editorconfig", "test_baseline.json"}
+
+# Exact existing CI contracts plus executor safety tests. This explicit gate is
+# separate from frozen-baseline impact/release classification.
+CURRENT_CONTRACT_TESTS = (
+    'tests/test_impacted_test_runner.py',
+    'tests/test_client_approved_only_policy.py',
+    'tests/test_phase2f_observability_operations.py',
+    'tests/test_phase3_repository_cleanup.py',
+    'tests/test_client_approved_qa.py',
+    'tests/test_client_qa_acceptance.py',
+    'tests/test_approved_qa_manager.py',
+    'tests/test_instagram_chatbot_control.py',
+    'tests/test_ordered_approved_response.py',
+    'tests/test_channel_policy.py',
+    'tests/test_admin_security.py',
+    'tests/test_session_persistence.py',
+    'tests/test_explicit_intent_interrupts_stale_flow.py',
+    'tests/test_order_intake.py',
+    'tests/test_instagram_identity.py',
+    'tests/test_instagram_source_referential.py',
+    'tests/test_instagram_story_routing.py',
+    'tests/test_shared_post_pairing.py',
+    'tests/test_shared_reel_precedence.py',
+    'tests/test_simple_source_mapping.py',
+    'tests/test_ad_mapped_source_context.py',
+    'tests/test_instagram_ads_inventory.py',
+    'tests/test_test_execution.py',
+    'tests/test_admin_portal.py::test_webhook_signature_status_is_reported_honestly',
+    'tests/test_admin_portal.py::test_secure_webhook_signature_default_when_environment_value_is_absent',
+    'tests/test_admin_portal.py::test_signed_instagram_webhook_passes_signature_gate',
+    'tests/test_admin_portal.py::test_missing_or_invalid_instagram_signature_is_rejected',
+    'tests/test_admin_portal.py::test_instagram_get_challenge_does_not_require_post_signature',
+    'tests/test_admin_portal.py::test_instagram_get_challenge_rejects_untrusted_verify_tokens',
+    'tests/test_admin_portal.py::test_meta_verify_token_defaults_to_unconfigured_when_environment_is_absent',
+    'tests/test_admin_portal.py::test_require_webhook_signature_rejects_unsigned_when_unconfigured',
+)

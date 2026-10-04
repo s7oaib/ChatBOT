@@ -60,3 +60,5 @@ graphify-out/
 $TEMP/
 .agents/skills/
 .codex/
+# Local/CI validation evidence, never application data.
+.test-results/
