@@ -861,6 +861,64 @@ class Database:
             # A reel shared into a DM is matched by its normalized shortcode.
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_instagram_routes_shortcode ON instagram_source_routes(shortcode, active)")
 
+            # Exact Meta ad IDs are aliases of an operator-mapped source.
+            # Unbound observations share the table but cannot route until an
+            # administrator binds them to an active route.
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS instagram_source_ad_bindings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ad_id TEXT NOT NULL UNIQUE,
+                routing_id INTEGER,
+                status TEXT NOT NULL DEFAULT 'OBSERVED' CHECK(status IN ('OBSERVED','BOUND')),
+                first_seen_at TEXT,
+                last_seen_at TEXT,
+                occurrence_count INTEGER NOT NULL DEFAULT 0,
+                display_title TEXT,
+                bound_at TEXT,
+                bound_by TEXT,
+                active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_ig_ad_bindings_route ON instagram_source_ad_bindings(routing_id, active)")
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS instagram_source_ad_binding_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ad_id TEXT NOT NULL,
+                routing_id INTEGER,
+                action TEXT NOT NULL,
+                actor TEXT,
+                occurred_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS instagram_pending_media_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_key TEXT NOT NULL UNIQUE,
+                sender_id TEXT NOT NULL,
+                media_id TEXT NOT NULL,
+                received_at REAL NOT NULL,
+                expires_at REAL NOT NULL,
+                status TEXT NOT NULL DEFAULT 'PENDING' CHECK(status IN ('PENDING','CONSUMED','FINALIZING','FINALIZED','AD_SEEN')),
+                finalized_at REAL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_ig_pending_media_expiry ON instagram_pending_media_events(status, expires_at)")
+            # Migrate only unambiguous legacy exact bindings. Existing fields
+            # remain intact and duplicate legacy IDs fail closed at lookup.
+            cursor.execute("""
+                INSERT OR IGNORE INTO instagram_source_ad_bindings
+                    (ad_id, routing_id, status, bound_at, active)
+                SELECT ad_id, MIN(routing_id), 'BOUND', CURRENT_TIMESTAMP, 1
+                FROM instagram_source_routes
+                WHERE ad_id IS NOT NULL AND TRIM(ad_id) <> ''
+                  AND active=1 AND archived_at IS NULL
+                GROUP BY ad_id
+                HAVING COUNT(*)=1
+            """)
+
             # Posts and Reels are an inventory, not routing rows.  Keep this
             # registry separate so discovery can scale without turning every
             # item into a customer-facing source route.
@@ -1774,6 +1832,10 @@ class Database:
                 ).fetchall()
                 if any(int(binding["routing_id"]) != routing_id for binding in bindings):
                     raise ValueError("This Ad ID is already bound to a different active source.")
+            old_ad_row = conn.execute(
+                "SELECT ad_id FROM instagram_source_routes WHERE routing_id=?", (routing_id,),
+            ).fetchone() if routing_id is not None else None
+            old_ad_id = str(old_ad_row["ad_id"] or "").strip() if old_ad_row else ""
             if routing_id is None:
                 cursor = conn.execute(
                     """INSERT INTO instagram_source_routes
@@ -1795,6 +1857,33 @@ class Database:
                 )
                 if cursor.rowcount == 0:
                     raise ValueError("Routing record not found.")
+            new_ad_id = str(route.get("ad_id") or "").strip()
+            if new_ad_id:
+                binding = conn.execute(
+                    "SELECT * FROM instagram_source_ad_bindings WHERE ad_id=?", (new_ad_id,),
+                ).fetchone()
+                if binding and binding["status"] == "BOUND" and binding["active"] and int(binding["routing_id"] or 0) != int(routing_id):
+                    raise ValueError("This Ad ID is already bound to a different active source.")
+                if binding and binding["status"] == "BOUND" and int(binding["routing_id"] or 0) != int(routing_id):
+                    conn.execute("""
+                        INSERT INTO instagram_source_ad_binding_history(ad_id, routing_id, action, occurred_at)
+                        VALUES (?, ?, 'REBOUND', ?)
+                    """, (new_ad_id, binding["routing_id"], now))
+                    conn.execute("UPDATE instagram_source_routes SET ad_id=NULL WHERE ad_id=? AND routing_id<>?",
+                                 (new_ad_id, int(routing_id)))
+                conn.execute("""
+                    INSERT INTO instagram_source_ad_bindings(ad_id, routing_id, status, bound_at, active, updated_at)
+                    VALUES (?, ?, 'BOUND', ?, 1, ?)
+                    ON CONFLICT(ad_id) DO UPDATE SET routing_id=excluded.routing_id,
+                        status='BOUND', bound_at=excluded.bound_at, active=1, updated_at=excluded.updated_at
+                """, (new_ad_id, int(routing_id), now, now))
+            if old_ad_id and old_ad_id != new_ad_id:
+                    conn.execute("UPDATE instagram_source_ad_bindings SET active=0, updated_at=? WHERE ad_id=? AND routing_id=?",
+                                 (now, old_ad_id, int(routing_id)))
+                    conn.execute("""
+                        INSERT INTO instagram_source_ad_binding_history(ad_id, routing_id, action, occurred_at)
+                        VALUES (?, ?, 'DISABLED', ?)
+                    """, (old_ad_id, int(routing_id), now))
             conn.commit()
             row = conn.execute(
                 "SELECT * FROM instagram_source_routes WHERE routing_id = ?", (routing_id,)
@@ -1908,6 +1997,31 @@ class Database:
         if field not in ("ad_id", "media_id", "shortcode"):
             raise ValueError("Unsupported route identifier.")
         with self.get_connection() as conn:
+            if field == "ad_id":
+                binding = conn.execute(
+                    "SELECT * FROM instagram_source_ad_bindings WHERE ad_id=?", (value,),
+                ).fetchone()
+                legacy = conn.execute(
+                    "SELECT * FROM instagram_source_routes WHERE ad_id=? AND active=1 AND archived_at IS NULL",
+                    (value,),
+                ).fetchall()
+                legacy_ids = {int(row["routing_id"]) for row in legacy}
+                if len(legacy_ids) > 1:
+                    return None
+                if binding:
+                    if binding["status"] != "BOUND" or not binding["active"] or not binding["routing_id"]:
+                        return None
+                    route_id = int(binding["routing_id"])
+                    if legacy_ids and legacy_ids != {route_id}:
+                        return None
+                    row = conn.execute(
+                        "SELECT * FROM instagram_source_routes WHERE routing_id=? AND active=1 AND archived_at IS NULL",
+                        (route_id,),
+                    ).fetchone()
+                    return dict(row) if row else None
+                # Backward compatibility for databases initialized before
+                # alias backfill or legacy rows that were inactive at init.
+                return dict(legacy[0]) if legacy else None
             where = (
                 f"{field} = ? AND active = 1 AND archived_at IS NULL"
                 + (" AND source_type = ?" if source_type else "")
@@ -1929,6 +2043,241 @@ class Database:
         if field == "ad_id" and len(rows) > 1:
             return None
         return dict(rows[0]) if rows else None
+
+    def instagram_ad_binding_status(self, ad_id: str) -> str:
+        """Return a safe diagnostic state without exposing ad-title identity."""
+        with self.get_connection() as conn:
+            binding = conn.execute(
+                "SELECT * FROM instagram_source_ad_bindings WHERE ad_id=?", (str(ad_id),),
+            ).fetchone()
+            legacy = conn.execute(
+                "SELECT routing_id FROM instagram_source_routes WHERE ad_id=? AND active=1 AND archived_at IS NULL",
+                (str(ad_id),),
+            ).fetchall()
+            route_ids = {int(row["routing_id"]) for row in legacy}
+            if len(route_ids) > 1:
+                return "AMBIGUOUS"
+            if binding and binding["status"] == "BOUND" and binding["routing_id"]:
+                if route_ids and route_ids != {int(binding["routing_id"])}:
+                    return "AMBIGUOUS"
+                route = conn.execute(
+                    "SELECT 1 FROM instagram_source_routes WHERE routing_id=? AND active=1 AND archived_at IS NULL",
+                    (int(binding["routing_id"]),),
+                ).fetchone()
+                return "BOUND" if binding["active"] and route else "UNBOUND"
+            return "BOUND" if len(route_ids) == 1 else "UNBOUND"
+
+    @staticmethod
+    def _safe_ad_display_title(value: Optional[str]) -> Optional[str]:
+        if not value:
+            return None
+        text = " ".join(str(value).split())[:240]
+        return text or None
+
+    def observe_instagram_ad(self, ad_id: str, title: Optional[str] = None) -> Dict[str, Any]:
+        ad_id = str(ad_id or "").strip()
+        if not ad_id or len(ad_id) > 200 or not re.fullmatch(r"[A-Za-z0-9_-]+", ad_id):
+            raise ValueError("Invalid Meta Ad ID.")
+        now = datetime.now(timezone.utc).isoformat()
+        display_title = self._safe_ad_display_title(title)
+        with self.get_connection() as conn:
+            conn.execute("""
+                INSERT INTO instagram_source_ad_bindings
+                    (ad_id, status, first_seen_at, last_seen_at, occurrence_count, display_title)
+                VALUES (?, 'OBSERVED', ?, ?, 1, ?)
+                ON CONFLICT(ad_id) DO UPDATE SET
+                    last_seen_at=excluded.last_seen_at,
+                    occurrence_count=instagram_source_ad_bindings.occurrence_count+1,
+                    display_title=COALESCE(excluded.display_title, instagram_source_ad_bindings.display_title),
+                    updated_at=excluded.last_seen_at
+            """, (ad_id, now, now, display_title))
+            conn.commit()
+            row = conn.execute("SELECT * FROM instagram_source_ad_bindings WHERE ad_id=?", (ad_id,)).fetchone()
+        return dict(row)
+
+    def list_observed_instagram_ads(self) -> List[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            rows = conn.execute("""
+                SELECT * FROM instagram_source_ad_bindings
+                WHERE status='OBSERVED' AND active=1
+                ORDER BY last_seen_at DESC, id DESC
+            """).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_instagram_ad_bindings(self, routing_id: Optional[int] = None) -> List[Dict[str, Any]]:
+        query = "SELECT * FROM instagram_source_ad_bindings WHERE status='BOUND'"
+        params = ()
+        if routing_id is not None:
+            query += " AND routing_id=?"
+            params = (routing_id,)
+        query += " ORDER BY bound_at DESC, id DESC"
+        with self.get_connection() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [dict(row) for row in rows]
+
+    def bind_instagram_ad(
+        self, ad_id: str, routing_id: int, bound_by: Optional[str] = None,
+        *, allow_rebind: bool = False,
+    ) -> Dict[str, Any]:
+        ad_id = str(ad_id or "").strip()
+        now = datetime.now(timezone.utc).isoformat()
+        if not ad_id or not re.fullmatch(r"[A-Za-z0-9_-]{1,200}", ad_id):
+            raise ValueError("Invalid Meta Ad ID.")
+        with self.get_connection() as conn:
+            route = conn.execute(
+                "SELECT routing_id FROM instagram_source_routes WHERE routing_id=? AND active=1 AND archived_at IS NULL",
+                (int(routing_id),),
+            ).fetchone()
+            if not route:
+                raise ValueError("Select an active mapped source.")
+            current = conn.execute(
+                "SELECT * FROM instagram_source_ad_bindings WHERE ad_id=?", (ad_id,),
+            ).fetchone()
+            if (current and current["status"] == "BOUND" and current["active"]
+                    and int(current["routing_id"] or 0) != int(routing_id) and not allow_rebind):
+                raise ValueError("This Ad ID is already bound to a different active source.")
+            changed = not current or current["status"] != "BOUND" or int(current["routing_id"] or 0) != int(routing_id) or not current["active"]
+            if current and current["status"] == "BOUND" and int(current["routing_id"] or 0) != int(routing_id):
+                conn.execute("""
+                    INSERT INTO instagram_source_ad_binding_history(ad_id, routing_id, action, actor, occurred_at)
+                    VALUES (?, ?, 'REBOUND', ?, ?)
+                """, (ad_id, current["routing_id"], bound_by, now))
+                conn.execute(
+                    "UPDATE instagram_source_routes SET ad_id=NULL, updated_at=? WHERE ad_id=? AND routing_id<>?",
+                    (now, ad_id, int(routing_id)),
+                )
+            conn.execute("""
+                INSERT INTO instagram_source_ad_bindings
+                    (ad_id, routing_id, status, bound_at, bound_by, active, updated_at)
+                VALUES (?, ?, 'BOUND', ?, ?, 1, ?)
+                ON CONFLICT(ad_id) DO UPDATE SET
+                    routing_id=excluded.routing_id, status='BOUND', bound_at=excluded.bound_at,
+                    bound_by=excluded.bound_by, active=1, updated_at=excluded.updated_at
+            """, (ad_id, int(routing_id), now, bound_by, now))
+            if changed:
+                conn.execute(
+                    "INSERT INTO instagram_source_ad_binding_history(ad_id, routing_id, action, actor, occurred_at) VALUES (?, ?, 'BOUND', ?, ?)",
+                    (ad_id, int(routing_id), bound_by, now),
+                )
+            conn.commit()
+            row = conn.execute("SELECT * FROM instagram_source_ad_bindings WHERE ad_id=?", (ad_id,)).fetchone()
+        return dict(row)
+
+    def list_instagram_ad_binding_history(self, ad_id: str) -> List[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM instagram_source_ad_binding_history WHERE ad_id=? ORDER BY id DESC",
+                (str(ad_id),),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def set_instagram_ad_binding_active(self, ad_id: str, active: bool, actor: str = "admin") -> bool:
+        with self.get_connection() as conn:
+            current = conn.execute(
+                "SELECT routing_id, active FROM instagram_source_ad_bindings WHERE ad_id=? AND status='BOUND'",
+                (str(ad_id),),
+            ).fetchone()
+            if not current:
+                return False
+            now = datetime.now(timezone.utc).isoformat()
+            cursor = conn.execute(
+                "UPDATE instagram_source_ad_bindings SET active=?, updated_at=? WHERE ad_id=? AND status='BOUND'",
+                (int(bool(active)), now, str(ad_id)),
+            )
+            if bool(current["active"]) != bool(active):
+                conn.execute(
+                    "INSERT INTO instagram_source_ad_binding_history(ad_id, routing_id, action, actor, occurred_at) VALUES (?, ?, ?, ?, ?)",
+                    (str(ad_id), current["routing_id"], "ENABLED" if active else "DISABLED", actor, now),
+                )
+            conn.commit()
+        return bool(cursor.rowcount)
+
+    def record_pending_instagram_media(self, event_key: str, sender_id: str, media_id: str,
+                                      grace_seconds: int = 5) -> Dict[str, Any]:
+        now = time.time()
+        with self.get_connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            recent_ad = conn.execute("""
+                SELECT id FROM instagram_pending_media_events
+                WHERE sender_id=? AND status='AD_SEEN' AND expires_at>=?
+                ORDER BY received_at DESC LIMIT 1
+            """, (str(sender_id), now)).fetchone()
+            status = "CONSUMED" if recent_ad else "PENDING"
+            conn.execute("""
+                INSERT OR IGNORE INTO instagram_pending_media_events
+                    (event_key, sender_id, media_id, received_at, expires_at, status)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (event_key, str(sender_id), str(media_id), now,
+                  now + max(1, int(grace_seconds)), status))
+            if recent_ad:
+                conn.execute("UPDATE instagram_pending_media_events SET status='CONSUMED' WHERE id=?", (recent_ad["id"],))
+            row = conn.execute("SELECT * FROM instagram_pending_media_events WHERE event_key=?", (event_key,)).fetchone()
+            conn.commit()
+        return dict(row)
+
+    def has_pending_instagram_media(self, sender_id: str, media_id: str) -> bool:
+        with self.get_connection() as conn:
+            row = conn.execute("""
+                SELECT 1 FROM instagram_pending_media_events
+                WHERE sender_id=? AND media_id=? AND status='PENDING' LIMIT 1
+            """, (str(sender_id), str(media_id))).fetchone()
+        return bool(row)
+
+    def record_instagram_ads_referral_seen(
+        self, sender_id: str, ad_id: str, event_key: str, grace_seconds: int = 5,
+    ) -> List[Dict[str, Any]]:
+        now = time.time()
+        with self.get_connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            rows = conn.execute("""
+                SELECT * FROM instagram_pending_media_events
+                WHERE sender_id=? AND status='PENDING' AND expires_at>=?
+                ORDER BY received_at
+            """, (str(sender_id), now)).fetchall()
+            if rows:
+                ids = [int(row["id"]) for row in rows]
+                conn.execute(
+                    f"UPDATE instagram_pending_media_events SET status='CONSUMED' WHERE id IN ({','.join('?' for _ in ids)}) AND status='PENDING'",
+                    ids,
+                )
+            conn.execute("""
+                INSERT OR IGNORE INTO instagram_pending_media_events
+                    (event_key, sender_id, media_id, received_at, expires_at, status)
+                VALUES (?, ?, '', ?, ?, 'AD_SEEN')
+            """, (f"ad-referral:{event_key}", str(sender_id), now, now + grace_seconds))
+            conn.commit()
+        return [dict(row) for row in rows]
+
+    def claim_expired_pending_instagram_media(self, limit: int = 100) -> List[Dict[str, Any]]:
+        now = time.time()
+        with self.get_connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            # Referral tombstones and completed media jobs are only needed to
+            # bridge webhook ordering. Bound their storage without removing
+            # pending/finalizing work that still needs processing.
+            conn.execute(
+                "DELETE FROM instagram_pending_media_events WHERE status IN ('AD_SEEN','CONSUMED','FINALIZED') AND expires_at<?",
+                (now - 86400,),
+            )
+            rows = conn.execute("""
+                SELECT * FROM instagram_pending_media_events
+                WHERE (status='PENDING' AND expires_at<?) OR status='FINALIZING'
+                ORDER BY expires_at LIMIT ?
+            """, (now, int(limit))).fetchall()
+            if rows:
+                ids = [int(row["id"]) for row in rows]
+                conn.execute(
+                    f"UPDATE instagram_pending_media_events SET status='FINALIZING' WHERE id IN ({','.join('?' for _ in ids)}) AND status='PENDING'",
+                    ids,
+                )
+            conn.commit()
+        return [dict(row) for row in rows]
+
+    def finish_pending_instagram_media(self, event_id: int) -> None:
+        with self.get_connection() as conn:
+            conn.execute("UPDATE instagram_pending_media_events SET status='FINALIZED', finalized_at=? WHERE id=? AND status='FINALIZING'",
+                         (time.time(), int(event_id)))
+            conn.commit()
 
     def record_instagram_story_source(
         self,
