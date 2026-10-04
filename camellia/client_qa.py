@@ -457,6 +457,76 @@ def _followup_subject(state: Dict[str, Any]) -> str:
     return {"bento": "bento", "subscription": "subscription", "savoury": "savoury"}.get(topic, "")
 
 
+def contextual_price_question(message: str) -> bool:
+    """Only subject-free price follow-ups; unknown named products cannot enter."""
+    return bool(re.fullmatch(
+        r"(?:how much(?: does (?:it|this|that) cost| is (?:it|this|that)| for (?:it|this|that))?|"
+        r"what does (?:it|this|that) cost|(?:whats|what is) the price|"
+        r"(?:price|cost|rate)(?: please)?|can you tell me the price)",
+        _normalise_match_text(message),
+    ))
+
+
+def contextual_price_subject(state: Dict[str, Any]) -> str:
+    """Exact configured metadata only; never captions, titles or ad_product hints."""
+    canonical = {
+        "sondesh": "sondesh", "sondesh general": "sondesh", "aamar mishti": "sondesh",
+        "signature": "sondesh", "signature collection": "sondesh",
+        "bento": "bento", "bengali bento": "bento", "bento meal": "bento",
+        "home table": "home_table", "bengali home table": "home_table",
+        "subscription": "subscription",
+    }
+
+    def subject(value):
+        return canonical.get(_normalise_question(str(value or "").replace("_", " ")), "")
+
+    def unique(values):
+        found = set(values) - {""}
+        return next(iter(found)) if len(found) == 1 else ""
+
+    route = state.get("source_route")
+    if isinstance(route, dict) and route and not state.get("source_context_superseded"):
+        if not route.get("active", True) or route.get("archived_at"):
+            return ""
+        products = route.get("priority_products") or []
+        # Runtime routes are decoded lists. Malformed or unknown IDs cannot
+        # inherit a stale conversation subject or a label-derived product.
+        if not isinstance(products, list) or any(not subject(p) for p in products):
+            return ""
+        values = [subject(p) for p in products]
+        qa_id = route.get("approved_qa_id")
+        if qa_id:
+            entry = REGISTRY_BY_ID.get(qa_id)
+            if not entry or not subject(entry.context):
+                return ""
+            values.append(subject(entry.context))
+        # Backward compatibility for exact canonical routing topics only.
+        # A free-form display label such as Norom Pak Sondesh is NOT parsed.
+        values.append(subject(route.get("routing_topic")))
+        return unique(values)
+    values = [subject(state.get(key)) for key in (
+        "last_topic", "active_topic", "active_product_context") if state.get(key)]
+    if any(state.get(key) and not subject(state[key]) for key in (
+            "last_topic", "active_topic", "active_product_context")):
+        return ""
+    entity = state.get("active_entity")
+    if entity:
+        if subject(entity):
+            values.append(subject(entity))
+        elif not (entity == "BENGALI_MEAL" and unique(values) == "bento"):
+            # BENGALI_MEAL is broader than Bento; it cannot establish a
+            # price subject alone, but is compatible with canonical Bento.
+            return ""
+    if values:
+        return unique(values)
+    entry = REGISTRY_BY_ID.get(str(state.get("client_qa_id") or ""))
+    if entry and state.get("last_answer_id"):
+        # last_answer_id is transient and expires with the existing session
+        # TTL; client_qa_id alone is an audit field and may outlive it.
+        return subject(entry.context)
+    return "home_table" if state.get("home_table_context") and not state.get("source_context_superseded") else ""
+
+
 def _match_base(message: str, facts: Optional[Dict[str, Any]] = None) -> Optional[ApprovedMatch]:
     """Extend existing matching with bounded aliases; return source entries only."""
     state = facts or {}
@@ -483,7 +553,9 @@ def _match_base(message: str, facts: Optional[Dict[str, Any]] = None) -> Optiona
     subject = next(iter(subjects), "") or _followup_subject(state)
     # Only genuine short follow-ups use session context. Explicit named
     # subjects always win. Canonical generic questions retain their old route.
-    short_price = bool(re.fullmatch(r"(?:how much|price|cost|rate)(?: please)?", text))
+    short_price = contextual_price_question(message)
+    if short_price and not subjects:
+        subject = contextual_price_subject(state)
     short_details = text in {"tell me more", "more details", "tell me about it"}
     short_time = bool(re.fullmatch(r"(?:how long|how long (?:will |does )?delivery take|delivery time|when will it arrive)", text))
     context_ids = {
@@ -502,6 +574,16 @@ def _match_base(message: str, facts: Optional[Dict[str, Any]] = None) -> Optiona
             return _match_existing(message, {})
         return None
     if not subjects and (short_price or short_details):
+        # Preserve the original general FAQ when there is no authoritative
+        # subject at all. Ambiguous/incomplete source or canonical state must
+        # never be disguised as that general answer.
+        context_present = any(state.get(key) for key in (
+            "last_topic", "active_topic", "active_product_context", "active_entity", "home_table_context"))
+        context_present = context_present or bool(
+            (state.get("source_route") and not state.get("source_context_superseded"))
+            or (state.get("client_qa_id") and state.get("last_answer_id")))
+        if short_price and not context_present and _generic_price(message):
+            return _match_existing(message, {})
         return None
 
     candidates = set(_ALIAS_IDS.get(text, ()))

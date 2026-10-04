@@ -17,6 +17,7 @@ from camellia.config import config
 from camellia.instagram_chatbot_control import TEST_ONLY
 from camellia.instagram_routing import route_for_inbound, validate_route_payload
 from camellia.session_memory import session_memory
+from camellia import client_qa, approved_qa
 
 
 @pytest.fixture
@@ -81,6 +82,154 @@ def _dispatch_durable_instagram_events(events):
         {"entry": [{"id": "test-account", "messaging": events}]}, durable_tasks,
     )
     asyncio.run(background_tasks())
+
+
+PRICE_VARIATIONS = (
+    "How much does it cost?", "How much is it?", "What does it cost?",
+    "What's the price?", "What is the price?", "Price please",
+    "How much for this?", "Can you tell me the price?", "What does this cost?",
+    "  WHAT’S THE PRICE?!  ",
+)
+PRICE_SUBJECTS = (
+    ("Norom Pak Sondesh", "aamar_mishti", "sondesh_price_client"),
+    ("Bengali Bento", "bento", "bento_price_client"),
+    ("Bengali Home Table", None, "home_table_price"),
+    ("Subscription", None, "subscription_price"),
+)
+
+
+def _price_source(ad_customer, name, product, qa_id):
+    ad_customer[2].save_menu_image_draft("weekly_vegetarian", "/uploads/test-reviewed-current-weekly.jpeg", "fixture")
+    ad_customer[2].publish_menu_image("weekly_vegetarian")
+    route = instagram_routing.decode_route(_mapped_source(ad_customer, "post", "120246385008280540", topic_name=name))
+    # Persist authoritative product IDs / Approved Q&A reference in the temp
+    # test database. A free-form Sondesh title alone is intentionally insufficient.
+    route.update(priority_products=[product] if product else [], menu_mode="NONE", menu_id=None)
+    if product is None:
+        route.update(response_mode="APPROVED_QA", approved_qa_id=qa_id)
+    return ad_customer[2].save_instagram_source_route({**validate_route_payload(route), "routing_id": route["routing_id"]})
+
+
+@pytest.mark.parametrize("message", PRICE_VARIATIONS)
+@pytest.mark.parametrize("name,product,qa_id", PRICE_SUBJECTS)
+def test_natural_price_uses_bound_canonical_subject_and_unchanged_approved_copy(
+        eligible_weekly_asset, ad_customer, name, product, qa_id, message):
+    route = _price_source(ad_customer, name, product, qa_id)
+    sender, facts, db = ad_customer
+    send = _process(ad_customer, message, _ad_entry(sender, "120246385008280540", message,
+                    title="Misleading unrelated sweet/caption"))
+    entry = client_qa.effective_entry(qa_id)
+    assert facts["client_qa_id"] == qa_id
+    assert facts["last_route_source"] == "EXACT_APPROVED"
+    assert facts["source_route"]["routing_id"] == route["routing_id"]
+    assert db.get_active_handoff("instagram", sender) is None
+    stored = db.get_conversations(limit=1, channel="instagram", user_id=sender)[0]
+    assert stored["bot_response"] == entry.answer
+    assert send.called
+    text = "\n\n".join(b["text"] for b in facts["ordered_response_blocks"] if b["kind"] == "TEXT")
+    if qa_id == "home_table_price":
+        assert facts["ordered_response_blocks"] == client_qa.build_home_table_reel_blocks(entry.answer)
+    else:
+        assert text == entry.answer
+    expected = {"weekly_menu": eligible_weekly_asset,
+                "aamar_menu": "/uploads/ad-source-menu.jpg",
+                "signature_menu": "/images/Signature%20Sondesh.jpeg",
+                "subscription_rate_chart": "/images/Everyday%20Meal%20Subscription%20Rate%20Chart.jpeg"}
+    urls = [url for b in facts["ordered_response_blocks"] if b["kind"] != "TEXT" for url in b.get("urls", [])]
+    assert urls == [expected[key] for key in entry.asset_keys]
+
+
+@pytest.mark.parametrize("name,product,qa_id", PRICE_SUBJECTS)
+def test_durable_ad_referral_natural_price_and_followup_real_routing(
+        eligible_weekly_asset, ad_customer, name, product, qa_id):
+    _price_source(ad_customer, name, product, qa_id)
+    sender, facts, db = ad_customer
+    event = {"sender": {"id": sender}, "message": {"mid": "natural-price-ad",
+             "text": "How much does it cost?", "referral": {"source": "ADS",
+             "ad_id": "120246385008280540", "ads_context_data": {"ad_title": "Untrusted display"}}}}
+    with patch.object(app_module, "send_instagram_reply", return_value={"status": "sent", "message_id": "reply"}), \
+         patch.object(app_module.escalator, "handle_escalation") as escalate:
+        _dispatch_durable_instagram_events([event])
+        _dispatch_durable_instagram_events([event])
+    assert facts["client_qa_id"] == qa_id
+    assert not escalate.called
+    assert db.get_active_handoff("instagram", sender) is None
+    assert len([r for r in db.get_conversations(limit=20, user_id=sender, channel="instagram")
+                if r["user_message"] == "How much does it cost?"]) == 1
+    _process(ad_customer, "What does this cost?", EntryPoint(source="typed"))
+    assert facts["client_qa_id"] == qa_id
+    assert db.get_active_handoff("instagram", sender) is None
+
+
+@pytest.mark.parametrize("message,qa_id", [
+    ("How much is the Bengali Bento?", "bento_price_client"),
+    ("How much is the subscription?", "subscription_price"),
+])
+def test_explicit_price_subject_overrides_mapped_source_and_next_followup(
+        eligible_weekly_asset, ad_customer, message, qa_id):
+    _price_source(ad_customer, "Norom Pak Sondesh", "aamar_mishti", "sondesh_price_client")
+    sender, facts, db = ad_customer
+    _process(ad_customer, message, _ad_entry(sender, "120246385008280540", message))
+    assert facts["client_qa_id"] == qa_id
+    assert facts["source_context_superseded"]
+    _process(ad_customer, "How much does it cost?", EntryPoint(source="typed"))
+    assert facts["client_qa_id"] == qa_id
+    assert db.get_active_handoff("instagram", sender) is None
+
+
+@pytest.mark.parametrize("message", ["How much does XYZ sweet cost?", "What does paneer cost?", "chicken price"])
+def test_unknown_named_price_never_inherits_bound_source(ad_customer, message):
+    _price_source(ad_customer, "Norom Pak Sondesh", "aamar_mishti", "sondesh_price_client")
+    sender, facts, db = ad_customer
+    assert client_qa.match(message, {"last_topic": "sondesh"}) is None
+    _process(ad_customer, message, _ad_entry(sender, "120246385008280540", message))
+    assert facts.get("client_qa_id") != "sondesh_price_client"
+    assert facts["last_route_source"] == "HUMAN_HANDOFF"
+    assert db.get_active_handoff("instagram", sender)
+
+
+@pytest.mark.parametrize("state", [
+    {}, {"ad_product": "sondesh", "ad_title": "Sondesh"},
+    {"last_topic": "sondesh", "active_topic": "bento"},
+    {"source_route": {"routing_id": 1, "routing_topic": "Norom Pak Sondesh"}, "last_topic": "sondesh"},
+    {"source_route": {"routing_id": 1, "priority_products": ["aamar_mishti", "bento"]}},
+    {"source_route": {"routing_id": 1, "priority_products": ["unknown"]}, "last_topic": "bento"},
+    {"source_route": {"routing_id": 1, "active": False, "priority_products": ["bento"]}},
+    {"source_route": {"routing_id": 1, "priority_products": ["bento"], "approved_qa_id": "sondesh_price_client"}},
+])
+def test_missing_or_conflicting_subject_fails_closed(state):
+    for message in PRICE_VARIATIONS:
+        # Canonical general-price copy remains available only without context,
+        # as before. Pronoun follow-ups never guess from the display-only ad.
+        if any(k != "ad_product" and k != "ad_title" for k in state) or message not in {"What's the price?", "What is the price?", "Price please", "Can you tell me the price?", "  WHAT’S THE PRICE?!  "}:
+            assert client_qa.match(message, state) is None
+
+
+def test_unbound_ad_natural_price_does_not_borrow_title(ad_customer):
+    sender, facts, db = ad_customer
+    _process(ad_customer, "How much does it cost?", _ad_entry(sender, "unbound", "How much does it cost?", title="Bengali Bento"))
+    assert facts.get("client_qa_id") not in {p[2] for p in PRICE_SUBJECTS}
+    assert db.get_active_handoff("instagram", sender)
+
+
+@pytest.mark.parametrize("key,value,qa_id", [
+    ("last_topic", "sondesh_general", "sondesh_price_client"),
+    ("active_topic", "bento", "bento_price_client"),
+    ("active_product_context", "subscription", "subscription_price"),
+    ("client_qa_id", "home_table_details", "home_table_price"),
+])
+def test_canonical_conversation_context_resolves_same_entry(key, value, qa_id):
+    for message in PRICE_VARIATIONS:
+        matched = client_qa.match(message, {key: value, "last_answer_id": "bengali_home_table_details"} if key == "client_qa_id" else {key: value})
+        assert matched.entry == client_qa.effective_entry(qa_id)
+
+
+def test_contextual_price_still_participates_in_admin_alias_ambiguity():
+    row = {"aliases_json": '["How much does it cost?"]', "context": "bento", "status": "ACTIVE"}
+    state = {"last_topic": "sondesh"}
+    assert approved_qa.match("How much does it cost?", state, rows={"bento_price_client": row}) is None
+    same = approved_qa.match("HOW MUCH DOES IT COST?!", state, rows={"sondesh_price_client": row})
+    assert same.entry.qa_id == "sondesh_price_client"
 
 
 @pytest.mark.parametrize("kind,ad_id", [("post", "ad-post-42"), ("reel", "ad-reel-42")])
