@@ -336,16 +336,23 @@ global.fetch = async (url,options) => { calls.push({url,options}); return {ok:tr
  await loadAdsWorkspace();
  assert(calls[0].url.includes('view=active'));
  assert(nodes.adsList.innerHTML.includes('Map Ad'));
- const sibling={...ad,ad_id:'120246385008280541'};
+ const sibling={...ad,ad_id:'120246385008280541',thumbnail_url:'https://example.test/creative.jpg'};
  adsWorkspace.items=[ad,sibling];
  adsWorkspace.active_groups=[{identity:['180001'],member_ad_ids:[ad.ad_id,sibling.ad_id]}];
  adsWorkspace.counts={active:1,raw_active:2};
  renderAdsWorkspace();
  assert.equal((nodes.adsList.innerHTML.match(/data-active-group=/g)||[]).length,1);
  assert(nodes.adsList.innerHTML.includes(sibling.ad_id));
+ assert(nodes.adsList.innerHTML.includes('src="https://example.test/creative.jpg"'));
+ assert(nodes.adsList.innerHTML.includes('AD · Display'));
+ assert(nodes.adsList.innerHTML.includes('<summary>2 Meta Ad IDs ▾</summary>'));
+ assert(nodes.adsSummary.innerHTML.includes('Meta-reported active creative groups: <b>1</b>'));
+ assert(nodes.adsSummary.innerHTML.includes('Raw Meta Ad ID counts'));
+ assert(nodes.adsSummary.innerHTML.includes('Meta-reported active: 2'));
  nodes.adsExactId.value=ad.ad_id; renderAdsWorkspace();
  assert(nodes.adsList.innerHTML.includes(`data-ad-id="${ad.ad_id}"`));
- assert(!nodes.adsList.innerHTML.includes(`data-ad-id="${sibling.ad_id}"`));
+ assert(nodes.adsList.innerHTML.includes(`data-ad-id="${sibling.ad_id}"`));
+ assert(nodes.adsList.innerHTML.includes('<details open>'));
  nodes.adsExactId.value='999'; renderAdsWorkspace();
  assert(nodes.adsList.innerHTML.includes('No ads match'));
  nodes.adsExactId.value='';
@@ -373,6 +380,10 @@ def test_ads_workspace_script_parses_and_classic_nav_is_separate(store, tmp_path
     assert 'id="igObservedAds"' not in page
     assert "Enter an existing active source mapping ID" not in page
     assert "data-ads-route" in page and "Use Existing Mapping" in page
+    search = re.search(r'<input id="adsExactId"[^>]+>', page).group()
+    assert 'width:100%' in search and 'box-sizing:border-box' in search
+    assert 'Manage one exact Ad ID' not in page
+    assert '>Meta-reported active groups</button>' in page
     dialog = re.search(r'<dialog id="adsMappingDialog"[^>]+>', page).group()
     for style in ('position:fixed', 'left:50%', 'top:50%', 'transform:translate(-50%, -50%)',
                   'margin:0', 'width:min(850px, 95vw)', 'max-height:90vh', 'overflow:auto'):

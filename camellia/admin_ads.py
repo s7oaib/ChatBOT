@@ -4,10 +4,10 @@ HTML = r'''
   <div class="admin-page-heading"><div><h2>Ads</h2><p>Map exact Meta Ad IDs to existing Instagram sources.</p></div>
     <button id="adsSyncButton" class="btn-secondary" type="button" onclick="syncAdsNow()">↻ Sync Now</button></div>
   <div id="adsSummary" class="gallery-toolbar" aria-label="Ads summary"></div>
-  <label for="adsExactId">Exact Meta Ad ID</label><input id="adsExactId" type="search" inputmode="numeric" placeholder="Enter an exact Ad ID" oninput="renderAdsWorkspace()">
-  <p class="ig-media-muted">Active groups exact promoted Instagram identities reported ACTIVE by Meta. It does not measure current delivery or Ads Library visibility. Choose one member Ad ID to manage its binding.</p>
+  <div style="width:100%;margin:12px 0;"><label for="adsExactId" style="display:block;margin-bottom:6px;">Exact Meta Ad ID</label><input id="adsExactId" class="field-control" type="search" inputmode="numeric" placeholder="Search by exact Meta Ad ID" style="display:block;width:100%;box-sizing:border-box;" oninput="renderAdsWorkspace()"></div>
+  <p class="ig-media-muted">Meta-reported active groups reflect configured ACTIVE status, not verified current delivery. Expand a group to manage one exact Meta Ad ID.</p>
   <div class="gallery-toolbar" role="group" aria-label="Ads filters">
-    <button class="btn-secondary active" data-ads-filter="active" onclick="setAdsFilter('active')">Active</button>
+    <button class="btn-secondary active" data-ads-filter="active" onclick="setAdsFilter('active')">Meta-reported active groups</button>
     <button class="btn-secondary" data-ads-filter="unmapped" onclick="setAdsFilter('unmapped')">Unmapped</button>
     <button class="btn-secondary" data-ads-filter="mapped" onclick="setAdsFilter('mapped')">Mapped</button>
     <button class="btn-secondary" data-ads-filter="inactive" onclick="setAdsFilter('inactive')">Inactive</button>
@@ -66,8 +66,8 @@ async function syncAdsNow() {
     finally { adsSyncBusy = false; button.disabled = false; button.textContent = '↻ Sync Now'; }
 }
 function renderAdsWorkspace() {
-    const summary = [['active','Active'],['unmapped','Unmapped'],['mapped','Mapped'],['inactive','Inactive / Ended']];
-    document.getElementById('adsSummary').innerHTML = summary.map(([key,label]) => `<span class="ig-media-muted">${label}: <b>${Number(adsWorkspace.counts[key] || 0)}</b></span>`).join('') + `<span class="ig-media-muted">Raw ACTIVE Ad IDs: ${Number(adsWorkspace.counts.raw_active || 0)}</span>`;
+    const rawCounts = [['all','All'],['raw_active','Meta-reported active'],['unmapped','Unmapped'],['mapped','Mapped'],['inactive','Inactive / ended']];
+    document.getElementById('adsSummary').innerHTML = `<div style="width:100%;">Meta-reported active creative groups: <b>${Number(adsWorkspace.counts.active || 0)}</b></div><div style="width:100%;"><b>Raw Meta Ad ID counts</b> · ${rawCounts.map(([key,label]) => `${label}: ${Number(adsWorkspace.counts[key] || 0)}`).join(' · ')}</div>`;
     const sync = adsWorkspace.sync || {};
     document.getElementById('adsSyncStatus').textContent = `Last successful sync: ${sync.last_success_at || 'Never'}${sync.error_category ? ' · Sync warning: ' + sync.error_category + ' · Last complete inventory retained.' : ''}${sync.optional_fields_reduced ? ' · Some creative fields are unavailable.' : ''}`;
     const list = document.getElementById('adsList');
@@ -88,7 +88,11 @@ function renderAdsWorkspace() {
             const members = group.member_ad_ids.map(id => adsWorkspace.items.find(ad => ad.ad_id === id)).filter(Boolean);
             const first = members[0];
             if (!first) return '';
-            return `<section class="ig-media-card" data-active-group="true"><div class="ig-media-main"><b>AD · Active promoted creative</b><p style="overflow-wrap:anywhere;">${escapeHtml(first.instagram_permalink_url || first.effective_instagram_media_id || group.identity.join(' · '))}</p><p>${members.length} exact Meta Ad IDs</p><p style="overflow-wrap:anywhere;">${group.member_ad_ids.map(escapeHtml).join(', ')}</p><details${exactId ? ' open' : ''}><summary>Manage one exact Ad ID</summary>${members.filter(ad => !exactId || ad.ad_id === exactId).map(renderAd).join('')}</details></div></section>`;
+            const imageMember = members.find(ad => ad.thumbnail_url || ad.mapping?.preview_url);
+            const image = imageMember?.thumbnail_url || imageMember?.mapping?.preview_url;
+            const preview = image ? `<img class="ig-media-thumb" loading="lazy" src="${escapeHtml(image)}" alt="Promoted creative preview">` : '<div class="ig-media-placeholder">Preview unavailable</div>';
+            const displayName = members.find(ad => ad.name)?.name || 'Promoted creative';
+            return `<section class="ig-media-card" data-active-group="true"><div class="ig-media-preview">${preview}</div><div class="ig-media-main"><b>AD · ${escapeHtml(displayName)}</b><p style="overflow-wrap:anywhere;">${escapeHtml(first.instagram_permalink_url || first.effective_instagram_media_id || group.identity.join(' · '))}</p><details${exactId ? ' open' : ''}><summary>${members.length} Meta Ad IDs ▾</summary>${members.map(renderAd).join('')}</details></div></section>`;
         }).join('');
     } else {
         list.innerHTML = (adsWorkspace.items || []).filter(ad => !exactId || ad.ad_id === exactId).map(renderAd).join('');
