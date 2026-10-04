@@ -1,6 +1,9 @@
 """Admin-only, read-only Marketing inventory. Local PR #58 aliases stay authoritative."""
 import re
 import time
+import json
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from urllib.parse import parse_qs, urlsplit
 
 import httpx
@@ -221,6 +224,113 @@ def active_presentation_groups(rows):
             for key, members in sorted(groups.items())]
 
 
+def _delivery_read(client, url, token, params):
+    try:
+        response = client.get(url, params=params, headers={"Authorization": "Bearer " + token})
+        payload = response.json()
+    except (httpx.HTTPError, ValueError):
+        raise AdsSyncError("NETWORK_OR_INVALID_RESPONSE") from None
+    if not isinstance(payload, dict):
+        raise AdsSyncError("INVALID_RESPONSE")
+    error = payload.get("error") or {}
+    if response.status_code != 200 or error:
+        code = error.get("code") if isinstance(error, dict) else None
+        raise AdsSyncError(_ERRORS.get(code, "ACCOUNT_OR_API_UNAVAILABLE"))
+    return payload
+
+
+def _delivery_pages(client, url, token, params, deadline):
+    rows, cursors = [], set()
+    for _ in range(100):
+        if time.monotonic() > deadline:
+            raise AdsSyncError("DELIVERY_TIMEOUT")
+        payload = _delivery_read(client, url, token, params)
+        if not isinstance(payload.get("data"), list):
+            raise AdsSyncError("INVALID_RESPONSE")
+        rows.extend(payload["data"])
+        paging = payload.get("paging") or {}
+        if not isinstance(paging, dict):
+            raise AdsSyncError("INVALID_PAGINATION")
+        next_url = paging.get("next")
+        if not next_url:
+            return rows
+        if not isinstance(next_url, str):
+            raise AdsSyncError("INVALID_PAGINATION")
+        parsed = urlsplit(next_url)
+        cursor = (parse_qs(parsed.query).get("after") or [None])[0]
+        if parsed.scheme != "https" or parsed.netloc != "graph.facebook.com" or parsed.path != urlsplit(url).path or not cursor or cursor in cursors:
+            raise AdsSyncError("INVALID_PAGINATION")
+        cursors.add(cursor)
+        params = {**params, "after": cursor}
+    raise AdsSyncError("PAGINATION_LIMIT")
+
+
+def delivery_evidence():
+    """Read-only, fresh Meta status + today's reported impressions; never instant delivery."""
+    token, account = config.META_MARKETING_ACCESS_TOKEN, ad_account_id()
+    rule = "Current Meta ACTIVE status and positive ad-level impressions today (ad-account timezone). Reporting can lag; not instantaneous delivery."
+    unavailable = {"status": "unavailable", "rule": rule, "ads": {}}
+    if not token or not account:
+        return {**unavailable, "error_category": "NOT_CONFIGURED"}
+    try:
+        base = f"https://graph.facebook.com/{config.INSTAGRAM_API_VERSION}/{account}"
+        deadline = time.monotonic() + 120
+        with httpx.Client(timeout=20.0, follow_redirects=False) as client:
+            account_data = _delivery_read(client, base, token, {"fields": "timezone_name"})
+            zone = ZoneInfo(account_data["timezone_name"])
+            day = datetime.now(zone).date().isoformat()
+            statuses = _delivery_pages(client, base + "/ads", token, {"fields": "id,effective_status", "limit": 100}, deadline)
+            active = set()
+            seen = set()
+            for row in statuses:
+                if not isinstance(row, dict) or not re.fullmatch(r"[0-9]+", str(row.get("id") or "")) or row["id"] in seen or not isinstance(row.get("effective_status"), str):
+                    raise AdsSyncError("INVALID_RESPONSE")
+                seen.add(row["id"])
+                if row["effective_status"] == "ACTIVE":
+                    active.add(row["id"])
+            insights = _delivery_pages(client, base + "/insights", token,
+                {"level": "ad", "fields": "ad_id,impressions,date_start,date_stop", "time_range": json.dumps({"since": day, "until": day}), "limit": 100}, deadline)
+            evidence, seen = {}, set()
+            for row in insights:
+                if not isinstance(row, dict) or not re.fullmatch(r"[0-9]+", str(row.get("ad_id") or "")) or row["ad_id"] in seen or not re.fullmatch(r"[0-9]+", str(row.get("impressions") or "")) or row.get("date_start") != day or row.get("date_stop") != day:
+                    raise AdsSyncError("INVALID_RESPONSE")
+                seen.add(row["ad_id"])
+                impressions = int(row["impressions"])
+                if row["ad_id"] in active and impressions > 0:
+                    evidence[row["ad_id"]] = {"impressions": impressions}
+            if datetime.now(zone).date().isoformat() != day:
+                raise AdsSyncError("REPORTING_DAY_CHANGED")
+        return {"status": "available", "rule": rule, "ads": evidence, "reporting_date": day,
+                "account_timezone": zone.key, "checked_at": datetime.now(timezone.utc).isoformat(), "raw_running": len(evidence)}
+    except AdsSyncError as exc:
+        return {**unavailable, "error_category": str(exc)}
+    except (KeyError, TypeError, ValueError, ZoneInfoNotFoundError):
+        return {**unavailable, "error_category": "INVALID_RESPONSE"}
+    except Exception:
+        return {**unavailable, "error_category": "DELIVERY_READ_FAILED"}
+
+
+def running_presentation_groups(rows, evidence):
+    """Only complete, globally consistent media/permalink pairs allow multi-ID confirmation."""
+    pairs, media_urls, url_media = {}, {}, {}
+    for row in rows:
+        media, url = str(row.get("effective_instagram_media_id") or ""), _permalink(row.get("instagram_permalink_url"))
+        if media and url:
+            media_urls.setdefault(media, set()).add(url)
+            url_media.setdefault(url, set()).add(media)
+        pairs[row["ad_id"]] = (media, url)
+    groups = {}
+    for row in sorted(rows, key=lambda row: row["ad_id"]):
+        media, url = pairs[row["ad_id"]]
+        verified = bool(media and url and len(media_urls[media]) == 1 and len(url_media[url]) == 1)
+        key = ("exact", media, url) if verified else ("ad", row["ad_id"])
+        group = groups.setdefault(key, {"identity": list(key[1:]), "member_ad_ids": [], "delivering_ad_ids": [], "verified_identity": verified})
+        group["member_ad_ids"].append(row["ad_id"])
+        if row["ad_id"] in evidence:
+            group["delivering_ad_ids"].append(row["ad_id"])
+    return [group for _, group in sorted(groups.items()) if group["delivering_ad_ids"]]
+
+
 def ads_workspace(database, view="active"):
     routes = [mapping_display(row) for row in database.list_instagram_source_routes()]
     route_by_id = {row["routing_id"]: row for row in routes}
@@ -244,10 +354,22 @@ def ads_workspace(database, view="active"):
                     history=[{key: event.get(key) for key in ("routing_id", "action", "occurred_at")} for event in database.list_instagram_ad_binding_history(ad_id)])
         rows.append(item)
     active_groups = active_presentation_groups(rows)
+    delivery = delivery_evidence() if view == "running" else {"status": "not_requested", "ads": {}}
+    running_groups = running_presentation_groups(rows, delivery["ads"])
+    running_ids = {ad_id for group in running_groups for ad_id in group["member_ad_ids"]}
+    delivery["unresolved_ad_ids"] = sorted(set(delivery["ads"]) - {row["ad_id"] for row in rows})
+    for row in rows:
+        row["delivery"] = delivery["ads"].get(row["ad_id"])
     counts = {"active": len(active_groups), "raw_active": sum(row["active"] for row in rows), "unmapped": sum(not row["mapped"] for row in rows),
               "mapped": sum(row["mapped"] for row in rows), "inactive": sum(not row["active"] and row["inventory_state"] != "OBSERVED" for row in rows), "all": len(rows)}
+    counts["running"] = len(running_groups) if delivery["status"] == "available" else None
+    if delivery["unresolved_ad_ids"]:
+        counts["running"] = None
+        delivery["resolved_group_count"] = len(running_groups)
+    counts["raw_running"] = delivery.get("raw_running")
     filtered = [row for row in rows if view == "all" or (view == "active" and row["active"]) or
+                (view == "running" and row["ad_id"] in running_ids) or
                 (view == "inactive" and not row["active"] and row["inventory_state"] != "OBSERVED") or (view == "mapped" and row["mapped"]) or
                 (view == "unmapped" and not row["mapped"])]
-    return {"status": "success", "items": filtered, "active_groups": active_groups, "counts": counts, "sync": sync_status(database),
+    return {"status": "success", "items": filtered, "active_groups": active_groups, "running_groups": running_groups, "delivery": delivery, "counts": counts, "sync": sync_status(database),
             "routes": [row for row in routes if row.get("active") and row.get("source_type") in {"post", "reel", "story"}]}
