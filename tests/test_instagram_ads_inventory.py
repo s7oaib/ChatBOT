@@ -172,6 +172,7 @@ def test_observed_inventory_binding_union_deduplicates_and_counts(store, monkeyp
 
 
 def test_admin_authenticated_endpoints_and_pr58_binding_history(store, monkeypatch):
+    monkeypatch.setattr(ads, "delivery_evidence", lambda: {"status": "unavailable", "ads": {}, "error_category": "PERMISSION_DENIED"})
     client = TestClient(app_module.app)
     headers = {"x-admin-key": config.ADMIN_API_KEY}
     saved = route(store)
@@ -326,7 +327,7 @@ global.adminAuthenticated = true;
 global.getAuthHeaders = () => ({'X-CSRF-Token':'test-csrf'});
 global.escapeHtml = value => String(value || '');
 global.confirm = () => true;
-global.document = {querySelectorAll:()=>[],getElementById:id=>nodes[id] ||= {innerHTML:'',textContent:'',querySelectorAll:()=>[],close:()=>{},showModal:()=>{}}};
+global.document = {querySelectorAll:()=>[],getElementById:id=>nodes[id] ||= {innerHTML:'',textContent:'',style:{},querySelectorAll:()=>[],close:()=>{},showModal:()=>{}}};
 const route = {routing_id:7,source_type:'post',active:true,canonical_url:'https://www.instagram.com/p/Exact/',routing_topic:'Source',media_id:'180001'};
 const ad = {ad_id:'120246385008280540',name:'Display',mapped:false,active:true,history:[],suggested_routing_id:7};
 global.fetch = async (url,options) => { calls.push({url,options}); return {ok:true,json:async()=>url.endsWith('/bind') ? {binding:{ad_id:ad.ad_id,routing_id:7,active:1}} : {items:[ad],routes:[route],counts:{active:1,unmapped:1},sync:{}}};};
@@ -334,12 +335,13 @@ global.fetch = async (url,options) => { calls.push({url,options}); return {ok:tr
     checks = r'''
 (async()=>{
  await loadAdsWorkspace();
- assert(calls[0].url.includes('view=active'));
+ assert(calls[0].url.includes('view=running'));
  assert(nodes.adsList.innerHTML.includes('Map Ad'));
  const sibling={...ad,ad_id:'120246385008280541',thumbnail_url:'https://example.test/creative.jpg'};
  adsWorkspace.items=[ad,sibling];
  adsWorkspace.active_groups=[{identity:['180001'],member_ad_ids:[ad.ad_id,sibling.ad_id]}];
  adsWorkspace.counts={active:1,raw_active:2};
+ adsFilter='active';
  renderAdsWorkspace();
  assert.equal((nodes.adsList.innerHTML.match(/data-active-group=/g)||[]).length,1);
  assert(nodes.adsList.innerHTML.includes(sibling.ad_id));
@@ -366,6 +368,40 @@ global.fetch = async (url,options) => { calls.push({url,options}); return {ok:tr
  assert.deepEqual(JSON.parse(call.options.body),{routing_id:7,change_binding:false});
  assert.equal(call.options.headers['X-CSRF-Token'],'test-csrf');
  assert(!calls.some(value=>value.url==='/admin/instagram-routes'));
+ const paired={...ad,effective_instagram_media_id:'180001',instagram_permalink_url:'https://www.instagram.com/p/Exact/'};
+ const second={...paired,ad_id:'120246385008280541',mapped:true,routing_id:8};
+ const group={identity:['180001',paired.instagram_permalink_url],verified_identity:true,member_ad_ids:[paired.ad_id,second.ad_id],delivering_ad_ids:[paired.ad_id]};
+ adsWorkspace={items:[paired,second],routes:[route],running_groups:[group],counts:{running:1,raw_running:1,active:1,raw_active:2},delivery:{status:'available',unresolved_ad_ids:[]},sync:{}};
+ adsFilter='running'; renderAdsWorkspace();
+ assert(nodes.adsList.innerHTML.includes('DELIVERED TODAY'));
+ assert(nodes.adsList.innerHTML.includes('data-ads-group-map'));
+ assert(nodes.adsList.innerHTML.includes('Instagram media ID: 180001'));
+ assert(nodes.adsSummary.innerHTML.includes('Running Now: <b>1</b>'));
+ openAdsGroupMapping(paired.ad_id);
+ assert(nodes.adsMappingIdentity.textContent.includes(paired.ad_id));
+ assert(nodes.adsMappingIdentity.textContent.includes(second.ad_id));
+ assert(nodes.adsMappingIdentity.textContent.includes('currently mapped to source 8'));
+ const start=calls.length; let confirmation='';
+ global.confirm=text=>{confirmation=text;return false;};
+ await bindAdsMapping(7); assert.equal(calls.length,start);
+ assert(confirmation.includes(paired.ad_id)&&confirmation.includes(second.ad_id)&&confirmation.includes('Selected existing source 7'));
+ global.confirm=()=>true;
+ global.fetch=async(url,options)=>{calls.push({url,options});return {ok:true,json:async()=>url.endsWith('/bind')?{binding:{ad_id:url.split('/').at(-2),routing_id:7,active:1}}:{...adsWorkspace}};};
+ await bindAdsMapping(7);
+ const individual=calls.slice(start).filter(value=>value.url.endsWith('/bind'));
+ assert.equal(individual.length,2);
+ assert.equal(individual[0].url,`/admin/instagram-ads/${paired.ad_id}/bind`);
+ assert.equal(individual[1].url,`/admin/instagram-ads/${second.ad_id}/bind`);
+ assert.deepEqual(JSON.parse(individual[1].options.body),{routing_id:7,change_binding:true});
+ assert(individual.every(value=>!('ad_ids' in JSON.parse(value.options.body))));
+ // Failed second request stops the loop, reports confirmed first ID, and disables blind retry.
+ openAdsGroupMapping(paired.ad_id); let attempts=0;
+ global.fetch=async(url,options)=>{if(url.endsWith('/bind')){attempts++;return {ok:attempts===1,json:async()=>({binding:{ad_id:paired.ad_id,routing_id:7,active:1}})};}return {ok:true,json:async()=>({...adsWorkspace})};};
+ await bindAdsMapping(7);
+ assert.equal(attempts,2); assert(nodes.adsMappingResult.textContent.includes(`Confirmed IDs: ${paired.ad_id}`));
+ assert.equal(adsChoosingId,null); assert.equal(adsChoosingGroup,null);
+ second.instagram_permalink_url='https://www.instagram.com/p/Conflict/';
+ openAdsGroupMapping(paired.ad_id); assert.equal(adsChoosingGroup,null);
 })().catch(error=>{console.error(error);process.exitCode=1;});
 '''
     target = tmp_path / "ads-behavior.js"
@@ -383,7 +419,7 @@ def test_ads_workspace_script_parses_and_classic_nav_is_separate(store, tmp_path
     search = re.search(r'<input id="adsExactId"[^>]+>', page).group()
     assert 'width:100%' in search and 'box-sizing:border-box' in search
     assert 'Manage one exact Ad ID' not in page
-    assert '>Meta-reported active groups</button>' in page
+    assert '>Meta Active</button>' in page and '>Running Now</button>' in page
     dialog = re.search(r'<dialog id="adsMappingDialog"[^>]+>', page).group()
     for style in ('position:fixed', 'left:50%', 'top:50%', 'transform:translate(-50%, -50%)',
                   'margin:0', 'width:min(850px, 95vw)', 'max-height:90vh', 'overflow:auto'):
@@ -438,3 +474,99 @@ def test_active_groups_use_canonical_permalink_and_partial_exact_identity():
         {'instagram_permalink_url':'https://www.instagram.com/p/A/'},
     ])]
     assert ads.active_presentation_groups(rows)[0]['member_ad_ids'] == ['0','1','2']
+
+
+def delivery_day():
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    return datetime.now(ZoneInfo('Asia/Kolkata')).date().isoformat()
+
+
+def insight(ad_id, impressions='10', **extra):
+    return {'ad_id': ad_id, 'impressions': impressions, 'date_start': delivery_day(), 'date_stop': delivery_day(), **extra}
+
+
+def test_delivery_read_requires_positive_impressions_and_fresh_active_status(store, monkeypatch):
+    calls = mock_pages(monkeypatch, [{'timezone_name': 'Asia/Kolkata'},
+        {'data': [{'id':'1','effective_status':'ACTIVE'}, {'id':'2','effective_status':'PAUSED'}, {'id':'3','effective_status':'ACTIVE'}]},
+        {'data':[insight('1'), insight('2'), insight('3','0')]}])
+    result = ads.delivery_evidence()
+    assert result['status'] == 'available' and result['ads'] == {'1': {'impressions':10}}
+    assert result['reporting_date'] == delivery_day() and result['account_timezone'] == 'Asia/Kolkata'
+    assert all(call.method == 'GET' and 'access_token' not in str(call.url) for call in calls)
+    assert calls[-1].url.params['level'] == 'ad'
+    assert json.loads(calls[-1].url.params['time_range']) == {'since':delivery_day(),'until':delivery_day()}
+    assert 'private-marketing-fixture' not in json.dumps(result)
+    assert store.list_instagram_ad_bindings() == [] and store.list_instagram_source_routes() == []
+
+
+def test_delivery_pagination_reconstructs_safe_cursor_and_reads_all_pages(store, monkeypatch):
+    calls = mock_pages(monkeypatch, [{'timezone_name':'Asia/Kolkata'},
+        {'data':[{'id':'1','effective_status':'ACTIVE'}], 'paging':{'next':'https://graph.facebook.com/v25.0/act_12345/ads?after=s&access_token=private-marketing-fixture'}},
+        {'data':[{'id':'2','effective_status':'ACTIVE'}]},
+        {'data':[insight('1')], 'paging':{'next':'https://graph.facebook.com/v25.0/act_12345/insights?after=i&access_token=private-marketing-fixture'}},
+        {'data':[insight('2')]}])
+    result = ads.delivery_evidence()
+    assert result['raw_running'] == 2
+    assert calls[2].url.params['after'] == 's' and calls[4].url.params['after'] == 'i'
+    assert all('access_token' not in str(call.url) for call in calls)
+
+
+@pytest.mark.parametrize('failure', [
+    (403, {'error':{'code':200,'message':'private-marketing-fixture'}}),
+    {'data':'bad'}, {'data':[insight('1','-1')]},
+    {'data':[insight('1',date_start='2000-01-01')]},
+    {'data':[insight('1'), insight('1')]},
+    {'data':[insight('1')], 'paging':{'next':'https://evil.test/insights?after=x'}},
+    httpx.ConnectError('private-marketing-fixture'),
+])
+def test_delivery_fails_closed_without_partial_evidence_or_secrets(store, monkeypatch, failure):
+    mock_pages(monkeypatch, [{'timezone_name':'Asia/Kolkata'}, {'data':[{'id':'1','effective_status':'ACTIVE'}]}, failure])
+    result = ads.delivery_evidence()
+    assert result['status'] == 'unavailable' and result['ads'] == {}
+    assert 'private-marketing-fixture' not in json.dumps(result)
+
+
+def test_running_groups_keep_verified_siblings_and_display_is_not_authority():
+    rows = [{'ad_id':str(i),'effective_instagram_media_id':media,'instagram_permalink_url':url,
+             'name':'Same display', 'thumbnail_url':'https://example.test/same.jpg'} for i, (media,url) in enumerate([
+        ('1','https://www.instagram.com/p/A/'), ('1','https://www.instagram.com/p/A/?utm_source=test'),
+        ('2','https://www.instagram.com/p/B/'), ('3',None), ('3',None)])]
+    groups = ads.running_presentation_groups(rows, {'0':{},'2':{},'3':{},'4':{}})
+    assert groups == ads.running_presentation_groups(list(reversed(rows)), {'0':{},'2':{},'3':{},'4':{}})
+    assert len(groups) == 4
+    paired = next(g for g in groups if '0' in g['member_ad_ids'])
+    assert paired['member_ad_ids'] == ['0','1'] and paired['delivering_ad_ids'] == ['0'] and paired['verified_identity']
+    assert all(not g['verified_identity'] for g in groups if '3' in g['member_ad_ids'] or '4' in g['member_ad_ids'])
+
+
+def test_running_identity_conflicts_never_group_even_without_delivery_on_conflicting_row():
+    rows = [{'ad_id':str(i),'effective_instagram_media_id':media,'instagram_permalink_url':url} for i,(media,url) in enumerate([
+        ('1','https://www.instagram.com/p/A/'), ('1','https://www.instagram.com/p/A/'),
+        ('1','https://www.instagram.com/p/B/'), ('2','https://www.instagram.com/p/A/')])]
+    groups = ads.running_presentation_groups(rows, {'0':{},'1':{}})
+    assert len(groups) == 2 and all(len(g['member_ad_ids']) == 1 and not g['verified_identity'] for g in groups)
+
+
+def test_running_workspace_preserves_meta_inventory_routes_and_bindings(store, monkeypatch):
+    sync(store, monkeypatch, [item(),item('200'),item('300',effective_instagram_media_id='2',instagram_permalink_url='https://www.instagram.com/p/B/')])
+    before = store.list_instagram_ads_inventory('act_12345')
+    monkeypatch.setattr(ads, 'delivery_evidence', lambda: {'status':'available','ads':{item()['id']:{'impressions':10}},'raw_running':1})
+    workspace = ads.ads_workspace(store, 'running')
+    assert workspace['counts']['running'] == 1 and workspace['counts']['raw_running'] == 1
+    assert workspace['running_groups'][0]['member_ad_ids'] == [item()['id'],'200']
+    assert workspace['counts']['active'] == 2 and workspace['counts']['raw_active'] == 3
+    assert len(ads.ads_workspace(store, 'all')['items']) == 3
+    assert store.list_instagram_ads_inventory('act_12345') == before
+    assert store.list_instagram_ad_bindings() == [] and store.list_instagram_source_routes() == []
+    monkeypatch.setattr(ads, 'delivery_evidence', lambda: {'status':'unavailable','ads':{},'error_category':'PERMISSION_DENIED'})
+    workspace = ads.ads_workspace(store, 'running')
+    assert workspace['counts']['running'] is None and workspace['items'] == []
+    assert workspace['counts']['raw_active'] == 3
+    monkeypatch.setattr(ads, 'delivery_evidence', lambda: {'status':'available','ads':{},'raw_running':0})
+    assert ads.ads_workspace(store, 'running')['counts']['running'] == 0
+    monkeypatch.setattr(ads, 'delivery_evidence', lambda: {'status':'available','ads':{'999':{'impressions':1}},'raw_running':1})
+    workspace = ads.ads_workspace(store, 'running')
+    assert workspace['counts']['running'] is None
+    assert workspace['delivery']['unresolved_ad_ids'] == ['999']
+    assert workspace['delivery']['resolved_group_count'] == 0

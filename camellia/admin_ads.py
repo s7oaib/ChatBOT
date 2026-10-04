@@ -5,9 +5,10 @@ HTML = r'''
     <button id="adsSyncButton" class="btn-secondary" type="button" onclick="syncAdsNow()">↻ Sync Now</button></div>
   <div id="adsSummary" class="gallery-toolbar" aria-label="Ads summary"></div>
   <div style="width:100%;margin:12px 0;"><label for="adsExactId" style="display:block;margin-bottom:6px;">Exact Meta Ad ID</label><input id="adsExactId" class="field-control" type="search" inputmode="numeric" placeholder="Search by exact Meta Ad ID" style="display:block;width:100%;box-sizing:border-box;" oninput="renderAdsWorkspace()"></div>
-  <p class="ig-media-muted">Meta-reported active groups reflect configured ACTIVE status, not verified current delivery. Expand a group to manage one exact Meta Ad ID.</p>
+  <p class="ig-media-muted">Running Now means current Meta ACTIVE status plus reported impressions today in the ad-account timezone; reporting may lag. Meta Active is technical inventory. Expand any card to manage individual exact Ad IDs.</p>
   <div class="gallery-toolbar" role="group" aria-label="Ads filters">
-    <button class="btn-secondary active" data-ads-filter="active" onclick="setAdsFilter('active')">Meta-reported active groups</button>
+    <button class="btn-secondary active" data-ads-filter="running" onclick="setAdsFilter('running')">Running Now</button>
+    <button class="btn-secondary" data-ads-filter="active" onclick="setAdsFilter('active')">Meta Active</button>
     <button class="btn-secondary" data-ads-filter="unmapped" onclick="setAdsFilter('unmapped')">Unmapped</button>
     <button class="btn-secondary" data-ads-filter="mapped" onclick="setAdsFilter('mapped')">Mapped</button>
     <button class="btn-secondary" data-ads-filter="inactive" onclick="setAdsFilter('inactive')">Inactive</button>
@@ -27,11 +28,12 @@ HTML = r'''
 SCRIPT = r'''
 <script>
 let adsWorkspace = {items: [], routes: [], counts: {}, sync: {}};
-let adsFilter = 'active';
+let adsFilter = 'running';
 let adsRequestGeneration = 0;
 let adsSyncBusy = false;
 let adsMutationBusy = false;
 let adsChoosingId = null;
+let adsChoosingGroup = null;
 
 function setAdsFilter(view) {
     adsFilter = view;
@@ -66,10 +68,12 @@ async function syncAdsNow() {
     finally { adsSyncBusy = false; button.disabled = false; button.textContent = '↻ Sync Now'; }
 }
 function renderAdsWorkspace() {
-    const rawCounts = [['all','All'],['raw_active','Meta-reported active'],['unmapped','Unmapped'],['mapped','Mapped'],['inactive','Inactive / ended']];
-    document.getElementById('adsSummary').innerHTML = `<div style="width:100%;">Meta-reported active creative groups: <b>${Number(adsWorkspace.counts.active || 0)}</b></div><div style="width:100%;"><b>Raw Meta Ad ID counts</b> · ${rawCounts.map(([key,label]) => `${label}: ${Number(adsWorkspace.counts[key] || 0)}`).join(' · ')}</div>`;
+    const rawCounts = [['all','All'],['raw_running','Delivered today + currently ACTIVE'],['raw_active','Meta-reported active'],['unmapped','Unmapped'],['mapped','Mapped'],['inactive','Inactive / ended']];
+    document.getElementById('adsSummary').innerHTML = `<div style="width:100%;">Running Now: <b>${adsWorkspace.counts.running == null ? 'Not checked / unavailable' : Number(adsWorkspace.counts.running)}</b> creative groups · Meta-reported active creative groups: <b>${Number(adsWorkspace.counts.active || 0)}</b></div><div style="width:100%;"><b>Raw Meta Ad ID counts</b> · ${rawCounts.map(([key,label]) => `${label}: ${adsWorkspace.counts[key] == null ? 'Not checked' : Number(adsWorkspace.counts[key])}`).join(' · ')}</div>`;
     const sync = adsWorkspace.sync || {};
     document.getElementById('adsSyncStatus').textContent = `Last successful sync: ${sync.last_success_at || 'Never'}${sync.error_category ? ' · Sync warning: ' + sync.error_category + ' · Last complete inventory retained.' : ''}${sync.optional_fields_reduced ? ' · Some creative fields are unavailable.' : ''}`;
+    const delivery = adsWorkspace.delivery || {};
+    if (adsFilter === 'running') document.getElementById('adsSyncStatus').textContent += delivery.status === 'available' ? ` · Delivery window: ${delivery.reporting_date} (${delivery.account_timezone}) · Checked: ${delivery.checked_at}${delivery.unresolved_ad_ids?.length ? ' · Some delivering IDs lack inventory; Sync Now to resolve discovery.' : ''}` : ` · Delivery evidence unavailable: ${delivery.error_category || 'Not checked'}. Use Meta Active / All for retained inventory.`;
     const list = document.getElementById('adsList');
     const exactId = document.getElementById('adsExactId').value?.trim() || '';
     const renderAd = ad => {
@@ -83,8 +87,9 @@ function renderAdsWorkspace() {
         const suggested = ad.suggested_routing_id && !ad.mapped ? '<button class="btn-secondary" data-ads-action="suggestion">Use Existing Mapping</button>' : '';
         return `<article class="ig-media-card" data-ad-id="${escapeHtml(ad.ad_id)}"><div class="ig-media-preview">${preview}</div><div class="ig-media-main"><b>AD · ${escapeHtml(ad.name)}</b><div class="ig-media-summary">Meta Ad ID: ${escapeHtml(ad.ad_id)}</div><div class="ig-media-facts"><span>${ad.inventory_state === 'OBSERVED' ? 'OBSERVED' : ad.active ? 'ACTIVE' : 'INACTIVE'} · ${escapeHtml(ad.effective_status)}</span><span>${ad.mapped ? 'MAPPED ✓' : 'UNMAPPED'} · ${escapeHtml(ad.binding_status)}</span><span>Linked source: ${escapeHtml(ad.source_type || 'unknown')}</span></div><p style="overflow-wrap:anywhere;">${escapeHtml(identity)}</p><p>${escapeHtml(linked)}</p><p>Mapped to: ${escapeHtml(mapping)}${ad.mapped ? ` · Binding: ${ad.binding_active ? 'ON' : 'OFF'}` : ''}</p><small>Last synced: ${escapeHtml(ad.last_synced_at || 'Not yet synced')}</small></div><div class="ig-media-actions">${action}${suggested}</div></article>`;
     };
-    if (adsFilter === 'active' && adsWorkspace.active_groups) {
-        list.innerHTML = adsWorkspace.active_groups.filter(group => !exactId || group.member_ad_ids.includes(exactId)).map(group => {
+    const groups = adsFilter === 'running' ? adsWorkspace.running_groups : adsWorkspace.active_groups;
+    if ((adsFilter === 'active' || adsFilter === 'running') && groups) {
+        list.innerHTML = groups.filter(group => !exactId || group.member_ad_ids.includes(exactId)).map(group => {
             const members = group.member_ad_ids.map(id => adsWorkspace.items.find(ad => ad.ad_id === id)).filter(Boolean);
             const first = members[0];
             if (!first) return '';
@@ -92,12 +97,15 @@ function renderAdsWorkspace() {
             const image = imageMember?.thumbnail_url || imageMember?.mapping?.preview_url;
             const preview = image ? `<img class="ig-media-thumb" loading="lazy" src="${escapeHtml(image)}" alt="Promoted creative preview">` : '<div class="ig-media-placeholder">Preview unavailable</div>';
             const displayName = members.find(ad => ad.name)?.name || 'Promoted creative';
-            return `<section class="ig-media-card" data-active-group="true"><div class="ig-media-preview">${preview}</div><div class="ig-media-main"><b>AD · ${escapeHtml(displayName)}</b><p style="overflow-wrap:anywhere;">${escapeHtml(first.instagram_permalink_url || first.effective_instagram_media_id || group.identity.join(' · '))}</p><details${exactId ? ' open' : ''}><summary>${members.length} Meta Ad IDs ▾</summary>${members.map(renderAd).join('')}</details></div></section>`;
+            const running = adsFilter === 'running';
+            const indicator = running ? `<p style="overflow-wrap:anywhere;">DELIVERED TODAY + currently Meta ACTIVE · Evidence IDs: ${group.delivering_ad_ids.map(id => escapeHtml(id)).join(', ')}. ${members.length} exact member IDs. Mapping: ${members.filter(ad => ad.mapped).length}/${members.length} bound.${group.verified_identity ? '' : ' Incomplete/conflicting identity: individual mapping only.'}</p><button class="btn-primary" data-ads-group-map="${escapeHtml(first.ad_id)}">Map Ad</button>` : '';
+            return `<section class="ig-media-card" data-active-group="true"><div class="ig-media-preview">${preview}</div><div class="ig-media-main"><b>AD · ${escapeHtml(displayName)}</b><p style="overflow-wrap:anywhere;">Permalink: ${first.instagram_permalink_url ? `<a href="${escapeHtml(first.instagram_permalink_url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(first.instagram_permalink_url)}</a>` : 'Unavailable'}<br>Instagram media ID: ${escapeHtml(first.effective_instagram_media_id || 'Unavailable')}</p>${indicator}<details${exactId ? ' open' : ''}><summary>${members.length} Meta Ad IDs ▾</summary>${members.map(renderAd).join('')}</details></div></section>`;
         }).join('');
     } else {
         list.innerHTML = (adsWorkspace.items || []).filter(ad => !exactId || ad.ad_id === exactId).map(renderAd).join('');
     }
-    if (!list.innerHTML) list.innerHTML = '<p class="ig-media-muted">No ads match this filter. Sync Now discovers ads before a customer sends a DM.</p>';
+    if (!list.innerHTML) list.innerHTML = '<p class="ig-media-muted">No ads match this filter. Exact IDs without delivery evidence remain searchable in Meta Active or All.</p>';
+    list.querySelectorAll('[data-ads-group-map]').forEach(button => button.addEventListener('click', () => openAdsGroupMapping(button.dataset.adsGroupMap)));
     list.querySelectorAll('[data-ad-id]').forEach(card => card.querySelectorAll('[data-ads-action]').forEach(button => button.addEventListener('click', () => {
         const ad = adsWorkspace.items.find(item => item.ad_id === card.dataset.adId);
         const action = button.dataset.adsAction;
@@ -108,6 +116,8 @@ function renderAdsWorkspace() {
     })));
 }
 function openAdsMapping(ad, suggestedOnly = false) {
+    if (adsMutationBusy) return;
+    adsChoosingGroup = null;
     adsChoosingId = ad.ad_id;
     const dialog = document.getElementById('adsMappingDialog');
     document.getElementById('adsMappingResult').textContent = '';
@@ -118,20 +128,47 @@ function openAdsMapping(ad, suggestedOnly = false) {
     choices.querySelectorAll('[data-ads-route]').forEach(button => button.addEventListener('click', () => bindAdsMapping(Number(button.dataset.adsRoute))));
     dialog.showModal();
 }
+function openAdsGroupMapping(memberId) {
+    if (adsMutationBusy) return;
+    const group = (adsWorkspace.running_groups || []).find(item => item.member_ad_ids.includes(memberId));
+    if (!group) return;
+    const members = group.member_ad_ids.map(id => adsWorkspace.items.find(ad => ad.ad_id === id));
+    if (members.some(ad => !ad)) return;
+    if (!group.verified_identity || members.length === 1) { openAdsMapping(members[0]); return; }
+    const first = members[0];
+    if (!first.effective_instagram_media_id || !first.instagram_permalink_url || members.some(ad => ad.effective_instagram_media_id !== first.effective_instagram_media_id || ad.instagram_permalink_url !== first.instagram_permalink_url)) return;
+    openAdsMapping(first);
+    adsChoosingGroup = [...group.member_ad_ids];
+    document.getElementById('adsMappingIdentity').textContent = `Verified creative · media ${first.effective_instagram_media_id} · ${first.instagram_permalink_url}\nAffected exact Meta Ad IDs:\n${members.map(ad => `${ad.ad_id} · ${ad.mapped ? 'currently mapped to source ' + ad.routing_id : 'unmapped'}`).join('\n')}`;
+    document.getElementById('adsMappingIdentity').style.whiteSpace = 'pre-wrap';
+}
 async function bindAdsMapping(routingId) {
     if (adsMutationBusy) return;
     const ad = adsWorkspace.items.find(item => item.ad_id === adsChoosingId);
     const route = adsWorkspace.routes.find(item => item.routing_id === routingId);
-    if (!ad || !route || !confirm(`Bind exact Ad ${ad.ad_id} to ${route.canonical_url || route.media_id || route.shortcode}?`)) return;
+    if (!ad || !route) return;
+    const members = (adsChoosingGroup || [ad.ad_id]).map(id => adsWorkspace.items.find(item => item.ad_id === id));
+    if (members.some(item => !item)) return;
+    if (adsChoosingGroup && (!ad.effective_instagram_media_id || !ad.instagram_permalink_url || members.some(item => item.effective_instagram_media_id !== ad.effective_instagram_media_id || item.instagram_permalink_url !== ad.instagram_permalink_url))) return;
+    const confirmation = `Bind individual exact Meta Ad IDs:\n${members.map(item => `${item.ad_id}${item.mapped ? ' · replace/reactivate existing binding to source ' + item.routing_id : ''}`).join('\n')}\nSelected existing source ${routingId}: ${route.display_label || route.routing_topic || route.source_type}\nMedia: ${route.media_id || 'Unavailable'}\nPermalink: ${route.canonical_url || route.shortcode || 'Unavailable'}\nConfirm each listed individual binding?`;
+    if (!confirm(confirmation)) return;
     adsMutationBusy = true;
+    const completed = [];
     try {
-        const response = await fetch(`/admin/instagram-ads/${encodeURIComponent(ad.ad_id)}/bind`, {method:'POST',headers:{...getAuthHeaders(),'Content-Type':'application/json'},body:JSON.stringify({routing_id:routingId,change_binding:ad.mapped})});
+        for (const member of members) {
+        const response = await fetch(`/admin/instagram-ads/${encodeURIComponent(member.ad_id)}/bind`, {method:'POST',headers:{...getAuthHeaders(),'Content-Type':'application/json'},body:JSON.stringify({routing_id:routingId,change_binding:member.mapped})});
         if (!response.ok) throw Error('Binding failed');
         const result = await response.json();
-        if (result.binding?.ad_id !== ad.ad_id || result.binding?.routing_id !== routingId || !result.binding?.active) throw Error('Binding verification failed');
+        if (result.binding?.ad_id !== member.ad_id || result.binding?.routing_id !== routingId || !result.binding?.active) throw Error('Binding verification failed');
+        completed.push(member.ad_id);
+        }
         document.getElementById('adsMappingDialog').close();
         await loadAdsWorkspace();
-    } catch (_) { document.getElementById('adsMappingResult').textContent = 'Could not confirm binding. Refresh Ads before retrying.'; }
+    } catch (_) {
+        adsChoosingGroup = null; adsChoosingId = null;
+        document.getElementById('adsMappingResult').textContent = `Stopped. Confirmed IDs: ${completed.join(', ') || 'None'}. The last attempted ID may have changed; remaining IDs were not attempted. Refresh and verify individual bindings before retrying.`;
+        await loadAdsWorkspace();
+    }
     finally { adsMutationBusy = false; }
 }
 async function toggleAdsBinding(ad) {

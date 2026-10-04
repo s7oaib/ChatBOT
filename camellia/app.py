@@ -3677,9 +3677,9 @@ def list_instagram_routes(
 
 
 @app.get("/admin/instagram-ads")
-def list_instagram_ads(view: str = "active", x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+def list_instagram_ads(view: str = "running", x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
     require_admin(x_admin_key, x_admin_pin)
-    if view not in {"active", "unmapped", "mapped", "inactive", "all"}:
+    if view not in {"running", "active", "unmapped", "mapped", "inactive", "all"}:
         raise HTTPException(400, "Unsupported Ads filter.")
     from camellia.instagram_ads import ads_workspace
     return ads_workspace(db, view)
