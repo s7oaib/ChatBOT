@@ -27,7 +27,9 @@ No automatic binding or Marketing write is performed. Sync failure does not inte
 
 ## Release validation
 
-Deploy the tested branch to existing Railway Staging and call the authenticated sync endpoint. If Staging lacks existing variables/references, do not copy secrets. Record live pre-merge validation as blocked and use the same endpoint immediately after production deployment, under the operator's 4 October 2026 revised authorization.
+The release path is feature branch → PR → impacted/full tests as required → GitHub CI → review → merge to main → Railway production validation. Pre-merge Meta validation uses tests and mocks. This release does not depend on a Railway staging environment; do not create, deploy to or restore ChatBOT-Staging.
+
+Immediately after the reviewed PR is merged and its exact commit is deployed to production, run the authenticated server-side sync endpoint for the first real Meta API read. The server reads the existing Railway environment variables and returns only safe diagnostic results. Keep Marketing API access read-only, never copy the token locally, and do not change production secrets or remove Railway variables as part of this release.
 
 `tests/test_instagram_ads_inventory.py` covers account normalization, version/GET/header safety, pre-DM discovery, full pagination, later-page failures, optional fallback/restart, safe errors, inactive/ended retention, exact suggestions, ambiguity, deduplication, multiple ads per source, idempotence, authenticated PR #58 bind/rebind/disable/history, leases, Post/Reel identity/filter truth, stale flags, JavaScript parsing and executed picker/filter behavior.
 
