@@ -3887,7 +3887,7 @@ async def save_instagram_media_mapping(item_id: int, request: Request, x_admin_k
     topic_id = str(body.get("topic_id") or "").strip()
     if not topic_id and body.get("response_mode", "CUSTOM") != "APPROVED_QA":
         raise HTTPException(status_code=400, detail="Choose a Topic.")
-    existing = db.get_instagram_media_mapping(item_id)
+    existing = db.get_instagram_media_mapping(item_id, for_edit=True)
     source_type = "reel" if item["media_type"] == "VIDEO" else "post"
     if existing is None:
         existing = next((route for route in db.list_instagram_source_routes()
@@ -3924,12 +3924,12 @@ def delete_instagram_media_mapping(item_id: int, x_admin_key: Optional[str] = He
     if not item:
         raise HTTPException(status_code=404, detail="Instagram media not found.")
     _require_verified_current_instagram_media(item)
-    route = db.get_instagram_media_mapping(item_id)
+    route = db.get_instagram_media_mapping(item_id, for_edit=True)
     if route is None:
         route = next((candidate for candidate in db.list_instagram_source_routes()
                       if candidate.get("media_id") == item["instagram_media_id"]
                       and candidate.get("source_type") == ("reel" if item["media_type"] == "VIDEO" else "post")), None)
-    if route and (route.get("media_id") == item["instagram_media_id"] or (route.get("canonical_url") == item.get("permalink"))):
+    if route and (route.get("media_id") == item["instagram_media_id"] or (route.get("canonical_url") == item.get("permalink")) or (item.get("shortcode") and route.get("shortcode") == item["shortcode"])):
         db.archive_instagram_source_route(int(route["routing_id"]))
     db.update_instagram_media_route(item_id, route_mode="DEFAULT", topic_id=None, custom_route_id=None, needs_review=False)
     return {"status": "success", "mapping_removed": True, "instagram_media_id": item["instagram_media_id"]}

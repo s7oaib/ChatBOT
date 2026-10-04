@@ -1792,20 +1792,20 @@ class Database:
         return items, total
 
     @staticmethod
-    def _instagram_media_route_match() -> str:
+    def _instagram_media_route_match(*, include_custom_pointer: bool = True) -> str:
         # One predicate supplies cards, counts, search, and mapped filters.
         # Empty values must never make unrelated inventory appear mapped.
-        return """r.source_type IN ('post','reel') AND r.archived_at IS NULL AND (
-            r.routing_id=instagram_media.custom_route_id
-            OR (instagram_media.instagram_media_id<>'' AND r.media_id=instagram_media.instagram_media_id)
+        pointer = "r.routing_id=instagram_media.custom_route_id OR " if include_custom_pointer else ""
+        return """r.source_type IN ('post','reel') AND r.archived_at IS NULL AND (""" + pointer + """
+            (instagram_media.instagram_media_id<>'' AND r.media_id=instagram_media.instagram_media_id)
             OR (instagram_media.permalink<>'' AND r.canonical_url=instagram_media.permalink)
             OR (instagram_media.shortcode<>'' AND r.shortcode=instagram_media.shortcode)
         )"""
 
-    def get_instagram_media_mapping(self, item_id: int) -> Optional[Dict[str, Any]]:
+    def get_instagram_media_mapping(self, item_id: int, *, for_edit: bool = False) -> Optional[Dict[str, Any]]:
         with self.get_connection() as conn:
             row = conn.execute(f"""SELECT r.* FROM instagram_media, instagram_source_routes r
-                WHERE instagram_media.id=? AND {self._instagram_media_route_match()}
+                WHERE instagram_media.id=? AND {self._instagram_media_route_match(include_custom_pointer=not for_edit)}
                 ORDER BY r.active DESC, r.routing_id ASC LIMIT 1""", (item_id,)).fetchone()
         return dict(row) if row else None
 

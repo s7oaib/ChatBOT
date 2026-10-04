@@ -237,6 +237,19 @@ def test_stale_media_topic_does_not_claim_a_route(store):
     assert store.list_instagram_media(mapping_status="unmapped")[1] == 1
 
 
+def test_mapping_edits_resolve_exact_identity_instead_of_unrelated_pointer(store):
+    unrelated = route(store, code="Other", media_id="999999")
+    exact = route(store, media_id=None)
+    media = store.upsert_instagram_media({"instagram_media_id": "180001", "media_type": "IMAGE",
+        "permalink": "https://www.instagram.com/p/ExactSondesh/", "shortcode": "ExactSondesh"})
+    store.update_instagram_media_route(media["id"], route_mode="CUSTOM", topic_id=None,
+        custom_route_id=unrelated["routing_id"], needs_review=False)
+    assert store.get_instagram_media_mapping(media["id"], for_edit=True)["routing_id"] == exact["routing_id"]
+    store.archive_instagram_source_route(exact["routing_id"])
+    assert store.get_instagram_media_mapping(media["id"], for_edit=True) is None
+    assert store.get_instagram_source_route(unrelated["routing_id"])["canonical_url"].endswith("Other/")
+
+
 def test_many_ad_ids_share_one_existing_source_and_idempotent_bind(store, monkeypatch):
     saved = route(store)
     for ad_id in ("100", "200"):
