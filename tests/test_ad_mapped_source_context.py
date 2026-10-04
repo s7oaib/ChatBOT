@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from unittest.mock import patch
 
@@ -71,6 +72,15 @@ def _process(ad_customer, text, entry):
          patch.object(app_module.escalator, "handle_escalation"):
         app_module._process_instagram_event(sender, text, entry.ad_id, entry_point=entry)
     return send
+
+
+def _dispatch_durable_instagram_events(events):
+    background_tasks = BackgroundTasks()
+    durable_tasks = app_module._DurableInstagramTasks(background_tasks)
+    app_module._dispatch_instagram_payload(
+        {"entry": [{"id": "test-account", "messaging": events}]}, durable_tasks,
+    )
+    asyncio.run(background_tasks())
 
 
 @pytest.mark.parametrize("kind,ad_id", [("post", "ad-post-42"), ("reel", "ad-reel-42")])
@@ -257,55 +267,69 @@ def test_unknown_ads_are_observed_and_can_be_bound_by_admin(ad_customer):
     assert db.list_instagram_ad_binding_history("new-unmapped-ad")[-1]["action"] == "BOUND"
 
 
-def test_ads_referral_consumes_pending_post_and_redelivery_is_idempotent(ad_customer):
+@pytest.mark.parametrize("same_payload,order", [
+    (False, "post_first"), (False, "ad_first"),
+    (True, "post_first"), (True, "ad_first"),
+])
+def test_both_ad_post_race_orders_use_durable_dispatch_and_are_idempotent(ad_customer, same_payload, order):
     sender = ad_customer[0]
     db = ad_customer[2]
     route = _mapped_source(ad_customer, "post", "race-bound-ad")
+    suffix = uuid.uuid4().hex
     post = {
         "sender": {"id": sender}, "timestamp": 1700000000000,
-        "message": {"mid": "shared-post-mid", "attachments": [{"type": "ig_post", "payload": {
+        "message": {"mid": f"shared-post-{suffix}", "attachments": [{"type": "ig_post", "payload": {
             "ig_post_media_id": "race-post-media-123", "title": "non-authoritative",
         }}]},
     }
     ads = {
         "sender": {"id": sender}, "timestamp": 1700000000100,
-        "message": {"mid": "ads-referral-mid", "text": "What is the price?", "referral": {
+        "message": {"mid": f"ads-referral-{suffix}", "text": "What is the price?", "referral": {
             "source": "ADS", "ad_id": "race-bound-ad",
         }},
     }
-    payload = lambda event: {"entry": [{"id": "test-account", "messaging": [event]}]}
-
-    app_module._dispatch_instagram_payload(payload(post), BackgroundTasks())
-    pending = db.get_connection()
-    try:
-        assert pending.execute("SELECT status FROM instagram_pending_media_events WHERE media_id=?", ("race-post-media-123",)).fetchone()[0] == "PENDING"
-    finally:
-        pending.close()
-    app_module._handle_shared_attachment(sender, None, "race-post-media-123")
-    assert db.get_active_handoff("instagram", sender) is None
-    app_module._dispatch_instagram_payload(payload(ads), BackgroundTasks())
-    app_module._dispatch_instagram_payload(payload(ads), BackgroundTasks())
-
-    connection = db.get_connection()
-    try:
-        statuses = [row[0] for row in connection.execute(
-            "SELECT status FROM instagram_pending_media_events WHERE media_id IN ('race-post-media-123','') ORDER BY id",
-        ).fetchall()]
-    finally:
-        connection.close()
-    assert statuses.count("CONSUMED") == 1
-    assert statuses.count("AD_SEEN") == 1
-
-    with patch.object(app_module, "_send_or_queue_instagram_reply", return_value={"status": "sent"}) as send, \
+    ordered = [post, ads] if order == "post_first" else [ads, post]
+    with patch.object(app_module, "send_instagram_reply", return_value={"status": "sent", "message_id": "sent-test-mid"}) as send, \
          patch.object(app_module.escalator, "handle_escalation"):
-        app_module._process_instagram_event(sender, "What is the price?", "race-bound-ad",
-                                            entry_point=_ad_entry(sender, "race-bound-ad", "What is the price?"))
-    assert send.call_count >= 1
+        if same_payload:
+            _dispatch_durable_instagram_events(ordered)
+        else:
+            _dispatch_durable_instagram_events([ordered[0]])
+            _dispatch_durable_instagram_events([ordered[1]])
+        # Meta retries both deliveries with the same message IDs. Durable job
+        # identity and the consumed media state must make the replay inert.
+        if same_payload:
+            _dispatch_durable_instagram_events(ordered)
+        else:
+            _dispatch_durable_instagram_events([ordered[0]])
+            _dispatch_durable_instagram_events([ordered[1]])
+
     assert db.get_active_handoff("instagram", sender) is None
     assert ad_customer[1]["last_route_source"] == "EXACT_APPROVED"
+    assert ad_customer[1]["source_route"]["routing_id"] == route["routing_id"]
     stored = db.get_conversations(limit=1, channel="instagram", user_id=sender)[0]
     assert stored["bot_response"]
     assert "Operator-authored" not in stored["bot_response"]
+    query_rows = [row for row in db.get_conversations(limit=20, channel="instagram", user_id=sender)
+                  if row["user_message"] == "What is the price?"]
+    assert len(query_rows) == 1
+    assert query_rows[0]["template_id"] != "waiting_for_human"
+    assert send.call_count >= 1
+
+    assert db.get_pending_instagram_media_status(sender, "race-post-media-123") == "CONSUMED"
+
+
+def test_consumed_media_handler_is_defensively_terminal(ad_customer):
+    sender = ad_customer[0]
+    db = ad_customer[2]
+    db.record_instagram_ads_referral_seen(sender, "observed-ad", "ad-before-post-event")
+    pending = db.record_pending_instagram_media("post-after-ad-event", sender, "consumed-post-123")
+    assert pending["status"] == "CONSUMED"
+
+    app_module._handle_shared_attachment(sender, None, "consumed-post-123")
+
+    assert db.get_active_handoff("instagram", sender) is None
+    assert db.get_pending_instagram_media_status(sender, "consumed-post-123") == "CONSUMED"
 
 
 def test_ads_referral_does_not_cancel_or_resume_an_older_unrelated_handoff(ad_customer):
@@ -341,7 +365,7 @@ def test_ads_referral_does_not_cancel_or_resume_an_older_unrelated_handoff(ad_cu
     assert route_for_inbound(ad_id="handoff-protection-ad", media_id=None)[0]["routing_id"] == route["routing_id"]
 
 
-def test_unpaired_post_is_finalized_after_grace_period(ad_customer, monkeypatch):
+def test_unpaired_post_is_finalized_after_grace_period(ad_customer):
     sender = ad_customer[0]
     db = ad_customer[2]
     event = {
@@ -354,13 +378,13 @@ def test_unpaired_post_is_finalized_after_grace_period(ad_customer, monkeypatch)
     with db.get_connection() as conn:
         conn.execute("UPDATE instagram_pending_media_events SET expires_at=0 WHERE media_id=?", ("unpaired-post-media-123",))
         conn.commit()
-    finalized = []
-    monkeypatch.setattr(app_module, "_handoff_unmapped_shared_media",
-                        lambda sender_id, **kwargs: finalized.append((sender_id, kwargs)))
+    with patch.object(app_module, "send_instagram_reply", return_value={"status": "sent", "message_id": "handoff-notice"}), \
+         patch.object(app_module.escalator, "handle_escalation"):
+        app_module._finalize_expired_unmapped_posts()
 
-    app_module._finalize_expired_unmapped_posts()
-
-    assert finalized == [(sender, {"source_type": "post", "media_id": "unpaired-post-media-123"})]
+    handoff = db.get_active_handoff("instagram", sender)
+    assert handoff
+    assert "Unmapped shared Instagram Post" in handoff["reason"]
     with db.get_connection() as conn:
         assert conn.execute("SELECT status FROM instagram_pending_media_events WHERE media_id=?",
                             ("unpaired-post-media-123",)).fetchone()[0] == "FINALIZED"

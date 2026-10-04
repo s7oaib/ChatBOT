@@ -2223,6 +2223,16 @@ class Database:
             """, (str(sender_id), str(media_id))).fetchone()
         return bool(row)
 
+    def get_pending_instagram_media_status(self, sender_id: str, media_id: str) -> Optional[str]:
+        """Return the latest durable event state for one sender/Post pair."""
+        with self.get_connection() as conn:
+            row = conn.execute("""
+                SELECT status FROM instagram_pending_media_events
+                WHERE sender_id=? AND media_id=?
+                ORDER BY id DESC LIMIT 1
+            """, (str(sender_id), str(media_id))).fetchone()
+        return str(row["status"]) if row else None
+
     def record_instagram_ads_referral_seen(
         self, sender_id: str, ad_id: str, event_key: str, grace_seconds: int = 5,
     ) -> List[Dict[str, Any]]:

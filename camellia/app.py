@@ -1419,6 +1419,10 @@ def _handle_shared_attachment(
     """
     if not instagram_chatbot_control.is_sender_allowed(sender_id, database=db):
         return
+    if post_media_id and db.get_pending_instagram_media_status(sender_id, post_media_id) == "CONSUMED":
+        log.info("AD_MEDIA_RACE sender_hash=%s pending_post=true ads_referral_followed=true result=CONSUMED_BY_AD",
+                 _safe_identifier_hash(sender_id))
+        return
     if reel_identity or post_media_id:
         # Use the same route/responder path as a share with accompanying text.
         # A mapped source gets its approved default response; only an
@@ -2118,6 +2122,15 @@ def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks
                                 _instagram_event_key(entry_id, messaging_event), sender_id, shared_post_id,
                                 grace_seconds=5,
                             )
+                            if pending.get("status") == "CONSUMED":
+                                log.info("AD_MEDIA_RACE sender_hash=%s pending_post=false ads_referral_followed=true result=CONSUMED_BY_AD",
+                                         _safe_identifier_hash(sender_id))
+                                results.append({
+                                    "sender_id": sender_id,
+                                    "action": "consumed_ad_creative",
+                                    "shared_post_media_id": shared_post_id,
+                                })
+                                continue
                             log.info("AD_MEDIA_RACE sender_hash=%s pending_post=%s ads_referral_followed=false result=%s",
                                      _safe_identifier_hash(sender_id), pending.get("status") == "PENDING",
                                      "PENDING" if pending.get("status") == "PENDING" else "CONSUMED_BY_AD")
