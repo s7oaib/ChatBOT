@@ -298,4 +298,6 @@ def test_ci_fast_and_full_policy_remains_separate():
     assert "run: python scripts/run_impacted_tests.py --full --workers 2" in content
     assert "run: python scripts/run_impacted_tests.py --current-contract --workers 2" in content
     assert content.count("uses: ./.github/actions/setup-tests") == 2
+    assert "${{ github.event_name }}-${{ github.ref }}" in content
+    assert content.count("include-hidden-files: true") == 2
     assert "update_test_baseline" not in content

@@ -21,7 +21,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: camellia-ci-${{ github.workflow }}-${{ github.ref }}
+  group: camellia-ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -63,6 +63,7 @@ jobs:
         with:
           name: current-contract-execution
           path: .test-results/
+          include-hidden-files: true
 
   full-regression:
     name: Full regression (Python 3.11)
@@ -102,3 +103,4 @@ jobs:
         with:
           name: full-regression-execution
           path: .test-results/
+          include-hidden-files: true

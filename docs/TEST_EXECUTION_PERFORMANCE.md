@@ -10,7 +10,7 @@ Windows, Python 3.14.0, the existing virtual environment, 20 logical CPUs.
 Exactly one complete serial run through `python scripts/run_impacted_tests.py`:
 **3,791 passed, zero skipped/failed; 1,447.58 seconds** (pytest: 1,447.25s).
 An ignored profiling plugin recorded every case and setup/call/teardown report.
-The reference 1,497–1,568 seconds is historical, not used as a measured baseline.
+The reference 1,497â€“1,568 seconds is historical, not used as a measured baseline.
 
 | Phase | Seconds |
 | --- | ---: |
@@ -122,29 +122,33 @@ It consolidates two pytest launches, without dropping either suite.
 Both jobs reuse a composite setup action and pip cache keyed by runtime **and**
 test requirements. Both keep Python 3.11, existing lint/schema checks, required
 job names, event conditions and timeouts. Reports upload even on failure.
-Push and PR checks remain separate because head and merge commits differ;
-nightly/dispatch/release full regression remains separate from the PR contract
+Push and PR checks remain separate because head and merge commits differ.
+concurrency includes event type so a manual full run cannot cancel a branch
+push contract gate. Artifact upload explicitly includes the hidden report
+directory. Both details were checked against actual CI execution.
+Nightly/dispatch/release full regression remains separate from the PR contract
 gate. No required protection is removed.
 
 ## Reliability and measured optimized runs
 
-Both optimized runs used the normal impact command and classified CRITICAL/full.
+All optimized runs used the normal impact command and classified CRITICAL/full.
 
 | Run | Cases passed | Wall seconds | Reduction from measured serial |
 | --- | ---: | ---: | ---: |
-| Serial baseline | 3,791 | 1,447.58 | � |
+| Serial baseline | 3,791 | 1,447.58 | — |
 | Optimized first proof | 3,815 | 284.04 | 80.38% |
-| Optimized final repeat | 3,818 | 275.48 | 80.97% |
+| Optimized repeat | 3,818 | 275.48 | 80.97% |
+| Final after CI evidence fixes | 3,818 | 279.15 | 80.72% |
 
 All runs had zero failures/skips. The first proof added 23 executor cases plus
 one automatic no-shadowed-test case; final repeat adds three more executor
 safety cases (26 new executor tests, one automatic case). All **3,791 original
-node IDs** are present in both optimized collected/executed unions, with no
+node IDs** are present in all optimized collected/executed unions, with no
 omission or duplicate. Original sorted-node SHA256:
 `320c9383edde6e1ed3cf3f04b5dffaaee564010b0f2e70eddab345132e7181d9`.
 Final partition: **3,078 parallel cases in 125 audited files; 740 serial cases**.
-The final report phase durations are 139.54s parallel and
-132.31s serial, plus subprocess/aggregation overhead.
+The final report phase durations are 148.84s parallel and
+126.81s serial, plus subprocess/aggregation overhead.
 
 Focused infrastructure checks: 147 passed before the first full proof; final
 executor checks: 26 passed. Real two-process temporary suites exercise both
@@ -157,3 +161,13 @@ runner/gate contract instead of the replaced direct pytest invocation.
 These are Windows/Python 3.14 measurements on this machine, not guaranteed CI
 speedups. CI runs the same executor on Ubuntu/Python 3.11 with two workers.
 
+
+Ubuntu/Python 3.11 compatibility proof: full dispatch run
+[37240078135](https://github.com/s7oaib/ChatBOT/actions/runs/37240078135)
+passed all 3,818 cases (zero failures/skips) in 245.75s through the same runner
+with two workers. Current-contract PR run
+[37240038160](https://github.com/s7oaib/ChatBOT/actions/runs/37240038160)
+passed all 786 cases (760 pre-existing plus 26 executor cases) in 54.59s.
+The manual dispatch exposed old shared-event concurrency canceling its push
+check, and hidden artifact exclusion. Only workflow settings and their
+infrastructure assertions were adjusted; the final local run passed afterward.
