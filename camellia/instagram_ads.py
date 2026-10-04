@@ -192,6 +192,35 @@ def exact_route_suggestion(item, routes):
     return int(candidate["routing_id"]), "EXACT_MATCH"
 
 
+def active_presentation_groups(rows):
+    """Discovery only: exact identities never replace individual binding rows."""
+    active = sorted((row for row in rows if row.get("active")), key=lambda row: row["ad_id"])
+    media_urls, url_media = {}, {}
+    for row in active:
+        media = row.get("effective_instagram_media_id")
+        url = _permalink(row.get("instagram_permalink_url"))
+        if media and url:
+            media_urls.setdefault(str(media), set()).add(url)
+            url_media.setdefault(url, set()).add(str(media))
+    groups = {}
+    for row in active:
+        media = str(row.get("effective_instagram_media_id") or "")
+        url = _permalink(row.get("instagram_permalink_url"))
+        if not media and url and len(url_media.get(url, ())) == 1:
+            media = next(iter(url_media[url]))
+        if media:
+            key = ("media", media, url or "") if len(media_urls.get(media, ())) > 1 else ("media", media)
+        elif url:
+            key = ("permalink", url)
+        elif row.get("creative_id"):
+            key = ("creative", str(row["creative_id"]))
+        else:
+            key = ("ad", row["ad_id"])
+        groups.setdefault(key, []).append(row["ad_id"])
+    return [{"identity_kind": key[0], "identity": list(key[1:]), "member_ad_ids": members}
+            for key, members in sorted(groups.items())]
+
+
 def ads_workspace(database, view="active"):
     routes = [mapping_display(row) for row in database.list_instagram_source_routes()]
     route_by_id = {row["routing_id"]: row for row in routes}
@@ -214,10 +243,11 @@ def ads_workspace(database, view="active"):
                     source_type=normalize_instagram_url(source)["source_type"] if source else route.get("source_type", "unknown") if route else "unknown",
                     history=[{key: event.get(key) for key in ("routing_id", "action", "occurred_at")} for event in database.list_instagram_ad_binding_history(ad_id)])
         rows.append(item)
-    counts = {"active": sum(row["active"] for row in rows), "unmapped": sum(not row["mapped"] for row in rows),
+    active_groups = active_presentation_groups(rows)
+    counts = {"active": len(active_groups), "raw_active": sum(row["active"] for row in rows), "unmapped": sum(not row["mapped"] for row in rows),
               "mapped": sum(row["mapped"] for row in rows), "inactive": sum(not row["active"] and row["inventory_state"] != "OBSERVED" for row in rows), "all": len(rows)}
     filtered = [row for row in rows if view == "all" or (view == "active" and row["active"]) or
                 (view == "inactive" and not row["active"] and row["inventory_state"] != "OBSERVED") or (view == "mapped" and row["mapped"]) or
                 (view == "unmapped" and not row["mapped"])]
-    return {"status": "success", "items": filtered, "counts": counts, "sync": sync_status(database),
+    return {"status": "success", "items": filtered, "active_groups": active_groups, "counts": counts, "sync": sync_status(database),
             "routes": [row for row in routes if row.get("active") and row.get("source_type") in {"post", "reel", "story"}]}

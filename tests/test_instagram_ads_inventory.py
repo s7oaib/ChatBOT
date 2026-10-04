@@ -167,7 +167,7 @@ def test_observed_inventory_binding_union_deduplicates_and_counts(store, monkeyp
     sync(store, monkeypatch)
     result = ads.ads_workspace(store, "all")
     assert len(result["items"]) == 2
-    assert result["counts"] == {"active": 1, "mapped": 1, "unmapped": 1, "inactive": 0, "all": 2}
+    assert result["counts"] == {"active": 1, "raw_active": 1, "mapped": 1, "unmapped": 1, "inactive": 0, "all": 2}
     assert ads.ads_workspace(store, "mapped")["items"][0]["name"] == "Norom Pak Sondesh"
 
 
@@ -336,6 +336,19 @@ global.fetch = async (url,options) => { calls.push({url,options}); return {ok:tr
  await loadAdsWorkspace();
  assert(calls[0].url.includes('view=active'));
  assert(nodes.adsList.innerHTML.includes('Map Ad'));
+ const sibling={...ad,ad_id:'120246385008280541'};
+ adsWorkspace.items=[ad,sibling];
+ adsWorkspace.active_groups=[{identity:['180001'],member_ad_ids:[ad.ad_id,sibling.ad_id]}];
+ adsWorkspace.counts={active:1,raw_active:2};
+ renderAdsWorkspace();
+ assert.equal((nodes.adsList.innerHTML.match(/data-active-group=/g)||[]).length,1);
+ assert(nodes.adsList.innerHTML.includes(sibling.ad_id));
+ nodes.adsExactId.value=ad.ad_id; renderAdsWorkspace();
+ assert(nodes.adsList.innerHTML.includes(`data-ad-id="${ad.ad_id}"`));
+ assert(!nodes.adsList.innerHTML.includes(`data-ad-id="${sibling.ad_id}"`));
+ nodes.adsExactId.value='999'; renderAdsWorkspace();
+ assert(nodes.adsList.innerHTML.includes('No ads match'));
+ nodes.adsExactId.value='';
  adsFilter='unmapped'; await loadAdsWorkspace();
  assert(calls[1].url.includes('view=unmapped'));
  openAdsMapping(ad,true);
@@ -360,6 +373,10 @@ def test_ads_workspace_script_parses_and_classic_nav_is_separate(store, tmp_path
     assert 'id="igObservedAds"' not in page
     assert "Enter an existing active source mapping ID" not in page
     assert "data-ads-route" in page and "Use Existing Mapping" in page
+    dialog = re.search(r'<dialog id="adsMappingDialog"[^>]+>', page).group()
+    for style in ('position:fixed', 'left:50%', 'top:50%', 'transform:translate(-50%, -50%)',
+                  'margin:0', 'width:min(850px, 95vw)', 'max-height:90vh', 'overflow:auto'):
+        assert style in dialog
     node = shutil.which("node")
     if not node:
         pytest.skip("Node unavailable; separate JavaScript gate is required")
@@ -368,3 +385,45 @@ def test_ads_workspace_script_parses_and_classic_nav_is_separate(store, tmp_path
         target.write_text(script, encoding="utf-8")
         result = subprocess.run([node, "--check", str(target)], capture_output=True, text=True)
         assert result.returncode == 0, result.stderr
+
+
+def test_active_grouping_preserves_raw_inventory_and_binding_authority(store, monkeypatch):
+    sync(store, monkeypatch, [item(), item('200', id='901'),
+                             item('300', effective_instagram_media_id='180002', instagram_permalink_url='https://www.instagram.com/p/Other/'),
+                             item('400', effective='PAUSED')])
+    target = route(store)
+    store.bind_instagram_ad('200', target['routing_id'], bound_by='test')
+    active = ads.ads_workspace(store, 'active')
+    assert active['counts']['active'] == len(active['active_groups']) == 2
+    assert active['counts']['raw_active'] == 3
+    assert {tuple(g['member_ad_ids']) for g in active['active_groups']} == {('120246385008280540', '200'), ('300',)}
+    assert len(active['items']) == 3
+    assert len(ads.ads_workspace(store, 'all')['items']) == 4
+    assert [r['ad_id'] for r in ads.ads_workspace(store, 'mapped')['items']] == ['200']
+    assert len(ads.ads_workspace(store, 'unmapped')['items']) == 3
+    assert [r['ad_id'] for r in ads.ads_workspace(store, 'inactive')['items']] == ['400']
+    assert store.instagram_ad_binding_status('120246385008280540') == 'UNBOUND'
+
+
+def test_active_groups_are_deterministic_and_fail_closed_on_conflicting_identity():
+    rows = [dict(ad_id=str(i), active=True, **fields) for i, fields in enumerate([
+        {'effective_instagram_media_id':'1','instagram_permalink_url':'https://www.instagram.com/p/A/'},
+        {'effective_instagram_media_id':'1','instagram_permalink_url':'https://www.instagram.com/p/B/'},
+        {'effective_instagram_media_id':'2','instagram_permalink_url':'https://www.instagram.com/p/A/'},
+        {'instagram_permalink_url':'https://www.instagram.com/p/A/'},
+        {'creative_id':'7'}, {'creative_id':'7'}, {}, {},
+    ])]
+    groups = ads.active_presentation_groups(rows)
+    assert groups == ads.active_presentation_groups(list(reversed(rows)))
+    assert len(groups) == 7
+    assert sorted(id for group in groups for id in group['member_ad_ids']) == [str(i) for i in range(8)]
+    assert any(group['member_ad_ids'] == ['4','5'] for group in groups)
+
+
+def test_active_groups_use_canonical_permalink_and_partial_exact_identity():
+    rows = [dict(ad_id=str(i), active=True, **fields) for i, fields in enumerate([
+        {'effective_instagram_media_id':'1','instagram_permalink_url':'https://www.instagram.com/p/A/?utm_source=test'},
+        {'effective_instagram_media_id':'1'},
+        {'instagram_permalink_url':'https://www.instagram.com/p/A/'},
+    ])]
+    assert ads.active_presentation_groups(rows)[0]['member_ad_ids'] == ['0','1','2']

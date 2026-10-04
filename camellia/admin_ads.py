@@ -4,6 +4,8 @@ HTML = r'''
   <div class="admin-page-heading"><div><h2>Ads</h2><p>Map exact Meta Ad IDs to existing Instagram sources.</p></div>
     <button id="adsSyncButton" class="btn-secondary" type="button" onclick="syncAdsNow()">↻ Sync Now</button></div>
   <div id="adsSummary" class="gallery-toolbar" aria-label="Ads summary"></div>
+  <label for="adsExactId">Exact Meta Ad ID</label><input id="adsExactId" type="search" inputmode="numeric" placeholder="Enter an exact Ad ID" oninput="renderAdsWorkspace()">
+  <p class="ig-media-muted">Active groups exact promoted Instagram identities reported ACTIVE by Meta. It does not measure current delivery or Ads Library visibility. Choose one member Ad ID to manage its binding.</p>
   <div class="gallery-toolbar" role="group" aria-label="Ads filters">
     <button class="btn-secondary active" data-ads-filter="active" onclick="setAdsFilter('active')">Active</button>
     <button class="btn-secondary" data-ads-filter="unmapped" onclick="setAdsFilter('unmapped')">Unmapped</button>
@@ -13,7 +15,7 @@ HTML = r'''
   </div>
   <p id="adsSyncStatus" class="ig-media-muted" role="status"></p>
   <div id="adsList" class="instagram-gallery"></div>
-  <dialog id="adsMappingDialog" style="max-width:850px;width:90%;border:1px solid var(--border);border-radius:12px;padding:24px;">
+  <dialog id="adsMappingDialog" style="position:fixed;left:50%;top:50%;transform:translate(-50%, -50%);margin:0;width:min(850px, 95vw);max-height:90vh;overflow:auto;box-sizing:border-box;border:1px solid var(--border);border-radius:12px;padding:24px;">
     <div class="admin-page-heading"><h3>Use Existing Mapping</h3><button class="btn-secondary" onclick="document.getElementById('adsMappingDialog').close()">Close</button></div>
     <p id="adsMappingIdentity"></p><p class="source-map-help">Verify the exact Post, Reel or Story identity before selecting a mapping.</p>
     <div id="adsMappingChoices" class="instagram-gallery"></div>
@@ -65,11 +67,12 @@ async function syncAdsNow() {
 }
 function renderAdsWorkspace() {
     const summary = [['active','Active'],['unmapped','Unmapped'],['mapped','Mapped'],['inactive','Inactive / Ended']];
-    document.getElementById('adsSummary').innerHTML = summary.map(([key,label]) => `<span class="ig-media-muted">${label}: <b>${Number(adsWorkspace.counts[key] || 0)}</b></span>`).join('');
+    document.getElementById('adsSummary').innerHTML = summary.map(([key,label]) => `<span class="ig-media-muted">${label}: <b>${Number(adsWorkspace.counts[key] || 0)}</b></span>`).join('') + `<span class="ig-media-muted">Raw ACTIVE Ad IDs: ${Number(adsWorkspace.counts.raw_active || 0)}</span>`;
     const sync = adsWorkspace.sync || {};
     document.getElementById('adsSyncStatus').textContent = `Last successful sync: ${sync.last_success_at || 'Never'}${sync.error_category ? ' · Sync warning: ' + sync.error_category + ' · Last complete inventory retained.' : ''}${sync.optional_fields_reduced ? ' · Some creative fields are unavailable.' : ''}`;
     const list = document.getElementById('adsList');
-    list.innerHTML = (adsWorkspace.items || []).map(ad => {
+    const exactId = document.getElementById('adsExactId').value?.trim() || '';
+    const renderAd = ad => {
         const image = ad.thumbnail_url || ad.mapping?.preview_url;
         const preview = image ? `<img class="ig-media-thumb" loading="lazy" src="${escapeHtml(image)}" alt="Ad preview">` : '<div class="ig-media-placeholder">Preview unavailable</div>';
         const identity = ad.instagram_permalink_url || ad.effective_instagram_media_id || 'Not supplied by Meta';
@@ -79,7 +82,18 @@ function renderAdsWorkspace() {
         const action = ad.mapped ? '<button class="btn-secondary" data-ads-action="edit">Edit Mapping</button><button class="btn-secondary" data-ads-action="map">Change Mapping</button><button class="btn-secondary" data-ads-action="toggle">' + (ad.binding_active ? 'Disable Binding' : 'Enable Binding') + '</button><button class="btn-secondary" data-ads-action="history">History</button>' : '<button class="btn-primary" data-ads-action="map">Map Ad</button>';
         const suggested = ad.suggested_routing_id && !ad.mapped ? '<button class="btn-secondary" data-ads-action="suggestion">Use Existing Mapping</button>' : '';
         return `<article class="ig-media-card" data-ad-id="${escapeHtml(ad.ad_id)}"><div class="ig-media-preview">${preview}</div><div class="ig-media-main"><b>AD · ${escapeHtml(ad.name)}</b><div class="ig-media-summary">Meta Ad ID: ${escapeHtml(ad.ad_id)}</div><div class="ig-media-facts"><span>${ad.inventory_state === 'OBSERVED' ? 'OBSERVED' : ad.active ? 'ACTIVE' : 'INACTIVE'} · ${escapeHtml(ad.effective_status)}</span><span>${ad.mapped ? 'MAPPED ✓' : 'UNMAPPED'} · ${escapeHtml(ad.binding_status)}</span><span>Linked source: ${escapeHtml(ad.source_type || 'unknown')}</span></div><p style="overflow-wrap:anywhere;">${escapeHtml(identity)}</p><p>${escapeHtml(linked)}</p><p>Mapped to: ${escapeHtml(mapping)}${ad.mapped ? ` · Binding: ${ad.binding_active ? 'ON' : 'OFF'}` : ''}</p><small>Last synced: ${escapeHtml(ad.last_synced_at || 'Not yet synced')}</small></div><div class="ig-media-actions">${action}${suggested}</div></article>`;
-    }).join('') || '<p class="ig-media-muted">No ads match this filter. Sync Now discovers ads before a customer sends a DM.</p>';
+    };
+    if (adsFilter === 'active' && adsWorkspace.active_groups) {
+        list.innerHTML = adsWorkspace.active_groups.filter(group => !exactId || group.member_ad_ids.includes(exactId)).map(group => {
+            const members = group.member_ad_ids.map(id => adsWorkspace.items.find(ad => ad.ad_id === id)).filter(Boolean);
+            const first = members[0];
+            if (!first) return '';
+            return `<section class="ig-media-card" data-active-group="true"><div class="ig-media-main"><b>AD · Active promoted creative</b><p style="overflow-wrap:anywhere;">${escapeHtml(first.instagram_permalink_url || first.effective_instagram_media_id || group.identity.join(' · '))}</p><p>${members.length} exact Meta Ad IDs</p><p style="overflow-wrap:anywhere;">${group.member_ad_ids.map(escapeHtml).join(', ')}</p><details${exactId ? ' open' : ''}><summary>Manage one exact Ad ID</summary>${members.filter(ad => !exactId || ad.ad_id === exactId).map(renderAd).join('')}</details></div></section>`;
+        }).join('');
+    } else {
+        list.innerHTML = (adsWorkspace.items || []).filter(ad => !exactId || ad.ad_id === exactId).map(renderAd).join('');
+    }
+    if (!list.innerHTML) list.innerHTML = '<p class="ig-media-muted">No ads match this filter. Sync Now discovers ads before a customer sends a DM.</p>';
     list.querySelectorAll('[data-ad-id]').forEach(card => card.querySelectorAll('[data-ads-action]').forEach(button => button.addEventListener('click', () => {
         const ad = adsWorkspace.items.find(item => item.ad_id === card.dataset.adId);
         const action = button.dataset.adsAction;
