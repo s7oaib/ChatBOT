@@ -220,7 +220,7 @@ def test_cli_smoke_only_and_list(monkeypatch, capsys):
     assert commands == []
     assert "does NOT satisfy" in capsys.readouterr().out
     assert runner.main(["--smoke-only"]) == 0
-    assert commands == [[sys.executable, "-m", "pytest", "-q", *runner.deduplicate(impact.SMOKE_TESTS)]]
+    assert commands == [[sys.executable, "-m", "scripts.test_execution", "--workers", "4", *runner.deduplicate(impact.SMOKE_TESTS)]]
 
 
 def test_docs_only_cli_never_runs_pytest(monkeypatch):
@@ -295,5 +295,7 @@ def test_ci_fast_and_full_policy_remains_separate():
     assert 'cron: "23 2 * * *"' in content
     assert "github.event_name == 'push' || github.event_name == 'pull_request'" in content
     assert "github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || github.event_name == 'release'" in content
-    assert "run: python -m pytest -q" in content
+    assert "run: python scripts/run_impacted_tests.py --full --workers 2" in content
+    assert "run: python scripts/run_impacted_tests.py --current-contract --workers 2" in content
+    assert content.count("uses: ./.github/actions/setup-tests") == 2
     assert "update_test_baseline" not in content

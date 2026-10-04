@@ -129,10 +129,15 @@ def main(argv=None, root=ROOT):
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--smoke-only", action="store_true", help="explicit smoke check, NOT a release/core gate")
     modes.add_argument("--full", action="store_true", help="full regression even without a resolvable baseline")
+    modes.add_argument("--current-contract", action="store_true", help="existing CI contract/security gate; NOT full regression")
+    parser.add_argument("--workers", type=int, choices=range(1, 5), default=4, help="bounded parallel workers (default 4)")
+    parser.add_argument("--serial", action="store_true", help="explicit serial fallback")
     parser.add_argument("--baseline", help="override comparison commit, never writes the baseline record")
     args = parser.parse_args(argv)
     try:
-        if args.full:
+        if args.current_contract:
+            plan = Plan("HIGH", (), (("explicit CI current-contract", "HIGH", "not a full-regression substitute"),), impact.CURRENT_CONTRACT_TESTS)
+        elif args.full:
             plan = Plan("CRITICAL", (), (("explicit --full", "CRITICAL", "full regression requested"),), (), True)
         else:
             baseline = read_baseline(root, args.baseline)
@@ -164,6 +169,8 @@ def main(argv=None, root=ROOT):
         print("  " + " ".join(command), flush=True)
         if args.list:
             return 0
+        command = [sys.executable, "-m", "scripts.test_execution", "--workers", str(args.workers),
+                   *(["--serial"] if args.serial else []), *([] if plan.full else plan.tests)]
         return subprocess.run(command, cwd=root).returncode
     except (SelectionError, OSError) as exc:
         print(f"BLOCKED: {exc}", file=sys.stderr)

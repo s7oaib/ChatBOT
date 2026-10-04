@@ -91,4 +91,4 @@ def test_workflows_no_longer_configure_retired_credentials():
     text = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     assert "GEMINI_ENABLED" not in text
     assert "ADMIN_PIN:" not in text
-    assert "python -m pytest -q" in text
+    assert "python scripts/run_impacted_tests.py --full --workers 2" in text
