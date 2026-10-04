@@ -167,7 +167,8 @@ def test_observed_inventory_binding_union_deduplicates_and_counts(store, monkeyp
     sync(store, monkeypatch)
     result = ads.ads_workspace(store, "all")
     assert len(result["items"]) == 2
-    assert result["counts"] == {"active": 1, "raw_active": 1, "mapped": 1, "unmapped": 1, "inactive": 0, "all": 2}
+    assert result["counts"] == {"active": 1, "raw_active": 1, "mapped": 1, "unmapped": 1, "inactive": 0, "all": 2,
+                                "running": None, "raw_running": None}
     assert ads.ads_workspace(store, "mapped")["items"][0]["name"] == "Norom Pak Sondesh"
 
 
