@@ -1,0 +1,322 @@
+"""Read-only Marketing discovery, atomic snapshots and exact PR #58 binding UI."""
+import json
+import re
+import shutil
+import subprocess
+
+import httpx
+import pytest
+from fastapi.testclient import TestClient
+
+from camellia import app as app_module, instagram_ads as ads
+from camellia.config import config
+from camellia.database import Database
+
+_HTTPX_CLIENT = httpx.Client
+
+
+@pytest.fixture
+def store(tmp_path, monkeypatch):
+    database = Database(str(tmp_path / "ads.db"))
+    monkeypatch.setattr(app_module, "db", database)
+    monkeypatch.setattr(config, "META_MARKETING_ACCESS_TOKEN", "private-marketing-fixture")
+    monkeypatch.setattr(config, "META_AD_ACCOUNT_ID", "12345")
+    monkeypatch.setattr(config, "ADMIN_API_KEY", "ads-admin-fixture")
+    monkeypatch.setattr(config, "INSTAGRAM_API_VERSION", "v25.0")
+    return database
+
+
+def item(ad_id="120246385008280540", effective="ACTIVE", **creative):
+    return {"id": ad_id, "name": "Norom Pak Sondesh", "status": "ACTIVE", "effective_status": effective,
+            "creative": {"id": "900", "effective_instagram_media_id": "180001", "instagram_permalink_url": "https://www.instagram.com/p/ExactSondesh/", **creative}}
+
+
+def mock_pages(monkeypatch, responses):
+    requests = []
+    def handler(request):
+        requests.append(request)
+        answer = responses[len(requests) - 1]
+        if isinstance(answer, Exception):
+            raise answer
+        status, payload = answer if isinstance(answer, tuple) else (200, answer)
+        return httpx.Response(status, json=payload)
+    monkeypatch.setattr(ads.httpx, "Client", lambda **kwargs: _HTTPX_CLIENT(transport=httpx.MockTransport(handler), **kwargs))
+    return requests
+
+
+def route(store, code="ExactSondesh", media_id="180001", **extra):
+    return store.save_instagram_source_route({"source_type": "post", "canonical_url": f"https://www.instagram.com/p/{code}/",
+        "shortcode": code, "media_id": media_id, "routing_topic": "Sondesh", "source_description": "Approved source description",
+        "active": True, "priority_products": [], "knowledge_scope": [], **extra})
+
+
+def sync(store, monkeypatch, rows=None):
+    mock_pages(monkeypatch, [{"data": rows if rows is not None else [item()]}])
+    return ads.sync_instagram_ads(store)
+
+
+@pytest.mark.parametrize("value,expected", [("12345", "act_12345"), ("act_12345", "act_12345"), (" act_12345 ", "act_12345"), ("", ""), ("act_act_123", ""), ("../123", "")])
+def test_account_normalization(store, monkeypatch, value, expected):
+    monkeypatch.setattr(config, "META_AD_ACCOUNT_ID", value)
+    assert ads.ad_account_id() == expected
+
+
+def test_read_only_requests_use_existing_version_and_server_header(store, monkeypatch):
+    calls = mock_pages(monkeypatch, [{"data": [item()]}])
+    result = ads.sync_instagram_ads(store)
+    assert result["status"] == "success" and result["active_ad_count"] == 1
+    assert calls[0].method == "GET"
+    assert str(calls[0].url).startswith("https://graph.facebook.com/v25.0/act_12345/ads?")
+    assert "access_token" not in str(calls[0].url)
+    assert calls[0].headers["Authorization"] == "Bearer private-marketing-fixture"
+    assert "private-marketing-fixture" not in json.dumps(result)
+    assert store.list_instagram_ad_bindings() == []
+    assert store.list_instagram_source_routes() == []
+
+
+def test_complete_pagination_drops_next_url_token(store, monkeypatch):
+    next_url = "https://graph.facebook.com/v25.0/act_12345/ads?after=cursor1&access_token=private-marketing-fixture"
+    calls = mock_pages(monkeypatch, [{"data": [item()], "paging": {"next": next_url}}, {"data": [item("200")]}])
+    assert ads.sync_instagram_ads(store)["status"] == "success"
+    assert len(store.list_instagram_ads_inventory("act_12345")) == 2
+    assert calls[1].url.params["after"] == "cursor1" and "access_token" not in str(calls[1].url)
+
+
+@pytest.mark.parametrize("effective", ["PAUSED", "CAMPAIGN_PAUSED", "ADSET_PAUSED", "ARCHIVED", "DELETED", "DISAPPROVED", "IN_PROCESS", "WITH_ISSUES"])
+def test_only_effective_active_is_active(store, monkeypatch, effective):
+    sync(store, monkeypatch, [item(effective=effective)])
+    assert ads.ads_workspace(store, "active")["items"] == []
+    assert ads.ads_workspace(store, "inactive")["items"][0]["effective_status"] == effective
+
+
+@pytest.mark.parametrize("failure,category", [((400, {"error": {"code": 190, "message": "private-marketing-fixture"}}), "INVALID_OR_EXPIRED_TOKEN"),
+    ((403, {"error": {"code": 200}}), "PERMISSION_DENIED"), ((429, {"error": {"code": 4}}), "RATE_LIMITED"),
+    (httpx.ConnectError("private-marketing-fixture"), "NETWORK_OR_INVALID_RESPONSE"), ({"data": "bad"}, "INVALID_RESPONSE")])
+def test_partial_page_failure_preserves_inventory_and_bindings(store, monkeypatch, failure, category):
+    saved = route(store)
+    store.bind_instagram_ad(item()["id"], saved["routing_id"])
+    sync(store, monkeypatch)
+    before = store.list_instagram_ads_inventory("act_12345")
+    mock_pages(monkeypatch, [{"data": [item("999")], "paging": {"next": "https://graph.facebook.com/v25.0/act_12345/ads?after=x"}}, failure])
+    result = ads.sync_instagram_ads(store)
+    assert result["error_category"] == category and result["status"] == "error"
+    assert store.list_instagram_ads_inventory("act_12345") == before
+    assert store.instagram_ad_binding_status(item()["id"]) == "BOUND"
+    assert "private-marketing-fixture" not in json.dumps(result)
+
+
+def test_optional_fields_fallback_restarts_and_keeps_safe_diagnostic(store, monkeypatch):
+    calls = mock_pages(monkeypatch, [(400, {"error": {"code": 100, "message": "Tried accessing nonexisting field thumbnail_url on node type AdCreative private-marketing-fixture"}}), {"data": [item()]}])
+    result = ads.sync_instagram_ads(store)
+    assert result["status"] == "success" and result["optional_fields_reduced"] == 1
+    assert "thumbnail_url" in calls[0].url.params["fields"] and "thumbnail_url" not in calls[1].url.params["fields"]
+
+
+def test_complete_absence_marks_ended_retains_history_and_route(store, monkeypatch):
+    saved = route(store)
+    store.bind_instagram_ad(item()["id"], saved["routing_id"])
+    sync(store, monkeypatch)
+    history = store.list_instagram_ad_binding_history(item()["id"])
+    sync(store, monkeypatch, [])
+    entry = ads.ads_workspace(store, "inactive")["items"][0]
+    assert entry["effective_status"] == "ENDED" and entry["mapped"]
+    assert store.list_instagram_ad_binding_history(item()["id"]) == history
+    assert store.instagram_ad_binding_status(item()["id"]) == "BOUND"
+    assert len(store.list_instagram_source_routes()) == 1
+
+
+@pytest.mark.parametrize("identity", ["media", "url", "shortcode"])
+def test_suggestions_use_only_exact_identity_without_binding(store, monkeypatch, identity):
+    saved = route(store, media_id="180001" if identity == "media" else None,
+                  canonical_url=None if identity != "url" else "https://www.instagram.com/p/ExactSondesh/")
+    sync(store, monkeypatch)
+    result = ads.ads_workspace(store, "unmapped")["items"][0]
+    assert result["suggested_routing_id"] == saved["routing_id"]
+    assert result["identity_status"] == "EXACT_MATCH"
+    assert not result["mapped"] and store.list_instagram_ad_bindings() == []
+
+
+def test_matching_title_does_not_supply_identity(store, monkeypatch):
+    route(store, code="DifferentPost", media_id="999999", routing_topic="Norom Pak Sondesh")
+    sync(store, monkeypatch)
+    result = ads.ads_workspace(store, "unmapped")["items"][0]
+    assert result["suggested_routing_id"] is None and result["identity_status"] == "NO_EXACT_MATCH"
+
+
+def test_conflicting_exact_identifiers_fail_closed(store, monkeypatch):
+    route(store, code="OtherPost", media_id="180001")
+    sync(store, monkeypatch)
+    result = ads.ads_workspace(store, "unmapped")["items"][0]
+    assert result["suggested_routing_id"] is None and result["identity_status"] == "AMBIGUOUS"
+
+
+def test_multiple_exact_candidates_fail_closed(store, monkeypatch):
+    route(store)
+    with store.get_connection() as conn:
+        conn.execute("INSERT INTO instagram_source_routes(source_type,shortcode,media_id,routing_topic,active) VALUES ('post','ExactSondesh','180001','duplicate',1)")
+        conn.commit()
+    sync(store, monkeypatch)
+    assert ads.ads_workspace(store, "unmapped")["items"][0]["identity_status"] == "AMBIGUOUS"
+
+
+def test_observed_inventory_binding_union_deduplicates_and_counts(store, monkeypatch):
+    saved = route(store)
+    store.observe_instagram_ad(item()["id"], "wrong display title")
+    store.observe_instagram_ad("observed-only")
+    store.bind_instagram_ad(item()["id"], saved["routing_id"])
+    sync(store, monkeypatch)
+    result = ads.ads_workspace(store, "all")
+    assert len(result["items"]) == 2
+    assert result["counts"] == {"active": 1, "mapped": 1, "unmapped": 1, "inactive": 0, "all": 2}
+    assert ads.ads_workspace(store, "mapped")["items"][0]["name"] == "Norom Pak Sondesh"
+
+
+def test_admin_authenticated_endpoints_and_pr58_binding_history(store, monkeypatch):
+    client = TestClient(app_module.app)
+    headers = {"x-admin-key": config.ADMIN_API_KEY}
+    saved = route(store)
+    other = route(store, code="Other", media_id="180002")
+    sync(store, monkeypatch)
+    for path in ("/admin/instagram-ads", "/admin/instagram-ads/sync-status"):
+        assert client.get(path).status_code in {401, 403}
+        result = client.get(path, headers=headers)
+        assert result.status_code == 200 and "private-marketing-fixture" not in result.text
+    assert client.post("/admin/instagram-ads/sync").status_code in {401, 403}
+    assert client.get("/admin/instagram-ads?view=bad", headers=headers).status_code == 400
+    ad_id = item()["id"]
+    response = client.post(f"/admin/instagram-ads/{ad_id}/bind", headers=headers, json={"routing_id": saved["routing_id"]})
+    assert response.status_code == 200 and response.json()["binding"]["active"] == 1
+    assert response.json()["binding"]["bound_by"] == "admin"
+    assert client.post(f"/admin/instagram-ads/{ad_id}/bind", headers=headers, json={"routing_id": other["routing_id"]}).status_code == 400
+    assert client.post(f"/admin/instagram-ads/{ad_id}/bind", headers=headers, json={"routing_id": other["routing_id"], "change_binding": True}).status_code == 200
+    assert client.patch(f"/admin/instagram-ads/{ad_id}/active", headers=headers, json={"active": False}).status_code == 200
+    assert store.instagram_ad_binding_status(ad_id) == "UNBOUND"
+    assert len(store.list_instagram_source_routes()) == 2
+    assert [row["action"] for row in store.list_instagram_ad_binding_history(ad_id)] == ["DISABLED", "BOUND", "REBOUND", "BOUND"]
+
+
+@pytest.mark.parametrize("next_url", ["https://attacker.example/?after=x", "http://graph.facebook.com/v25.0/act_12345/ads?after=x", "https://graph.facebook.com/v25.0/act_other/ads?after=x", "https://graph.facebook.com/v25.0/act_12345/ads"])
+def test_pagination_cannot_redirect_credential(store, monkeypatch, next_url):
+    calls = mock_pages(monkeypatch, [{"data": [item()], "paging": {"next": next_url}}])
+    assert ads.sync_instagram_ads(store)["error_category"] == "INVALID_PAGINATION"
+    assert len(calls) == 1 and store.list_instagram_ads_inventory("act_12345") == []
+
+
+def test_not_configured_never_calls_meta(store, monkeypatch):
+    monkeypatch.setattr(config, "META_MARKETING_ACCESS_TOKEN", "")
+    calls = mock_pages(monkeypatch, [])
+    result = ads.sync_instagram_ads(store)
+    assert result["error_category"] == "NOT_CONFIGURED" and not result["configured"] and not calls
+
+
+def test_sync_lock_prevents_overlapping_snapshot(store, monkeypatch):
+    assert store.acquire_instagram_ads_sync("act_12345")
+    calls = mock_pages(monkeypatch, [])
+    assert ads.sync_instagram_ads(store)["status"] == "busy" and not calls
+
+
+@pytest.mark.parametrize("identity", ["media", "pointer", "url", "shortcode"])
+def test_posts_mapping_cards_and_filters_use_same_route(store, identity):
+    saved = route(store, media_id="180001" if identity == "media" else None,
+                  canonical_url="https://www.instagram.com/p/ExactSondesh/" if identity == "url" else None,
+                  shortcode="ExactSondesh" if identity == "shortcode" else None)
+    media = store.upsert_instagram_media({"instagram_media_id": "180001", "media_type": "IMAGE",
+        "permalink": "https://www.instagram.com/p/ExactSondesh/", "shortcode": "ExactSondesh"})
+    if identity == "pointer":
+        store.update_instagram_media_route(media["id"], route_mode="CUSTOM", topic_id=None, custom_route_id=saved["routing_id"], needs_review=False)
+    mapped, total = store.list_instagram_media(mapping_status="mapped")
+    assert total == 1 and mapped[0]["mapping_status"] == "MAPPED"
+    assert mapped[0]["mapping_route"]["routing_id"] == saved["routing_id"]
+    assert store.list_instagram_media(mapping_status="unmapped")[1] == 0
+
+
+def test_stale_media_topic_does_not_claim_a_route(store):
+    media = store.upsert_instagram_media({"instagram_media_id": "180002", "media_type": "IMAGE"})
+    store.update_instagram_media_route(media["id"], route_mode="CUSTOM", topic_id="stale", custom_route_id=888, needs_review=False)
+    assert store.list_instagram_media(mapping_status="mapped")[1] == 0
+    assert store.list_instagram_media(mapping_status="unmapped")[1] == 1
+
+
+def test_many_ad_ids_share_one_existing_source_and_idempotent_bind(store, monkeypatch):
+    saved = route(store)
+    for ad_id in ("100", "200"):
+        store.bind_instagram_ad(ad_id, saved["routing_id"])
+        store.bind_instagram_ad(ad_id, saved["routing_id"])
+    sync(store, monkeypatch, [item("100"), item("200")])
+    assert len(ads.ads_workspace(store, "mapped")["items"]) == 2
+    assert len(store.list_instagram_source_routes()) == 1
+    assert len(store.list_instagram_ad_binding_history("100")) == 1
+
+
+def test_optional_fallback_later_page_failure_keeps_last_snapshot(store, monkeypatch):
+    sync(store, monkeypatch)
+    before = store.list_instagram_ads_inventory("act_12345")
+    mock_pages(monkeypatch, [(400, {"error": {"code": 100, "message": "unsupported field thumbnail_url"}}),
+        {"data": [item("999")], "paging": {"next": "https://graph.facebook.com/v25.0/act_12345/ads?after=x"}},
+        (403, {"error": {"code": 200}})])
+    assert ads.sync_instagram_ads(store)["status"] == "error"
+    assert store.list_instagram_ads_inventory("act_12345") == before
+
+
+def test_repeated_cursor_or_duplicate_id_does_not_publish(store, monkeypatch):
+    next_url = "https://graph.facebook.com/v25.0/act_12345/ads?after=x"
+    mock_pages(monkeypatch, [{"data": [item()], "paging": {"next": next_url}}, {"data": [item("200")], "paging": {"next": next_url}}])
+    assert ads.sync_instagram_ads(store)["error_category"] == "INVALID_PAGINATION"
+    assert store.list_instagram_ads_inventory("act_12345") == []
+
+
+def test_ads_ui_filter_and_picker_execute_pr58_endpoint(store, tmp_path):
+    from camellia.admin_ads import SCRIPT
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node unavailable; separate JavaScript gate is required")
+    fixture = r'''
+const assert = require('assert');
+const nodes = {};
+const calls = [];
+global.adminAuthenticated = true;
+global.getAuthHeaders = () => ({'X-CSRF-Token':'test-csrf'});
+global.escapeHtml = value => String(value || '');
+global.confirm = () => true;
+global.document = {querySelectorAll:()=>[],getElementById:id=>nodes[id] ||= {innerHTML:'',textContent:'',querySelectorAll:()=>[],close:()=>{},showModal:()=>{}}};
+const route = {routing_id:7,source_type:'post',active:true,canonical_url:'https://www.instagram.com/p/Exact/',routing_topic:'Source',media_id:'180001'};
+const ad = {ad_id:'120246385008280540',name:'Display',mapped:false,active:true,history:[],suggested_routing_id:7};
+global.fetch = async (url,options) => { calls.push({url,options}); return {ok:true,json:async()=>url.endsWith('/bind') ? {binding:{ad_id:ad.ad_id,routing_id:7,active:1}} : {items:[ad],routes:[route],counts:{active:1,unmapped:1},sync:{}}};};
+'''
+    checks = r'''
+(async()=>{
+ await loadAdsWorkspace();
+ assert(calls[0].url.includes('view=active'));
+ assert(nodes.adsList.innerHTML.includes('Map Ad'));
+ adsFilter='unmapped'; await loadAdsWorkspace();
+ assert(calls[1].url.includes('view=unmapped'));
+ openAdsMapping(ad,true);
+ assert(nodes.adsMappingChoices.innerHTML.includes('data-ads-route="7"'));
+ await bindAdsMapping(7);
+ const call=calls.find(value=>value.url.endsWith('/bind'));
+ assert.equal(call.url,'/admin/instagram-ads/120246385008280540/bind');
+ assert.deepEqual(JSON.parse(call.options.body),{routing_id:7,change_binding:false});
+ assert.equal(call.options.headers['X-CSRF-Token'],'test-csrf');
+ assert(!calls.some(value=>value.url==='/admin/instagram-routes'));
+})().catch(error=>{console.error(error);process.exitCode=1;});
+'''
+    target = tmp_path / "ads-behavior.js"
+    target.write_text(fixture + SCRIPT.replace("<script>", "").replace("</script>", "") + checks, encoding="utf-8")
+    result = subprocess.run([node, str(target)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_ads_workspace_script_parses_and_classic_nav_is_separate(store, tmp_path):
+    page = TestClient(app_module.app).get("/admin").text
+    assert '<span class="nav-label">Ads</span>' in page and 'id="tab-ads"' in page
+    assert 'id="igObservedAds"' not in page
+    assert "Enter an existing active source mapping ID" not in page
+    assert "data-ads-route" in page and "Use Existing Mapping" in page
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node unavailable; separate JavaScript gate is required")
+    for index, script in enumerate(re.findall(r"<script>(.*?)</script>", page, re.S)):
+        target = tmp_path / f"admin-{index}.js"
+        target.write_text(script, encoding="utf-8")
+        result = subprocess.run([node, "--check", str(target)], capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr

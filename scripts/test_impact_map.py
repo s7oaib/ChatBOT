@@ -63,6 +63,7 @@ AREA_TESTS = {
         "tests/test_phase2b_pending_menu_handoff.py", "tests/test_subtopic_sufficiency_and_safety.py",
     ),
     "instagram": (
+        "tests/test_instagram_ads_inventory.py", "tests/test_ad_mapped_source_context.py",
         "tests/test_instagram_identity.py", "tests/test_instagram_source_routing.py",
         "tests/test_instagram_source_referential.py", "tests/test_instagram_story_routing.py",
         "tests/test_instagram_story_sync.py", "tests/test_instagram_story_lifecycle.py",
@@ -101,6 +102,7 @@ AREA_FILES = {
         "understanding.py", "text_rules.py", "slang_normalizer.py", "triage.py", "ai_responder.py",
     ),
     "instagram": (
+        "instagram_ads.py", "admin_ads.py",
         "instagram_routing.py", "instagram_media.py", "instagram_identity.py",
         "instagram_story_sync.py", "ad_routing.py", "ad_gate.py", "ice_breakers.py",
     ),

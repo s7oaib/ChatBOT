@@ -882,6 +882,27 @@ class Database:
             );
             """)
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_ig_ad_bindings_route ON instagram_source_ad_bindings(routing_id, active)")
+            # Paid discovery is separate from PR #58's binding authority.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS instagram_ads_inventory (
+                    ad_id TEXT PRIMARY KEY, ad_account_id TEXT NOT NULL,
+                    name TEXT, status TEXT, effective_status TEXT,
+                    campaign_id TEXT, adset_id TEXT, creative_id TEXT,
+                    effective_instagram_media_id TEXT, instagram_permalink_url TEXT,
+                    thumbnail_url TEXT, created_time TEXT, updated_time TEXT,
+                    first_seen_at TEXT NOT NULL, last_seen_at TEXT NOT NULL,
+                    last_synced_at TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 0
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS instagram_ads_syncs (
+                    ad_account_id TEXT PRIMARY KEY, last_success_at TEXT,
+                    last_attempt_at TEXT, error_category TEXT,
+                    http_success INTEGER, account_accepted INTEGER,
+                    optional_fields_reduced INTEGER NOT NULL DEFAULT 0,
+                    lease_until REAL NOT NULL DEFAULT 0
+                )
+            """)
             cursor.execute("""
             CREATE TABLE IF NOT EXISTS instagram_source_ad_binding_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1734,21 +1755,22 @@ class Database:
                 clauses.append("needs_review=?"); params.append(int(needs_review))
             if topic_id:
                 clauses.append("topic_id=?"); params.append(topic_id)
+            route_match = self._instagram_media_route_match()
             if mapping_status == "mapped":
-                clauses.append("(topic_id IS NOT NULL OR route_mode IN ('CUSTOM','DISABLED') OR EXISTS (SELECT 1 FROM instagram_source_routes r WHERE (r.media_id=instagram_media.instagram_media_id OR r.routing_id=instagram_media.custom_route_id) AND r.source_type IN ('post','reel') AND r.archived_at IS NULL))")
+                clauses.append(f"EXISTS (SELECT 1 FROM instagram_source_routes r WHERE {route_match})")
             elif mapping_status == "unmapped":
-                clauses.append("(topic_id IS NULL AND route_mode='DEFAULT' AND NOT EXISTS (SELECT 1 FROM instagram_source_routes r WHERE (r.media_id=instagram_media.instagram_media_id OR r.routing_id=instagram_media.custom_route_id) AND r.source_type IN ('post','reel') AND r.archived_at IS NULL))")
+                clauses.append(f"NOT EXISTS (SELECT 1 FROM instagram_source_routes r WHERE {route_match})")
             if context_active is not None:
-                clauses.append("EXISTS (SELECT 1 FROM instagram_source_routes r WHERE (r.media_id=instagram_media.instagram_media_id OR r.routing_id=instagram_media.custom_route_id) AND r.source_type IN ('post','reel') AND r.archived_at IS NULL AND r.active=?)")
+                clauses.append(f"EXISTS (SELECT 1 FROM instagram_source_routes r WHERE {route_match} AND r.active=?)")
                 params.append(int(context_active))
             if search:
                 pattern = f"%{search[:200]}%"
-                clauses.append("(instagram_media_id LIKE ? OR permalink LIKE ? OR caption LIKE ? OR EXISTS (SELECT 1 FROM instagram_source_routes r WHERE (r.media_id=instagram_media.instagram_media_id OR r.routing_id=instagram_media.custom_route_id) AND r.source_type IN ('post','reel') AND r.archived_at IS NULL AND (r.routing_topic LIKE ? OR r.source_description LIKE ?)))")
+                clauses.append(f"(instagram_media_id LIKE ? OR permalink LIKE ? OR caption LIKE ? OR EXISTS (SELECT 1 FROM instagram_source_routes r WHERE {route_match} AND (r.routing_topic LIKE ? OR r.source_description LIKE ?)))")
                 params.extend([pattern] * 5)
             where = " AND ".join(clauses)
             total = int(conn.execute(f"SELECT COUNT(*) AS n FROM instagram_media WHERE {where}", params).fetchone()["n"])
             rows = conn.execute(
-                f"SELECT * FROM instagram_media WHERE {where} ORDER BY {order_column} {direction}, id {direction} LIMIT ? OFFSET ?",
+                f"SELECT *, (SELECT r.routing_id FROM instagram_source_routes r WHERE {route_match} ORDER BY r.active DESC, r.routing_id ASC LIMIT 1) AS mapping_route_id FROM instagram_media WHERE {where} ORDER BY {order_column} {direction}, id {direction} LIMIT ? OFFSET ?",
                 [*params, page_size, (page - 1) * page_size],
             ).fetchall()
         items = [dict(row) for row in rows]
@@ -1762,9 +1784,82 @@ class Database:
                 item["owner_username"] = None
                 item["inventory_verification"] = "LEGACY_UNVERIFIED"
         for item in items:
+            route = self.get_instagram_source_route(item["mapping_route_id"]) if item["mapping_route_id"] else None
+            item["mapping_route"] = route
+            item["mapping_status"] = "MAPPED" if route else "UNMAPPED"
             if item.get("sync_status") == "MANUAL_EXACT_LINK":
                 item["inventory_verification"] = "MANUAL_EXACT_LINK"
         return items, total
+
+    @staticmethod
+    def _instagram_media_route_match() -> str:
+        # One predicate supplies cards, counts, search, and mapped filters.
+        # Empty values must never make unrelated inventory appear mapped.
+        return """r.source_type IN ('post','reel') AND r.archived_at IS NULL AND (
+            r.routing_id=instagram_media.custom_route_id
+            OR (instagram_media.instagram_media_id<>'' AND r.media_id=instagram_media.instagram_media_id)
+            OR (instagram_media.permalink<>'' AND r.canonical_url=instagram_media.permalink)
+            OR (instagram_media.shortcode<>'' AND r.shortcode=instagram_media.shortcode)
+        )"""
+
+    def get_instagram_media_mapping(self, item_id: int) -> Optional[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            row = conn.execute(f"""SELECT r.* FROM instagram_media, instagram_source_routes r
+                WHERE instagram_media.id=? AND {self._instagram_media_route_match()}
+                ORDER BY r.active DESC, r.routing_id ASC LIMIT 1""", (item_id,)).fetchone()
+        return dict(row) if row else None
+
+    def get_instagram_ads_sync(self, account_id: str) -> Dict[str, Any]:
+        with self.get_connection() as conn:
+            row = conn.execute("SELECT * FROM instagram_ads_syncs WHERE ad_account_id=?", (account_id,)).fetchone()
+        result = dict(row) if row else {}
+        result.pop("lease_until", None)
+        return result
+
+    def acquire_instagram_ads_sync(self, account_id: str) -> bool:
+        with self.get_connection() as conn:
+            now = time.time()
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("INSERT OR IGNORE INTO instagram_ads_syncs(ad_account_id) VALUES (?)", (account_id,))
+            cursor = conn.execute("UPDATE instagram_ads_syncs SET lease_until=? WHERE ad_account_id=? AND lease_until<=?", (now + 600, account_id, now))
+            conn.commit()
+        return bool(cursor.rowcount)
+
+    def record_instagram_ads_sync_failure(self, account_id: str, category: str) -> None:
+        with self.get_connection() as conn:
+            conn.execute("""INSERT INTO instagram_ads_syncs(ad_account_id,last_attempt_at,error_category,http_success,account_accepted)
+                VALUES (?,?,?,0,0) ON CONFLICT(ad_account_id) DO UPDATE SET
+                last_attempt_at=excluded.last_attempt_at,error_category=excluded.error_category,
+                http_success=0,account_accepted=0,lease_until=0""",
+                (account_id, datetime.now(timezone.utc).isoformat(), category))
+            conn.commit()
+
+    def apply_instagram_ads_inventory(self, account_id: str, items: List[Dict[str, Any]], *, reduced: bool = False) -> None:
+        """Publish one complete snapshot atomically; retain absent ads and bindings."""
+        now = datetime.now(timezone.utc).isoformat()
+        fields = ("name", "status", "effective_status", "campaign_id", "adset_id", "creative_id",
+                  "effective_instagram_media_id", "instagram_permalink_url", "thumbnail_url", "created_time", "updated_time")
+        with self.get_connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("INSERT OR IGNORE INTO instagram_ads_syncs(ad_account_id) VALUES (?)", (account_id,))
+            conn.execute("UPDATE instagram_ads_inventory SET active=0,effective_status='ENDED',last_synced_at=? WHERE ad_account_id=?", (now, account_id))
+            for item in items:
+                conn.execute(f"""INSERT INTO instagram_ads_inventory
+                    (ad_id,ad_account_id,{','.join(fields)},first_seen_at,last_seen_at,last_synced_at,active)
+                    VALUES ({','.join('?' for _ in range(len(fields)+6))})
+                    ON CONFLICT(ad_id) DO UPDATE SET ad_account_id=excluded.ad_account_id,
+                    {','.join(f'{f}=excluded.{f}' for f in fields)},last_seen_at=excluded.last_seen_at,
+                    last_synced_at=excluded.last_synced_at,active=excluded.active""",
+                    (item["ad_id"], account_id, *(item.get(f) for f in fields), now, now, now, int(item["effective_status"] == "ACTIVE")))
+            conn.execute("""UPDATE instagram_ads_syncs SET last_success_at=?,last_attempt_at=?,error_category=NULL,
+                http_success=1,account_accepted=1,optional_fields_reduced=?,lease_until=0 WHERE ad_account_id=?""",
+                (now, now, int(reduced), account_id))
+            conn.commit()
+
+    def list_instagram_ads_inventory(self, account_id: str) -> List[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            rows = conn.execute("SELECT * FROM instagram_ads_inventory WHERE ad_account_id=? ORDER BY active DESC,last_seen_at DESC,ad_id", (account_id,)).fetchall()
+        return [dict(row) for row in rows]
 
     def get_instagram_media(self, item_id: int) -> Optional[Dict[str, Any]]:
         with self.get_connection() as conn:

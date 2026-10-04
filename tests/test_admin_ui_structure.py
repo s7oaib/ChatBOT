@@ -228,13 +228,13 @@ def test_stories_are_not_offered_or_shown_in_content_routing_tab(page):
     source_select = section[section.index('id="igSourceType"'):section.index('</select>', section.index('id="igSourceType"'))]
     assert '<option value="post">' in source_select
     assert '<option value="reel">' in source_select
-    assert '<option value="ad">' in source_select
+    assert '<option value="ad">' not in source_select
     assert 'value="story"' not in source_select
     assert 'igStoryMapForm' not in section
     assert 'igStoryMediaId' not in section
     assert 'igStorySourceList' not in section
     registry = page[page.index('function renderInstagramMediaRegistry'):page.index('async function loadAdRoutes')]
-    assert "route.source_type !== 'story'" in registry
+    assert "['post','reel'].includes(route.source_type)" in registry
     assert 'useCapturedStory' not in page
     assert "igSourceType').value = 'story'" not in page
 

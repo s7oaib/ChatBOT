@@ -277,6 +277,9 @@ class Config:
     INSTAGRAM_AUTH_MODE: str = _resolve_instagram_auth_mode()
     INSTAGRAM_PAGE_ID: str = os.getenv("INSTAGRAM_PAGE_ID", "")
     INSTAGRAM_ACCESS_TOKEN: str = os.getenv("INSTAGRAM_ACCESS_TOKEN", "")
+    # Dedicated server-side read credential; never sent to Admin clients.
+    META_MARKETING_ACCESS_TOKEN: str = _env_secret("META_MARKETING_ACCESS_TOKEN")
+    META_AD_ACCOUNT_ID: str = os.getenv("META_AD_ACCOUNT_ID", "").strip()
     INSTAGRAM_API_VERSION: str = _resolve_graph_api_version(
         "INSTAGRAM_API_VERSION", _DEFAULT_INSTAGRAM_API_VERSION
     )
