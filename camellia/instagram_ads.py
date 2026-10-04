@@ -27,6 +27,16 @@ def ad_account_id():
     return "act_" + value if re.fullmatch(r"[0-9]+", value) else ""
 
 
+def mapping_display(row):
+    """Presentation from the already selected authority; never used for identity."""
+    from camellia.client_qa import resolve_effective_approved_qa_by_id
+    route = decode_route(row)
+    approved = resolve_effective_approved_qa_by_id(route.get("approved_qa_id")) if route.get("response_mode") == "APPROVED_QA" else None
+    route["display_label"] = route.get("routing_topic") or (approved.entry.question if approved else "Mapped source")
+    route["display_description"] = route.get("source_description") or (approved.entry.answer[:500] if approved else "Approved Q&A unavailable" if route.get("response_mode") == "APPROVED_QA" else "No description added.")
+    return route
+
+
 def sync_status(database):
     account = ad_account_id()
     result = database.get_instagram_ads_sync(account)
@@ -183,7 +193,7 @@ def exact_route_suggestion(item, routes):
 
 
 def ads_workspace(database, view="active"):
-    routes = [decode_route(row) for row in database.list_instagram_source_routes()]
+    routes = [mapping_display(row) for row in database.list_instagram_source_routes()]
     route_by_id = {row["routing_id"]: row for row in routes}
     bindings = {row["ad_id"]: row for row in database.list_instagram_ad_bindings()}
     inventory = {row["ad_id"]: row for row in database.list_instagram_ads_inventory(ad_account_id())}

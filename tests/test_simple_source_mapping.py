@@ -370,7 +370,7 @@ def test_client_mapping_ui_hides_route_mode():
     assert "loading=\"lazy\"" in html
     card = html[html.index("function renderInstagramContentCard"):html.index("function renderInstagramContentGallery")]
     assert "Mapped to:" not in card
-    assert "route.routing_topic || 'Unmapped'" in card
+    assert "route.mapping_route ? 'Mapped source' : 'Unmapped'" in card
     assert "Context active" in card and "Context off" in card
     assert 'data-content-filter="post"' in html and 'data-content-filter="reel"' in html
     assert 'data-content-map-filter="mapped"' in html and 'data-content-map-filter="unmapped"' in html

@@ -250,6 +250,41 @@ def test_mapping_edits_resolve_exact_identity_instead_of_unrelated_pointer(store
     assert store.get_instagram_source_route(unrelated["routing_id"])["canonical_url"].endswith("Other/")
 
 
+def test_approved_qa_route_with_empty_custom_topic_has_authoritative_display(store, monkeypatch):
+    saved = route(store, routing_topic="", source_description="", response_mode="APPROVED_QA", approved_qa_id="sondesh_details_client")
+    store.upsert_instagram_media({"instagram_media_id": "180001", "media_type": "IMAGE",
+        "permalink": "https://www.instagram.com/p/ExactSondesh/", "shortcode": "ExactSondesh"})
+    response = TestClient(app_module.app).get("/admin/instagram-media?mapping_status=mapped", headers={"x-admin-key": config.ADMIN_API_KEY})
+    mapped = response.json()["items"][0]
+    assert mapped["mapping_status"] == "MAPPED"
+    assert mapped["mapping_route"]["routing_id"] == saved["routing_id"]
+    assert mapped["mapping_route"]["display_label"] not in ("", "Unmapped", "Mapped source")
+    assert mapped["mapping_route"]["display_description"]
+    sync(store, monkeypatch)
+    suggestion = ads.ads_workspace(store, "unmapped")
+    assert suggestion["items"][0]["suggested_routing_id"] == saved["routing_id"]
+    assert suggestion["routes"][0]["display_label"] == mapped["mapping_route"]["display_label"]
+
+
+def test_mapped_card_never_renders_unmapped_for_blank_topic(store, tmp_path):
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node unavailable; separate JavaScript gate is required")
+    page = TestClient(app_module.app).get("/admin").text
+    status = page.split("function instagramContentStatus(route)", 1)[1].split("function setInstagramContentFilter", 1)[0]
+    card = page.split("function renderInstagramContentCard(route)", 1)[1].split("function renderInstagramContentGallery", 1)[0]
+    script = "const assert=require('assert'); const escapeHtml=value=>String(value||'');\nfunction instagramContentStatus(route)" + status + "\nfunction renderInstagramContentCard(route)" + card + """
+const html=renderInstagramContentCard({gallery_media:true,media_type:'IMAGE',routing_id:1,routing_topic:'',mapping_route:{routing_id:39,active:true}});
+assert(html.includes('MAPPED') && html.includes('✓'));
+assert(html.includes('Edit Mapping'));
+assert(!html.includes('Unmapped') && !html.includes('Not mapped'));
+"""
+    target = tmp_path / "mapped-card.js"
+    target.write_text(script, encoding="utf-8")
+    result = subprocess.run([node, str(target)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
 def test_many_ad_ids_share_one_existing_source_and_idempotent_bind(store, monkeypatch):
     saved = route(store)
     for ad_id in ("100", "200"):
