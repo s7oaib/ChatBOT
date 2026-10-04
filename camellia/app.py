@@ -3676,6 +3676,29 @@ def list_instagram_routes(
     }
 
 
+@app.get("/admin/instagram-ads")
+def list_instagram_ads(view: str = "active", x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    if view not in {"active", "unmapped", "mapped", "inactive", "all"}:
+        raise HTTPException(400, "Unsupported Ads filter.")
+    from camellia.instagram_ads import ads_workspace
+    return ads_workspace(db, view)
+
+
+@app.get("/admin/instagram-ads/sync-status")
+def instagram_ads_sync_status(x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    from camellia.instagram_ads import sync_status
+    return sync_status(db)
+
+
+@app.post("/admin/instagram-ads/sync")
+def sync_admin_instagram_ads(x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    from camellia.instagram_ads import sync_instagram_ads
+    return sync_instagram_ads(db)
+
+
 @app.post("/admin/instagram-ads/{ad_id}/bind")
 async def bind_observed_instagram_ad(
     ad_id: str, request: Request,
@@ -3688,7 +3711,7 @@ async def bind_observed_instagram_ad(
         routing_id = int(body.get("routing_id"))
         allow_rebind = body.get("change_binding") is True
         binding = db.bind_instagram_ad(
-            ad_id, routing_id, bound_by=x_admin_key or "admin", allow_rebind=allow_rebind,
+            ad_id, routing_id, bound_by="admin", allow_rebind=allow_rebind,
         )
     except (ValueError, TypeError) as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -3705,7 +3728,7 @@ async def set_instagram_ad_binding_active(
     body = await request.json()
     if not isinstance(body.get("active"), bool):
         raise HTTPException(status_code=400, detail="active must be true or false.")
-    if not db.set_instagram_ad_binding_active(ad_id, body["active"], actor=x_admin_key or "admin"):
+    if not db.set_instagram_ad_binding_active(ad_id, body["active"], actor="admin"):
         raise HTTPException(status_code=404, detail="Ad binding not found.")
     return {"status": "success", "ad_id": ad_id, "active": body["active"]}
 
@@ -3742,6 +3765,9 @@ def list_instagram_media(
         else "OWNER_NOT_CONFIGURED"
     )
     for item in items:
+        if item.get("mapping_route"):
+            from camellia.instagram_ads import mapping_display
+            item["mapping_route"] = mapping_display(item["mapping_route"])
         item["needs_review"] = bool(item["needs_review"])
         item["active"] = bool(item["active"])
     return {"status": "success", "items": items, "page": page, "page_size": page_size,
@@ -3862,9 +3888,7 @@ async def save_instagram_media_mapping(item_id: int, request: Request, x_admin_k
     topic_id = str(body.get("topic_id") or "").strip()
     if not topic_id and body.get("response_mode", "CUSTOM") != "APPROVED_QA":
         raise HTTPException(status_code=400, detail="Choose a Topic.")
-    existing = db.get_instagram_source_route(int(item["custom_route_id"])) if item.get("custom_route_id") else None
-    if existing and existing.get("media_id") != item["instagram_media_id"] and existing.get("canonical_url") != item.get("permalink"):
-        existing = None
+    existing = db.get_instagram_media_mapping(item_id, for_edit=True)
     source_type = "reel" if item["media_type"] == "VIDEO" else "post"
     if existing is None:
         existing = next((route for route in db.list_instagram_source_routes()
@@ -3901,12 +3925,12 @@ def delete_instagram_media_mapping(item_id: int, x_admin_key: Optional[str] = He
     if not item:
         raise HTTPException(status_code=404, detail="Instagram media not found.")
     _require_verified_current_instagram_media(item)
-    route = db.get_instagram_source_route(int(item["custom_route_id"])) if item.get("custom_route_id") else None
+    route = db.get_instagram_media_mapping(item_id, for_edit=True)
     if route is None:
         route = next((candidate for candidate in db.list_instagram_source_routes()
                       if candidate.get("media_id") == item["instagram_media_id"]
                       and candidate.get("source_type") == ("reel" if item["media_type"] == "VIDEO" else "post")), None)
-    if route and (route.get("media_id") == item["instagram_media_id"] or (route.get("canonical_url") == item.get("permalink"))):
+    if route and (route.get("media_id") == item["instagram_media_id"] or (route.get("canonical_url") == item.get("permalink")) or (item.get("shortcode") and route.get("shortcode") == item["shortcode"])):
         db.archive_instagram_source_route(int(route["routing_id"]))
     db.update_instagram_media_route(item_id, route_mode="DEFAULT", topic_id=None, custom_route_id=None, needs_review=False)
     return {"status": "success", "mapping_removed": True, "instagram_media_id": item["instagram_media_id"]}
@@ -7636,6 +7660,7 @@ def get_admin_dashboard():
                 <button class="tab-btn" onclick="switchTab('tab-instagram-stories', this)">▣ <span class="nav-label">Instagram Stories</span></button>
                 <button class="tab-btn" onclick="switchTab('tab-image', this)">🍱 <span class="nav-label">Menu</span><span id="menuSidebarBadge" class="admin-nav-badge" hidden aria-label="Menus needing review"></span></button>
                 <button class="tab-btn" onclick="switchTab('tab-instagram-content', this)">◉ <span class="nav-label">Posts &amp; Reels</span></button>
+                <button class="tab-btn" onclick="switchTab('tab-ads', this)">▧ <span class="nav-label">Ads</span></button>
                 <button class="tab-btn" onclick="switchTab('tab-handoffs', this)">↗ <span class="nav-label">Handoffs</span><span id="handoffSidebarBadge" class="admin-nav-badge" style="display:none;">0</span></button>
             </nav>
             <div class="admin-sidebar-label">More</div>
@@ -7757,7 +7782,7 @@ def get_admin_dashboard():
                 <div>
                     <label class="field-label" for="igSourceType">Source</label>
                     <select class="field-control" id="igSourceType" onchange="onInstagramSourceTypeChange()">
-                        <option value="post">Post</option><option value="reel">Reel</option><option value="ad">Ad</option>
+                        <option value="post">Post</option><option value="reel">Reel</option>
                     </select>
                 </div>
                 <div id="igRouteUrlWrap">
@@ -7821,7 +7846,6 @@ def get_admin_dashboard():
 
             <div><button class="btn-primary source-save" id="igSaveButton" type="button" onclick="saveInstagramRoute()">Save Mapping</button><div class="source-secondary-actions" style="margin-top:12px;"><button class="btn-secondary" type="button" onclick="resetInstagramRouteForm()">Cancel</button></div></div></div>
             <div id="adRouteResult" class="result-box"></div>
-            <section id="igObservedAds" style="margin-top:16px;"><h3>Observed / Unmapped Ads</h3><p class="source-map-help">Ad titles are display-only and never determine routing. Bind each exact Meta Ad ID to an existing active source.</p><div id="igObservedAdsList" class="ad-route-list"></div></section>
             <div style="display:flex; gap:8px; margin-top:16px; border-bottom:1px solid var(--border);">
                 <button class="tab-btn active" type="button" id="igRouteTabActiveBtn" onclick="switchIgRouteTab('active')" style="border-radius:8px 8px 0 0;">Active</button>
             </div>
@@ -8937,6 +8961,7 @@ THIS WEEK'S BENGAL SPECIALS
             'tab-menu-manager': 'menu_manager',
             'tab-instagram-stories': 'instagram_stories',
             'tab-instagram-content': 'instagram_content',
+            'tab-ads': 'ads',
             'tab-handoffs': 'handoffs',
             'tab-settings': 'settings',
             'tab-stats': 'customers',
@@ -8951,6 +8976,7 @@ THIS WEEK'S BENGAL SPECIALS
         const PRIMARY_TAB_BY_GROUP = {
             dashboard: 'tab-dashboard', menu: 'tab-image', menu_manager: 'tab-menu-manager',
             instagram_stories: 'tab-instagram-stories', instagram_content: 'tab-instagram-content',
+            ads: 'tab-ads',
             handoffs: 'tab-handoffs', settings: 'tab-settings', customers: 'tab-ai-resolution',
             answers: 'tab-ai-resolution', ai_resolution: 'tab-ai-resolution', custom_qa: 'tab-custom-qa',
         };
@@ -9011,6 +9037,7 @@ THIS WEEK'S BENGAL SPECIALS
             if (group === 'custom_qa') { loadCustomQa(); loadAssistedEvaluation(); }
             if (group === 'instagram_stories') { loadInstagramStories(); }
             if (group === 'instagram_content') { loadInstagramContentGallery(); }
+            if (group === 'ads') { loadAdsWorkspace(); }
             if (group === 'handoffs') { loadHandoffs(); }
             if (group === 'dashboard') { loadDashboardOverview(); }
             if (group === 'settings') { loadSettingsHealth(); }
@@ -9233,7 +9260,7 @@ THIS WEEK'S BENGAL SPECIALS
         }
 
         function instagramContentStatus(route) {
-            if (route.gallery_media) return route.mapping_route || route.topic_id ? 'Mapped' : 'Not mapped';
+            if (route.gallery_media) return route.mapping_route ? 'MAPPED' : 'UNMAPPED';
             if (route.archived_at) return 'ARCHIVED';
             if (!route.routing_topic && !route.topic_id) return 'UNMAPPED';
             return route.active === false ? 'ARCHIVED' : 'ACTIVE';
@@ -9268,8 +9295,8 @@ THIS WEEK'S BENGAL SPECIALS
             const status = instagramContentStatus(route); const label = route.gallery_media ? (route.media_type === 'VIDEO' ? 'REEL' : route.media_type === 'CAROUSEL_ALBUM' ? 'CAROUSEL' : 'POST') : (route.source_type === 'reel' ? 'REEL' : 'POST'); const image = route.preview_url || route.admin_preview_url;
             const preview = image ? `<img class="ig-media-thumb" loading="lazy" decoding="async" src="${escapeHtml(image)}" alt="${label} preview" onerror="this.style.display='none';this.nextElementSibling.style.display='flex';"><div class="ig-media-placeholder" style="display:none;"><span class="ig-media-placeholder-icon">◎</span><span>${label}</span></div>` : `<div class="ig-media-placeholder"><span class="ig-media-placeholder-icon">◎</span><span>${label}</span></div>`;
             const unverified = route.inventory_verification === 'LEGACY_UNVERIFIED'; const manual = route.sync_status === 'MANUAL_EXACT_LINK';
-            const action = unverified ? '<button class="btn-secondary" type="button" disabled title="Ownership is unverified until a complete owner sync succeeds">LEGACY · UNVERIFIED</button>' : `<button class="btn-secondary" type="button" data-content-action="details">${route.mapping_route || route.topic_id ? 'Edit Mapping' : label === 'REEL' ? 'Map Reel' : 'Map Post'}</button>`;
-            return `<article class="ig-media-card" tabindex="${unverified ? '-1' : '0'}" data-content-route-id="${escapeHtml(String(route.routing_id || ''))}"><div class="ig-media-preview">${preview}<span class="ig-media-badge">${label}${manual ? " · MANUAL/COLLABORATOR UNVERIFIED" : ""}</span></div><div class="ig-media-main"><div class="ig-media-title"><b class="ig-media-topic">${escapeHtml(route.routing_topic || 'Unmapped')}</b></div><div class="ig-media-summary">${escapeHtml(route.source_description || 'No description added.')}</div><div class="ig-media-facts"><span>${unverified ? 'LEGACY · UNVERIFIED — not verified for this account' : route.mapping_route?.active || (!route.mapping_route && route.topic_id && route.route_mode !== 'DISABLED') ? '● Context active' : '○ Context off'}</span><span>${escapeHtml(route.published_at || route.created_at || '—')}</span></div></div><div class="ig-media-actions">${action}</div></article>`;
+            const action = unverified ? '<button class="btn-secondary" type="button" disabled title="Ownership is unverified until a complete owner sync succeeds">LEGACY · UNVERIFIED</button>' : `<button class="btn-secondary" type="button" data-content-action="details">${route.mapping_route ? 'Edit Mapping' : label === 'REEL' ? 'Map Reel' : 'Map Post'}</button>`;
+            return `<article class="ig-media-card" tabindex="${unverified ? '-1' : '0'}" data-content-route-id="${escapeHtml(String(route.routing_id || ''))}"><div class="ig-media-preview">${preview}<span class="ig-media-badge">${label}${manual ? " · MANUAL/COLLABORATOR UNVERIFIED" : ""}</span></div><div class="ig-media-main"><div class="ig-media-title"><b class="ig-media-topic">${escapeHtml(route.routing_topic || (route.mapping_route ? 'Mapped source' : 'Unmapped'))}</b></div><div class="ig-media-summary">${escapeHtml(route.mapping_route?.display_description || route.source_description || 'No description added.')}</div><div class="ig-media-facts"><span>${escapeHtml(status)}${status === 'MAPPED' ? ' ✓' : ''}</span><span>${unverified ? 'LEGACY · UNVERIFIED — not verified for this account' : route.mapping_route?.active ? '● Context active' : '○ Context off'}</span><span>${escapeHtml(route.published_at || route.created_at || '—')}</span></div></div><div class="ig-media-actions">${action}</div></article>`;
         }
 
         function renderInstagramContentGallery() {
@@ -9285,7 +9312,7 @@ THIS WEEK'S BENGAL SPECIALS
             });
             if (!filtered.length) { list.innerHTML = '<span class="ig-media-muted">No Instagram media matches this filter.</span>'; return; }
             if (igContentView === 'table') {
-                list.className = ''; list.innerHTML = `<table class="instagram-table"><thead><tr><th>Type</th><th>Topic</th><th>Attachment</th><th>Chatbot context</th><th></th></tr></thead><tbody>${filtered.map(route => { const unverified = route.inventory_verification === 'LEGACY_UNVERIFIED'; return `<tr><td>${route.source_type === 'reel' ? 'Reel' : 'Post'}${route.sync_status === 'MANUAL_EXACT_LINK' ? ' · MANUAL/COLLABORATOR UNVERIFIED' : unverified ? ' · LEGACY UNVERIFIED' : ''}</td><td>${escapeHtml(route.routing_topic || 'Not mapped')}</td><td>${escapeHtml((igMenus.find(menu => menu.menu_id === route.menu_id) || {}).name || 'None')}</td><td>${unverified ? 'Unverified' : route.mapping_route?.active ? 'On' : 'Off'}</td><td>${unverified ? '<button class="btn-secondary" type="button" disabled>LEGACY · UNVERIFIED</button>' : `<button class="btn-secondary" type="button" data-content-table-id="${escapeHtml(String(route.routing_id || ''))}" style="padding:6px 9px;font-size:.72rem;">${route.mapping_route ? 'Edit Mapping' : 'Map'}</button>`}</td></tr>`; }).join('')}</tbody></table>`;
+                list.className = ''; list.innerHTML = `<table class="instagram-table"><thead><tr><th>Type</th><th>Topic</th><th>Attachment</th><th>Chatbot context</th><th></th></tr></thead><tbody>${filtered.map(route => { const unverified = route.inventory_verification === 'LEGACY_UNVERIFIED'; return `<tr><td>${route.source_type === 'reel' ? 'Reel' : 'Post'}${route.sync_status === 'MANUAL_EXACT_LINK' ? ' · MANUAL/COLLABORATOR UNVERIFIED' : unverified ? ' · LEGACY UNVERIFIED' : ''}</td><td>${escapeHtml(route.routing_topic || (route.mapping_route ? 'Mapped source' : 'Not mapped'))}</td><td>${escapeHtml((igMenus.find(menu => menu.menu_id === route.menu_id) || {}).name || 'None')}</td><td>${unverified ? 'Unverified' : route.mapping_route?.active ? 'On' : 'Off'}</td><td>${unverified ? '<button class="btn-secondary" type="button" disabled>LEGACY · UNVERIFIED</button>' : `<button class="btn-secondary" type="button" data-content-table-id="${escapeHtml(String(route.routing_id || ''))}" style="padding:6px 9px;font-size:.72rem;">${route.mapping_route ? 'Edit Mapping' : 'Map'}</button>`}</td></tr>`; }).join('')}</tbody></table>`;
                 list.querySelectorAll('[data-content-table-id]').forEach(button => button.addEventListener('click', () => openContentDetails('content', igContentRoutes.find(route => String(route.routing_id) === button.dataset.contentTableId))));
                 return;
             }
@@ -9317,13 +9344,8 @@ THIS WEEK'S BENGAL SPECIALS
                     notice.textContent = ['LEGACY_UNVERIFIED', 'OWNER_NOT_CONFIGURED'].includes(igContentInventoryVerification)
                         ? 'LEGACY · UNVERIFIED — showing saved media records for continuity. Their account ownership has not been verified, they are not authoritative current-account media, and mapping edits are disabled until a complete owner sync succeeds.' : '';
                 }
-                const pageMediaIds = (payload.items || []).map(item => item.instagram_media_id).filter(Boolean);
-                const mappingParams = new URLSearchParams({ media_ids: pageMediaIds.join(',') });
-                const mappingResponse = pageMediaIds.length ? await fetch(`/admin/instagram-routes?${mappingParams}`, { headers: getAuthHeaders() }) : null;
-                const mappingPayload = mappingResponse ? await mappingResponse.json().catch(() => ({})) : { routes: [] };
-                if (mappingResponse && !mappingResponse.ok) throw new Error(mappingPayload.detail || 'Could not load source mappings.');
-                window.igGalleryCustomRoutes = mappingPayload.routes || [];
-                const pageItems = (payload.items || []).map(item => { const mapping = (window.igGalleryCustomRoutes || []).find(route => (route.routing_id === item.custom_route_id || route.media_id === item.instagram_media_id) && !route.archived_at); const topicId = (mapping || {}).topic_id || item.topic_id; const topic = igTopics.find(t => t.topic_id === topicId); return { ...item, gallery_media: true, routing_id: item.id, media_id: item.instagram_media_id, preview_url: item.thumbnail_url || item.media_url, canonical_url: item.permalink, source_type: item.media_type === 'VIDEO' ? 'reel' : 'post', routing_topic: topic?.name || mapping?.routing_topic || '', source_description: mapping?.source_description || '', menu_id: mapping?.menu_id || null, mapping_route: mapping || null }; });
+                window.igGalleryCustomRoutes = (payload.items || []).map(item => item.mapping_route).filter(Boolean);
+                const pageItems = (payload.items || []).map(item => { const mapping = item.mapping_route; const topicId = mapping?.topic_id; const topic = igTopics.find(t => t.topic_id === topicId); return { ...item, gallery_media: true, routing_id: item.id, media_id: item.instagram_media_id, preview_url: item.thumbnail_url || item.media_url, canonical_url: item.permalink, source_type: item.media_type === 'VIDEO' ? 'reel' : 'post', routing_topic: topic?.name || mapping?.display_label || mapping?.routing_topic || '', source_description: mapping?.source_description || '', menu_id: mapping?.menu_id || null, mapping_route: mapping || null }; });
                 igContentRoutes = reset ? pageItems : [...igContentRoutes, ...pageItems];
                 igContentHasMore = Boolean(payload.has_more); igContentTotal = Number(payload.total || 0); igContentPage += 1;
                 window.igContentRoutes = igContentRoutes; renderInstagramContentGallery();
@@ -9460,6 +9482,13 @@ THIS WEEK'S BENGAL SPECIALS
                     ['Auth readiness', data.admin_auth?.password_configured && data.admin_auth?.https_required !== false ? 'Ready' : 'Needs attention'],
                     ['Failure counters', data.instagram_outbound?.failures_last_24h ?? data.outbound_delivery?.failures_last_24h ?? 0],
                 ];
+                const adsStatusResponse = await fetch('/admin/instagram-ads/sync-status', {headers:getAuthHeaders(), cache:'no-store'});
+                if (adsStatusResponse.ok) {
+                    const ads = await adsStatusResponse.json();
+                    safe.push(['META_MARKETING_ACCESS_TOKEN', ads.marketing_token_configured ? 'Configured' : 'Not configured'],
+                        ['META_AD_ACCOUNT_ID', ads.ad_account_configured ? 'Configured' : 'Not configured'],
+                        ['Ads last successful sync', ads.last_success_at || 'Never'], ['Ads sync warning', ads.error_category || 'None']);
+                }
                 const opsResponse = await fetch('/admin/operations', { headers: getAuthHeaders(), cache: 'no-store' });
                 if (opsResponse.ok) {
                     const ops = await opsResponse.json();
@@ -10600,10 +10629,9 @@ THIS WEEK'S BENGAL SPECIALS
             const priority = (route.priority_products || []).map(id => ((igProducts.find(p => p.id === id) || {}).label || id)).join(' → ') || 'Normal conversation routing';
             const link = route.canonical_url ? `<a class="ig-media-link" href="${escapeHtml(route.canonical_url)}" target="_blank" rel="noopener noreferrer">Open Instagram · ${escapeHtml(instagramShortUrl(route.canonical_url))}</a>` : route.source_type === 'story' ? `<span class="ig-media-muted">Story media ID: ${escapeHtml(route.media_id || '—')}</span>` : '<span class="ig-media-muted">Instagram link unavailable</span>';
             const pairingNote = route.source_type === 'post' && route.media_id && route.pairing_status === 'bound' ? '<span class="ig-media-muted">Connected via Post Pairing</span>' : '';
-            const adBindings = (route.ad_bindings || []).map(binding => `<span class="ig-media-muted">Ad ID ${escapeHtml(binding.ad_id)} · ${binding.active ? 'On' : 'Off'} <button class="btn-secondary" type="button" onclick="changeInstagramAdBinding('${escapeHtml(binding.ad_id)}')">Change Binding</button> <button class="btn-secondary" type="button" onclick="setInstagramAdBindingActive('${escapeHtml(binding.ad_id)}',${!binding.active})">${binding.active ? 'Disable' : 'Enable'}</button> <button class="btn-secondary" type="button" onclick="showInstagramAdBindingHistory('${escapeHtml(binding.ad_id)}')">History (${(binding.history || []).length})</button></span>`).join(' ');
             const detailsImage = (route.preview_url || route.admin_preview_url) ? instagramPreview(route, true) : '<span class="ig-media-muted">Preview unavailable; route remains active.</span>';
             const previewSource = route.preview_url ? 'Meta-provided preview' : route.admin_preview_url ? 'Admin preview fallback' : 'Placeholder';
-            const details = `<details class="ig-media-details"><summary style="cursor:pointer;">Details</summary>${detailsImage}<div>Topic: ${escapeHtml(route.routing_topic || 'Not mapped')}<br>Description: ${escapeHtml(route.source_description || 'No description added.')}<br>Updated: ${escapeHtml(route.updated_at || route.created_at || '—')}<br>Exact ad bindings: ${adBindings || 'None'}</div></details>`;
+            const details = `<details class="ig-media-details"><summary style="cursor:pointer;">Details</summary>${detailsImage}<div>Topic: ${escapeHtml(route.routing_topic || 'Not mapped')}<br>Description: ${escapeHtml(route.source_description || 'No description added.')}<br>Updated: ${escapeHtml(route.updated_at || route.created_at || '—')}</div></details>`;
             let actions = '';
             if (route.archived_at) {
                 actions = `<button class="btn-secondary" type="button" onclick="restoreInstagramRoute(${route.routing_id})">Restore</button> <button class="btn-danger" type="button" onclick="openIgRemoveModal(${route.routing_id})">Delete</button>`;
@@ -11010,48 +11038,10 @@ THIS WEEK'S BENGAL SPECIALS
         function renderInstagramMediaRegistry() {
             const list = document.getElementById('adRouteList');
             if (!list) return;
-            renderObservedInstagramAds();
-            const all = [...(window.igRoutes || [])].filter(route => route.source_type !== 'story');
-            if (igRouteTab === 'active') all.push(...(window.igLegacyAds || []));
+            const all = [...(window.igRoutes || [])].filter(route => ['post','reel'].includes(route.source_type));
             const filtered = all.filter(instagramRouteMatches);
             if (!filtered.length) { list.innerHTML=`<p style="color:var(--text-muted);font-size:0.84rem;">${all.length ? 'No connected media matches this search or filter.' : igRouteTab === 'archived' ? 'No archived routes.' : 'No Instagram routes added yet.'}</p>`; return; }
             list.innerHTML = filtered.map(renderInstagramMediaCard).join('');
-        }
-        function renderObservedInstagramAds() {
-            const box = document.getElementById('igObservedAdsList');
-            if (!box) return;
-            const observed = window.igObservedAds || [];
-            const routes = (window.igRoutes || []).filter(route => route.active && !route.archived_at && ['post','reel','story'].includes(route.source_type));
-            if (!observed.length) { box.innerHTML = '<p class="ig-media-muted">No unmapped ad IDs observed.</p>'; return; }
-            box.innerHTML = observed.map(ad => `<article class="ig-media-card"><div class="ig-media-main"><b>Meta Ad ID:</b> ${escapeHtml(ad.ad_id)}<div class="ig-media-summary">Title (NON-AUTHORITATIVE): ${escapeHtml(ad.display_title || 'Not provided')}</div><div class="ig-media-facts">First seen ${escapeHtml(ad.first_seen_at || '—')} · Last seen ${escapeHtml(ad.last_seen_at || '—')} · ${Number(ad.occurrence_count || 0)} observations</div></div><div class="ig-media-actions"><select class="field-control" id="igObservedRoute-${escapeHtml(ad.ad_id)}"><option value="">Select existing mapping</option>${routes.map(route => `<option value="${route.routing_id}">${escapeHtml(route.routing_topic || route.canonical_url || route.source_type)} · #${route.routing_id}</option>`).join('')}</select><button class="btn-primary" type="button" onclick="bindObservedInstagramAd('${escapeHtml(ad.ad_id)}')">Bind to Existing Mapping</button></div></article>`).join('');
-        }
-        async function bindObservedInstagramAd(adId) {
-            const selected = document.getElementById(`igObservedRoute-${adId}`)?.value;
-            if (!selected) { alert('Select an existing active mapping first.'); return; }
-            const response = await fetch(`/admin/instagram-ads/${encodeURIComponent(adId)}/bind`, { method:'POST', headers:{...getAuthHeaders(),'Content-Type':'application/json'}, body:JSON.stringify({routing_id:Number(selected)}) });
-            const data = await response.json().catch(() => ({}));
-            if (!response.ok) { alert(data.detail || 'Could not bind this Ad ID.'); return; }
-            await loadAdRoutes();
-        }
-        async function setInstagramAdBindingActive(adId, active) {
-            const response = await fetch(`/admin/instagram-ads/${encodeURIComponent(adId)}/active`, { method:'PATCH', headers:{...getAuthHeaders(),'Content-Type':'application/json'}, body:JSON.stringify({active}) });
-            if (!response.ok) { alert('Could not update Ad ID binding.'); return; }
-            await loadAdRoutes();
-        }
-        async function changeInstagramAdBinding(adId) {
-            const routes = (window.igRoutes || []).filter(route => route.active && !route.archived_at && ['post','reel','story'].includes(route.source_type));
-            const options = routes.map(route => `${route.routing_id}: ${route.routing_topic || route.canonical_url || route.source_type}`).join('\n');
-            const selected = prompt(`Enter an existing active source mapping ID for Ad ${adId}:\n${options}`);
-            if (selected === null || !/^\\d+$/.test(selected.trim())) return;
-            const response = await fetch(`/admin/instagram-ads/${encodeURIComponent(adId)}/bind`, { method:'POST', headers:{...getAuthHeaders(),'Content-Type':'application/json'}, body:JSON.stringify({routing_id:Number(selected.trim()),change_binding:true}) });
-            const data = await response.json().catch(() => ({}));
-            if (!response.ok) { alert(data.detail || 'Could not change Ad ID binding.'); return; }
-            await loadAdRoutes();
-        }
-        function showInstagramAdBindingHistory(adId) {
-            const binding = (window.igRoutes || []).flatMap(route => route.ad_bindings || []).find(item => item.ad_id === adId);
-            const history = binding?.history || [];
-            alert(history.length ? history.map(item => `${item.occurred_at}: ${item.action} · route ${item.routing_id || 'unbound'} · ${item.actor || 'unknown operator'}`).join('\n') : 'No binding changes recorded.');
         }
         async function loadAdRoutes() {
             const list = document.getElementById('adRouteList');
@@ -13359,7 +13349,9 @@ Non-Veg:
         position = html_content.index(f'for="{topic_id}"')
         field = html_content.rfind('<div class="source-map-field">', 0, position)
         html_content = html_content[:field] + selector_html(prefix) + html_content[field:]
-    html_content = html_content.replace('</body>', REVIEW_SCRIPT + WEEKLY_SCRIPT + APPROVED_SCRIPT + SOURCE_RESPONSE_SCRIPT + '</body>', 1)
+    from camellia.admin_ads import HTML as ADS_HTML, SCRIPT as ADS_SCRIPT
+    html_content = html_content.replace('<div id="tab-handoffs"', ADS_HTML + '<div id="tab-handoffs"', 1)
+    html_content = html_content.replace('</body>', REVIEW_SCRIPT + WEEKLY_SCRIPT + APPROVED_SCRIPT + SOURCE_RESPONSE_SCRIPT + ADS_SCRIPT + '</body>', 1)
     return HTMLResponse(
         content=html_content,
         headers={

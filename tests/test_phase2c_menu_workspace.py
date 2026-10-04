@@ -160,7 +160,7 @@ def test_primary_menu_navigation_is_middle_entry_and_weekly_visible_above_catalo
     page = workspace[0].get("/admin").text
     sidebar = page.split('<aside class="admin-sidebar"', 1)[1].split('</aside>', 1)[0]
     labels = re.findall(r'<span class="nav-label">(.*?)</span>', sidebar)
-    assert labels[:5] == ["Dashboard", "Instagram Stories", "Menu", "Posts &amp; Reels", "Handoffs"]
+    assert labels[:6] == ["Dashboard", "Instagram Stories", "Menu", "Posts &amp; Reels", "Ads", "Handoffs"]
     assert labels.count("Menu") == 1
     assert "Menu Manager" not in labels and "Menu V2" not in labels and "Catalogue" not in labels
     assert 'id="menuSidebarBadge"' in sidebar

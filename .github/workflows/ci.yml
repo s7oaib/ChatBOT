@@ -91,6 +91,8 @@ jobs:
           tests/test_shared_post_pairing.py
           tests/test_shared_reel_precedence.py
           tests/test_simple_source_mapping.py
+          tests/test_ad_mapped_source_context.py
+          tests/test_instagram_ads_inventory.py
 
   full-regression:
     name: Full regression (Python 3.11)

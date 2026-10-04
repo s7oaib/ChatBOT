@@ -33,6 +33,8 @@ _TEST_ENV_KEYS = (
     "ENABLE_WEB_TESTER",
     "ADMIN_API_KEY",
     "INSTAGRAM_ACCESS_TOKEN",
+    "META_MARKETING_ACCESS_TOKEN",
+    "META_AD_ACCOUNT_ID",
     "META_APP_SECRET",
     "META_VERIFY_TOKEN",
 )
@@ -57,6 +59,8 @@ os.environ.update({
     "ENABLE_WEB_TESTER": "true",
     "ADMIN_API_KEY": "pytest-only-admin-api-key-7f410b33",
     "INSTAGRAM_ACCESS_TOKEN": "",
+    "META_MARKETING_ACCESS_TOKEN": "",
+    "META_AD_ACCOUNT_ID": "",
     "META_APP_SECRET": "",
     "META_VERIFY_TOKEN": "",
 })
