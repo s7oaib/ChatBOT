@@ -3524,21 +3524,10 @@ class DeterministicResponder:
             # client-approved Subscription QA record, never the source label
             # or a legacy response template.
             source_context_blocks_client_qa = False
-        price_followup = bool(re.fullmatch(
-            r"\s*(?:(?:what(?:'s| is)|whats)\s+the\s+)?(?:price|cost|rate)|how\s+much\s*",
-            user_message.strip(" ?.!").lower(), re.I,
-        ))
+        price_followup = client_qa.contextual_price_question(user_message)
         details_followup = bool(re.fullmatch(r"\s*(?:tell me more|more details|tell me about it)\s*[?.!]*\s*", user_message, re.I))
         context_topic = str(facts.get("last_topic") or "").casefold()
-        source_topic = str(source_route.get("routing_topic") or "").casefold() if source_route_active else ""
-        contextual_price_topic = (
-            "sondesh" if context_topic.startswith("sondesh") else
-            "subscription" if context_topic == "subscription" else
-            "bento" if context_topic == "bento" else
-            "subscription" if "subscription" in source_topic else
-            "sondesh" if "sondesh" in source_topic else
-            "bento" if "bento" in source_topic else ""
-        ) if price_followup else ""
+        contextual_price_topic = client_qa.contextual_price_subject(facts) if price_followup else ""
         contextual_details_topic = (
             "sondesh" if context_topic.startswith("sondesh") else
             "subscription" if context_topic == "subscription" else
@@ -3549,13 +3538,15 @@ class DeterministicResponder:
             (
                 "tell me more about subscription"
                 if source_subscription_asset_request
-                else f"{contextual_price_topic} price" if contextual_price_topic
                 else f"tell me about {contextual_details_topic}" if contextual_details_topic
                 else user_message
             ),
             facts,
         )
-        if contextual_topic and context_topic:
+        if contextual_price_topic and source_route_active:
+            source_context_blocks_client_qa = False
+            facts["source_context_used"] = True
+        elif contextual_topic and context_topic:
             facts["source_context_superseded"] = True
             source_context_blocks_client_qa = False
         elif contextual_topic and source_route_active:
@@ -3610,13 +3601,15 @@ class DeterministicResponder:
                 and not explicit_client_subject
                 and not (
                     client_qa_candidate
-                    and contextual_topic == facts.get("active_product_context")
+                    and (contextual_topic == facts.get("active_product_context")
+                         or (price_followup and client_qa_candidate.match_kind == "context"))
                 )
             )
             or (
                 facts.get("ad_product")
                 and not supported_service_question
                 and not explicit_client_subject
+                and not (price_followup and client_qa_candidate and client_qa_candidate.match_kind == "context")
                 and bool(_CANONICAL_ROUTE_HINT_RE.search(lowered_text))
             )
         )
