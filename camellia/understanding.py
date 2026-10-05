@@ -46,6 +46,27 @@ class Intent(str, Enum):
     UNKNOWN = "unknown"
 
 
+# Business-development proposals must never be reinterpreted as customer menu
+# requests just because they mention a "curated menu", "upcoming events", or
+# products.  The bot has no approved authority to accept partnerships, feature
+# another brand, onboard suppliers, or make collaboration commitments.  Keep
+# this as a meaning-level guard so both model-backed and deterministic NLU use
+# the same safe handoff path.
+_COLLABORATION_PROPOSAL_RE = re.compile(
+    r"\b(?:"
+    r"collab(?:oration|orate|orating|orative)?|"
+    r"partnership|partner(?:ing)?\s+with\s+(?:you|camellia)|"
+    r"work(?:ing)?\s+together|"
+    r"brand\s+(?:collab(?:oration)?|partnership)|"
+    r"feature(?:d|ing)?\s+(?:some\s+of\s+)?(?:my|our)\s+products?|"
+    r"stock(?:ing)?\s+(?:some\s+of\s+)?(?:my|our)\s+products?|"
+    r"carry(?:ing)?\s+(?:some\s+of\s+)?(?:my|our)\s+products?|"
+    r"supplier\s+proposal|vendor\s+proposal"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
 STRUCTURED_NLU_RESPONSE_FORMAT = {
     "type": "json_schema",
     "json_schema": {
@@ -138,6 +159,27 @@ def _json_object(text: str) -> Optional[Dict[str, Any]]:
     return value if isinstance(value, dict) else None
 
 
+def _collaboration_handoff(user_message: str) -> Optional[UnderstandingResult]:
+    """Classify business-development proposals before generic menu language.
+
+    A proposal to collaborate, feature products, or partner with Camellia is a
+    real business enquiry but has no approved self-service answer.  Represent
+    it as the existing typed business gap and force the existing human handoff
+    rather than adding a new customer-facing promise or response template.
+    """
+    if not _COLLABORATION_PROPOSAL_RE.search(user_message or ""):
+        return None
+    return UnderstandingResult(
+        intents=[Intent.BUSINESS_POLICY_UNKNOWN.value],
+        entities={"topic": "collaboration proposal"},
+        confidence=1.0,
+        requires_human=True,
+        knowledge_gap=True,
+        available=True,
+        reason="deterministic_collaboration_guard",
+    )
+
+
 class UnderstandingEngine:
     """Uses Groq for meaning only. Returned prose never reaches customers."""
 
@@ -173,6 +215,11 @@ class UnderstandingEngine:
         disappearing. Confidence stays deliberately below the model's: this
         result is continuity, not certainty.
         """
+        collaboration = _collaboration_handoff(user_message)
+        if collaboration is not None:
+            collaboration.confidence = 0.75
+            collaboration.reason = "deterministic_fallback_collaboration_guard"
+            return collaboration
         reading = semantic_fallback.read(user_message)
         intents = [
             intent for intent in reading["intents"]
@@ -222,6 +269,9 @@ class UnderstandingEngine:
         history_turns: Optional[List[Dict[str, Any]]] = None,
         state: Optional[Dict[str, Any]] = None,
     ) -> UnderstandingResult:
+        collaboration = _collaboration_handoff(user_message)
+        if collaboration is not None:
+            return collaboration
         if not config.STRUCTURED_NLU_ENABLED or not user_message.strip():
             return UnderstandingResult(reason="disabled_or_empty")
 
