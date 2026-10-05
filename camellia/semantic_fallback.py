@@ -21,6 +21,7 @@ Three properties matter more than coverage:
 """
 
 import re
+from camellia.intent_guards import SUBSCRIPTION_CHANGE_RE
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 # --- normalisation ---------------------------------------------------------
@@ -227,10 +228,7 @@ _ORDER_SHAPED = re.compile(
 _SUBSCRIPTION_BOOKING = re.compile(
     r"\b(book|booking|subscribe|sign me up|start|next steps?|join)\b", re.IGNORECASE,
 )
-_SUBSCRIPTION_CHANGE = re.compile(
-    r"\b(change|changing|reschedul\w*|postpone|prepone|shift|skip|pause|cancel)\b",
-    re.IGNORECASE,
-)
+_SUBSCRIPTION_CHANGE = SUBSCRIPTION_CHANGE_RE
 
 # --- entities --------------------------------------------------------------
 

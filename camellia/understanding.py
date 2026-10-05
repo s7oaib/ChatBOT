@@ -8,6 +8,7 @@ from enum import Enum
 from typing import Any, Dict, List, Optional
 
 from camellia import semantic_fallback
+from camellia.intent_guards import evaluate_turn_authority, is_collaboration_proposal
 from camellia.semantic_fallback import normalize_menu_type, normalize_pack_size
 from camellia.config import config
 from camellia.monitoring import get_logger
@@ -44,32 +45,6 @@ class Intent(str, Enum):
     BUSINESS_POLICY_UNKNOWN = "unknown_business_query"
     ESCALATION = "escalation"
     UNKNOWN = "unknown"
-
-
-# Business-development proposals must never be reinterpreted as customer menu
-# requests just because they mention a "curated menu", "upcoming events", or
-# products.  The bot has no approved authority to accept partnerships, feature
-# another brand, onboard suppliers, or make collaboration commitments.  Keep
-# this as a meaning-level guard so both model-backed and deterministic NLU use
-# the same safe handoff path.
-_COLLABORATION_PROPOSAL_RE = re.compile(
-    r"\b(?:"
-    r"collab(?:oration|orate|orating|orative)?|"
-    r"partnership|partner(?:ing)?\s+with\s+(?:you|camellia)|"
-    r"work(?:ing)?\s+together|"
-    r"brand\s+(?:collab(?:oration)?|partnership)|"
-    r"feature(?:d|ing)?\s+(?:some\s+of\s+)?(?:my|our)\s+products?|"
-    r"stock(?:ing)?\s+(?:some\s+of\s+)?(?:my|our)\s+products?|"
-    r"carry(?:ing)?\s+(?:some\s+of\s+)?(?:my|our)\s+products?|"
-    r"supplier\s+proposal|vendor\s+proposal"
-    r")\b",
-    re.IGNORECASE,
-)
-
-
-def is_collaboration_proposal(message: str) -> bool:
-    """Shared proposal rule for understanding and early responder precedence."""
-    return bool(_COLLABORATION_PROPOSAL_RE.search(message or ""))
 
 
 STRUCTURED_NLU_RESPONSE_FORMAT = {
@@ -164,24 +139,32 @@ def _json_object(text: str) -> Optional[Dict[str, Any]]:
     return value if isinstance(value, dict) else None
 
 
-def _collaboration_handoff(user_message: str) -> Optional[UnderstandingResult]:
-    """Classify business-development proposals before generic menu language.
+def _authority_handoff(user_message: str, enforce_turn_authority: bool = False) -> Optional[UnderstandingResult]:
+    """Keep unresolved primary requests ahead of borrowed secondary keywords.
 
-    A proposal to collaborate, feature products, or partner with Camellia is a
-    real business enquiry but has no approved self-service answer.  Represent
-    it as the existing typed business gap and force the existing human handoff
-    rather than adding a new customer-facing promise or response template.
+    Represent the request as the existing typed gap. The responder still seeks
+    exact approved coverage before using the existing human-handoff copy.
     """
-    if not is_collaboration_proposal(user_message):
+    authority = evaluate_turn_authority(user_message)
+    if not authority.blocks_shortcut or (not enforce_turn_authority and not is_collaboration_proposal(user_message)):
         return None
+    if authority.reason == "compound_requires_complete_authority":
+        return None
+    if authority.primary_intent == "business_proposal":
+        reading = semantic_fallback.read(user_message)
+        if Intent.EVENT_ORDER.value in reading["intents"]:
+            return UnderstandingResult(intents=[Intent.EVENT_ORDER.value],
+                entities={key: value for key, value in reading["entities"].items() if key in {"event", "quantity", "location"}},
+                confidence=0.75, requires_human=True, knowledge_gap=True, available=True,
+                reason="deterministic_turn_authority_guard")
     return UnderstandingResult(
         intents=[Intent.BUSINESS_POLICY_UNKNOWN.value],
-        entities={"topic": "collaboration proposal"},
+        entities={"topic": "collaboration proposal" if is_collaboration_proposal(user_message) else authority.primary_intent},
         confidence=1.0,
         requires_human=True,
         knowledge_gap=True,
         available=True,
-        reason="deterministic_collaboration_guard",
+        reason="deterministic_collaboration_guard" if is_collaboration_proposal(user_message) else "deterministic_turn_authority_guard",
     )
 
 
@@ -211,7 +194,7 @@ class UnderstandingEngine:
         ))
 
     @staticmethod
-    def deterministic_fallback(user_message: str) -> UnderstandingResult:
+    def deterministic_fallback(user_message: str, *, enforce_turn_authority: bool = False) -> UnderstandingResult:
         """Read meaning without a model, using concepts rather than phrasings.
 
         `semantic_fallback.read` owns the reading: concept families, entity
@@ -220,10 +203,11 @@ class UnderstandingEngine:
         disappearing. Confidence stays deliberately below the model's: this
         result is continuity, not certainty.
         """
-        collaboration = _collaboration_handoff(user_message)
+        collaboration = _authority_handoff(user_message, enforce_turn_authority)
         if collaboration is not None:
             collaboration.confidence = 0.75
-            collaboration.reason = "deterministic_fallback_collaboration_guard"
+            collaboration.reason = ("deterministic_fallback_collaboration_guard" if is_collaboration_proposal(user_message)
+                                    else "deterministic_fallback_turn_authority_guard")
             return collaboration
         reading = semantic_fallback.read(user_message)
         intents = [
@@ -274,7 +258,7 @@ class UnderstandingEngine:
         history_turns: Optional[List[Dict[str, Any]]] = None,
         state: Optional[Dict[str, Any]] = None,
     ) -> UnderstandingResult:
-        collaboration = _collaboration_handoff(user_message)
+        collaboration = _authority_handoff(user_message)
         if collaboration is not None:
             return collaboration
         if not config.STRUCTURED_NLU_ENABLED or not user_message.strip():

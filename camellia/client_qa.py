@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from camellia.intent_guards import can_candidate_own_turn, has_price_intent, is_payment_method_request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -297,9 +298,9 @@ def _match_existing(message: str, facts: Optional[Dict[str, Any]] = None) -> Opt
         home = True
     if re.search(r"\b(?:price\s+(?:is\s+)?high|high\s+price|too\s+expensive|quite\s+expensive|why\s+is\s+it\s+so\s+expensive)\b", text, re.I):
         return result("price_is_high", "exact" if normalized == _normalise_question("PRICE IS HIGH") else "paraphrase")
-    if home and re.search(r"\b(?:how\s+to\s+pay|payment|pay)\b", text, re.I):
-        return result("home_table_payment", "exact" if normalized == _normalise_question("How to pay") else "paraphrase")
-    if home and (_generic_price(text) or re.search(r"\b(?:price|cost|how\s+much)\b", text, re.I)):
+    if is_payment_method_request(text):
+        return result("home_table_payment" if home else "general_payment_client", "exact" if normalized == _normalise_question("How to pay") else "paraphrase")
+    if home and (_generic_price(text) or has_price_intent(text)):
         return result("home_table_price", "exact" if normalized in {_normalise_question("Whats the price?"), _normalise_question("What's the price?")} else "paraphrase")
     if home and re.search(r"\b(?:tell|talk|share|give)\s+me\s+(?:more|details)\s+(?:about\s+)?(?:this|(?:the\s+)?(?:bengali\s+)?home\s+table|the\s+event)\b|\btell\s+me\s+about\s+(?:the\s+)?(?:bengali\s+)?home\s+table\b", text, re.I):
         return result("home_table_details", "exact" if normalized == _normalise_question("tell me more about this") else "paraphrase")
@@ -310,14 +311,14 @@ def _match_existing(message: str, facts: Optional[Dict[str, Any]] = None) -> Opt
     if re.search(r"\b(?:out\s+of\s+area|other\s+city|different\s+city|xyz\s+city|outside\s+(?:delhi|ncr)|deliver(?:\s+\w+){0,5}\s+to\s+(?:bangalore|bengaluru|mumbai|chennai|hyderabad|pune|kolkata))\b", text, re.I):
         return result("delivery_out_of_area_client")
     if re.search(r"\bsubscriptions?\b|\bmeal\s+plan\b|\beveryday\s+meal\b", text, re.I):
-        return result("subscription_price" if re.search(r"\b(?:price|cost|rate|how\s+much)\b", text, re.I) else "subscription_details_client")
+        return result("subscription_price" if has_price_intent(text) else "subscription_details_client")
     if re.search(r"\bbengali\s+bento\b|\bbento\b", text, re.I) and not re.search(
         r"\b(?:without|no|remove|replace|substitut|customi[sz]|cheapest|lowest|how\s+much\s+more|difference|cheaper)\b",
         text,
         re.I,
     ):
-        return result("bento_price_client" if re.search(r"\b(?:price|cost|how\s+much|rate|pirce)\b", text, re.I) else "bento_details_client")
-    if re.search(r"\bchicken\s+kosha\b", text, re.I):
+        return result("bento_price_client" if has_price_intent(text) else "bento_details_client")
+    if re.search(r"\bchicken\s+kosha\b", text, re.I) and has_price_intent(text):
         return result("chicken_kosha_price_client")
     if re.search(r"\bsondesh\b", text, re.I):
         if re.search(r"\b(?:how\s+much\s+time|how\s+long|delivery\s+time|dispatch|deliver)\b", text, re.I):
@@ -378,7 +379,7 @@ def _match_existing(message: str, facts: Optional[Dict[str, Any]] = None) -> Opt
         re.I,
     ):
         return result("order_ready_handoff")
-    if re.search(r"\b(?:how\s+do\s+i\s+pay|payment)\b", text, re.I):
+    if is_payment_method_request(text):
         return result("general_payment_client")
     return None
 
@@ -527,7 +528,7 @@ def contextual_price_subject(state: Dict[str, Any]) -> str:
     return "home_table" if state.get("home_table_context") and not state.get("source_context_superseded") else ""
 
 
-def _match_base(message: str, facts: Optional[Dict[str, Any]] = None) -> Optional[ApprovedMatch]:
+def _match_base_unchecked(message: str, facts: Optional[Dict[str, Any]] = None) -> Optional[ApprovedMatch]:
     """Extend existing matching with bounded aliases; return source entries only."""
     state = facts or {}
     text = _normalise_match_text(message)
@@ -540,7 +541,7 @@ def _match_base(message: str, facts: Optional[Dict[str, Any]] = None) -> Optiona
     # an old Home Table context or fall into the broad general-price pattern.
     if re.search(r"\bchicken\b", text) and "chicken_kosha" not in subjects and "bento" not in subjects:
         return None
-    price = bool(re.search(r"\b(?:price|cost|rate|how much)\b", text))
+    price = has_price_intent(text)
     timing = bool(re.search(r"\b(?:time|how long|when|arrive|reach|dispatch)\b", text))
     objection = bool(re.search(r"\b(?:high|expensive|pricey)\b", text))
     if price and re.search(r"\b(?:paneer|fish|mutton|curry)\b", text):
@@ -616,6 +617,13 @@ def _match_base(message: str, facts: Optional[Dict[str, Any]] = None) -> Optiona
         return None
     entry = REGISTRY_BY_ID[candidates.pop()]
     return ApprovedMatch(entry, "semantic_alias", entry.asset_keys)
+
+
+def _match_base(message: str, facts: Optional[Dict[str, Any]] = None) -> Optional[ApprovedMatch]:
+    candidate = _match_base_unchecked(message, facts)
+    if candidate and can_candidate_own_turn(_normalise_match_text(message), candidate.entry.qa_id):
+        return candidate
+    return None
 
 
 def match(message: str, facts: Optional[Dict[str, Any]] = None) -> Optional[ApprovedMatch]:
