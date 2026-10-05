@@ -2755,7 +2755,22 @@ class DeterministicResponder:
                                  and (_pending_menu_affects_question(user_message, facts)
                                       or menu_review.menu_question_blocked(user_message, facts)))
             if (not exact or exact.match_kind != "admin_exact") and not pending_authority:
-                return self._structured_nlu_response(user_message, user_id, channel)
+                resolved = self._structured_nlu_response(user_message, user_id, channel)
+                if resolved is not None:
+                    return resolved
+                # The structured reader may decline partly understood clauses.
+                # A blocked whole turn must fail closed, never reach shortcuts
+                # or return None to the production reply wrapper.
+                facts.update({"last_route_source": "HUMAN_HANDOFF",
+                              "last_handoff_reason": authority.reason,
+                              "last_knowledge_ids": [],
+                              "last_actions": [BusinessAction.ESCALATE_TO_TEAM.value],
+                              "knowledge_sufficient": False,
+                              "last_grounding": "turn_authority_unresolved",
+                              "last_fallback_used": True})
+                handoff = self._generic_fallback()
+                session_memory.add_turn(user_id, channel, user_message, handoff)
+                return handoff, False, None, None
 
         source_for_qa = facts.get("source_route") or {}
         mapped_qa_reference = bool(

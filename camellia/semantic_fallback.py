@@ -561,7 +561,9 @@ def read(message: str) -> Dict[str, Any]:
 
     unmapped: List[str] = []
     # Split original punctuation before normalization removes sentence boundaries.
-    for raw_clause in _clauses(message):
+    # Ampersands in labels (e.g. flavours & prices) were removed by the
+    # existing normalizer, not interpreted as independent requests.
+    for raw_clause in _clauses((message or "").replace("&", " ")):
         clause = _normalise(raw_clause)
         escalation_request = (
             not _IDENTITY_QUESTION_RE.match(clause.strip())
