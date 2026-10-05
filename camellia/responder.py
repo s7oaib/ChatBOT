@@ -38,7 +38,8 @@ from camellia.menu_images import (
     has_weekly_archive,
 )
 from camellia import semantic_fallback
-from camellia.understanding import BusinessAction, Intent, is_collaboration_proposal, understanding_engine
+from camellia.understanding import BusinessAction, Intent, understanding_engine
+from camellia.intent_guards import can_candidate_own_turn, evaluate_turn_authority, exact_custom_coverage, has_price_intent, is_payment_method_request, CONFIRMED_BENTO_SUBSTITUTION_RE as _CONFIRMED_BENTO_SUBSTITUTION_RE
 from camellia.conversation_resolver import (
     ContextResolution,
     explicit_entity,
@@ -143,7 +144,7 @@ def _approved_chicken_kosha_price_question(message: str, facts: Dict[str, Any]) 
     if re.search(
         r"\b(?:current\w*|today|tonight|tomorrow|this\s+week|available|availability|"
         r"in\s+stock|sold\s+out|menus?)\b", message, re.I,
-    ) or not re.search(r"\b(?:price|cost|rate|how\s+much)\b", message, re.I):
+    ) or not has_price_intent(message):
         return False
     candidate = client_qa.match(message, facts)
     return bool(candidate and candidate.entry.qa_id == "chicken_kosha_price_client")
@@ -356,11 +357,7 @@ _DUPLICATE_REPLY_NOTICE = (
 #
 # Flavour mixing is NOT here and must not be added — that was never confirmed,
 # and GUARD_customization_flavour_mixing exists to keep it with a human.
-_CONFIRMED_BENTO_SUBSTITUTION_RE = re.compile(
-    r"\bchholar\s+daa?l\b(?=.*\b(bento|aloo\s+dom)\b)"
-    r"|\b(bento|aloo\s+dom)\b(?=.*\bchholar\s+daa?l\b)",
-    re.IGNORECASE,
-)
+
 
 _UNSUPPORTED_CUSTOMIZATION_RE = re.compile(
     r"\b(?:can|could|would|do)\s+you\s+(?:make|prepare|do|customi[sz]e|modify)\b.*"
@@ -996,9 +993,7 @@ HOME_TABLE_RE = re.compile(
     r'home\s+table|home\s+tabel\s+pris(?:e|s)\s+kolkatta)\b',
     re.IGNORECASE,
 )
-HOME_TABLE_PAYMENT_RE = re.compile(
-    r'\b(?:how\s+to\s+pay|how\s+do\s+i\s+pay|payment|pay)\b', re.IGNORECASE,
-)
+
 HOME_TABLE_DETAILED_PRICING_RE = re.compile(
     r'\b(?:detailed\s+pricing|price\s+per\s+person|pricing|prices|price|pris[es]|cost|rate|'
     r'how\s+much|per\s+person|per\s+head|'
@@ -1012,13 +1007,7 @@ HOME_TABLE_BOOKING_RE = re.compile(
     r"\b(?:book|booking|reserve|reservation)\b",
     re.IGNORECASE,
 )
-PAYMENT_QUERY_RE = re.compile(
-    r'\b(?:how\s+to\s+pay|how\s+2\s+pay|how\s+do\s+i\s+pay|how\s+can\s+i\s+pay|'
-    r'payment(?:\s+details?|\s+method(?:s)?|\s+options?)?|pay(?:ment)?\s+details?|'
-    r'bank\s+transfer|upi|qr(?:\s+code)?|gpay|paytm|phonepe|net\s+banking|'
-    r'credit\s+card|debit\s+card|cash\s+on\s+delivery|\bcod\b)\b',
-    re.IGNORECASE,
-)
+
 KOLKATA_MOVE_VERB_RE = re.compile(r'\b(mov(e|ing)|leav(e|ing)|leaves|clos(e|ing))\b', re.IGNORECASE)
 KOLKATA_SUBJECT_RE = re.compile(
     r'\b(kitchen|gurgaon|founder|founders|recipes|recipe|quality|standards|team|somdeb)\b',
@@ -2175,8 +2164,8 @@ class DeterministicResponder:
         intro_greeting_prefix: str = "",
     ) -> Optional[Tuple[str, bool, str, Optional[Any]]]:
         """Resolve every substantive request through intent/entity knowledge."""
-        collaboration_proposal = is_collaboration_proposal(user_message)
-        if not collaboration_proposal and (
+        authority = evaluate_turn_authority(user_message)
+        if not (channel == "instagram" and authority.blocks_shortcut) and (
             not config.SEMANTIC_ROUTER_ENABLED
             or not _structured_nlu_enabled_for(user_id, channel)
             or not understanding_engine.should_analyze(user_message)
@@ -2185,10 +2174,12 @@ class DeterministicResponder:
 
         facts = session_memory.get_facts(user_id, channel)
         history = session_memory.get_session(user_id, channel).get("turns", [])
-        result = understanding_engine.analyze(user_message, history_turns=history, state=facts)
+        result = (understanding_engine.deterministic_fallback(user_message, enforce_turn_authority=True)
+                  if channel == "instagram" and authority.blocks_shortcut
+                  else understanding_engine.analyze(user_message, history_turns=history, state=facts))
         original_nlu_reason = result.reason
         model_result_available = result.available and result.confidence >= 0.65
-        llm_called = result.reason not in {"provider_unavailable", "disabled_or_empty"}
+        llm_called = not result.reason.startswith("deterministic_") and result.reason not in {"provider_unavailable", "disabled_or_empty"}
         fallback_used = False
         if (
             not result.available
@@ -2347,15 +2338,25 @@ class DeterministicResponder:
             self._customer_templates(),
             serviceable_location=serviceable,
         )
+        if channel == "instagram" and authority.blocks_shortcut and not resolution.fully_sufficient:
+            # A supported secondary clause must not leak through an unresolved
+            # primary request. Exact whole-question Custom Q&A still gets its
+            # existing last refusal below.
+            resolution.items = []
+            resolution.missing_intents = list(result.intents)
+            resolution.sufficient_by_intent = {intent: False for intent in result.intents}
         # A typed unknown is not itself the final route.  Give the existing
         # ACTIVE learned-knowledge layer its promised last refusal after
         # canonical knowledge declines the message; otherwise structured NLU
         # manufactured a handoff before that layer could answer an approved
         # staff-added question.
-        if not resolution.items and not collaboration_proposal:
-            learned_match = db.search_learned_knowledge(user_message)
+        if not resolution.items:
+            learned_match = db.search_learned_knowledge(user_message, count_usage=False)
+            if channel == "instagram" and authority.blocks_shortcut and not exact_custom_coverage(user_message, learned_match):
+                learned_match = None
             learned_answer = (learned_match or {}).get("verified_answer", "").strip()
             if learned_answer:
+                db.record_learned_knowledge_usage(learned_match["id"])
                 sequence_reply = self._custom_sequence_reply(learned_match, facts, user_id, channel, user_message)
                 if sequence_reply is not None:
                     return sequence_reply
@@ -2534,6 +2535,10 @@ class DeterministicResponder:
         elif intents:
             template_id = "compound_" + "_".join(intents)
         else:
+            template_id = None
+        if channel == "instagram" and authority.blocks_shortcut and not knowledge_sufficient:
+            facts["last_route_source"] = "HUMAN_HANDOFF"
+            facts["last_handoff_reason"] = authority.reason
             template_id = None
         if len(used_templates) > 1:
             log.info(
@@ -2776,10 +2781,24 @@ class DeterministicResponder:
         facts["source_context_used"] = False
         facts["source_referential_intent"] = None
 
-        # Proposals must reach the existing typed human handoff before source,
-        # order, approved-Q&A, or weekly-flyer shortcuts can claim menu words.
-        if channel == "instagram" and is_collaboration_proposal(user_message):
-            return self._structured_nlu_response(user_message, user_id, channel)
+        # A shortcut owns a whole turn, not just one familiar secondary word.
+        # Exact approved coverage remains eligible; otherwise use the existing
+        # typed gap/Custom Q&A/human-handoff pipeline before contextual returns.
+        authority = evaluate_turn_authority(user_message)
+        facts["turn_authority"] = None
+        if channel == "instagram" and authority.blocks_shortcut:
+            facts["turn_authority"] = {"primary_intent": authority.primary_intent, "reason": authority.reason,
+                                       "blocked_candidate": "instagram_shortcuts"}
+            facts.update(source_context_superseded=True, source_context_used=False,
+                         active_product_context=None, ad_product=None)
+            log.info("TURN_AUTHORITY primary=%s blocked=instagram_shortcuts reason=%s",
+                     authority.primary_intent, authority.reason)
+            exact = client_qa.match(user_message, {})
+            pending_authority = (authority.primary_intent == "live_availability"
+                                 and (_pending_menu_affects_question(user_message, facts)
+                                      or menu_review.menu_question_blocked(user_message, facts)))
+            if (not exact or exact.match_kind != "admin_exact") and not pending_authority:
+                return self._structured_nlu_response(user_message, user_id, channel)
 
         source_for_qa = facts.get("source_route") or {}
         mapped_qa_reference = bool(
@@ -3662,8 +3681,8 @@ class DeterministicResponder:
                     })
                     session_memory.add_turn(user_id, channel, user_message, response_text)
                     return response_text, True, "customer_topic_menus", [item["image_url"] for item in eligible]
-        if mapped_qa_match:
-            client_qa_excluded = False  # Only the exact referential whitelist can select by ID.
+        if mapped_qa_match or (client_qa_candidate and client_qa_candidate.match_kind == "admin_exact"):
+            client_qa_excluded = False  # Exact source references or exact effective Admin questions only.
         client_match = (
             None
             if channel != "instagram" or client_qa_excluded
@@ -3900,6 +3919,8 @@ class DeterministicResponder:
             if (
                 Intent.MENU_REQUEST.value in menu_reading.intents
                 and not bento_option_selection
+                and (not re.search(r"\bmenus?\b", lowered_text)
+                     or can_candidate_own_turn(user_message, "approved_menu"))
                 and set(menu_reading.intents).issubset({
                     Intent.MENU_REQUEST.value, Intent.PRODUCT_INFORMATION.value,
                 })
@@ -4081,7 +4102,7 @@ class DeterministicResponder:
         has_home_table_subject = bool(HOME_TABLE_RE.search(lowered_text))
         home_table_context_followup = bool(
             HOME_TABLE_BOOKING_RE.search(lowered_text)
-            or HOME_TABLE_PAYMENT_RE.search(lowered_text)
+            or is_payment_method_request(lowered_text)
             or HOME_TABLE_DETAILED_PRICING_RE.search(lowered_text)
             or HOME_TABLE_BARE_PRICE_RE.fullmatch(lowered_text)
         )
@@ -4101,7 +4122,7 @@ class DeterministicResponder:
                 facts["last_topic"] = "order"
                 session_memory.add_turn(user_id, channel, user_message, order_response)
                 return order_response, False, "order_next_steps", None
-            if HOME_TABLE_PAYMENT_RE.search(lowered_text):
+            if is_payment_method_request(lowered_text):
                 home_table_template_id = "bengali_home_table_payment"
             elif has_home_table_context and HOME_TABLE_BARE_PRICE_RE.fullmatch(lowered_text):
                 home_table_template_id = "bengali_home_table_details"
@@ -4935,7 +4956,7 @@ class DeterministicResponder:
         # structured NLU so an LLM can never paraphrase or narrow the approved
         # payment methods based on the wording of the question.
         if (
-            PAYMENT_QUERY_RE.search(lowered_text)
+            is_payment_method_request(lowered_text)
             and not OUT_OF_SCOPE_TOPIC_RE.search(lowered_text)
             and not self.check_explicit_escalation_triggers(user_message)
         ):
@@ -5003,7 +5024,7 @@ class DeterministicResponder:
         # such as "bank transfer" and "payment details" before fuzzy scoring
         # can turn them into a knowledge gap or a nearby product answer, while
         # allowing complaints and other explicit escalations above to win.
-        if PAYMENT_QUERY_RE.search(lowered_text):
+        if is_payment_method_request(lowered_text):
             payment_template = self._template_by_id("GUARD_payment_method")
             payment_response = payment_template.get("response") or self._generic_fallback()
             facts["last_topic"] = "payment"

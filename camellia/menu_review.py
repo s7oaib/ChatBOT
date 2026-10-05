@@ -4,6 +4,8 @@ menu.json remains the legacy baseline. Approved version overlays are canonical
 for reviewed menus, so SQLite can atomically switch facts AND the flyer. No
 cross-filesystem transaction or startup rewrite of production JSON is needed.
 """
+from camellia.intent_guards import can_candidate_own_turn
+
 import copy
 import hashlib
 import io
@@ -521,7 +523,7 @@ WEEKLY_SAVOURY_BROWSE = "WEEKLY_SAVOURY_BROWSE"
 def weekly_menu_browsing(message):
     """Explicit weekly/general browsing, independent of stale session context."""
     text = weekly_savoury._name(message)
-    return bool(re.search(r"\bmenus?\b", text) and not re.search(
+    return bool(can_candidate_own_turn(message, "approved_menu") and re.search(r"\bmenus?\b", text) and not re.search(
         r"\b(?:order|draft|whatsapp|price|cost|pay|payment|available|availability|ingredient|"
         r"ingredients|allergen|allergens|gluten|shelf|historical|archive|old|previous|last|"
         r"sondesh|sandesh|mishti|signature|aamar|bento|subscription|home table)\b", text))
