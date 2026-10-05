@@ -80,6 +80,7 @@ from camellia import client_qa
 from camellia import menu_dates
 from camellia import menu_manager
 from camellia import menu_images
+from camellia import instagram_story_previews
 from camellia import menu_catalogue
 from camellia.menu_catalogue import MenuCatalogueError
 from camellia.session_memory import session_memory
@@ -1560,10 +1561,11 @@ def _sanitize_story_temporary_url(value: Any) -> Optional[str]:
         return None
 
 
-def _record_story_reply(messaging_event: dict, sender_id: Optional[str], media_id: str) -> None:
+def _record_story_reply(messaging_event: dict, sender_id: Optional[str], media_id: str, preview_requests=None) -> None:
     """Capture exact Story evidence; failures never affect the reply path."""
     try:
         story = _story_reply_payload(messaging_event) or {}
+        display = instagram_story_previews.display_metadata(story, db.get_instagram_story_source(media_id))
         supplied_url = next(
             (story.get(key) for key in ("url", "media_url", "thumbnail_url")
              if isinstance(story.get(key), str) and story.get(key).startswith(("http://", "https://"))),
@@ -1580,8 +1582,15 @@ def _record_story_reply(messaging_event: dict, sender_id: Optional[str], media_i
                 "timestamp": messaging_event.get("timestamp"),
                 "message_id": (messaging_event.get("message") or {}).get("mid"),
                 "source": "story_reply",
+                "display": display,
             },
         )
+        preview = instagram_story_previews.preview_candidate(story)
+        if preview:
+            if preview_requests is None:
+                instagram_story_previews.cache_preview(media_id, preview, db)
+            else:
+                preview_requests.append((media_id, preview))
     except Exception:
         log.exception("Could not capture Instagram Story reply %s.", media_id)
 
@@ -2026,6 +2035,7 @@ def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks
         len(entries), bool(configured_account_id),
     )
     results = []
+    preview_requests = []
     for entry in entries:
         entry_id = entry.get("id", "")
         guard_match = _instagram_account_guard_matches(entry_id, configured_account_id)
@@ -2074,7 +2084,7 @@ def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks
             # has not mapped them yet. Capture before sender/ad-gate handling
             # so the admin can see every Story that reached the webhook.
             if entry_point.source == "story_reply" and entry_point.media_id:
-                _record_story_reply(messaging_event, sender_id, entry_point.media_id)
+                _record_story_reply(messaging_event, sender_id, entry_point.media_id, preview_requests)
 
             # Mentions are not replies to our Story and carry no approved
             # product context. Keep them observable, but never turn them into
@@ -2247,6 +2257,11 @@ def _dispatch_instagram_payload(payload: dict, background_tasks: BackgroundTasks
                 "ad_title": entry_point.ad_title,
             })
 
+    # Display-only media URLs must not enter durable job payloads. Schedule
+    # best-effort caching after customer work, off the webhook ACK path.
+    preview_tasks = getattr(background_tasks, "background_tasks", background_tasks)
+    for story_id, media_url in preview_requests:
+        preview_tasks.add_task(instagram_story_previews.cache_preview, story_id, media_url, db)
     return {"status": "processed", "results": results}
 
 
@@ -3997,9 +4012,26 @@ def list_instagram_story_sources(
         search=search, mapping_status_filter=mapping_status,
         context_active=context_active, sort=sort, with_total=True,
     )
+    instagram_story_previews.cleanup(db)
+    items = [instagram_story_previews.enrich(item, db) for item in items]
     return {"status": "success", "story_sources": items, "page": page,
             "page_size": page_size, "total": total,
             "has_more": page * page_size < total}
+
+
+@app.get("/admin/instagram-story-sources/{story_media_id}/preview")
+def get_instagram_story_preview(
+    story_media_id: str, x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """Serve only a private cached image for this exact captured Story."""
+    require_admin(x_admin_key, x_admin_pin)
+    source = db.get_instagram_story_source(story_media_id)
+    path = instagram_story_previews.cached_path(story_media_id)
+    if not source or str(source.get("story_status") or "").upper() in {"EXPIRED", "REMOVED"} or not path:
+        raise HTTPException(status_code=404, detail="Story preview unavailable.")
+    from fastapi.responses import FileResponse
+    return FileResponse(path, media_type="image/jpeg", headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"})
 
 
 @app.get("/admin/instagram-story-sources/account-diagnostic")
@@ -4033,6 +4065,7 @@ def delete_instagram_story_source(
     require_admin(x_admin_key, x_admin_pin)
     if not db.delete_instagram_story_source(story_media_id):
         raise HTTPException(status_code=404, detail="Captured Story not found.")
+    instagram_story_previews.delete_preview(story_media_id)
     return {"status": "success", "story_media_id": story_media_id, "deleted": True}
 
 
@@ -10799,14 +10832,13 @@ THIS WEEK'S BENGAL SPECIALS
         function instagramStoryPreview(source) {
             const placeholder = '<div class="ig-media-placeholder"><span class="ig-media-placeholder-icon">📖</span><span>STORY</span></div>';
             try {
-                const url = new URL(String(source.temporary_url || ''));
-                if (!['https:', 'http:'].includes(url.protocol) || !url.hostname || url.username || url.password || url.search || url.hash) return placeholder;
-                const preview = escapeHtml(url.href);
-                // Safe Meta-supplied URL is display-only; never a mapping identity.
+                const id = encodeURIComponent(String(source.story_media_id || '')).replace(/[!\x27()*]/g, c => '%' + c.charCodeAt(0).toString(16).toUpperCase());
+                const expected = `/admin/instagram-story-sources/${id}/preview`;
+                if (!id || source.preview_url !== expected) return placeholder;
+                const preview = escapeHtml(expected);
+                // Private cached image/video thumbnail; never a mapping identity.
                 const fallback = "this.style.display='none';this.nextElementSibling.style.display='flex';";
-                const media = String(source.media_type || '').toUpperCase() === 'VIDEO'
-                    ? `<video src="${preview}" controls muted playsinline preload="metadata" onerror="${fallback}" style="width:100%;height:100%;object-fit:cover;"></video>`
-                    : `<img src="${preview}" alt="Instagram Story preview" loading="lazy" referrerpolicy="no-referrer" onerror="${fallback}" style="width:100%;height:100%;object-fit:cover;">`;
+                const media = `<img src="${preview}" alt="Instagram Story preview" loading="lazy" referrerpolicy="no-referrer" onerror="${fallback}" style="width:100%;height:100%;object-fit:cover;">`;
                 return media + placeholder.replace('class="ig-media-placeholder"', 'class="ig-media-placeholder" style="display:none;"');
             } catch (_) { return placeholder; }
         }
@@ -10830,7 +10862,14 @@ THIS WEEK'S BENGAL SPECIALS
             const typeLabel = type === 'IMAGE' ? 'Image Story' : type === 'VIDEO' ? 'Video Story' : 'Story';
             const sequence = source.source === 'META_STORY_SYNC' && source.story_sequence_display
                 && source.story_sequence_display !== 'Story — sequence unavailable' ? source.story_sequence_display : '';
-            return `${discovery ? `<span>${fullId ? 'Discovery: ' : ''}${escapeHtml(discovery)}</span>` : ''}<span>${escapeHtml(typeLabel)}</span>${sequence ? `<span>${fullId ? 'Sequence: ' : ''}${escapeHtml(sequence)}</span>` : ''}<span>${escapeHtml(observation)}</span><span>Story ID: ${escapeHtml(displayId || 'Unavailable')}</span>`;
+            const sourceUsername = source.source_username || source.original_username;
+            let attribution = `<span>Source account: ${sourceUsername ? '@' + escapeHtml(sourceUsername) + ' — Meta supplied' : 'Not supplied by Meta'}</span>`;
+            if (source.source_username && source.original_username && source.source_username !== source.original_username) attribution += `<span>Original account: @${escapeHtml(source.original_username)} — Meta supplied</span>`;
+            for (const [key, label] of [['source_account_id','Source account ID'], ['original_account_id','Original account ID'], ['source_media_id','Source media ID'], ['original_media_id','Original media ID'], ['permalink','Story permalink'], ['source_permalink','Source permalink'], ['original_permalink','Original permalink']]) {
+                if (source[key]) attribution += `<span>${label}: ${escapeHtml(source[key])} — Meta supplied</span>`;
+            }
+            if (source.replier_username) attribution += `<span>Replied by: @${escapeHtml(String(source.replier_username).replace(/^@/, ''))}</span>`;
+            return `${discovery ? `<span>${fullId ? 'Discovery: ' : ''}${escapeHtml(discovery)}</span>` : ''}<span>${escapeHtml(typeLabel)}</span>${sequence ? `<span>${fullId ? 'Sequence: ' : ''}${escapeHtml(sequence)}</span>` : ''}<span>${escapeHtml(observation)}</span><span>Story ID: ${escapeHtml(displayId || 'Unavailable')}</span>${attribution}`;
         }
 
         function openInstagramStoryMapping(mediaId) {
