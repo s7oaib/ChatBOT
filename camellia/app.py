@@ -1208,6 +1208,20 @@ def _reply_to_unreadable_attachment(
     if not instagram_chatbot_control.is_sender_allowed(sender_id, database=db):
         return
     try:
+        if db.get_active_handoff("instagram", sender_id):
+            # Staff own every inbound path while the durable pause is active.
+            # Keep the observed attachment without recording an unsent notice
+            # or consuming the once-per-conversation notice after resumption.
+            db.log_conversation(
+                sender_id, "instagram", "[attachment]", "", False,
+                "waiting_for_human", message_source="attachment",
+                source_type=source_type, media_id=media_id, shortcode=shortcode,
+                source_match_method=source_match_method,
+                source_context_available=False, source_context_used=False,
+                source_media_present=bool(source_media_present),
+                customer_text_accompanied_media=False,
+            )
+            return
         facts = session_memory.get_facts(sender_id, "instagram")
         if facts.get("attachment_notice_sent"):
             log.info("Attachment notice already sent for sender_hash=%s.", _safe_identifier_hash(sender_id))

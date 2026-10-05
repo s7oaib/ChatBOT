@@ -273,6 +273,71 @@ class TestUnreadableAttachments:
             "message": {"mid": "m1", "attachments": [{"type": "image"}]},
         }]}]}
 
+    @pytest.mark.parametrize("status", ["CREATED", "REFERRED", "WAITING_FOR_HUMAN"])
+    @pytest.mark.parametrize("source_present", [False, True])
+    def test_active_durable_pause_keeps_attachment_silent_and_audited(
+        self, tmp_path, monkeypatch, status, source_present,
+    ):
+        from camellia.database import Database
+        database = Database(str(tmp_path / "attachment-pause.db"))
+        monkeypatch.setattr(app_module, "db", database)
+        uid = "attachment-paused"
+        session_memory.clear_session(uid, "instagram")
+        database.create_handoff(
+            handoff_ref="CAM-attachment-pause", source_channel="instagram",
+            source_user_id=uid, reason="Human requested", summary="Attachment",
+            known_entities={}, unresolved_topic=None, escalation_id=None,
+            expires_at=None,
+        )
+        database.update_handoff_status("CAM-attachment-pause", status)
+        before = database.get_active_handoff("instagram", uid)
+        with patch.object(app_module.instagram_chatbot_control, "is_sender_allowed", return_value=True), \
+             patch.object(app_module, "_send_or_queue_instagram_reply") as outbound, \
+             patch.object(app_module, "get_or_create_handoff") as create, \
+             patch.object(database, "log_conversation", wraps=database.log_conversation) as audit:
+            for _ in range(2):
+                app_module._reply_to_unreadable_attachment(
+                    uid, source_type="post" if source_present else None,
+                    media_id="exact-media-id" if source_present else None,
+                    source_match_method="unresolved" if source_present else None,
+                    source_media_present=source_present,
+                )
+            outbound.assert_not_called()
+            create.assert_not_called()
+            assert audit.call_count == 2
+            assert audit.call_args.args[3:6] == ("", False, "waiting_for_human")
+            assert audit.call_args.kwargs["source_media_present"] is source_present
+            assert audit.call_args.kwargs["media_id"] == ("exact-media-id" if source_present else None)
+            assert database.get_active_handoff("instagram", uid) == before
+            assert not session_memory.get_facts(uid, "instagram").get("attachment_notice_sent")
+
+            # Only an explicit operator resumption releases the existing gate.
+            database.resume_handoff("CAM-attachment-pause")
+            app_module._reply_to_unreadable_attachment(uid)
+            assert outbound.call_count == 1
+            assert outbound.call_args.args[1] == app_module._UNREADABLE_ATTACHMENT_REPLY
+            app_module._reply_to_unreadable_attachment(uid)
+            assert outbound.call_count == 1
+
+    @pytest.mark.parametrize("status", ["RESOLVED", "EXPIRED", "RESUMED"])
+    def test_closed_handoff_preserves_existing_attachment_notice(self, tmp_path, monkeypatch, status):
+        from camellia.database import Database
+        database = Database(str(tmp_path / "attachment-closed.db"))
+        monkeypatch.setattr(app_module, "db", database)
+        uid = "attachment-closed"
+        session_memory.clear_session(uid, "instagram")
+        database.create_handoff(
+            handoff_ref="CAM-attachment-closed", source_channel="instagram",
+            source_user_id=uid, reason="Human requested", summary="Attachment",
+            known_entities={}, unresolved_topic=None, escalation_id=None, expires_at=None,
+        )
+        database.update_handoff_status("CAM-attachment-closed", status)
+        with patch.object(app_module.instagram_chatbot_control, "is_sender_allowed", return_value=True), \
+             patch.object(app_module, "_send_or_queue_instagram_reply") as outbound:
+            app_module._reply_to_unreadable_attachment(uid)
+        assert outbound.call_count == 1
+        assert outbound.call_args.args[1] == app_module._UNREADABLE_ATTACHMENT_REPLY
+
     def test_a_photo_gets_an_answer_instead_of_silence(self):
         tasks = MagicMock()
         with patch.object(app_module.config, "BYPASS_AD_GATE", True):
