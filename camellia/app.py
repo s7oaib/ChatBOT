@@ -10913,7 +10913,15 @@ THIS WEEK'S BENGAL SPECIALS
                 const sequenceDisplay = source.story_sequence_display || 'Story — sequence unavailable';
                 const mappingLabel = status === 'UNMAPPED' ? 'Unmapped' : topic;
                 const contextLabel = status === 'MAPPED' ? '● Context active' : '○ Context off';
-                return `<article class="ig-media-card ig-story-card" tabindex="0" data-story-media-id="${escapeHtml(source.story_media_id || '')}"><div class="ig-media-preview"><div class="ig-media-placeholder"><span class="ig-media-placeholder-icon">📖</span><span>STORY</span></div><span class="ig-media-badge">STORY</span></div><div class="ig-media-main"><div class="ig-media-title"><b class="ig-media-topic">${escapeHtml(mappingLabel)}</b></div><div class="ig-media-summary" title="${escapeHtml(source.source_description || sequenceDisplay)}">${escapeHtml(source.source_description || sequenceDisplay)}</div><div class="ig-media-facts"><span>${contextLabel}</span><span>${escapeHtml(source.published_at || source.last_seen || '—')}</span></div></div><div class="ig-media-actions">${actions}</div></article>`;
+                let discoveryLabel = source.source === 'META_STORY_SYNC' ? 'Owned Story'
+                    : source.source === 'WEBHOOK_STORY_REPLY' ? 'Webhook observed' : '';
+                if (source.source == null) {
+                    try {
+                        const evidence = JSON.parse(source.last_event_metadata || '{}');
+                        if (evidence && evidence.source === 'story_reply') discoveryLabel = 'Webhook observed';
+                    } catch (_) { /* Unknown provenance is not webhook evidence. */ }
+                }
+                return `<article class="ig-media-card ig-story-card" tabindex="0" data-story-media-id="${escapeHtml(source.story_media_id || '')}"><div class="ig-media-preview"><div class="ig-media-placeholder"><span class="ig-media-placeholder-icon">📖</span><span>STORY</span></div><span class="ig-media-badge">STORY</span></div><div class="ig-media-main"><div class="ig-media-title"><b class="ig-media-topic">${escapeHtml(mappingLabel)}</b></div><div class="ig-media-summary" title="${escapeHtml(source.source_description || sequenceDisplay)}">${escapeHtml(source.source_description || sequenceDisplay)}</div><div class="ig-media-facts"><span>${contextLabel}</span><span>${escapeHtml(discoveryLabel)}</span><span>${escapeHtml(source.published_at || source.last_seen || '—')}</span></div></div><div class="ig-media-actions">${actions}</div></article>`;
             }).join('');
             list.querySelectorAll('[data-story-action]').forEach(button => button.addEventListener('click', () => {
                 const action = button.dataset.storyAction;

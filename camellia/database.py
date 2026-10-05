@@ -2405,21 +2405,26 @@ class Database:
             return None
         now = seen_at or datetime.now(timezone.utc).isoformat()
         metadata = json.dumps(event_metadata or {}, ensure_ascii=False, sort_keys=True)
+        source = "WEBHOOK_STORY_REPLY" if (event_metadata or {}).get("source") == "story_reply" else ""
         with self.get_connection() as conn:
             conn.execute(
                 """
                 INSERT INTO instagram_story_sources
                     (story_media_id, temporary_url, story_status, first_seen,
-                     last_seen, last_sender_id, last_event_metadata)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                     last_seen, last_sender_id, last_event_metadata, source)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(story_media_id) DO UPDATE SET
                     temporary_url=COALESCE(excluded.temporary_url, instagram_story_sources.temporary_url),
                     story_status=COALESCE(excluded.story_status, instagram_story_sources.story_status),
                     last_seen=excluded.last_seen,
                     last_sender_id=COALESCE(excluded.last_sender_id, instagram_story_sources.last_sender_id),
-                    last_event_metadata=excluded.last_event_metadata
+                    last_event_metadata=excluded.last_event_metadata,
+                    source=CASE WHEN instagram_story_sources.source='META_STORY_SYNC'
+                        THEN instagram_story_sources.source
+                        WHEN excluded.source='WEBHOOK_STORY_REPLY' THEN excluded.source
+                        ELSE COALESCE(instagram_story_sources.source, '') END
                 """,
-                (media_id, temporary_url, story_status, now, now, sender_id, metadata),
+                (media_id, temporary_url, story_status, now, now, sender_id, metadata, source),
             )
             conn.commit()
             row = conn.execute(
@@ -2486,7 +2491,9 @@ class Database:
         owned-Stories edge returned in a fully successful (non-partial, non-
         failed) fetch — a failure, timeout, rate limit, or malformed/partial
         page must never reach here, since only a complete successful fetch is
-        trustworthy evidence that an ACTIVE Story is actually absent.
+        trustworthy evidence that an owned ACTIVE Story is actually absent.
+        Webhook-observed Stories (including verified legacy webhook rows)
+        are excluded: Meta owned inventory does not include reshared Stories.
 
         Expired Stories are hard-deleted only when a trustworthy publication
         timestamp confirms their lifetime has passed. Other absent Stories
@@ -2504,10 +2511,19 @@ class Database:
                 where += f" AND story_media_id NOT IN ({','.join('?' for _ in ids)})"
                 params.extend(ids)
             missing_rows = conn.execute(
-                f"SELECT story_media_id, published_at, sync_miss_count FROM instagram_story_sources WHERE {where}",
+                f"SELECT story_media_id, published_at, sync_miss_count, source, last_event_metadata FROM instagram_story_sources WHERE {where}",
                 tuple(params),
             ).fetchall()
             for row in missing_rows:
+                if row["source"] == "WEBHOOK_STORY_REPLY":
+                    continue
+                if row["source"] is None:
+                    try:
+                        evidence = json.loads(row["last_event_metadata"] or "{}")
+                    except (TypeError, ValueError):
+                        evidence = {}
+                    if isinstance(evidence, dict) and evidence.get("source") == "story_reply":
+                        continue
                 story_id = row["story_media_id"]
                 published_dt = _parse_trustworthy_datetime(row["published_at"])
                 miss_count = int(row["sync_miss_count"] or 0)

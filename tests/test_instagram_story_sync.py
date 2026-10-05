@@ -346,3 +346,40 @@ def test_verified_story_sync_empty_result_explains_meta_limit(monkeypatch, sync_
     assert "Story sync completed for @camellia.artisanal, but Meta returned 0 active Stories." in result["message"]
     assert "reshared Stories" in result["message"]
     assert "IGAA_SECRET" not in str(result)
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_webhook_story_and_exact_route_survive_repeated_empty_owned_sync(sync_db, monkeypatch, legacy):
+    sync_db.record_instagram_story_source(STORY_ID, event_metadata={"source": "story_reply"})
+    assert sync_db.get_instagram_story_source(STORY_ID)["source"] == "WEBHOOK_STORY_REPLY"
+    if legacy:
+        # Pre-sync schemas permitted NULL provenance; retain authentic metadata.
+        with sync_db.get_connection() as conn:
+            conn.execute("ALTER TABLE instagram_story_sources DROP COLUMN source")
+            conn.execute("ALTER TABLE instagram_story_sources ADD COLUMN source TEXT")
+            conn.commit()
+    route = sync_db.save_instagram_source_route({
+        "source_type": "story", "media_id": STORY_ID,
+        "routing_topic": "Jolbhora", "active": True,
+    })
+    monkeypatch.setattr("camellia.database.db", sync_db)
+    _install_meta(monkeypatch, [_page(), _stories([])] * 3)
+    for _ in range(3):
+        result = sync_module.sync_instagram_stories(sync_db)
+        assert result["status"] == "success" and result["fetched"] == 0
+        assert result["removed"] == result["expired"] == 0
+        assert sync_db.get_instagram_story_source(STORY_ID)["sync_miss_count"] == 0
+        assert sync_db.get_instagram_source_route(route["routing_id"]) == route
+        resolved, method = route_for_inbound(ad_id=None, media_id=STORY_ID, source_type="story_reply")
+        assert resolved["routing_id"] == route["routing_id"] and method == "story_media_id"
+
+
+def test_owned_story_promotion_and_stronger_provenance_survive_webhook(sync_db, monkeypatch):
+    sync_db.record_instagram_story_source(STORY_ID, event_metadata={"source": "story_reply"})
+    _install_meta(monkeypatch, [_page(), _stories([_story()]), _page(), _stories([])])
+    sync_module.sync_instagram_stories(sync_db)
+    sync_db.record_instagram_story_source(STORY_ID, event_metadata={"source": "story_reply"})
+    assert sync_db.get_instagram_story_source(STORY_ID)["source"] == "META_STORY_SYNC"
+    result = sync_module.sync_instagram_stories(sync_db)
+    assert result["expired"] == 1
+    assert sync_db.get_instagram_story_source(STORY_ID) is None
