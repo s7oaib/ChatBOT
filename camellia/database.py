@@ -4075,8 +4075,24 @@ class Database:
             clauses.append("inbound_message_id = ?")
             params.append(int(inbound_message_id))
         if since:
+            # Audit rows use SQLite's UTC, space-separated timestamp format.
+            # Normalize the instant before a text comparison; ISO's 'T' and
+            # non-UTC offsets otherwise sort differently from the stored rows.
+            try:
+                raw_since = str(since).strip()
+                if len(raw_since) > 128 or not re.match(r"^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}", raw_since):
+                    raise ValueError
+                boundary = datetime.fromisoformat(raw_since.replace("Z", "+00:00"))
+                if boundary.tzinfo is None:
+                    boundary = boundary.replace(tzinfo=timezone.utc)
+                boundary = boundary.astimezone(timezone.utc).replace(tzinfo=None)
+                normalized_since = boundary.isoformat(
+                    sep=" ", timespec="microseconds" if boundary.microsecond else "seconds",
+                )
+            except (ValueError, OverflowError):
+                raise ValueError("since must be a valid ISO timestamp.") from None
             clauses.append("created_at >= ?")
-            params.append(str(since))
+            params.append(normalized_since)
         params.append(max(1, min(int(limit or 50), 200)))
         with self.get_connection() as conn:
             self._ensure_instagram_outbound_audit_schema(conn)
