@@ -10810,7 +10810,7 @@ THIS WEEK'S BENGAL SPECIALS
                 }
                 showInstagramStoryResult(
                     'success',
-                    `Story sync complete: ${Number(data.fetched || 0)} fetched, ${Number(data.created || 0)} new, ${Number(data.updated || 0)} updated, ${Number(data.unchanged || 0)} unchanged, ${Number(data.expired || 0)} expired.`,
+                    `${data.message || 'Story sync complete:'} ${Number(data.fetched || 0)} fetched, ${Number(data.created || 0)} new, ${Number(data.updated || 0)} updated, ${Number(data.unchanged || 0)} unchanged, ${Number(data.expired || 0)} expired.`,
                 );
                 await loadInstagramStories();
             } catch (err) {
