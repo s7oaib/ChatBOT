@@ -383,3 +383,48 @@ def test_owned_story_promotion_and_stronger_provenance_survive_webhook(sync_db, 
     result = sync_module.sync_instagram_stories(sync_db)
     assert result["expired"] == 1
     assert sync_db.get_instagram_story_source(STORY_ID) is None
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("published", [None, "2026-10-01T00:00:00+00:00"])
+def test_observed_story_timestamp_expiry_cleans_only_exact_route(sync_db, legacy, published):
+    sync_db.record_instagram_story_source(STORY_ID, event_metadata={"source": "story_reply"}, seen_at="2026-10-04T12:00:00+00:00")
+    route = sync_db.save_instagram_source_route({"source_type": "story", "media_id": STORY_ID, "routing_topic": "Jolbhora", "active": True})
+    other = sync_db.save_instagram_source_route({"source_type": "post", "media_id": "unrelated-post", "routing_topic": "Jolbhora", "active": True})
+    with sync_db.get_connection() as conn:
+        if legacy:
+            conn.execute("ALTER TABLE instagram_story_sources DROP COLUMN source")
+            conn.execute("ALTER TABLE instagram_story_sources ADD COLUMN source TEXT")
+        conn.execute("UPDATE instagram_story_sources SET published_at=? WHERE story_media_id=?", (published, STORY_ID))
+        conn.commit()
+    early = sync_db.expire_webhook_instagram_stories(now="2026-10-05T11:59:59+00:00")
+    assert early == int(published is not None)
+    if published is None:
+        assert sync_db.get_instagram_source_route(route["routing_id"]) == route
+        assert sync_db.expire_webhook_instagram_stories(now="2026-10-05T12:00:00+00:00") == 1
+    assert sync_db.get_instagram_story_source(STORY_ID) is None
+    assert sync_db.get_instagram_source_route(route["routing_id"]) is None
+    assert sync_db.get_instagram_source_route(other["routing_id"]) == other
+
+
+def test_authentic_reply_refreshes_observed_expiry_and_promotion_keeps_mapping(sync_db, monkeypatch):
+    sync_db.record_instagram_story_source(STORY_ID, event_metadata={"source": "story_reply"}, seen_at="2026-10-01T00:00:00+00:00")
+    sync_db.record_instagram_story_source(STORY_ID, event_metadata={"source": "story_reply"}, seen_at="2026-10-04T18:00:00+00:00")
+    assert sync_db.expire_webhook_instagram_stories(now="2026-10-05T12:00:00+00:00") == 0
+    route = sync_db.save_instagram_source_route({"source_type": "story", "media_id": STORY_ID, "routing_topic": "Jolbhora", "active": True})
+    _install_meta(monkeypatch, [_page(), _stories([_story()])])
+    sync_module.sync_instagram_stories(sync_db)
+    assert sync_db.get_instagram_story_source(STORY_ID)["source"] == "META_STORY_SYNC"
+    assert sync_db.expire_webhook_instagram_stories(now="2026-10-10T00:00:00+00:00") == 0
+    assert sync_db.get_instagram_source_route(route["routing_id"]) == route
+
+
+def test_unknown_legacy_provenance_and_invalid_time_do_not_trigger_webhook_expiry(sync_db):
+    sync_db.record_instagram_story_source("unknown", seen_at="2020-01-01T00:00:00+00:00")
+    sync_db.record_instagram_story_source("invalid", event_metadata={"source": "story_reply"}, seen_at="invalid")
+    with sync_db.get_connection() as conn:
+        conn.execute("ALTER TABLE instagram_story_sources DROP COLUMN source")
+        conn.execute("ALTER TABLE instagram_story_sources ADD COLUMN source TEXT")
+        conn.commit()
+    assert sync_db.expire_webhook_instagram_stories(now="2026-10-05T12:00:00+00:00") == 0
+    assert sync_db.get_instagram_story_source("unknown") and sync_db.get_instagram_story_source("invalid")

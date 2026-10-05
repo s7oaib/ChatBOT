@@ -350,6 +350,13 @@ async def _human_notification_loop(stop_event: asyncio.Event) -> None:
     """Poll the durable notification outbox with bounded work per pass."""
     while not stop_event.is_set():
         try:
+            # Local timestamp expiry works even when owned Meta sync is disabled.
+            await asyncio.to_thread(db.expire_webhook_instagram_stories)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("Webhook-observed Story expiry failed.")
+        try:
             delivered = await asyncio.to_thread(
                 escalator.process_pending_notifications, limit=20,
             )
@@ -814,6 +821,17 @@ def _process_instagram_event(
         }
         if entry.ad_title and not facts.get("ad_title"):
             facts["ad_title"] = entry.ad_title
+        if entry.source == "story_reply" and entry.media_id and str(message_text or "").strip():
+            exact_story_route, _ = route_for_inbound(
+                ad_id=None, media_id=entry.media_id, source_type="story_reply",
+            )
+            if not exact_story_route:
+                _mark_unmapped_shared_attachment(sender_id)
+                _handoff_unmapped_shared_media(
+                    sender_id, source_type="story", media_id=entry.media_id,
+                    customer_text=str(message_text).strip(),
+                )
+                return
         ad_product = product_for_ad(trace["ad_id"], trace["ad_title"])
         if ad_product:
             facts["ad_product"] = ad_product
@@ -1223,12 +1241,15 @@ def _handoff_unmapped_shared_media(
     source_type: str,
     media_id: Optional[str] = None,
     shortcode: Optional[str] = None,
+    customer_text: Optional[str] = None,
 ) -> None:
-    """Create one durable human handoff for an identifiable unmapped Post/Reel."""
+    """Reuse the durable human handoff for an exact unmapped media source."""
     if not instagram_chatbot_control.is_sender_allowed(sender_id, database=db):
         return
-    source_label = "Reel" if source_type == "reel" else "Post"
-    customer_message = f"[shared Instagram {source_label.lower()}]"
+    source_label = "Story" if source_type == "story" else "Reel" if source_type == "reel" else "Post"
+    customer_message = customer_text or f"[shared Instagram {source_label.lower()}]"
+    message_source = "story_reply" if source_type == "story" else "shared_media"
+    match_method = "story_media_id_unmapped" if source_type == "story" else "shared_media_unmapped"
     facts = session_memory.get_facts(sender_id, "instagram")
     facts.update({
         "source_route": None,
@@ -1241,10 +1262,10 @@ def _handoff_unmapped_shared_media(
     if active:
         db.log_conversation(
             sender_id, "instagram", customer_message, "", False, "waiting_for_human",
-            message_source="shared_media", source_type=source_type, media_id=media_id,
-            shortcode=shortcode, source_match_method="shared_media_unmapped",
+            message_source=message_source, source_type=source_type, media_id=media_id,
+            shortcode=shortcode, source_match_method=match_method,
             source_context_available=False, source_context_used=False,
-            source_media_present=True, customer_text_accompanied_media=False,
+            source_media_present=True, customer_text_accompanied_media=bool(customer_text),
         )
         return
 
@@ -1272,10 +1293,10 @@ def _handoff_unmapped_shared_media(
     session_memory.add_turn(sender_id, "instagram", customer_message, notice)
     conversation_id = db.log_conversation(
         sender_id, "instagram", customer_message, notice, True, "shared_media_handoff",
-        message_source="shared_media", source_type=source_type, media_id=media_id,
-        shortcode=shortcode, source_match_method="shared_media_unmapped",
+        message_source=message_source, source_type=source_type, media_id=media_id,
+        shortcode=shortcode, source_match_method=match_method,
         source_context_available=False, source_context_used=False,
-        source_media_present=True, customer_text_accompanied_media=False,
+        source_media_present=True, customer_text_accompanied_media=bool(customer_text),
     )
     _send_or_queue_instagram_reply(
         sender_id, notice, inbound_message_id=conversation_id, response_type="handoff",
@@ -10747,6 +10768,21 @@ THIS WEEK'S BENGAL SPECIALS
             renderInstagramStoryPriorityProducts();
         }
 
+        function instagramStoryPreview(source) {
+            const placeholder = '<div class="ig-media-placeholder"><span class="ig-media-placeholder-icon">📖</span><span>STORY</span></div>';
+            try {
+                const url = new URL(String(source.temporary_url || ''));
+                if (!['https:', 'http:'].includes(url.protocol) || !url.hostname || url.username || url.password || url.search || url.hash) return placeholder;
+                const preview = escapeHtml(url.href);
+                // Safe Meta-supplied URL is display-only; never a mapping identity.
+                const fallback = "this.style.display='none';this.nextElementSibling.style.display='flex';";
+                const media = String(source.media_type || '').toUpperCase() === 'VIDEO'
+                    ? `<video src="${preview}" controls muted playsinline preload="metadata" onerror="${fallback}" style="width:100%;height:100%;object-fit:cover;"></video>`
+                    : `<img src="${preview}" alt="Instagram Story preview" loading="lazy" referrerpolicy="no-referrer" onerror="${fallback}" style="width:100%;height:100%;object-fit:cover;">`;
+                return media + placeholder.replace('class="ig-media-placeholder"', 'class="ig-media-placeholder" style="display:none;"');
+            } catch (_) { return placeholder; }
+        }
+
         function openInstagramStoryMapping(mediaId) {
             const source = igStorySources.find(item => String(item.story_media_id || '') === String(mediaId || '')) || { story_media_id: mediaId || '' };
             const status = String(source.mapping_status || source.status || 'UNMAPPED').toUpperCase();
@@ -10754,7 +10790,7 @@ THIS WEEK'S BENGAL SPECIALS
             igStoryEditingRoutingId = routeId;
             igStoryPriority = [...(source.priority_products || [])];
             document.getElementById('igStoryMediaId').value = source.story_media_id || '';
-            document.getElementById('igStoryMappingPreview').innerHTML = '<span>Instagram Story preview unavailable</span>';
+            document.getElementById('igStoryMappingPreview').innerHTML = instagramStoryPreview(source);
             document.getElementById('igStoryTopicPicker').value = source.topic_id || '';
             document.getElementById('igStorySourceDescription').value = source.source_description || '';
             initSourceResponse('igStory', source);
@@ -10921,7 +10957,7 @@ THIS WEEK'S BENGAL SPECIALS
                         if (evidence && evidence.source === 'story_reply') discoveryLabel = 'Webhook observed';
                     } catch (_) { /* Unknown provenance is not webhook evidence. */ }
                 }
-                return `<article class="ig-media-card ig-story-card" tabindex="0" data-story-media-id="${escapeHtml(source.story_media_id || '')}"><div class="ig-media-preview"><div class="ig-media-placeholder"><span class="ig-media-placeholder-icon">📖</span><span>STORY</span></div><span class="ig-media-badge">STORY</span></div><div class="ig-media-main"><div class="ig-media-title"><b class="ig-media-topic">${escapeHtml(mappingLabel)}</b></div><div class="ig-media-summary" title="${escapeHtml(source.source_description || sequenceDisplay)}">${escapeHtml(source.source_description || sequenceDisplay)}</div><div class="ig-media-facts"><span>${contextLabel}</span><span>${escapeHtml(discoveryLabel)}</span><span>${escapeHtml(source.published_at || source.last_seen || '—')}</span></div></div><div class="ig-media-actions">${actions}</div></article>`;
+                return `<article class="ig-media-card ig-story-card" tabindex="0" data-story-media-id="${escapeHtml(source.story_media_id || '')}"><div class="ig-media-preview">${instagramStoryPreview(source)}<span class="ig-media-badge">STORY</span></div><div class="ig-media-main"><div class="ig-media-title"><b class="ig-media-topic">${escapeHtml(mappingLabel)}</b></div><div class="ig-media-summary" title="${escapeHtml(source.source_description || sequenceDisplay)}">${escapeHtml(source.source_description || sequenceDisplay)}</div><div class="ig-media-facts"><span>${contextLabel}</span><span>${escapeHtml(discoveryLabel)}</span><span>${escapeHtml(source.published_at || source.last_seen || '—')}</span></div></div><div class="ig-media-actions">${actions}</div></article>`;
             }).join('');
             list.querySelectorAll('[data-story-action]').forEach(button => button.addEventListener('click', () => {
                 const action = button.dataset.storyAction;
@@ -10933,7 +10969,7 @@ THIS WEEK'S BENGAL SPECIALS
                 else if (action === 'delete-mapping') removeInstagramStoryMapping(routingId);
             }));
             list.querySelectorAll('[data-story-media-id]').forEach(card => card.addEventListener('click', event => {
-                if (event.target.closest('button,a,summary')) return;
+                if (event.target.closest('button,a,summary,video')) return;
                 const source = igStorySources.find(item => String(item.story_media_id || '') === String(card.dataset.storyMediaId || ''));
                 openContentDetails('story', source);
             }));

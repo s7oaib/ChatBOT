@@ -832,3 +832,26 @@ def test_fresh_mapping_selector_loads_effective_qa_without_editing_existing_rout
     """)
     assert result['qaIds'] == ['home_table_details']
     assert result['disabled'] is False
+
+
+def test_safe_story_preview_card_modal_and_load_failure_fallback():
+    result = _run_node(r'''
+        const source = {story_media_id:'preview-story', temporary_url:'https://cdn.example/story.jpg', source:'WEBHOOK_STORY_REPLY', mapping_status:'UNMAPPED'};
+        igStorySources = [source];
+        renderInstagramStories();
+        const card = document.getElementById('igStoryList').innerHTML;
+        openInstagramStoryMapping(source.story_media_id);
+        const modal = document.getElementById('igStoryMappingPreview').innerHTML;
+        const invalid = ['javascript:alert(1)', 'https://user:secret@cdn.example/a', 'https://cdn.example/a?access_token=secret', '', 'not-a-url'].map(temporary_url => instagramStoryPreview({temporary_url}));
+        const video = instagramStoryPreview({temporary_url:'https://cdn.example/story.mp4', media_type:'VIDEO'});
+        const handler = card.match(/onerror="([^"]+)"/)[1];
+        const failed = {style:{display:''}, nextElementSibling:{style:{display:'none'}}};
+        Function(handler).call(failed);
+        console.log('RESULT::'+JSON.stringify({card, modal, invalid, video, failed}));
+    ''')
+    assert '<img ' in result['card'] and 'https://cdn.example/story.jpg' in result['card']
+    assert 'Webhook observed' in result['card'] and 'Map Story' in result['card']
+    assert '<img ' in result['modal']
+    assert all('<img ' not in value and 'STORY' in value and 'secret' not in value for value in result['invalid'])
+    assert '<video ' in result['video']
+    assert result['failed'] == {'style': {'display': 'none'}, 'nextElementSibling': {'style': {'display': 'flex'}}}

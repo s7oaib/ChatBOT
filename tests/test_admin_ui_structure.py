@@ -392,6 +392,7 @@ def test_instagram_story_preview_metadata_never_exposes_temporary_url(page):
     assert "Meta Story ID:" not in story_render
     assert "data-story-media-id" in story_render
     assert "temporary_url}" not in story_render
+    assert "instagramStoryPreview(source)" in story_render
 
 
 def test_the_fake_flyer_test_button_is_gone(page):
