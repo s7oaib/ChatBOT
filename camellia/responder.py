@@ -3538,7 +3538,6 @@ class DeterministicResponder:
             client_qa_candidate and client_qa_candidate.entry.qa_id in {
                 "best_time_to_book", "savoury_delivery_time", "sondesh_delivery_time",
                 "order_prebook", "alacarte_prebook",
-                "general_payment_client", "home_table_payment",
             }
         )
         client_qa_excluded = bool(
@@ -3585,7 +3584,9 @@ class DeterministicResponder:
                 and not (
                     client_qa_candidate
                     and (contextual_topic == facts.get("active_product_context")
-                         or (price_followup and client_qa_candidate.match_kind == "context"))
+                         or (price_followup and client_qa_candidate.match_kind == "context")
+                         or (is_payment_method_request(user_message)
+                             and client_qa_candidate.entry.qa_id in {"general_payment_client", "home_table_payment"}))
                 )
             )
             or (
