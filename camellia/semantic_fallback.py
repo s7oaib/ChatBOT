@@ -37,7 +37,7 @@ _SPELLING = {
 }
 
 _CLAUSE_SPLIT = re.compile(
-    r"\s+(?:and|but|also|plus|aur|&|,\s*and|then)\s+|[,;]\s+|\?\s+", re.IGNORECASE,
+    r"\s+(?:and|but|also|plus|aur|&|,\s*and|then)\s+|[,;]\s+|[.?!]\s+", re.IGNORECASE,
 )
 
 # Words that carry no subject of their own. A clause made only of these is

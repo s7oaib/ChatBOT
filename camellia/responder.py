@@ -39,7 +39,7 @@ from camellia.menu_images import (
 )
 from camellia import semantic_fallback
 from camellia.understanding import BusinessAction, Intent, understanding_engine
-from camellia.intent_guards import can_candidate_own_turn, evaluate_turn_authority, exact_custom_coverage, has_price_intent, is_payment_method_request, CONFIRMED_BENTO_SUBSTITUTION_RE as _CONFIRMED_BENTO_SUBSTITUTION_RE
+from camellia.intent_guards import GREETING_ONLY_RE, CONVERSATIONAL_OPENER_RE, split_conversational_opener, can_candidate_own_turn, evaluate_turn_authority, exact_custom_coverage, has_price_intent, is_payment_method_request, CONFIRMED_BENTO_SUBSTITUTION_RE as _CONFIRMED_BENTO_SUBSTITUTION_RE
 from camellia.conversation_resolver import (
     ContextResolution,
     explicit_entity,
@@ -712,49 +712,6 @@ BARE_PRICE_QUESTION_RE = re.compile(
 # bypass source-context resolution, but a greeting carrying a real request
 # (for example, "hi, what is the price of Jolbhora?") must continue through
 # the normal intent/product precedence below.
-GREETING_ONLY_RE = re.compile(
-    r'^(?:(?:hi+|hello+|hey+)(?:\s+there)?|good\s+(?:morning|afternoon|evening)|namaste|'
-    r'nomoshkar|nomoskar|greetings)[\W_]*$',
-    re.IGNORECASE,
-)
-
-# A greeting may be a prefix to a real request ("hi tell me more"), not the
-# whole intent.  Keep the opener grammar deterministic and deliberately
-# conservative so only a leading conversational opener is removed.  The
-# remainder is then resolved by the normal product/order/source precedence.
-CONVERSATIONAL_OPENER_RE = re.compile(
-    r"^(?P<opener>hi+|hello+|hey+|good\s+(?:morning|afternoon|evening)|"
-    r"namaste|nomoshkar|nomoskar|greetings)(?:\s+there)?"
-    r"(?:[\s,!?;:.-]+(?P<remainder>.*))?$",
-    re.IGNORECASE,
-)
-
-
-def split_conversational_opener(text: str) -> Tuple[Optional[str], str]:
-    """Return ``(canonical opener, semantic remainder)`` for a leading opener.
-
-    The opener is not treated as business intent.  For opener-only messages
-    the remainder is empty, preserving the existing greeting behavior.  The
-    function intentionally does not fuzzy-match arbitrary words so a product
-    or topic name at the start of a message cannot be stripped accidentally.
-    """
-    normalized = unicodedata.normalize("NFKC", str(text or "")).strip()
-    if not normalized:
-        return None, ""
-    match = CONVERSATIONAL_OPENER_RE.fullmatch(normalized)
-    if not match:
-        return None, normalized
-    opener = re.sub(r"\s+", " ", match.group("opener").lower()).strip()
-    remainder = (match.group("remainder") or "").strip()
-    if opener.startswith("hi"):
-        opener = "hi"
-    elif opener.startswith("hello"):
-        opener = "hello"
-    elif opener.startswith("hey"):
-        opener = "hey"
-    return opener, remainder
-
-
 # Generic detail wording must not outrank a named subject.  This guard is
 # intentionally limited to the wrapper phrases that previously reached the
 # semantic router as ``know_more`` before the deterministic product/topic

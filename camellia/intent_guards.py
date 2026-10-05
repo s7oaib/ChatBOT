@@ -1,5 +1,7 @@
 """Cheap whole-turn ownership checks; these rules never supply business facts."""
 import re
+import unicodedata
+from typing import Optional, Tuple
 from dataclasses import dataclass
 
 
@@ -21,6 +23,51 @@ _REQUEST_RE = re.compile(r"\b(?:can|could|would|do|does|is|are|any|please|availa
 _PRODUCT_RE = re.compile(r"\b(?:bento|chicken\s+kosha|home\s+table|sondesh)\b", re.I)
 
 
+# Shared opener grammar for both routing and deterministic system replies.
+GREETING_ONLY_RE = re.compile(
+    r'^(?:(?:hi+|hello+|hey+)(?:\s+there)?|good\s+(?:morning|afternoon|evening)|namaste|namaskar|'
+    r'nomoshkar|nomoskar|greetings)[\W_]*$',
+    re.IGNORECASE,
+)
+
+# A greeting may be a prefix to a real request ("hi tell me more"), not the
+# whole intent.  Keep the opener grammar deterministic and deliberately
+# conservative so only a leading conversational opener is removed.  The
+# remainder is then resolved by the normal product/order/source precedence.
+CONVERSATIONAL_OPENER_RE = re.compile(
+    r"^(?P<opener>hi+|hello+|hey+|good\s+(?:morning|afternoon|evening)|"
+    r"namaste|namaskar|nomoshkar|nomoskar|greetings)(?:\s+there)?"
+    r"(?:[\s,!?;:.-]+(?P<remainder>.*))?$",
+    re.IGNORECASE,
+)
+
+
+def split_conversational_opener(text: str) -> Tuple[Optional[str], str]:
+    """Return ``(canonical opener, semantic remainder)`` for a leading opener.
+
+    The opener is not treated as business intent.  For opener-only messages
+    the remainder is empty, preserving the existing greeting behavior.  The
+    function intentionally does not fuzzy-match arbitrary words so a product
+    or topic name at the start of a message cannot be stripped accidentally.
+    """
+    normalized = unicodedata.normalize("NFKC", str(text or "")).strip()
+    if not normalized:
+        return None, ""
+    match = CONVERSATIONAL_OPENER_RE.fullmatch(normalized)
+    if not match:
+        return None, normalized
+    opener = re.sub(r"\s+", " ", match.group("opener").lower()).strip()
+    remainder = (match.group("remainder") or "").strip()
+    if opener.startswith("hi"):
+        opener = "hi"
+    elif opener.startswith("hello"):
+        opener = "hello"
+    elif opener.startswith("hey"):
+        opener = "hey"
+    return opener, remainder
+
+
+
 def normalize(message):
     return " ".join(re.findall(r"\w+", (message or "").casefold()))
 
@@ -32,8 +79,9 @@ def is_collaboration_proposal(message):
 def is_payment_method_request(message):
     text = normalize(message)
     return bool(re.search(
-        r"\b(?:how\s+(?:(?:do|can)\s+i\s+|to\s+|2\s+)(?:make\s+(?:the\s+)?(?:a\s+)?payment|pay)|"
-        r"can\s+i\s+pay|(?:what|which)\b.{0,35}\bpayment\s+(?:methods?|options?)|"
+        r"\b(?:how\s+(?:(?:do|can)\s+(?:i|we)\s+|to\s+|2\s+)(?:make\s+(?:the\s+)?(?:a\s+)?payment|pay)|"
+        r"where\s+(?:do|can)\s+(?:i|we)\s+make\s+(?:the\s+)?(?:a\s+)?payment|"
+        r"can\s+(?:i|we)\s+pay|(?:what|which)\b.{0,35}\bpayment\s+(?:methods?|options?)|"
         r"(?:share|send|give)\b.{0,20}\bpayment\s+(?:details|methods?|options?)|"
         r"(?:do|can)\s+you\s+accept\b.{0,20}\b(?:upi|bank\s+transfer|cards?|cash))\b", text)
         or re.fullmatch(r"(?:pay|payment|upi|bank transfer|qr(?: code)?|gpay|paytm|phonepe|net banking|credit card|debit card|cash on delivery|cod)(?: please)?", text)
@@ -59,7 +107,11 @@ def is_menu_browse_request(message):
     return bool(re.search(r"\bmenus?\b", text) and (
         re.search(r"(?:^|\bplease\s+|\b(?:can|could|would|will) you\s+|\b(?:hi|hello|hey)\s+)(?:show|send|share|give|bhejo|dikhao)\b", text)
         or re.search(r"\b(?:can|could|may) (?:i|we) (?:see|have|get)\b", text)
-        or re.search(r"\b(?:i|we) (?:want|need|would like)\b", text)
+        or re.search(r"\blet (?:me|us) (?:see|have a look at)\b", text)
+        or re.search(
+            r"\b(?:i|we) (?:want|need|would like) "
+            r"(?:to (?:see|browse|view|have a look at) )?"
+            r"(?:(?:the|your|current|weekly|savoury|savory|veg|vegetarian|non veg|non vegetarian|this week s) )*menus?\b", text)
         or re.search(r"\b(?:whats|what is|what s|what menu|which menu|what food|tell me)\b", text)
         or re.fullmatch(r"(?:(?:the|your|current|weekly|savoury|savory|veg|vegetarian|non veg|non vegetarian|this week s)\s+)*menus?(?: for (?:this|current) week)?(?: please| pls)?", text)
     ))
@@ -105,7 +157,13 @@ def evaluate_turn_authority(message):
         return TurnAuthority("unsupported_business_request", "unknown_business_query")
     if re.search(r"\b(?:cater|catering|customi[sz]e)\b", text) and _REQUEST_RE.search(text):
         return TurnAuthority("unsupported_operational_request", "business_proposal")
-    if re.search(r"\band\b.*\b(?:do|does|can|could|is|are|what|how|why|when)\b", text):
+    clauses = semantic_fallback._clauses(message)
+    sentence_request = bool(
+        re.search(r"[.!?;]\s+", message or "")
+        and any(re.match(r"(?:do|does|can|could|is|are|what|how|why|when|tell|show|send)\b",
+                         normalize(clause)) for clause in clauses[1:])
+    )
+    if sentence_request or re.search(r"\band\b.*\b(?:do|does|can|could|is|are|what|how|why|when)\b", text):
         reading = semantic_fallback.read(message)
         if reading["unknown_topics"] or "event_order" in reading["intents"]:
             return TurnAuthority("compound_unresolved_intent", "unknown_business_query")
