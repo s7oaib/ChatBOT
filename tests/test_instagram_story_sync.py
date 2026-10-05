@@ -428,3 +428,49 @@ def test_unknown_legacy_provenance_and_invalid_time_do_not_trigger_webhook_expir
         conn.commit()
     assert sync_db.expire_webhook_instagram_stories(now="2026-10-05T12:00:00+00:00") == 0
     assert sync_db.get_instagram_story_source("unknown") and sync_db.get_instagram_story_source("invalid")
+
+
+@pytest.mark.parametrize("media_type", ["IMAGE", "VIDEO"])
+def test_owned_story_caches_actual_meta_image_or_video_thumbnail(sync_db, monkeypatch, tmp_path, media_type):
+    from io import BytesIO
+    from PIL import Image
+    from camellia import instagram_story_previews as previews
+    monkeypatch.setattr(config, "MENU_JSON_PATH", str(tmp_path / "menu.json"))
+    raw = _story()
+    raw["media_type"] = media_type
+    raw["thumbnail_url"] = "https://scontent.cdninstagram.com/thumbnail.jpg?sig=SECRET"
+    raw["media_url"] = "https://scontent.cdninstagram.com/story.mp4?sig=SECRET" if media_type == "VIDEO" else "https://scontent.cdninstagram.com/image.jpg?sig=SECRET"
+    if media_type == "IMAGE":
+        raw.pop("thumbnail_url")
+    stream = BytesIO()
+    Image.new("RGB", (50, 70), "blue").save(stream, format="JPEG")
+    _install_meta(monkeypatch, [_page(), _stories([raw])])
+    with patch.object(previews, "_download", return_value=(stream.getvalue(), "image/jpeg")) as download:
+        result = sync_module.sync_instagram_stories(sync_db)
+    assert result["fetched"] == 1 and result["status"] == "success"
+    download.assert_called_once_with(raw.get("thumbnail_url") or raw["media_url"])
+    assert previews.cached_path(STORY_ID)
+    assert "SECRET" not in str(sync_db.get_instagram_story_source(STORY_ID))
+    assert sync_db.list_instagram_source_routes() == []
+
+
+def test_owned_promotion_preserves_exact_mapping_preview_and_explicit_source_metadata(sync_db, monkeypatch, tmp_path):
+    from io import BytesIO
+    from PIL import Image
+    from camellia import instagram_story_previews as previews
+    monkeypatch.setattr(config, "MENU_JSON_PATH", str(tmp_path / "menu.json"))
+    sync_db.record_instagram_story_source(STORY_ID, event_metadata={"source": "story_reply", "display": {"original_username": "original.owner", "original_media_id": "101"}})
+    route = sync_db.save_instagram_source_route({"source_type": "story", "media_id": STORY_ID, "routing_topic": "Chosen", "active": True})
+    stream = BytesIO()
+    Image.new("RGB", (50, 70), "blue").save(stream, format="JPEG")
+    with patch.object(previews, "_download", return_value=(stream.getvalue(), "image/jpeg")):
+        assert previews.cache_preview(STORY_ID, "https://lookaside.fbsbx.com/image?sig=SECRET", sync_db)
+    path = previews.cached_path(STORY_ID)
+    _install_meta(monkeypatch, [_page(), _stories([_story()])])
+    sync_module.sync_instagram_stories(sync_db)
+    saved = sync_db.get_instagram_story_source(STORY_ID)
+    assert saved["source"] == "META_STORY_SYNC" and saved["story_media_id"] == STORY_ID
+    assert previews.enrich(saved, sync_db)["original_username"] == "original.owner"
+    assert previews.enrich(saved, sync_db)["original_media_id"] == "101"
+    assert previews.cached_path(STORY_ID) == path
+    assert sync_db.get_instagram_source_route(route["routing_id"]) == route

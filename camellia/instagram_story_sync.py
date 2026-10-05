@@ -18,6 +18,7 @@ import httpx
 
 from camellia.config import config
 from camellia.database import db as default_db
+from camellia import instagram_story_previews
 
 
 STORY_FIELDS = "id,media_type,media_url,thumbnail_url,permalink,timestamp"
@@ -222,9 +223,13 @@ def sync_instagram_stories(database=None) -> Dict[str, Any]:
             story_id = story["story_media_id"]
             active_ids.append(story_id)
             existing = database.get_instagram_story_source(story_id)
+            story["event_metadata"]["display"] = instagram_story_previews.display_metadata(raw_story, existing)
             database.upsert_instagram_story_sync(story_id, **{key: story[key] for key in (
                 "media_type", "temporary_url", "permalink", "published_at", "event_metadata"
             )})
+            preview = instagram_story_previews.preview_candidate(raw_story)
+            if preview:
+                instagram_story_previews.cache_preview(story_id, preview, database)
             if not existing:
                 result["created"] += 1
                 continue
@@ -252,6 +257,7 @@ def sync_instagram_stories(database=None) -> Dict[str, Any]:
             # never renumbers an already-assigned Story.
             database.backfill_instagram_story_sequence_numbers()
         result["fetched"] = len(raw_stories)
+        instagram_story_previews.cleanup(database)
         if result["status"] == "success" and not raw_stories and config.instagram_auth_mode() == "instagram_login":
             username = str(config.INSTAGRAM_EXPECTED_USERNAME).strip().lstrip("@").casefold()
             result["message"] = (

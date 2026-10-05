@@ -836,25 +836,44 @@ def test_fresh_mapping_selector_loads_effective_qa_without_editing_existing_rout
 
 def test_safe_story_preview_card_modal_and_load_failure_fallback():
     result = _run_node(r'''
-        const source = {story_media_id:'preview-story', temporary_url:'https://cdn.example/story.jpg', source:'WEBHOOK_STORY_REPLY', mapping_status:'UNMAPPED'};
+        const source = {story_media_id:'preview-story', preview_url:'/admin/instagram-story-sources/preview-story/preview', source:'WEBHOOK_STORY_REPLY', mapping_status:'UNMAPPED'};
         igStorySources = [source];
         renderInstagramStories();
         const card = document.getElementById('igStoryList').innerHTML;
         openInstagramStoryMapping(source.story_media_id);
         const modal = document.getElementById('igStoryMappingPreview').innerHTML;
-        const invalid = ['javascript:alert(1)', 'https://user:secret@cdn.example/a', 'https://cdn.example/a?access_token=secret', '', 'not-a-url'].map(temporary_url => instagramStoryPreview({temporary_url}));
-        const video = instagramStoryPreview({temporary_url:'https://cdn.example/story.mp4', media_type:'VIDEO'});
+        const invalid = ['javascript:alert(1)', 'https://user:secret@cdn.example/a', 'https://cdn.example/a?access_token=secret', '', 'not-a-url', '/admin/instagram-story-sources/other-story/preview'].map(preview_url => instagramStoryPreview({...source, preview_url}));
+        const video = instagramStoryPreview({...source, media_type:'VIDEO'});
+        const remoteOnly = instagramStoryPreview({story_media_id:'preview-story', temporary_url:'https://cdn.example/story.jpg'});
         const handler = card.match(/onerror="([^"]+)"/)[1];
         const failed = {style:{display:''}, nextElementSibling:{style:{display:'none'}}};
         Function(handler).call(failed);
-        console.log('RESULT::'+JSON.stringify({card, modal, invalid, video, failed}));
+        console.log('RESULT::'+JSON.stringify({card, modal, invalid, video, remoteOnly, failed}));
     ''')
-    assert '<img ' in result['card'] and 'https://cdn.example/story.jpg' in result['card']
+    assert '<img ' in result['card'] and '/admin/instagram-story-sources/preview-story/preview' in result['card']
     assert 'Webhook observed' in result['card'] and 'Map Story' in result['card']
     assert '<img ' in result['modal']
     assert all('<img ' not in value and 'STORY' in value and 'secret' not in value for value in result['invalid'])
-    assert '<video ' in result['video']
+    assert '<img ' in result['video'] and '<video ' not in result['video']
+    assert '<img ' not in result['remoteOnly'] and 'STORY' in result['remoteOnly']
     assert result['failed'] == {'style': {'display': 'none'}, 'nextElementSibling': {'style': {'display': 'flex'}}}
+
+
+def test_story_attribution_keeps_explicit_source_and_replier_separate():
+    result = _run_node(r'''
+        const source = {story_media_id:'12345', original_username:'original.owner', original_account_id:'101', original_media_id:'202', replier_username:'customer.reply'};
+        const explicit = instagramStoryIdentification(source, true);
+        const absent = instagramStoryIdentification({story_media_id:'12345', replier_username:'customer.reply'}, true);
+        const hostile = instagramStoryIdentification({...source, original_username:'<img onerror=alert(1)>'}, true);
+        console.log('RESULT::'+JSON.stringify({explicit, absent, hostile}));
+    ''')
+    assert 'Source account: @original.owner — Meta supplied' in result['explicit']
+    assert 'Original account ID: 101 — Meta supplied' in result['explicit']
+    assert 'Original media ID: 202 — Meta supplied' in result['explicit']
+    assert 'Replied by: @customer.reply' in result['explicit']
+    assert 'Source account: Not supplied by Meta' in result['absent']
+    assert 'Source account: @customer.reply' not in result['absent']
+    assert '<img ' not in result['hostile'] and '&lt;img' in result['hostile']
 
 
 
