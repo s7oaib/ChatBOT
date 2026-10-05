@@ -357,6 +357,7 @@ def test_story_temporary_url_is_sanitized_and_not_exposed_by_admin(story_db):
     }
     app_module._record_story_reply(event, "story-customer", "story-secret")
     saved = story_db.get_instagram_story_source("story-secret")
+    assert saved["source"] == "WEBHOOK_STORY_REPLY"
     assert saved["temporary_url"] == "https://cdn.example/story.jpg"
     assert all(secret not in saved["temporary_url"] for secret in ("SECRET", "ABC", "XYZ", "123", "value"))
 
