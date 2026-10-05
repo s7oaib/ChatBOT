@@ -40,7 +40,7 @@ Thank you ☺️"""
     "I run a food brand and would like to collaborate with you.",
 ])
 @pytest.mark.parametrize("context", ["weekly", "product", "source"])
-def test_proposal_precedes_available_flyer_and_stale_context(message, context, monkeypatch):
+def test_proposal_precedes_available_flyer_and_stale_context(message, context, monkeypatch, eligible_weekly_asset):
     user_id = "collab-precedence-" + uuid.uuid4().hex
     facts = session_memory.get_facts(user_id, "instagram")
     if context == "weekly":
@@ -50,7 +50,6 @@ def test_proposal_precedes_available_flyer_and_stale_context(message, context, m
     else:
         facts["source_route"] = {"routing_id": "existing-test-route", "source_type": "story",
                                  "active": True, "source_description": "Old product menu"}
-    monkeypatch.setattr("camellia.responder.current_weekly_url", lambda: "/uploads/current-weekly.jpeg")
     # The deterministic collaboration handoff must work even with NLU disabled.
     monkeypatch.setattr("camellia.responder.config.SEMANTIC_ROUTER_ENABLED", False)
     monkeypatch.setattr("camellia.responder.config.STRUCTURED_NLU_ENABLED", False)
@@ -72,13 +71,12 @@ def test_proposal_precedes_available_flyer_and_stale_context(message, context, m
     "What is on the weekly menu?", "Veg menu please.",
     "What's on your menu this week?", "Can you send the current menu?",
 ])
-def test_genuine_menu_still_sends_available_approved_flyer(message, monkeypatch):
+def test_genuine_menu_still_sends_available_approved_flyer(message, eligible_weekly_asset):
     user_id = "menu-precedence-" + uuid.uuid4().hex
-    monkeypatch.setattr("camellia.responder.current_weekly_url", lambda: "/uploads/current-weekly.jpeg")
     text, matched, template_id, images = responder.match_and_respond(message, user_id=user_id, channel="instagram")
     assert matched is True
     assert template_id == "approved_menu"
-    assert images == ["/uploads/current-weekly.jpeg"]
+    assert images == [eligible_weekly_asset]
     assert session_memory.get_facts(user_id, "instagram")["last_route_source"] == "APPROVED_MENU"
 
 
