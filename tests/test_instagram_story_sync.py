@@ -71,6 +71,8 @@ def _install_meta(monkeypatch, responses, token="PAGE_TOKEN"):
         "instagram_login" if token.startswith("IGAA") else "legacy_page",
     )
     monkeypatch.setattr(config, "INSTAGRAM_PAGE_ID", "page-1")
+    monkeypatch.setattr(config, "INSTAGRAM_GRAPH_ACCOUNT_ID", "123456")
+    monkeypatch.setattr(config, "INSTAGRAM_EXPECTED_USERNAME", "camellia.artisanal")
     monkeypatch.setattr(config, "INSTAGRAM_API_VERSION", "v25.0")
     monkeypatch.setattr(
         sync_module.httpx,
@@ -241,12 +243,15 @@ def test_story_sync_uses_instagram_api_version_instagram_login(sync_db, monkeypa
     """Instagram-login (IGAA token) Story endpoint must use INSTAGRAM_API_VERSION."""
     calls = _install_meta(
         monkeypatch,
-        [FakeResponse(200, {"id": "ig-account-1"}), _stories([_story()])],
+        [FakeResponse(200, {"id": "123456", "username": "camellia.artisanal"}), _stories([_story()])],
         token="IGAA_TOKEN",
     )
 
     result = sync_module.sync_instagram_stories(sync_db)
 
+    assert result["fetched"] == 1
+    assert sync_db.get_instagram_story_source(STORY_ID)["story_media_id"] == STORY_ID
+    assert calls[1][0] == "https://graph.instagram.com/v25.0/123456/stories"
     assert result["status"] == "success"
     for url, _params in calls:
         assert "/v25.0/" in url
@@ -320,3 +325,24 @@ def test_story_account_diagnostic_route_requires_admin():
         assert app_module.instagram_story_account_diagnostic()["identity_match"]
     auth.assert_called_once()
     diagnostic.assert_called_once_with()
+
+
+@pytest.mark.parametrize("account_id,username", [("999999", "camellia.artisanal"), ("123456", "another.account")])
+def test_story_sync_identity_mismatch_preserves_inventory(monkeypatch, sync_db, account_id, username):
+    calls = _install_meta(monkeypatch, [FakeResponse(200, {"id": account_id, "username": username})], token="IGAA_SECRET")
+    sync_db.upsert_instagram_story_sync(STORY_ID, event_metadata={})
+    before = sync_db.get_instagram_story_source(STORY_ID)
+    result = sync_module.sync_instagram_stories(sync_db)
+    assert result["failure"]["category"] == "linked_account_mismatch"
+    assert len(calls) == 1
+    assert sync_db.get_instagram_story_source(STORY_ID) == before
+    assert "IGAA_SECRET" not in str(result)
+
+
+def test_verified_story_sync_empty_result_explains_meta_limit(monkeypatch, sync_db):
+    _install_meta(monkeypatch, [FakeResponse(200, {"id": "123456", "username": "Camellia.Artisanal"}), _stories([])], token="IGAA_SECRET")
+    result = sync_module.sync_instagram_stories(sync_db)
+    assert result["status"] == "success" and result["fetched"] == 0
+    assert "Story sync completed for @camellia.artisanal, but Meta returned 0 active Stories." in result["message"]
+    assert "reshared Stories" in result["message"]
+    assert "IGAA_SECRET" not in str(result)

@@ -74,20 +74,18 @@ def _resolve_stories_endpoint(
     """Resolve the connected professional account and its owned Stories edge."""
     if config.instagram_auth_mode() == "instagram_login":
         base = f"https://graph.instagram.com/{version}"
-        profile = client.get(
-            f"{base}/me", params={"fields": "id", "access_token": token}
-        )
-        if profile.status_code != 200:
-            return None, None, _safe_error(profile)
-        try:
-            payload = profile.json()
-            account_id = str(payload.get("id") or "").strip() if isinstance(payload, dict) else ""
-        except (ValueError, TypeError):
-            account_id = ""
-        return (
-            f"{base}/me/stories", account_id or None,
-            None if account_id else {"category": "malformed_account_response"},
-        )
+        from camellia.instagram_media import _resolve_current_account
+
+        account_id, username, _, failure = _resolve_current_account(client, token, version)
+        if failure:
+            return None, account_id, {"category": failure}
+        expected_id = config.instagram_media_owner_id()
+        expected_username = str(config.INSTAGRAM_EXPECTED_USERNAME or "").strip().lstrip("@").casefold()
+        if not expected_id or not expected_username:
+            return None, account_id, {"category": "linked_account_not_configured"}
+        if account_id != expected_id or str(username or "").casefold() != expected_username:
+            return None, account_id, {"category": "linked_account_mismatch"}
+        return f"{base}/{account_id}/stories", account_id, None
 
     base = f"https://graph.facebook.com/{version}"
     page_id = (config.INSTAGRAM_PAGE_ID or "").strip()
@@ -254,6 +252,12 @@ def sync_instagram_stories(database=None) -> Dict[str, Any]:
             # never renumbers an already-assigned Story.
             database.backfill_instagram_story_sequence_numbers()
         result["fetched"] = len(raw_stories)
+        if result["status"] == "success" and not raw_stories and config.instagram_auth_mode() == "instagram_login":
+            username = str(config.INSTAGRAM_EXPECTED_USERNAME).strip().lstrip("@").casefold()
+            result["message"] = (
+                f"Story sync completed for @{username}, but Meta returned 0 active Stories. "
+                "Meta does not return reshared Stories or Live Video Stories."
+            )
         return result
     except (httpx.HTTPError, ValueError, TypeError):
         return {**base_result, "failure": {"category": "sync_request_failed"}}
