@@ -4,11 +4,12 @@ Previously validated unrelated application code is **frozen**. Change only what 
 
 ## Current baselines
 
-- Accepted application/runtime and comparison baseline: `f58b1f4157e32361487320f6db2ec72bcdba3342`.
-- Production acceptance: Railway `5b1abab4-c414-4662-9a2f-ce41000eb3bb`, SUCCESS, exact accepted runtime SHA deployed with normal application startup.
-- Final complete regression: **3715 passed, 0 failed**, one existing Starlette/httpx warning, on tested HEAD `113aaec38fdb32c2f3f530e00b5a37e032f98a01`.
-- Tested HEAD tree `b0e8882c602a376862d5b76121ff31fd654af15d` is identical to accepted merge `f58b1f4157e32361487320f6db2ec72bcdba3342`.
-- Final focused suites: **399 passed**. Mandatory smoke: **68 passed**. GitHub fast current-contract gate completed successfully for the final HEAD.
+- Accepted application/runtime and comparison baseline: `3d412c1e4f94be7552c8882cd127eed1e8eb9e14` (PR #65).
+- Production acceptance: Railway `91f4c509-3589-492e-b667-a3a1d16e79de`, SUCCESS, exact accepted runtime SHA deployed; Online with one running replica and normal application startup/Approved Q&A alignment. Read-only mapping audit preserved all bindings/routes/history, including a real scheduled ad expiry.
+- Final complete regression: **3904 passed, 0 failed, 0 skipped, 308.33 seconds**, on tested HEAD `aeec381ee900049a08ca2aba591d366b48c3eb24`. Tested tree `1cb2ba1fc1f207a342747e0ebb4674fa139793af` is identical to accepted runtime merge.
+- PR #63 audited hybrid policy retained: 2991 parallel-safe cases, 913 serial cases. The 63 PR #64 contextual-price cases remain protected; 23 schedule cases and executed Admin JS expiry assertions were added.
+- Final feature CI: **872 passed, 0 failed/skipped, 65.39 seconds** in the Python 3.11 current-contract gate; required PR/push/main CI passed. See [client handover](CLIENT_HANDOVER.md) for full release and production evidence.
+- Previous frozen baseline: `f58b1f4157e32361487320f6db2ec72bcdba3342`. Promotion was deliberate through the existing utility only after complete regression and production acceptance, not an impact-classification shortcut.
 - Later handover documentation/baseline metadata commits are non-runtime and distinct from this runtime baseline. Do not advance the application baseline for each docs-only commit or rerun the full suite merely for Markdown/metadata.
 
 `test_baseline.json` records the comparison baseline used by `scripts/run_impacted_tests.py`. It never auto-advances.
