@@ -282,3 +282,41 @@ def test_instagram_api_version_falls_back_when_malformed(monkeypatch):
     assert _resolve_graph_api_version(
         "INSTAGRAM_API_VERSION", _DEFAULT_INSTAGRAM_API_VERSION
     ) == "v22.0"
+
+
+@pytest.mark.parametrize("account_id,username,category", [
+    ("123456", "Camellia.Artisanal", None),
+    ("999999", "camellia.artisanal", "linked_account_mismatch"),
+    ("123456", "another.account", "linked_account_mismatch"),
+])
+def test_story_account_diagnostic_verifies_identity_without_inventory(
+    monkeypatch, sync_db, account_id, username, category,
+):
+    _install_meta(monkeypatch, [FakeResponse(200, {"id": account_id, "username": username})], token="IGAA_SECRET")
+    monkeypatch.setattr(config, "INSTAGRAM_GRAPH_ACCOUNT_ID", "123456")
+    monkeypatch.setattr(config, "INSTAGRAM_EXPECTED_USERNAME", "@camellia.artisanal")
+    sync_db.upsert_instagram_story_sync(STORY_ID, event_metadata={})
+    before = sync_db.get_instagram_story_source(STORY_ID)
+    result = sync_module.story_account_diagnostic()
+    assert result["identity_match"] is (category is None)
+    assert result.get("failure", {}).get("category") == category
+    assert result["authenticated_account_id"] == account_id
+    assert result["authenticated_username"] == username
+    assert "IGAA_SECRET" not in str(result)
+    assert sync_db.get_instagram_story_source(STORY_ID) == before
+
+
+def test_story_account_diagnostic_failure_is_sanitized(monkeypatch):
+    _install_meta(monkeypatch, [FakeResponse(401, {"error": {"code": 190, "message": "access token IGAA_SECRET"}})], token="IGAA_SECRET")
+    result = sync_module.story_account_diagnostic()
+    assert result["status"] == "failed"
+    assert "IGAA_SECRET" not in str(result)
+
+
+def test_story_account_diagnostic_route_requires_admin():
+    with patch.object(app_module, "require_admin") as auth, patch.object(
+        sync_module, "story_account_diagnostic", return_value={"identity_match": True},
+    ) as diagnostic:
+        assert app_module.instagram_story_account_diagnostic()["identity_match"]
+    auth.assert_called_once()
+    diagnostic.assert_called_once_with()
