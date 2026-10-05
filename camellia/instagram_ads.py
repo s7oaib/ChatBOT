@@ -2,7 +2,7 @@
 import re
 import time
 import json
-from datetime import datetime, timezone
+from datetime import datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from urllib.parse import parse_qs, urlsplit
 
@@ -265,10 +265,39 @@ def _delivery_pages(client, url, token, params, deadline):
     raise AdsSyncError("PAGINATION_LIMIT")
 
 
+def _schedule_window(row, zone):
+    """Intersect explicit ad and ad-set schedules; never derive a duration."""
+    adset = row.get("adset") or {}
+    if not isinstance(adset, dict):
+        raise AdsSyncError("INVALID_SCHEDULE")
+
+    def times(values):
+        result = []
+        for value in values:
+            if value is None or value == "":
+                continue
+            try:
+                stamp = datetime.fromisoformat(value)
+                if stamp.tzinfo is None:
+                    raise ValueError()
+                result.append(stamp.astimezone(zone))
+            except (TypeError, ValueError):
+                raise AdsSyncError("INVALID_SCHEDULE") from None
+        return result
+
+    starts = times((row.get("ad_schedule_start_time"), adset.get("start_time")))
+    ends = times((row.get("ad_schedule_end_time"), adset.get("end_time")))
+    # Compare absolute instants, including repeated local hours at DST folds.
+    start, end = max(starts, key=lambda stamp: stamp.timestamp(), default=None), min(ends, key=lambda stamp: stamp.timestamp(), default=None)
+    if start and end and start.timestamp() >= end.timestamp():
+        raise AdsSyncError("INVALID_SCHEDULE")
+    return start, end
+
+
 def delivery_evidence():
     """Read-only, fresh Meta status + today's reported impressions; never instant delivery."""
     token, account = config.META_MARKETING_ACCESS_TOKEN, ad_account_id()
-    rule = "Current Meta ACTIVE status and positive ad-level impressions today (ad-account timezone). Reporting can lag; not instantaneous delivery."
+    rule = "Current Meta ACTIVE status, within supplied ad/ad-set schedule [start, end), and positive ad-level impressions today (ad-account timezone). Reporting can lag; not instantaneous delivery."
     unavailable = {"status": "unavailable", "rule": rule, "ads": {}}
     if not token or not account:
         return {**unavailable, "error_category": "NOT_CONFIGURED"}
@@ -279,13 +308,16 @@ def delivery_evidence():
             account_data = _delivery_read(client, base, token, {"fields": "timezone_name"})
             zone = ZoneInfo(account_data["timezone_name"])
             day = datetime.now(zone).date().isoformat()
-            statuses = _delivery_pages(client, base + "/ads", token, {"fields": "id,effective_status", "limit": 100}, deadline)
+            statuses = _delivery_pages(client, base + "/ads", token,
+                {"fields": "id,effective_status,ad_schedule_start_time,ad_schedule_end_time,adset{start_time,end_time}", "limit": 100}, deadline)
             active = set()
+            schedules = {}
             seen = set()
             for row in statuses:
                 if not isinstance(row, dict) or not re.fullmatch(r"[0-9]+", str(row.get("id") or "")) or row["id"] in seen or not isinstance(row.get("effective_status"), str):
                     raise AdsSyncError("INVALID_RESPONSE")
                 seen.add(row["id"])
+                schedules[row["id"]] = _schedule_window(row, zone)
                 if row["effective_status"] == "ACTIVE":
                     active.add(row["id"])
             insights = _delivery_pages(client, base + "/insights", token,
@@ -298,10 +330,22 @@ def delivery_evidence():
                 impressions = int(row["impressions"])
                 if row["ad_id"] in active and impressions > 0:
                     evidence[row["ad_id"]] = {"impressions": impressions}
-            if datetime.now(zone).date().isoformat() != day:
+            checked = datetime.now(zone)
+            if checked.date().isoformat() != day:
                 raise AdsSyncError("REPORTING_DAY_CHANGED")
+            schedule_diagnostic = {}
+            for ad_id, (start, end) in schedules.items():
+                reason = "NOT_STARTED" if start and checked.timestamp() < start.timestamp() else "ENDED" if end and checked.timestamp() >= end.timestamp() else "WITHIN_SCHEDULE"
+                schedule_diagnostic[ad_id] = {"start_time": start.isoformat() if start else None,
+                    "end_time": end.isoformat() if end else None, "eligibility": reason}
+                if reason != "WITHIN_SCHEDULE":
+                    evidence.pop(ad_id, None)
+                elif ad_id in evidence and (start or end):
+                    evidence[ad_id].update(start_time=start.isoformat() if start else None, end_time=end.isoformat() if end else None)
         return {"status": "available", "rule": rule, "ads": evidence, "reporting_date": day,
-                "account_timezone": zone.key, "checked_at": datetime.now(timezone.utc).isoformat(), "raw_running": len(evidence)}
+                "account_timezone": zone.key, "checked_at": checked.isoformat(), "raw_running": len(evidence),
+                "schedule_source": "ad_schedule_start_time/ad_schedule_end_time intersected with adset.start_time/end_time",
+                "schedules": schedule_diagnostic}
     except AdsSyncError as exc:
         return {**unavailable, "error_category": str(exc)}
     except (KeyError, TypeError, ValueError, ZoneInfoNotFoundError):

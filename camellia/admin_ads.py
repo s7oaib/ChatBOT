@@ -5,7 +5,7 @@ HTML = r'''
     <button id="adsSyncButton" class="btn-secondary" type="button" onclick="syncAdsNow()">↻ Sync Now</button></div>
   <div id="adsSummary" class="gallery-toolbar" aria-label="Ads summary"></div>
   <div style="width:100%;margin:12px 0;"><label for="adsExactId" style="display:block;margin-bottom:6px;">Exact Meta Ad ID</label><input id="adsExactId" class="field-control" type="search" inputmode="numeric" placeholder="Search by exact Meta Ad ID" style="display:block;width:100%;box-sizing:border-box;" oninput="renderAdsWorkspace()"></div>
-  <p class="ig-media-muted">Running Now means current Meta ACTIVE status plus reported impressions today in the ad-account timezone; reporting may lag. Meta Active is technical inventory. Expand any card to manage individual exact Ad IDs.</p>
+  <p class="ig-media-muted">Running Now means current Meta ACTIVE status, within the supplied Meta schedule, plus reported impressions today in the ad-account timezone; reporting may lag. End time is exclusive. Meta Active is technical inventory. Expand any card to manage individual exact Ad IDs.</p>
   <div class="gallery-toolbar" role="group" aria-label="Ads filters">
     <button class="btn-secondary active" data-ads-filter="running" onclick="setAdsFilter('running')">Running Now</button>
     <button class="btn-secondary" data-ads-filter="active" onclick="setAdsFilter('active')">Meta Active</button>
@@ -34,6 +34,34 @@ let adsSyncBusy = false;
 let adsMutationBusy = false;
 let adsChoosingId = null;
 let adsChoosingGroup = null;
+let adsExpiryTimer = null;
+let adsDeliveryClock = null;
+
+function expireRunningSchedules() {
+    clearTimeout(adsExpiryTimer);
+    if (adsFilter !== 'running' || !adsDeliveryClock) return;
+    const now = adsDeliveryClock.checked + (performance.now() - adsDeliveryClock.received);
+    const evidence = adsWorkspace.delivery?.ads || {};
+    const ends = [];
+    for (const [id, proof] of Object.entries(evidence)) {
+        const end = Date.parse(proof.end_time || '');
+        if (Number.isFinite(end)) {
+            if (now >= end) delete evidence[id];
+            else ends.push(end);
+        }
+    }
+    adsWorkspace.running_groups = (adsWorkspace.running_groups || []).map(group => ({...group,
+        delivering_ad_ids: group.delivering_ad_ids.filter(id => evidence[id])
+    })).filter(group => group.delivering_ad_ids.length);
+    if (adsWorkspace.delivery.status === 'available' && !adsWorkspace.delivery.unresolved_ad_ids?.length)
+        adsWorkspace.counts.running = adsWorkspace.running_groups.length;
+    if (adsWorkspace.delivery.status === 'available') adsWorkspace.counts.raw_running = Object.keys(evidence).length;
+    if (ends.length) adsExpiryTimer = setTimeout(() => {
+        expireRunningSchedules();
+        renderAdsWorkspace();
+        loadAdsWorkspace();
+    }, Math.min(2147483647, Math.max(1, Math.min(...ends) - now)));
+}
 
 function setAdsFilter(view) {
     adsFilter = view;
@@ -41,6 +69,7 @@ function setAdsFilter(view) {
     loadAdsWorkspace();
 }
 async function loadAdsWorkspace() {
+    if (adsFilter !== 'running') clearTimeout(adsExpiryTimer);
     if (!adminAuthenticated) return;
     const generation = ++adsRequestGeneration;
     try {
@@ -49,6 +78,9 @@ async function loadAdsWorkspace() {
         const payload = await response.json();
         if (generation !== adsRequestGeneration) return;
         adsWorkspace = payload;
+        const checked = Date.parse(payload.delivery?.checked_at || '');
+        adsDeliveryClock = Number.isFinite(checked) ? {checked, received:performance.now()} : null;
+        expireRunningSchedules();
         renderAdsWorkspace();
     } catch (_) {
         if (generation === adsRequestGeneration) document.getElementById('adsSyncStatus').textContent = 'Could not refresh Ads. Previously loaded inventory is retained.';
@@ -68,7 +100,7 @@ async function syncAdsNow() {
     finally { adsSyncBusy = false; button.disabled = false; button.textContent = '↻ Sync Now'; }
 }
 function renderAdsWorkspace() {
-    const rawCounts = [['all','All'],['raw_running','Delivered today + currently ACTIVE'],['raw_active','Meta-reported active'],['unmapped','Unmapped'],['mapped','Mapped'],['inactive','Inactive / ended']];
+    const rawCounts = [['all','All'],['raw_running','Schedule-eligible + delivered today + ACTIVE'],['raw_active','Meta-reported active'],['unmapped','Unmapped'],['mapped','Mapped'],['inactive','Inactive / ended']];
     document.getElementById('adsSummary').innerHTML = `<div style="width:100%;">Running Now: <b>${adsWorkspace.counts.running == null ? 'Not checked / unavailable' : Number(adsWorkspace.counts.running)}</b> creative groups · Meta-reported active creative groups: <b>${Number(adsWorkspace.counts.active || 0)}</b></div><div style="width:100%;"><b>Raw Meta Ad ID counts</b> · ${rawCounts.map(([key,label]) => `${label}: ${adsWorkspace.counts[key] == null ? 'Not checked' : Number(adsWorkspace.counts[key])}`).join(' · ')}</div>`;
     const sync = adsWorkspace.sync || {};
     document.getElementById('adsSyncStatus').textContent = `Last successful sync: ${sync.last_success_at || 'Never'}${sync.error_category ? ' · Sync warning: ' + sync.error_category + ' · Last complete inventory retained.' : ''}${sync.optional_fields_reduced ? ' · Some creative fields are unavailable.' : ''}`;
@@ -98,7 +130,7 @@ function renderAdsWorkspace() {
             const preview = image ? `<img class="ig-media-thumb" loading="lazy" src="${escapeHtml(image)}" alt="Promoted creative preview">` : '<div class="ig-media-placeholder">Preview unavailable</div>';
             const displayName = members.find(ad => ad.name)?.name || 'Promoted creative';
             const running = adsFilter === 'running';
-            const indicator = running ? `<p style="overflow-wrap:anywhere;">DELIVERED TODAY + currently Meta ACTIVE · Evidence IDs: ${group.delivering_ad_ids.map(id => escapeHtml(id)).join(', ')}. ${members.length} exact member IDs. Mapping: ${members.filter(ad => ad.mapped).length}/${members.length} bound.${group.verified_identity ? '' : ' Incomplete/conflicting identity: individual mapping only.'}</p><button class="btn-primary" data-ads-group-map="${escapeHtml(first.ad_id)}">Map Ad</button>` : '';
+            const indicator = running ? `<p style="overflow-wrap:anywhere;">WITHIN META SCHEDULE + DELIVERED TODAY + currently Meta ACTIVE · Evidence IDs: ${group.delivering_ad_ids.map(id => escapeHtml(id)).join(', ')}. ${members.length} exact member IDs. Mapping: ${members.filter(ad => ad.mapped).length}/${members.length} bound.${group.verified_identity ? '' : ' Incomplete/conflicting identity: individual mapping only.'}</p><button class="btn-primary" data-ads-group-map="${escapeHtml(first.ad_id)}">Map Ad</button>` : '';
             return `<section class="ig-media-card" data-active-group="true"><div class="ig-media-preview">${preview}</div><div class="ig-media-main"><b>AD · ${escapeHtml(displayName)}</b><p style="overflow-wrap:anywhere;">Permalink: ${first.instagram_permalink_url ? `<a href="${escapeHtml(first.instagram_permalink_url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(first.instagram_permalink_url)}</a>` : 'Unavailable'}<br>Instagram media ID: ${escapeHtml(first.effective_instagram_media_id || 'Unavailable')}</p>${indicator}<details${exactId ? ' open' : ''}><summary>${members.length} Meta Ad IDs ▾</summary>${members.map(renderAd).join('')}</details></div></section>`;
         }).join('');
     } else {
