@@ -488,7 +488,8 @@ def test_unknown_media_without_text_stays_silent_and_never_guesses(story_db, sou
 
 @pytest.mark.parametrize("text", ["Price?", "How much?", "How much is it?", "Tell me more", "Is it available?", "What is the price of Bento?"])
 @pytest.mark.parametrize("disabled", [False, True])
-def test_unmapped_story_always_uses_existing_human_handoff(story_db, text, disabled):
+def test_unmapped_story_always_uses_existing_human_handoff(story_db, monkeypatch, text, disabled):
+    monkeypatch.setattr("camellia.handoff.db", story_db)
     media_id = "unmapped-handoff-story"
     if disabled:
         route = _story_route(media_id)
