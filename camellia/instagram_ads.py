@@ -267,7 +267,9 @@ def _delivery_pages(client, url, token, params, deadline):
 
 def _schedule_window(row, zone):
     """Intersect explicit ad and ad-set schedules; never derive a duration."""
-    adset = row.get("adset") or {}
+    adset = row.get("adset")
+    if adset is None:
+        adset = {}
     if not isinstance(adset, dict):
         raise AdsSyncError("INVALID_SCHEDULE")
 

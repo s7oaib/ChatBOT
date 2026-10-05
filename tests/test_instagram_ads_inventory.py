@@ -655,7 +655,7 @@ def test_ad_specific_window_intersects_adset_window(store, monkeypatch, extra, r
 
 @pytest.mark.parametrize('schedule', [
     {'adset':{'end_time':'bad'}}, {'adset':{'end_time':'2026-10-06T10:00:00'}},
-    {'adset':'bad'}, {'ad_schedule_end_time':123},
+    {'adset':'bad'}, {'adset':False}, {'adset':[]}, {'ad_schedule_end_time':123},
     {'adset':{'start_time':'2026-10-06T10:00:00Z','end_time':'2026-10-06T09:00:00Z'}},
 ])
 def test_invalid_schedule_never_falls_back_to_active_status(store, monkeypatch, schedule):
