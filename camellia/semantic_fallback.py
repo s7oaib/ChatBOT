@@ -37,7 +37,7 @@ _SPELLING = {
 }
 
 _CLAUSE_SPLIT = re.compile(
-    r"\s+(?:and|but|also|plus|aur|&|,\s*and|then)\s+|[,;]\s+|\?\s+", re.IGNORECASE,
+    r"\s+(?:and|but|also|plus|aur|&|,\s*and|then)\s+|[,;]\s+|[.?!]\s+", re.IGNORECASE,
 )
 
 # Words that carry no subject of their own. A clause made only of these is
@@ -560,7 +560,11 @@ def read(message: str) -> Dict[str, Any]:
     unknown_topics: List[str] = []
 
     unmapped: List[str] = []
-    for clause in _clauses(normalised):
+    # Split original punctuation before normalization removes sentence boundaries.
+    # Ampersands in labels (e.g. flavours & prices) were removed by the
+    # existing normalizer, not interpreted as independent requests.
+    for raw_clause in _clauses((message or "").replace("&", " ")):
+        clause = _normalise(raw_clause)
         escalation_request = (
             not _IDENTITY_QUESTION_RE.match(clause.strip())
             and _ESCALATION_INTENT_RE.search(clause.strip())

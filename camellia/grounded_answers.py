@@ -5,6 +5,7 @@ import re
 import time
 from typing import Any, Dict, Optional, Tuple
 
+from camellia.intent_guards import split_conversational_opener
 from camellia import client_qa
 from camellia.ai_responder import ai_responder
 
@@ -17,7 +18,8 @@ def system_reply(
     message: str, *, include_contextual_acknowledgement: bool = True,
 ) -> Optional[str]:
     text = re.sub(r"[\s.!?]+", " ", message.casefold()).strip()
-    if re.fullmatch(r"hi|hello|hey|good morning|good afternoon|good evening", text):
+    opener, remainder = split_conversational_opener(message)
+    if opener and not remainder:
         return "Hi! Thanks for reaching out to Camellia.artisanal 😊 How can I help you today?"
     if re.fullmatch(r"(?:(?:okay|ok) )?(?:thanks|thank you|thank you so much|thx)", text):
         return "You're most welcome! 😊"

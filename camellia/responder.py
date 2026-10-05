@@ -39,7 +39,7 @@ from camellia.menu_images import (
 )
 from camellia import semantic_fallback
 from camellia.understanding import BusinessAction, Intent, understanding_engine
-from camellia.intent_guards import can_candidate_own_turn, evaluate_turn_authority, exact_custom_coverage, has_price_intent, is_payment_method_request, CONFIRMED_BENTO_SUBSTITUTION_RE as _CONFIRMED_BENTO_SUBSTITUTION_RE
+from camellia.intent_guards import GREETING_ONLY_RE, CONVERSATIONAL_OPENER_RE, split_conversational_opener, can_candidate_own_turn, evaluate_turn_authority, exact_custom_coverage, has_price_intent, is_payment_method_request, CONFIRMED_BENTO_SUBSTITUTION_RE as _CONFIRMED_BENTO_SUBSTITUTION_RE
 from camellia.conversation_resolver import (
     ContextResolution,
     explicit_entity,
@@ -712,49 +712,6 @@ BARE_PRICE_QUESTION_RE = re.compile(
 # bypass source-context resolution, but a greeting carrying a real request
 # (for example, "hi, what is the price of Jolbhora?") must continue through
 # the normal intent/product precedence below.
-GREETING_ONLY_RE = re.compile(
-    r'^(?:(?:hi+|hello+|hey+)(?:\s+there)?|good\s+(?:morning|afternoon|evening)|namaste|'
-    r'nomoshkar|nomoskar|greetings)[\W_]*$',
-    re.IGNORECASE,
-)
-
-# A greeting may be a prefix to a real request ("hi tell me more"), not the
-# whole intent.  Keep the opener grammar deterministic and deliberately
-# conservative so only a leading conversational opener is removed.  The
-# remainder is then resolved by the normal product/order/source precedence.
-CONVERSATIONAL_OPENER_RE = re.compile(
-    r"^(?P<opener>hi+|hello+|hey+|good\s+(?:morning|afternoon|evening)|"
-    r"namaste|nomoshkar|nomoskar|greetings)(?:\s+there)?"
-    r"(?:[\s,!?;:.-]+(?P<remainder>.*))?$",
-    re.IGNORECASE,
-)
-
-
-def split_conversational_opener(text: str) -> Tuple[Optional[str], str]:
-    """Return ``(canonical opener, semantic remainder)`` for a leading opener.
-
-    The opener is not treated as business intent.  For opener-only messages
-    the remainder is empty, preserving the existing greeting behavior.  The
-    function intentionally does not fuzzy-match arbitrary words so a product
-    or topic name at the start of a message cannot be stripped accidentally.
-    """
-    normalized = unicodedata.normalize("NFKC", str(text or "")).strip()
-    if not normalized:
-        return None, ""
-    match = CONVERSATIONAL_OPENER_RE.fullmatch(normalized)
-    if not match:
-        return None, normalized
-    opener = re.sub(r"\s+", " ", match.group("opener").lower()).strip()
-    remainder = (match.group("remainder") or "").strip()
-    if opener.startswith("hi"):
-        opener = "hi"
-    elif opener.startswith("hello"):
-        opener = "hello"
-    elif opener.startswith("hey"):
-        opener = "hey"
-    return opener, remainder
-
-
 # Generic detail wording must not outrank a named subject.  This guard is
 # intentionally limited to the wrapper phrases that previously reached the
 # semantic router as ``know_more`` before the deterministic product/topic
@@ -2798,7 +2755,22 @@ class DeterministicResponder:
                                  and (_pending_menu_affects_question(user_message, facts)
                                       or menu_review.menu_question_blocked(user_message, facts)))
             if (not exact or exact.match_kind != "admin_exact") and not pending_authority:
-                return self._structured_nlu_response(user_message, user_id, channel)
+                resolved = self._structured_nlu_response(user_message, user_id, channel)
+                if resolved is not None:
+                    return resolved
+                # The structured reader may decline partly understood clauses.
+                # A blocked whole turn must fail closed, never reach shortcuts
+                # or return None to the production reply wrapper.
+                facts.update({"last_route_source": "HUMAN_HANDOFF",
+                              "last_handoff_reason": authority.reason,
+                              "last_knowledge_ids": [],
+                              "last_actions": [BusinessAction.ESCALATE_TO_TEAM.value],
+                              "knowledge_sufficient": False,
+                              "last_grounding": "turn_authority_unresolved",
+                              "last_fallback_used": True})
+                handoff = self._generic_fallback()
+                session_memory.add_turn(user_id, channel, user_message, handoff)
+                return handoff, False, None, None
 
         source_for_qa = facts.get("source_route") or {}
         mapped_qa_reference = bool(
@@ -3627,7 +3599,9 @@ class DeterministicResponder:
                 and not (
                     client_qa_candidate
                     and (contextual_topic == facts.get("active_product_context")
-                         or (price_followup and client_qa_candidate.match_kind == "context"))
+                         or (price_followup and client_qa_candidate.match_kind == "context")
+                         or (is_payment_method_request(user_message)
+                             and client_qa_candidate.entry.qa_id in {"general_payment_client", "home_table_payment"}))
                 )
             )
             or (

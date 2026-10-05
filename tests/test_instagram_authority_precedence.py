@@ -208,3 +208,136 @@ def test_fully_covered_compound_keeps_both_approved_answers(instagram):
     assert client_qa.effective_entry("general_payment_client").answer in text
     assert "Bento" in text
     assert facts["knowledge_sufficient"] is True
+
+
+MENU_VARIANTS = [
+    "Let me see the weekly menu.", "Let me see this week's menu.",
+    "Let me see your weekly menu.", "Can I have a look at the weekly menu?",
+    "Can I see this week's menu?", "Show me the weekly menu.",
+    "Send me the weekly menu.", "Please share this week's menu.",
+    "Hi, can I see the weekly menu?", "I want to know about the menu",
+]
+PAYMENT_VARIANTS = [
+    "How do we pay?", "How can we pay?", "Where do we make the payment?",
+    "Can we pay by UPI?", "What payment options do we have?",
+    "Please share the payment details.", "Hey, how do we pay?",
+]
+COMPOUND_VARIANTS = [
+    "What is the Bento price? Can you gift wrap?",
+    "What is the Bento price. Do you gift wrap?",
+    "What is the Bento price! Can you gift wrap?",
+    "What is the Bento price; Can you gift wrap?",
+    "Tell me about Sondesh? Can you make it sugar free?",
+    "How much is Chicken Kosha? Is it available this Sunday?",
+    "Show me the menu. Can you cater a wedding?",
+    "How can I pay? Can you reserve 4 seats for Sunday?",
+]
+
+
+@pytest.mark.parametrize("message", MENU_VARIANTS)
+def test_request_shaped_menu_variants(instagram, eligible_weekly_asset, message):
+    reply, facts = instagram
+    result = reply(message)
+    assert result[1:3] == (True, "approved_menu")
+    assert result[3] == [eligible_weekly_asset]
+    assert "WEEKLY_SAVOURY_BROWSE" in facts["last_intents"]
+    assert not facts.get("last_llm_called")
+
+
+@pytest.mark.parametrize("message", [
+    "I love your weekly menu.", "We would like our products featured in your menu.",
+    "Would you feature our products in your menu?",
+    "I saw your menu while asking about collaboration.",
+    "Do you cater events with a custom menu?", "Your menu looks lovely.",
+    "The menu was mentioned in the post.",
+])
+def test_descriptive_menu_is_not_browsing(instagram, message):
+    reply, facts = instagram
+    result = reply(message)
+    assert result[2] != "approved_menu"
+    assert not result[3]
+    assert "WEEKLY_SAVOURY_BROWSE" not in facts.get("last_intents", [])
+
+
+@pytest.mark.parametrize("message", COMPOUND_VARIANTS)
+def test_sentence_compound_cannot_drop_unsupported_clause(instagram, message):
+    reply, facts = instagram
+    assert evaluate_turn_authority(message).blocks_shortcut
+    assert client_qa._match_base(message) is None
+    assert_handoff(reply(message), facts)
+
+
+@pytest.mark.parametrize("message", PAYMENT_VARIANTS)
+def test_plural_payment_uses_unchanged_approved_authority(instagram, message):
+    reply, facts = instagram
+    result = reply(message)
+    assert result[1] is True
+    assert facts["client_qa_id"] == "general_payment_client"
+    expected = "\n\n".join(b.value for b in client_qa.effective_entry("general_payment_client").blocks if b.kind == "TEXT")
+    assert result[0] == expected
+    assert not facts.get("last_llm_called")
+
+
+@pytest.mark.parametrize("message", [
+    "We will pay tomorrow.", "We can make payment Wednesday.",
+    "I already paid yesterday.", "Once you confirm availability we will pay.",
+    "My father will make the payment.",
+])
+def test_incidental_payment_is_not_method_request(instagram, message):
+    reply, facts = instagram
+    assert not is_payment_method_request(message)
+    result = reply(message)
+    assert result[2] not in {"general_payment_client", "GUARD_payment_method", "home_table_payment"}
+    assert facts.get("client_qa_id") != "general_payment_client"
+
+
+@pytest.mark.parametrize("message", ["Hiii", "Namaste", "Hi there", "Hi", "Hello", "Hey", "Namaskar", "Hello there"])
+def test_pure_greetings_use_existing_system_reply(instagram, message):
+    from camellia.grounded_answers import system_reply
+    reply, facts = instagram
+    result = reply(message)
+    assert result[:3] == (system_reply("Hi"), True, "system_conversation")
+    assert not result[3]
+    assert facts["last_route_source"] == "SYSTEM_CONVERSATION"
+    assert not facts.get("last_llm_called")
+
+
+@pytest.mark.parametrize("message", [
+    "Hello, do you have 3 places free Sunday?",
+    "Hiii, I'd like to collaborate with you.",
+])
+def test_greeting_prefix_does_not_hide_unsupported_request(instagram, message):
+    reply, facts = instagram
+    assert_handoff(reply(message), facts)
+
+
+@pytest.mark.parametrize("context,message,expected", [
+    ("bento", COMPOUND_VARIANTS[0], "handoff"),
+    ("payment", MENU_VARIANTS[0], "menu"),
+    ("menu", PAYMENT_VARIANTS[0], "payment"),
+])
+def test_new_grammar_outranks_stale_context(instagram, eligible_weekly_asset, context, message, expected):
+    reply, facts = instagram
+    facts.update(last_topic=context, active_topic=context, active_product_context=context)
+    result = reply(message)
+    if expected == "handoff":
+        assert_handoff(result, facts)
+    elif expected == "menu":
+        assert result[1:3] == (True, "approved_menu")
+        assert result[3] == [eligible_weekly_asset]
+    else:
+        assert result[1] is True
+        assert facts["client_qa_id"] == "general_payment_client"
+
+
+def test_sentence_compound_exact_custom_authority_only(instagram):
+    reply, facts = instagram
+    question = COMPOUND_VARIANTS[0]
+    nearby = "What is the Bento price?"
+    db.add_learned_knowledge("Nearby test", nearby, "Nearby answer.", source="client_admin",
+        response_sequence=[{"type": "text", "text": "Nearby answer."}])
+    assert_handoff(reply(question), facts)
+    answer = "Approved exact whole-turn test authority."
+    key = db.add_learned_knowledge("Whole-turn test", question, answer, source="client_admin",
+        response_sequence=[{"type": "text", "text": answer}])
+    assert reply(question)[:3] == (answer, True, f"learned_{key}")

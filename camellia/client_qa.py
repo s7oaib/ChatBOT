@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from camellia.intent_guards import can_candidate_own_turn, has_price_intent, is_payment_method_request
+from camellia.intent_guards import evaluate_turn_authority, can_candidate_own_turn, has_price_intent, is_payment_method_request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -621,7 +621,9 @@ def _match_base_unchecked(message: str, facts: Optional[Dict[str, Any]] = None) 
 
 def _match_base(message: str, facts: Optional[Dict[str, Any]] = None) -> Optional[ApprovedMatch]:
     candidate = _match_base_unchecked(message, facts)
-    if candidate and can_candidate_own_turn(_normalise_match_text(message), candidate.entry.qa_id):
+    # Preserve clause boundaries before the existing spelling/alias normalization.
+    if (candidate and not evaluate_turn_authority(message).blocks_shortcut
+            and can_candidate_own_turn(_normalise_match_text(message), candidate.entry.qa_id)):
         return candidate
     return None
 
