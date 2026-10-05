@@ -2482,6 +2482,41 @@ class Database:
             ).fetchone()
         return dict(row) if row else None
 
+    def expire_webhook_instagram_stories(self, *, now: Optional[str] = None) -> int:
+        """Expire observed Stories by exact-Story time, never owned API absence.
+
+        Only Meta publication metadata stored for this exact ID may outrank
+        the latest authentic webhook observation. Preview URLs are irrelevant.
+        Unknown/malformed timestamps fail closed and retain the record.
+        """
+        current = _parse_trustworthy_datetime(now or datetime.now(timezone.utc).isoformat())
+        if current is None:
+            return 0
+        removed = 0
+        with self.get_connection() as conn:
+            # Serialize expiry with fresh webhook observations before reading.
+            conn.execute("BEGIN IMMEDIATE")
+            rows = conn.execute(
+                "SELECT story_media_id, source, last_event_metadata, published_at, last_seen "
+                "FROM instagram_story_sources WHERE admin_deleted=0 "
+                "AND (source='WEBHOOK_STORY_REPLY' OR source IS NULL)"
+            ).fetchall()
+            for row in rows:
+                if row["source"] is None:
+                    try:
+                        evidence = json.loads(row["last_event_metadata"] or "{}")
+                    except (TypeError, ValueError):
+                        evidence = {}
+                    if not isinstance(evidence, dict) or evidence.get("source") != "story_reply":
+                        continue
+                timestamp = (_parse_trustworthy_datetime(row["published_at"])
+                             or _parse_trustworthy_datetime(row["last_seen"]))
+                if timestamp is not None and timestamp + timedelta(hours=24) <= current:
+                    self._delete_instagram_story_source_in_connection(conn, row["story_media_id"])
+                    removed += 1
+            conn.commit()
+        return removed
+
     def reconcile_instagram_story_lifecycle(
         self, active_story_ids: List[str], *, expired_before: str, now: Optional[str] = None,
     ) -> Dict[str, int]:
@@ -2503,7 +2538,7 @@ class Database:
         """
         ids = [str(value or "").strip() for value in active_story_ids if str(value or "").strip()]
         expired_before_dt = _parse_trustworthy_datetime(expired_before)
-        counts = {"expired": 0, "removed": 0, "miss_pending": 0}
+        counts = {"expired": self.expire_webhook_instagram_stories(now=now), "removed": 0, "miss_pending": 0}
         with self.get_connection() as conn:
             params: List[Any] = []
             where = "COALESCE(story_status, 'ACTIVE')='ACTIVE' AND admin_deleted=0"
