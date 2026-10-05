@@ -403,6 +403,33 @@ global.fetch = async (url,options) => { calls.push({url,options}); return {ok:tr
  assert.equal(adsChoosingId,null); assert.equal(adsChoosingGroup,null);
  second.instagram_permalink_url='https://www.instagram.com/p/Conflict/';
  openAdsGroupMapping(paired.ad_id); assert.equal(adsChoosingGroup,null);
+ // Server-anchored elapsed time, not the operator's wall clock, expires
+ // evidence at the exact boundary while retaining every identity/binding.
+ second.instagram_permalink_url=paired.instagram_permalink_url;
+ let elapsed=0, delay=0;
+ Object.defineProperty(global,'performance',{value:{now:()=>elapsed},configurable:true});
+ global.clearTimeout=()=>{};
+ global.setTimeout=(callback,ms)=>{delay=ms;return 1;};
+ const checked=Date.parse('2026-10-06T09:59:59+05:30');
+ adsDeliveryClock={checked,received:0};
+ adsWorkspace={items:[paired,second],routes:[route],running_groups:[{...group,delivering_ad_ids:[paired.ad_id,second.ad_id]}],
+   counts:{running:1,raw_running:2,active:1,raw_active:2},sync:{},
+   delivery:{status:'available',unresolved_ad_ids:[],ads:{
+     [paired.ad_id]:{end_time:'2026-10-06T10:00:00+05:30'},
+     [second.ad_id]:{end_time:'2026-10-06T10:00:01+05:30'}}}};
+ const requestCount=calls.length;
+ expireRunningSchedules(); assert.equal(delay,1000); assert.equal(adsWorkspace.counts.raw_running,2);
+ elapsed=1000; expireRunningSchedules();
+ assert.equal(adsWorkspace.counts.running,1); assert.equal(adsWorkspace.counts.raw_running,1);
+ assert.deepEqual(adsWorkspace.running_groups[0].member_ad_ids,[paired.ad_id,second.ad_id]);
+ assert.deepEqual(adsWorkspace.running_groups[0].delivering_ad_ids,[second.ad_id]);
+ elapsed=2000; expireRunningSchedules(); renderAdsWorkspace();
+ assert.equal(adsWorkspace.counts.running,0); assert.equal(adsWorkspace.counts.raw_running,0);
+ assert(nodes.adsList.innerHTML.includes('No ads match'));
+ assert.equal(adsWorkspace.items.length,2); assert.equal(adsWorkspace.counts.raw_active,2);
+ assert.equal(second.routing_id,8); assert.equal(calls.length,requestCount);
+ adsFilter='all'; nodes.adsExactId.value=paired.ad_id; renderAdsWorkspace();
+ assert(nodes.adsList.innerHTML.includes(paired.ad_id));
 })().catch(error=>{console.error(error);process.exitCode=1;});
 '''
     target = tmp_path / "ads-behavior.js"
@@ -571,3 +598,148 @@ def test_running_workspace_preserves_meta_inventory_routes_and_bindings(store, m
     assert workspace['counts']['running'] is None
     assert workspace['delivery']['unresolved_ad_ids'] == ['999']
     assert workspace['delivery']['resolved_group_count'] == 0
+
+@pytest.mark.parametrize('now,start,end,included', [
+    ('2026-10-06T09:59:59+05:30', '2026-10-05T10:00:00+05:30', '2026-10-06T10:00:00+05:30', True),
+    ('2026-10-06T10:00:00+05:30', '2026-10-05T10:00:00+05:30', '2026-10-06T10:00:00+05:30', False),
+    ('2026-10-06T10:00:01+05:30', None, '2026-10-06T10:00:00+05:30', False),
+    ('2026-10-05T09:59:59+05:30', '2026-10-05T10:00:00+05:30', None, False),
+    ('2026-10-05T10:00:00+05:30', '2026-10-05T10:00:00+05:30', None, True),
+    ('2026-10-06T10:00:00+05:30', None, None, True),
+    ('2026-10-06T10:00:00+05:30', None, '2026-10-06T04:30:00Z', False),
+    ('2026-10-06T00:00:00+05:30', None, '2026-10-05T18:30:00+00:00', False),
+])
+def test_delivery_schedule_boundaries_override_positive_today_impressions(store, monkeypatch, now, start, end, included):
+    from datetime import datetime
+    instant = datetime.fromisoformat(now)
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return instant.astimezone(tz) if tz else instant
+    monkeypatch.setattr(ads, 'datetime', Clock)
+    day = instant.date().isoformat()
+    calls = mock_pages(monkeypatch, [{'timezone_name':'Asia/Kolkata'},
+        {'data':[{'id':'1','effective_status':'ACTIVE','adset':{'start_time':start,'end_time':end}}]},
+        {'data':[insight('1', date_start=day, date_stop=day)]}])
+    result = ads.delivery_evidence()
+    assert result['status'] == 'available'
+    assert ('1' in result['ads']) is included
+    assert result['raw_running'] == int(included)
+    assert result['reporting_date'] == day and result['account_timezone'] == 'Asia/Kolkata'
+    assert result['schedules']['1']['end_time'] == (datetime.fromisoformat(end).astimezone(instant.tzinfo).isoformat() if end else None)
+    assert 'adset{start_time,end_time}' in calls[1].url.params['fields']
+    assert 'ad_schedule_end_time' in calls[1].url.params['fields']
+    assert store.list_instagram_ad_bindings() == []
+
+
+@pytest.mark.parametrize('extra,reason', [
+    ({'ad_schedule_end_time':'2026-10-06T03:30:00Z'}, 'ENDED'),
+    ({'ad_schedule_start_time':'2026-10-06T05:30:00Z'}, 'NOT_STARTED'),
+    ({}, 'WITHIN_SCHEDULE'),
+])
+def test_ad_specific_window_intersects_adset_window(store, monkeypatch, extra, reason):
+    from datetime import datetime
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime.fromisoformat('2026-10-06T04:30:00+00:00').astimezone(tz)
+    monkeypatch.setattr(ads, 'datetime', Clock)
+    mock_pages(monkeypatch, [{'timezone_name':'Asia/Kolkata'},
+        {'data':[{'id':'1','effective_status':'ACTIVE', 'adset':{'start_time':'2026-10-05T04:30:00Z','end_time':'2026-10-06T06:30:00Z'}, **extra}]},
+        {'data':[insight('1', date_start='2026-10-06', date_stop='2026-10-06')]}])
+    result = ads.delivery_evidence()
+    assert result['status'] == 'available'
+    assert result['schedules']['1']['eligibility'] == reason
+    assert bool(result['ads']) == (reason == 'WITHIN_SCHEDULE')
+
+
+@pytest.mark.parametrize('schedule', [
+    {'adset':{'end_time':'bad'}}, {'adset':{'end_time':'2026-10-06T10:00:00'}},
+    {'adset':'bad'}, {'adset':False}, {'adset':[]}, {'ad_schedule_end_time':123},
+    {'adset':{'start_time':'2026-10-06T10:00:00Z','end_time':'2026-10-06T09:00:00Z'}},
+])
+def test_invalid_schedule_never_falls_back_to_active_status(store, monkeypatch, schedule):
+    mock_pages(monkeypatch, [{'timezone_name':'Asia/Kolkata'},
+        {'data':[{'id':'1','effective_status':'ACTIVE', **schedule}]}])
+    result = ads.delivery_evidence()
+    assert result['status'] == 'unavailable' and result['ads'] == {}
+    assert result['error_category'] == 'INVALID_SCHEDULE'
+
+
+def test_schedule_expiry_retains_inventory_exact_binding_route_and_history(store, monkeypatch):
+    from datetime import datetime
+    sync(store, monkeypatch, [item(), item('200')])
+    target = route(store)
+    store.bind_instagram_ad(item()['id'], target['routing_id'], bound_by='test')
+    before = (store.list_instagram_ads_inventory('act_12345'), store.list_instagram_ad_bindings(),
+              store.list_instagram_source_routes(), store.list_instagram_ad_binding_history(item()['id']))
+    class Clock(datetime):
+        instant = datetime.fromisoformat('2026-10-06T09:59:59+05:30')
+        @classmethod
+        def now(cls, tz=None):
+            return cls.instant.astimezone(tz)
+    monkeypatch.setattr(ads, 'datetime', Clock)
+    def read():
+        mock_pages(monkeypatch, [{'timezone_name':'Asia/Kolkata'},
+            {'data':[{'id':item()['id'], 'effective_status':'ACTIVE','adset':{'end_time':'2026-10-06T10:00:00+05:30'}},
+                     {'id':'200', 'effective_status':'ACTIVE','adset':{'end_time':'2026-10-06T10:00:00+05:30'}}]},
+            {'data':[insight(item()['id'], date_start='2026-10-06', date_stop='2026-10-06')]}])
+        return ads.ads_workspace(store, 'running')
+    live = read()
+    assert live['counts']['running'] == 1
+    assert live['running_groups'][0]['member_ad_ids'] == [item()['id'], '200']
+    Clock.instant = datetime.fromisoformat('2026-10-06T10:00:00+05:30')
+    expired = read()
+    assert expired['counts']['running'] == 0 and expired['items'] == []
+    assert expired['counts']['raw_active'] == 2 and expired['counts']['active'] == 1
+    assert [r['ad_id'] for r in ads.ads_workspace(store, 'mapped')['items']] == [item()['id']]
+    assert len(ads.ads_workspace(store, 'all')['items']) == 2
+    assert store.instagram_ad_binding_status(item()['id']) == 'BOUND'
+    assert before == (store.list_instagram_ads_inventory('act_12345'), store.list_instagram_ad_bindings(),
+                      store.list_instagram_source_routes(), store.list_instagram_ad_binding_history(item()['id']))
+
+@pytest.mark.parametrize('final_time,error', [
+    ('2026-10-06T10:00:00+05:30', None),
+    ('2026-10-07T00:00:00+05:30', 'REPORTING_DAY_CHANGED'),
+])
+def test_schedule_checked_after_meta_read_and_reporting_day_rollover(store, monkeypatch, final_time, error):
+    from datetime import datetime
+    class Clock(datetime):
+        calls = 0
+        @classmethod
+        def now(cls, tz=None):
+            cls.calls += 1
+            value = '2026-10-06T09:59:59+05:30' if cls.calls == 1 else final_time
+            return datetime.fromisoformat(value).astimezone(tz)
+    monkeypatch.setattr(ads, 'datetime', Clock)
+    mock_pages(monkeypatch, [{'timezone_name':'Asia/Kolkata'},
+        {'data':[{'id':'1','effective_status':'ACTIVE','adset':{'end_time':'2026-10-06T10:00:00+05:30'}}]},
+        {'data':[insight('1',date_start='2026-10-06',date_stop='2026-10-06')]}])
+    result = ads.delivery_evidence()
+    assert result['ads'] == {}
+    if error:
+        assert result['status'] == 'unavailable' and result['error_category'] == error
+    else:
+        assert result['status'] == 'available' and result['schedules']['1']['eligibility'] == 'ENDED'
+
+@pytest.mark.parametrize('instant,included', [
+    ('2026-11-01T01:30:00-04:00', True),
+    ('2026-11-01T01:15:00-05:00', False),
+])
+def test_schedule_uses_absolute_instants_across_account_dst_fold(store, monkeypatch, instant, included):
+    from datetime import datetime
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime.fromisoformat(instant).astimezone(tz)
+    monkeypatch.setattr(ads, 'datetime', Clock)
+    mock_pages(monkeypatch, [{'timezone_name':'America/New_York'},
+        {'data':[{'id':'1','effective_status':'ACTIVE','adset':{
+            'start_time':'2026-11-01T01:00:00-04:00','end_time':'2026-11-01T01:15:00-05:00'},
+            'ad_schedule_end_time':'2026-11-01T01:45:00-04:00'}]},
+        {'data':[insight('1',date_start='2026-11-01',date_stop='2026-11-01')]}])
+    result = ads.delivery_evidence()
+    assert result['status'] == 'available'
+    assert result['account_timezone'] == 'America/New_York'
+    assert result['schedules']['1']['end_time'] == '2026-11-01T01:45:00-04:00'
+    assert ('1' in result['ads']) is included
