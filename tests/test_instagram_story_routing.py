@@ -497,7 +497,8 @@ def test_unmapped_story_always_uses_existing_human_handoff(story_db, monkeypatch
         story_db.save_instagram_source_route(route)
     uid = "story-human-" + uuid.uuid4().hex[:8]
     facts = session_memory.get_facts(uid, "instagram")
-    facts.update({"last_topic": "bengali_bento", "active_product_context": "bengali_bento"})
+    facts.update({"last_topic": "bengali_bento", "active_product_context": "bengali_bento",
+                  "last_entities": {"product": "bengali_bento"}, "ad_product": "bengali_bento"})
     sent = []
     with patch.object(app_module.responder, "match_and_respond") as matcher, \
          patch.object(app_module.escalator, "handle_escalation") as notify, \
@@ -509,3 +510,5 @@ def test_unmapped_story_always_uses_existing_human_handoff(story_db, monkeypatch
     assert notify.call_args.kwargs["user_message"] == text
     assert len(sent) == 1 and "Manager of Kitchens" in sent[0]
     assert not facts.get("source_context_used")
+    assert not facts.get("last_entities") and not facts.get("ad_product")
+    assert "bengali_bento" not in notify.call_args.kwargs["context_data"]["handoff_summary"]

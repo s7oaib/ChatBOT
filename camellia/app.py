@@ -827,6 +827,10 @@ def _process_instagram_event(
             )
             if not exact_story_route:
                 _mark_unmapped_shared_attachment(sender_id)
+                # The responder has not read this message: its old extracted
+                # entities and Ad product cannot describe this unmapped Story.
+                facts["last_entities"] = {}
+                facts["ad_product"] = None
                 _handoff_unmapped_shared_media(
                     sender_id, source_type="story", media_id=entry.media_id,
                     customer_text=str(message_text).strip(),
