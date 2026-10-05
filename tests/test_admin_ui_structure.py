@@ -756,3 +756,14 @@ def test_health_page_uses_safe_current_schema_and_refresh_states(page):
         assert marker in page
     settings = page[page.index('id="tab-settings"'):page.index('<!-- Customers and Answers')]
     assert "mfa_health" not in settings.lower()
+
+
+
+def test_story_only_preview_sizing_and_mapping_identity(page):
+    assert '.instagram-gallery .ig-media-preview { width: 100%; height: 142px;' in page
+    assert '.instagram-gallery .ig-story-card .ig-media-preview { width:100%; height:220px; flex:none; }' in page
+    assert '@media (max-width:660px) { .instagram-gallery .ig-story-card .ig-media-preview { height:200px; } }' in page
+    assert '#igStoryMappingPreview { width:min(320px,100%); height:auto; aspect-ratio:9 / 16;' in page
+    assert 'id="igStoryMappingIdentity"' in page
+    assert "instagramStoryIdentification(source, true)" in page
+    assert "instagramStoryPreview(source)" in page
