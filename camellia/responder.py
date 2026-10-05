@@ -38,7 +38,7 @@ from camellia.menu_images import (
     has_weekly_archive,
 )
 from camellia import semantic_fallback
-from camellia.understanding import BusinessAction, Intent, understanding_engine
+from camellia.understanding import BusinessAction, Intent, is_collaboration_proposal, understanding_engine
 from camellia.conversation_resolver import (
     ContextResolution,
     explicit_entity,
@@ -2175,7 +2175,8 @@ class DeterministicResponder:
         intro_greeting_prefix: str = "",
     ) -> Optional[Tuple[str, bool, str, Optional[Any]]]:
         """Resolve every substantive request through intent/entity knowledge."""
-        if (
+        collaboration_proposal = is_collaboration_proposal(user_message)
+        if not collaboration_proposal and (
             not config.SEMANTIC_ROUTER_ENABLED
             or not _structured_nlu_enabled_for(user_id, channel)
             or not understanding_engine.should_analyze(user_message)
@@ -2351,7 +2352,7 @@ class DeterministicResponder:
         # canonical knowledge declines the message; otherwise structured NLU
         # manufactured a handoff before that layer could answer an approved
         # staff-added question.
-        if not resolution.items:
+        if not resolution.items and not collaboration_proposal:
             learned_match = db.search_learned_knowledge(user_message)
             learned_answer = (learned_match or {}).get("verified_answer", "").strip()
             if learned_answer:
@@ -2774,6 +2775,11 @@ class DeterministicResponder:
         # turn's decision is reset here.
         facts["source_context_used"] = False
         facts["source_referential_intent"] = None
+
+        # Proposals must reach the existing typed human handoff before source,
+        # order, approved-Q&A, or weekly-flyer shortcuts can claim menu words.
+        if channel == "instagram" and is_collaboration_proposal(user_message):
+            return self._structured_nlu_response(user_message, user_id, channel)
 
         source_for_qa = facts.get("source_route") or {}
         mapped_qa_reference = bool(
