@@ -1,17 +1,39 @@
 # Camellia Artisanal client handover
 
-Handover date: **3 October 2026, Asia/Kolkata**. This document contains no credentials.
+Handover date: **5 October 2026, Asia/Kolkata**. This document contains no credentials.
 
 ## Accepted release and evidence
 
-- Accepted application/runtime SHA: `f58b1f4157e32361487320f6db2ec72bcdba3342` (PR #56, final Sondesh menu-authority correction).
-- Final tested feature HEAD: `113aaec38fdb32c2f3f530e00b5a37e032f98a01`; its tree `b0e8882c602a376862d5b76121ff31fd654af15d` is identical to the accepted merge commit tree.
-- Final full regression on the tested tree: **3715 passed, 0 failed**, with one existing Starlette/httpx deprecation warning. Final focused suites: **399 passed**. Mandatory smoke: **68 passed**.
-- GitHub fast current-contract gate for the final HEAD completed successfully; the workflow's remote full-regression job was intentionally skipped because the complete local release regression had already passed.
-- Accepted Railway runtime deployment: `5b1abab4-c414-4662-9a2f-ce41000eb3bb`, **SUCCESS**, exact commit `f58b1f4157e32361487320f6db2ec72bcdba3342`. Startup completed normally; Approved Q&A startup alignment reported `aligned=0 unchanged=22 failed=0` and no new startup failure was observed.
-- PR #55 (`607614ba8bb0e703e4c98ebd9341b127e19a10e2`) added manual exact-link Instagram media mapping, ordered Custom Q&A text/menu blocks, safe SYSTEM override reset, and the bare-product order-routing correction. PR #56 then centralized Collection 1/2 menu resolution on the current Menu Catalogue authority.
-- `test_baseline.json` is promoted to the accepted runtime SHA above with production deployment evidence and the 3715-test full-regression count.
-- Historical tags remain immutable evidence: `camellia-handover-2026-10-02` and `camellia-native-reels-2026-10-02` are not moved. Any later documentation-only merge/deployment is non-runtime evidence and does not advance the accepted application baseline by itself.
+- Accepted application/runtime and comparison baseline: `3d412c1e4f94be7552c8882cd127eed1e8eb9e14` (merged [PR #65](https://github.com/s7oaib/ChatBOT/pull/65), Running Now schedule expiry).
+- Tested feature HEAD: `aeec381ee900049a08ca2aba591d366b48c3eb24`. Its tree `1cb2ba1fc1f207a342747e0ebb4674fa139793af` is identical to the accepted feature merge tree.
+- Normal `python scripts/run_impacted_tests.py`: **3904 passed, 0 failed, 0 skipped, 308.33 seconds** (5 minutes 8 seconds), CRITICAL/full regression. PR #63's unchanged policy ran 2991 audited cases on four process workers and 913 serial cases. All 3881 prior cases remain, with 23 new schedule cases and additional executed Admin JavaScript expiry assertions. Existing deprecation warnings do not change the pass result.
+- Both final feature CI gates and main CI passed; the final PR Python 3.11 current-contract gate ran **872 passed, 0 failed/skipped, 65.39 seconds**. Local independent safety/code review found no blocker. CodeRabbit reviewed the initial feature without findings; its final small malformed-response correction was rate-limited and reviewed locally. No blocking review thread remained.
+- Accepted Railway runtime deployment: `91f4c509-3589-492e-b667-a3a1d16e79de`, **SUCCESS**, exact merge SHA above. The production environment was observed **Online**, with one RUNNING replica, zero crashed replicas, zero runtime log warnings/criticals, zero failed deployments during this release and empty pending work. Container startup, application startup completion and Approved Q&A alignment `aligned=0 unchanged=22 failed=0` were observed. Railway classifies four standard Uvicorn INFO startup lines on stderr as error-severity records; they are not application startup failures. `/health` remains healthy with its pre-existing informational WhatsApp/manual-handoff notice unchanged.
+- Live server-side Meta schedule reads succeeded in `Asia/Kolkata`. Before the first expiry: **3 Running Now groups / 3 evidence IDs**, **94 Meta Active groups / 129 raw ACTIVE IDs**, **156 retained raw IDs**. At **2026-10-05T06:30:00.88228+05:30**, after the actual **6:27:52 am IST** end of Ad `120246384641290540`, Running Now reported **2 groups / 2 evidence IDs**. That ad was absent from delivery evidence and its exact inventory, binding to route 27 and history remained unchanged. No count is forced to three.
+- Read-only acceptance audit retained **12 individual exact Ad-ID bindings, 19 current source routes and one archived route**. All three initially running creatives had complete, globally consistent exact media/permalink identities; 2/5/5 member IDs remained available, all BOUND to existing routes 27/37/23. No exact ID resolved to two active routes, no current Running Now member was unmapped, and no display field supplied mapping authority. Full source/binding/history/raw-inventory snapshots matched before and after release and the real expiry.
+- PR #64's accepted real customer result remains protected: mapped ad → exact source → canonical contextual Approved Q&A → no unnecessary handoff for “How much does it cost?”. The operator confirmed the real production conversation before this task; this release retained its 63 regression cases and verified the current source/binding structure without sending another real customer message. Sondesh/Bento/Home Table/Subscription resolve to their existing price Q&As; explicit subjects win and ambiguous/unbound/unknown-product context fails closed. Approved wording/assets are unchanged.
+- `test_baseline.json` is promoted with the existing utility to the validated runtime SHA and deployment above. A subsequent documentation/baseline-only merge/deployment is non-runtime; it does not replace this application baseline. The prior baseline `f58b1f4157e32361487320f6db2ec72bcdba3342` and historical tags remain immutable evidence.
+
+### Completed release sequence
+
+| PR | Completed work |
+| --- | --- |
+| [#58](https://github.com/s7oaib/ChatBOT/pull/58) | Durable individual exact Meta Ad-ID bindings: final runtime routing authority. |
+| [#59](https://github.com/s7oaib/ChatBOT/pull/59) | Dedicated Meta Ads workspace and safe server-side discovery. |
+| [#60](https://github.com/s7oaib/ChatBOT/pull/60) | Exact creative presentation grouping, exact ID search, centered mapping dialog. |
+| [#61](https://github.com/s7oaib/ChatBOT/pull/61) | Clear group/raw counters, display previews/names, expandable individual IDs. |
+| [#62](https://github.com/s7oaib/ChatBOT/pull/62) | Running Now from current status and current-day delivery evidence; technical inventory preserved. |
+| [#63](https://github.com/s7oaib/ChatBOT/pull/63) | Audited process parallelism plus serial-sensitive tests, cached CI, unchanged assertions and gates. |
+| [#64](https://github.com/s7oaib/ChatBOT/pull/64) | Canonical contextual natural price follow-ups through existing Approved Q&A and alias safeguards. |
+| [#65](https://github.com/s7oaib/ChatBOT/pull/65) | Authoritative schedule window `[start, end)` intersects ad/ad-set boundaries; expiry affects only Running Now. |
+
+### Running Now lifecycle and routing authority
+
+Require current Meta ACTIVE status, positive ad-level impressions on the account-local day, and every supplied schedule boundary: reached start, not reached end. Ad fields `ad_schedule_start_time` / `ad_schedule_end_time` intersect expanded `adset.start_time` / `adset.end_time`; absolute timestamp comparison handles offsets/DST folds. Missing boundaries create no invented expiry. Invalid/rejected schedule data makes delivery evidence unavailable. Reporting lag cannot extend a supplied end. The open Admin view expires evidence using server check time plus elapsed browser time, then refreshes the read-only endpoint.
+
+Expired ads remain in Meta Active/All/appropriate diagnostic history according to retained inventory status. Exact ID search, previews, canonical Instagram identity, all group members, mapping state and audit history remain. Grouping is discovery/presentation only: runtime binding is always an individual exact Ad ID. No sibling binding is created silently; any operator-approved multi-ID confirmation still invokes existing per-ID endpoints. No source, binding or history is deleted because a schedule ends. See [Running Now contract](ADS_RUNNING_NOW.md).
+
+No business mapping, Approved Q&A answer, Meta identity, credential, Railway variable, environment topology or `/app/var` volume was changed for this release. Previous PR #55/#56 exact-link/custom-block and canonical menu-asset behavior remains accepted and protected.
 
 ## Production controls and access
 
@@ -104,14 +126,14 @@ Follow [PRODUCTION_BACKUP_RECOVERY.md](PRODUCTION_BACKUP_RECOVERY.md) for the re
 
 **Before Approved Q&A publish:** preview exact wording, aliases, assets/actions and validity; publish only reviewed content.
 
-**Before deploy:** run impacted tests and mandatory smoke, run the complete full regression for CRITICAL/core/release/handover changes, review the diff, require green release evidence and explicit deployment authorization.
+**Before deploy:** run `python scripts/run_impacted_tests.py` and follow its classification using the existing hybrid safety policy. Review the exact diff/HEAD, require green CI and release evidence, and obtain deployment authorization when it has not already been given. Do not separately repeat a traditional full pytest command.
 
 **After deploy:** verify exact SHA, Railway SUCCESS, application startup, public health/Admin availability, no new 5xx/startup error and a limited authorized production smoke. Do not alter chatbot mode merely to make a smoke test easier.
 
 ## Maintenance validation
 
-Normal PR/push CI is the fast current-contract gate, not proof of a complete regression. Use `python scripts/run_impacted_tests.py`; failure debugging uses `python -m pytest --lf -q`. CRITICAL/core/release/handover validation requires `python -m pytest -q`.
+Normal PR/push CI is the fast current-contract gate, not proof of a complete regression. The single developer command remains `python scripts/run_impacted_tests.py`. Follow its classification: CRITICAL selects the complete hybrid regression; documentation/baseline metadata alone is LOW and selects no runtime pytest. A deliberate full validation, when justified, uses the runner’s `--full` option. Never bypass or weaken its parallel/serial policy.
 
-The final accepted runtime evidence is the **3715 passed / 0 failed** full regression on tested HEAD `113aaec38fdb32c2f3f530e00b5a37e032f98a01`, whose tree is identical to accepted merge `f58b1f4157e32361487320f6db2ec72bcdba3342`. Documentation/baseline metadata changes after this point are non-runtime and do not require another full regression unless they also alter executable/runtime inputs.
+The accepted runtime evidence is **3904 passed / 0 failed / 0 skipped in 308.33 seconds** on tested HEAD `aeec381ee900049a08ca2aba591d366b48c3eb24`, whose tree is identical to accepted runtime merge `3d412c1e4f94be7552c8882cd127eed1e8eb9e14`. Documentation/baseline metadata changes after this point are non-runtime and do not require another full regression unless they also alter executable/runtime inputs.
 
 See [testing policy](TESTING_STRATEGY.md), [runbook](PRODUCTION_RUNBOOK.md), [architecture](architecture.md), [chatbot control](INSTAGRAM_CHATBOT_CONTROL.md) and [validated dependency snapshot](HANDOVER_DEPENDENCY_SNAPSHOT.md).
