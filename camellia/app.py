@@ -7342,6 +7342,12 @@ def get_admin_dashboard():
         .ig-story-readonly { background:#F1EEEA; font-family:ui-monospace, SFMono-Regular, Consolas, monospace; overflow-wrap:anywhere; }
         .ig-story-preview-meta { color:var(--text-muted); font-size:0.76rem; overflow-wrap:anywhere; }
         .ig-story-card .ig-media-preview { background:#EDE8E3; }
+        .instagram-gallery .ig-story-card .ig-media-preview { width:100%; height:220px; flex:none; }
+        .ig-story-identification { display:grid; gap:4px; margin:8px 0; color:var(--text-muted); font-size:0.76rem; overflow-wrap:anywhere; }
+        #igStoryMappingPreview { width:min(320px,100%); height:auto; aspect-ratio:9 / 16; margin:12px 0; }
+        #igStoryMappingIdentity { margin-bottom:16px; }
+        @media (max-width:660px) { .instagram-gallery .ig-story-card .ig-media-preview { height:200px; } }
+
         @media (max-width: 660px) { .ig-media-card { grid-template-columns:76px minmax(0,1fr); } .ig-media-preview { width:76px; height:76px; } .ig-media-actions { grid-column:1 / -1; justify-content:flex-start; } .ig-media-details { grid-column:1 / -1; } }
         .ad-route-row {
             display: grid; grid-template-columns: 1fr auto auto; align-items: center; gap: 12px;
@@ -7929,7 +7935,8 @@ def get_admin_dashboard():
                     </div>
                     <span id="igStoryEditingLabel" class="ig-media-muted"></span>
                 </div>
-                <div id="igStoryMappingPreview" class="ig-media-preview" style="max-width:240px;margin:12px 0;"></div>
+                <div id="igStoryMappingPreview" class="ig-media-preview"></div>
+                <div id="igStoryMappingIdentity" class="ig-story-identification"></div>
                 <div class="source-map-form">
                     <div style="grid-column:1/-1;display:none;">
                         <label class="field-label" for="igStoryMediaId">Story media ID</label>
@@ -10787,6 +10794,28 @@ THIS WEEK'S BENGAL SPECIALS
             } catch (_) { return placeholder; }
         }
 
+        function instagramStoryIdentification(source, fullId = false) {
+            // All values here are display-only; mapping retains the full Meta ID.
+            let discovery = source.source === 'META_STORY_SYNC' ? 'Owned Story'
+                : source.source === 'WEBHOOK_STORY_REPLY' ? 'Webhook observed' : '';
+            if (source.source == null) {
+                try {
+                    const evidence = JSON.parse(source.last_event_metadata || '{}');
+                    if (evidence && evidence.source === 'story_reply') discovery = 'Webhook observed';
+                } catch (_) { /* Unknown provenance stays unknown. */ }
+            }
+            let observed = formatAdminTimestamp(source.last_seen);
+            if (observed === 'Timestamp unavailable') observed = formatAdminTimestamp(source.first_seen);
+            const observation = observed === 'Timestamp unavailable' ? 'Observed time unavailable' : `Observed ${observed}`;
+            const id = String(source.story_media_id || '');
+            const displayId = fullId || id.length <= 6 ? id : `…${id.slice(-6)}`;
+            const type = String(source.media_type || '').toUpperCase();
+            const typeLabel = type === 'IMAGE' ? 'Image Story' : type === 'VIDEO' ? 'Video Story' : 'Story';
+            const sequence = source.source === 'META_STORY_SYNC' && source.story_sequence_display
+                && source.story_sequence_display !== 'Story — sequence unavailable' ? source.story_sequence_display : '';
+            return `${discovery ? `<span>${fullId ? 'Discovery: ' : ''}${escapeHtml(discovery)}</span>` : ''}<span>${escapeHtml(typeLabel)}</span>${sequence ? `<span>${fullId ? 'Sequence: ' : ''}${escapeHtml(sequence)}</span>` : ''}<span>${escapeHtml(observation)}</span><span>Story ID: ${escapeHtml(displayId || 'Unavailable')}</span>`;
+        }
+
         function openInstagramStoryMapping(mediaId) {
             const source = igStorySources.find(item => String(item.story_media_id || '') === String(mediaId || '')) || { story_media_id: mediaId || '' };
             const status = String(source.mapping_status || source.status || 'UNMAPPED').toUpperCase();
@@ -10795,6 +10824,7 @@ THIS WEEK'S BENGAL SPECIALS
             igStoryPriority = [...(source.priority_products || [])];
             document.getElementById('igStoryMediaId').value = source.story_media_id || '';
             document.getElementById('igStoryMappingPreview').innerHTML = instagramStoryPreview(source);
+            document.getElementById('igStoryMappingIdentity').innerHTML = instagramStoryIdentification(source, true);
             document.getElementById('igStoryTopicPicker').value = source.topic_id || '';
             document.getElementById('igStorySourceDescription').value = source.source_description || '';
             initSourceResponse('igStory', source);
@@ -10948,20 +10978,9 @@ THIS WEEK'S BENGAL SPECIALS
                 else if (status === 'MAPPED' || status === 'DISABLED') actions = `<button class="btn-secondary" type="button" data-story-action="edit" data-story-media-id="${escapeHtml(source.story_media_id || '')}">Edit Mapping</button>`;
                 actions += ` <button class="btn-danger" type="button" data-story-action="delete" data-story-media-id="${escapeHtml(source.story_media_id || '')}">Delete</button>`;
                 const topic = source.routing_topic || 'Unmapped Story';
-                // Sequence is an admin convenience label only — routing and
-                // mapping always use the exact story_media_id shown below.
-                const sequenceDisplay = source.story_sequence_display || 'Story — sequence unavailable';
                 const mappingLabel = status === 'UNMAPPED' ? 'Unmapped' : topic;
                 const contextLabel = status === 'MAPPED' ? '● Context active' : '○ Context off';
-                let discoveryLabel = source.source === 'META_STORY_SYNC' ? 'Owned Story'
-                    : source.source === 'WEBHOOK_STORY_REPLY' ? 'Webhook observed' : '';
-                if (source.source == null) {
-                    try {
-                        const evidence = JSON.parse(source.last_event_metadata || '{}');
-                        if (evidence && evidence.source === 'story_reply') discoveryLabel = 'Webhook observed';
-                    } catch (_) { /* Unknown provenance is not webhook evidence. */ }
-                }
-                return `<article class="ig-media-card ig-story-card" tabindex="0" data-story-media-id="${escapeHtml(source.story_media_id || '')}"><div class="ig-media-preview">${instagramStoryPreview(source)}<span class="ig-media-badge">STORY</span></div><div class="ig-media-main"><div class="ig-media-title"><b class="ig-media-topic">${escapeHtml(mappingLabel)}</b></div><div class="ig-media-summary" title="${escapeHtml(source.source_description || sequenceDisplay)}">${escapeHtml(source.source_description || sequenceDisplay)}</div><div class="ig-media-facts"><span>${contextLabel}</span><span>${escapeHtml(discoveryLabel)}</span><span>${escapeHtml(source.published_at || source.last_seen || '—')}</span></div></div><div class="ig-media-actions">${actions}</div></article>`;
+                return `<article class="ig-media-card ig-story-card" tabindex="0" data-story-media-id="${escapeHtml(source.story_media_id || '')}"><div class="ig-media-preview">${instagramStoryPreview(source)}<span class="ig-media-badge">STORY</span></div><div class="ig-media-main"><div class="ig-media-title"><b class="ig-media-topic">${escapeHtml(mappingLabel)}</b></div>${source.source_description ? `<div class="ig-media-summary">${escapeHtml(source.source_description)}</div>` : ''}<div class="ig-story-identification">${instagramStoryIdentification(source)}</div><div class="ig-media-facts"><span>${contextLabel}</span></div></div><div class="ig-media-actions">${actions}</div></article>`;
             }).join('');
             list.querySelectorAll('[data-story-action]').forEach(button => button.addEventListener('click', () => {
                 const action = button.dataset.storyAction;

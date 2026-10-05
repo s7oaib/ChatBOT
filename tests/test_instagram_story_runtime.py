@@ -855,3 +855,35 @@ def test_safe_story_preview_card_modal_and_load_failure_fallback():
     assert all('<img ' not in value and 'STORY' in value and 'secret' not in value for value in result['invalid'])
     assert '<video ' in result['video']
     assert result['failed'] == {'style': {'display': 'none'}, 'nextElementSibling': {'style': {'display': 'flex'}}}
+
+
+
+def test_story_visual_metadata_keeps_full_identity_and_owned_sequence():
+    result = _run_node(r'''
+        const source = {story_media_id:'18350501275283851', source:'WEBHOOK_STORY_REPLY', mapping_status:'UNMAPPED', last_seen:'2026-10-05T05:39:18.629168+00:00', story_sequence_display:'Story — sequence unavailable', temporary_url:'https://cdn.example/reel.jpg'};
+        igStorySources = [source];
+        renderInstagramStories();
+        const card = document.getElementById('igStoryList').innerHTML;
+        openInstagramStoryMapping(source.story_media_id);
+        const modal = document.getElementById('igStoryMappingIdentity').innerHTML;
+        const owned = instagramStoryIdentification({...source, source:'META_STORY_SYNC', media_type:'IMAGE', story_sequence_display:'2nd Story • 05 Oct 2026'});
+        const ownedModal = instagramStoryIdentification({...source, source:'META_STORY_SYNC', story_sequence_display:'2nd Story • 05 Oct 2026'}, true);
+        const video = instagramStoryIdentification({...source, media_type:'VIDEO'});
+        const invalid = instagramStoryIdentification({...source, last_seen:'bad-date', first_seen:'bad-date'});
+        const fallback = instagramStoryIdentification({...source, last_seen:null, first_seen:'2026-10-05T05:39:18+00:00'});
+        console.log('RESULT::'+JSON.stringify({card, modal, owned, ownedModal, video, invalid, fallback, fullId:document.getElementById('igStoryMediaId').value, formatted:formatAdminTimestamp(source.last_seen)}));
+    ''')
+    assert 'Webhook observed' in result['card'] and 'Story ID: …283851' in result['card']
+    assert 'Observed ' + result['formatted'] in result['card']
+    assert '2026-10-05T' not in result['card']
+    assert 'data-story-media-id="18350501275283851"' in result['card']
+    assert result['fullId'] == '18350501275283851'
+    assert 'Discovery: Webhook observed' in result['modal'] and 'Story ID: 18350501275283851' in result['modal']
+    assert 'Observed ' + result['formatted'] in result['modal']
+    assert '2nd Story • 05 Oct 2026' in result['owned'] and 'Image Story' in result['owned']
+    assert 'Sequence: 2nd Story • 05 Oct 2026' in result['ownedModal']
+    assert 'Video Story' in result['video']
+    assert 'Image Story' not in result['card'] and 'Video Story' not in result['card']
+    assert all(text not in result['card'] for text in ('1st Story', '2nd Story', 'sequence unavailable', 'Reel #', 'Post #'))
+    assert 'Observed time unavailable' in result['invalid']
+    assert 'Observed time unavailable' not in result['fallback']
