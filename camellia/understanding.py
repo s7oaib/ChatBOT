@@ -67,6 +67,11 @@ _COLLABORATION_PROPOSAL_RE = re.compile(
 )
 
 
+def is_collaboration_proposal(message: str) -> bool:
+    """Shared proposal rule for understanding and early responder precedence."""
+    return bool(_COLLABORATION_PROPOSAL_RE.search(message or ""))
+
+
 STRUCTURED_NLU_RESPONSE_FORMAT = {
     "type": "json_schema",
     "json_schema": {
@@ -167,7 +172,7 @@ def _collaboration_handoff(user_message: str) -> Optional[UnderstandingResult]:
     it as the existing typed business gap and force the existing human handoff
     rather than adding a new customer-facing promise or response template.
     """
-    if not _COLLABORATION_PROPOSAL_RE.search(user_message or ""):
+    if not is_collaboration_proposal(user_message):
         return None
     return UnderstandingResult(
         intents=[Intent.BUSINESS_POLICY_UNKNOWN.value],
