@@ -560,7 +560,9 @@ def read(message: str) -> Dict[str, Any]:
     unknown_topics: List[str] = []
 
     unmapped: List[str] = []
-    for clause in _clauses(normalised):
+    # Split original punctuation before normalization removes sentence boundaries.
+    for raw_clause in _clauses(message):
+        clause = _normalise(raw_clause)
         escalation_request = (
             not _IDENTITY_QUESTION_RE.match(clause.strip())
             and _ESCALATION_INTENT_RE.search(clause.strip())

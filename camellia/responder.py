@@ -3538,6 +3538,7 @@ class DeterministicResponder:
             client_qa_candidate and client_qa_candidate.entry.qa_id in {
                 "best_time_to_book", "savoury_delivery_time", "sondesh_delivery_time",
                 "order_prebook", "alacarte_prebook",
+                "general_payment_client", "home_table_payment",
             }
         )
         client_qa_excluded = bool(

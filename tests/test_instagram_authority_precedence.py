@@ -215,7 +215,7 @@ MENU_VARIANTS = [
     "Let me see your weekly menu.", "Can I have a look at the weekly menu?",
     "Can I see this week's menu?", "Show me the weekly menu.",
     "Send me the weekly menu.", "Please share this week's menu.",
-    "Hi, can I see the weekly menu?",
+    "Hi, can I see the weekly menu?", "I want to know about the menu",
 ]
 PAYMENT_VARIANTS = [
     "How do we pay?", "How can we pay?", "Where do we make the payment?",

@@ -110,7 +110,7 @@ def is_menu_browse_request(message):
         or re.search(r"\blet (?:me|us) (?:see|have a look at)\b", text)
         or re.search(
             r"\b(?:i|we) (?:want|need|would like) "
-            r"(?:to (?:see|browse|view|have a look at) )?"
+            r"(?:to (?:see|browse|view|have a look at|know (?:more )?about) )?"
             r"(?:(?:the|your|current|weekly|savoury|savory|veg|vegetarian|non veg|non vegetarian|this week s) )*menus?\b", text)
         or re.search(r"\b(?:whats|what is|what s|what menu|which menu|what food|tell me)\b", text)
         or re.fullmatch(r"(?:(?:the|your|current|weekly|savoury|savory|veg|vegetarian|non veg|non vegetarian|this week s)\s+)*menus?(?: for (?:this|current) week)?(?: please| pls)?", text)
