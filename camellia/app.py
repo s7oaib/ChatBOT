@@ -3963,6 +3963,17 @@ def list_instagram_story_sources(
             "has_more": page * page_size < total}
 
 
+@app.get("/admin/instagram-story-sources/account-diagnostic")
+def instagram_story_account_diagnostic(
+    x_admin_key: Optional[str] = Header(None),
+    x_admin_pin: Optional[str] = Header(None),
+):
+    """Read the linked Graph identity without syncing or changing inventory."""
+    require_admin(x_admin_key, x_admin_pin)
+    from camellia.instagram_story_sync import story_account_diagnostic
+    return story_account_diagnostic()
+
+
 @app.post("/admin/instagram-story-sources/sync")
 def sync_instagram_story_sources(
     x_admin_key: Optional[str] = Header(None),

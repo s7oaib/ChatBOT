@@ -110,6 +110,42 @@ def _resolve_stories_endpoint(
     return f"{base}/{account_id}/stories", account_id, None
 
 
+def story_account_diagnostic() -> Dict[str, Any]:
+    """Admin-only fresh identity read; never touches inventory or returns secrets."""
+    from camellia.instagram_media import _resolve_current_account
+
+    mode = config.instagram_auth_mode()
+    expected_id = config.instagram_media_owner_id()
+    expected_username = str(config.INSTAGRAM_EXPECTED_USERNAME or "").strip().lstrip("@").casefold()
+    result = {
+        "status": "failed", "auth_mode": mode,
+        "graph_host": "graph.instagram.com" if mode == "instagram_login" else "graph.facebook.com",
+        "api_version": config.INSTAGRAM_API_VERSION,
+        "configured_graph_account_id": str(config.INSTAGRAM_GRAPH_ACCOUNT_ID or "").strip(),
+        "expected_account_id": expected_id, "expected_username": expected_username,
+        "authenticated_account_id": None, "authenticated_username": None,
+        "identity_match": False,
+    }
+    token = (config.INSTAGRAM_ACCESS_TOKEN or "").strip()
+    if not token:
+        return {**result, "failure": {"category": "instagram_token_not_configured"}}
+    try:
+        with httpx.Client(timeout=10.0) as client:
+            account_id, username, _, failure = _resolve_current_account(
+                client, token, config.INSTAGRAM_API_VERSION,
+            )
+        result.update(authenticated_account_id=account_id, authenticated_username=username)
+        if failure:
+            return {**result, "failure": {"category": failure}}
+        if not expected_id or not expected_username:
+            return {**result, "failure": {"category": "linked_account_not_configured"}}
+        if account_id != expected_id or str(username or "").casefold() != expected_username:
+            return {**result, "failure": {"category": "linked_account_mismatch"}}
+        return {**result, "status": "success", "identity_match": True}
+    except (httpx.HTTPError, ValueError, TypeError):
+        return {**result, "failure": {"category": "identity_request_failed"}}
+
+
 def _normalise_story(item: Any, account_id: str) -> Optional[Dict[str, Any]]:
     if not isinstance(item, dict):
         return None
