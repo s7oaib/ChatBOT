@@ -5057,12 +5057,15 @@ def get_instagram_outbound_audit(
 ):
     """Authenticated, read-only Meta send diagnostics."""
     require_admin(x_admin_key, x_admin_pin)
-    audits = db.get_instagram_outbound_audit(
-        limit=limit,
-        success=success,
-        inbound_message_id=inbound_message_id,
-        since=since,
-    )
+    try:
+        audits = db.get_instagram_outbound_audit(
+            limit=limit,
+            success=success,
+            inbound_message_id=inbound_message_id,
+            since=since,
+        )
+    except ValueError:
+        raise HTTPException(status_code=422, detail="since must be a valid ISO timestamp.") from None
     return {"count": len(audits), "audits": audits}
 
 @app.get("/admin/home-table-reel-delivery")

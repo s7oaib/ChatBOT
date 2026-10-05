@@ -2,6 +2,7 @@ from unittest.mock import patch
 import json
 import logging
 import sqlite3
+import pytest
 
 from camellia.config import config
 from camellia.database import Database
@@ -9,6 +10,59 @@ from fastapi.testclient import TestClient
 from camellia.app import app
 from camellia import app as app_module
 from camellia.monitoring import DeliveryHealthMonitor, classify_instagram_delivery, delivery_monitor
+
+
+@pytest.fixture
+def timestamp_audit_db(tmp_path):
+    database = Database(str(tmp_path / "timestamp-audit.db"))
+    for number, timestamp in enumerate((
+        "2026-10-05 14:09:35", "2026-10-05 14:09:36", "2026-10-05 14:09:37",
+    ), 1):
+        audit_id = database.create_instagram_outbound_audit(
+            inbound_message_id=number, recipient_id="sha256:masked",
+            response_type="text", parent_send_id=f"timestamp-{number}",
+            chunk_number=1, total_chunks=1, character_count=5,
+        )
+        with database.get_connection() as conn:
+            conn.execute("UPDATE instagram_outbound_audit SET created_at=? WHERE id=?", (timestamp, audit_id))
+            conn.commit()
+    return database
+
+
+@pytest.mark.parametrize("since", [
+    "2026-10-05T14:09:36", "2026-10-05 14:09:36",
+    "2026-10-05T14:09:36Z", "2026-10-05T14:09:36+00:00",
+    "2026-10-05T19:39:36+05:30", "2026-10-05T10:09:36-04:00",
+    "2026-10-05T14:09:36.000000Z", "2026-10-05 14:09:36.000000",
+])
+def test_equivalent_audit_timestamp_instants_include_exact_boundary(timestamp_audit_db, since):
+    assert [row["inbound_message_id"] for row in timestamp_audit_db.get_instagram_outbound_audit(since=since)] == [3, 2]
+
+
+@pytest.mark.parametrize("since, expected", [
+    (None, [3, 2, 1]), ("", [3, 2, 1]),
+    ("2026-10-05T14:09:34Z", [3, 2, 1]),
+    ("2026-10-05T14:09:36.000001Z", [3]),
+    ("2026-10-05T14:09:38Z", []),
+])
+def test_audit_timestamp_before_after_fractional_and_absent_controls(timestamp_audit_db, since, expected):
+    assert [row["inbound_message_id"] for row in timestamp_audit_db.get_instagram_outbound_audit(since=since)] == expected
+
+
+@pytest.mark.parametrize("since", ["not-a-date", "2026-10-05", "2026-02-30T00:00:00Z", " ", "2026-10-05T14:09:36' OR 1=1 --"])
+def test_malformed_audit_timestamp_is_rejected_without_querying(timestamp_audit_db, since):
+    with patch.object(timestamp_audit_db, "get_connection") as connection:
+        with pytest.raises(ValueError, match="since must be a valid ISO timestamp"):
+            timestamp_audit_db.get_instagram_outbound_audit(since=since)
+        connection.assert_not_called()
+
+
+def test_authenticated_audit_endpoint_returns_safe_422_for_bad_timestamp(timestamp_audit_db):
+    with patch.object(app_module, "require_admin"), patch.object(app_module, "db", timestamp_audit_db):
+        response = TestClient(app).get("/admin/instagram-outbound-audit", params={"since": "invalid-secret-value"})
+    assert response.status_code == 422
+    assert response.json() == {"detail": "since must be a valid ISO timestamp."}
+    assert "invalid-secret-value" not in response.text
 
 
 def test_instagram_outbound_audit_round_trip_and_health(tmp_path):
