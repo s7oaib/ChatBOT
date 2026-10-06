@@ -1232,6 +1232,8 @@ class Database:
             self._ensure_column(cursor, "instagram_source_routes", "topic_id", "TEXT")
             self._ensure_column(cursor, "instagram_source_routes", "response_mode", "TEXT NOT NULL DEFAULT 'CUSTOM'")
             self._ensure_column(cursor, "instagram_source_routes", "approved_qa_id", "TEXT")
+            from camellia.instagram_story_qa import initialize as initialize_story_qa
+            initialize_story_qa(cursor)
             self._ensure_column(cursor, "instagram_source_routes", "source_description", "TEXT NOT NULL DEFAULT ''")
             # The menu shown for this route. Defaults from the selected
             # Topic's default_menu_id at save time (see validate_route_payload)
@@ -1979,6 +1981,9 @@ class Database:
                         INSERT INTO instagram_source_ad_binding_history(ad_id, routing_id, action, occurred_at)
                         VALUES (?, ?, 'DISABLED', ?)
                     """, (old_ad_id, int(routing_id), now))
+            if route["source_type"] == "story" and route.get("response_mode", "CUSTOM") == "CUSTOM":
+                conn.execute("DELETE FROM instagram_story_qa_bundle_items WHERE routing_id=?", (routing_id,))
+                conn.execute("DELETE FROM instagram_story_qa_bundles WHERE routing_id=?", (routing_id,))
             conn.commit()
             row = conn.execute(
                 "SELECT * FROM instagram_source_routes WHERE routing_id = ?", (routing_id,)
@@ -2075,6 +2080,19 @@ class Database:
                 params,
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def get_instagram_story_qa_bundle(self, routing_id: int):
+        from camellia.instagram_story_qa import read
+        with self.get_connection() as conn:
+            route = conn.execute("SELECT * FROM instagram_source_routes WHERE routing_id=?", (routing_id,)).fetchone()
+            return read(conn, route)
+
+    def replace_instagram_story_qa_bundle(self, routing_id, story_id, context, qa_ids, actor):
+        from camellia import approved_qa, instagram_story_qa
+        with approved_qa._lock, self.get_connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            instagram_story_qa.replace(conn, routing_id, story_id, context, qa_ids, actor)
+        return self.get_instagram_story_qa_bundle(routing_id)
 
     def get_instagram_source_route(self, routing_id: int) -> Optional[Dict[str, Any]]:
         with self.get_connection() as conn:
