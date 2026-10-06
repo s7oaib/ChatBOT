@@ -2737,6 +2737,8 @@ class DeterministicResponder:
         # turn's decision is reset here.
         facts["source_context_used"] = False
         facts["source_referential_intent"] = None
+        facts.pop("story_bundle_match", None)
+        facts.pop("story_bundle_selected_count", None)
 
         # A shortcut owns a whole turn, not just one familiar secondary word.
         # Exact approved coverage remains eligible; otherwise use the existing
@@ -2773,6 +2775,60 @@ class DeterministicResponder:
                 return handoff, False, None, None
 
         source_for_qa = facts.get("source_route") or {}
+        bundle_match = None
+        bundle_active = False
+        if (channel == "instagram" and isinstance(source_for_qa, dict)
+                and source_for_qa.get("source_type") == "story" and source_for_qa.get("routing_id")
+                and source_for_qa.get("active", True) and not facts.get("source_context_superseded")
+                and source_for_qa.get("response_mode") == "APPROVED_QA"):
+            from camellia import approved_qa, instagram_story_qa
+            current_route = db.get_instagram_source_route(source_for_qa["routing_id"])
+            bundle = db.get_instagram_story_qa_bundle(source_for_qa["routing_id"])
+            if (bundle and bundle["story_bundle"]) or source_for_qa.get("story_bundle"):
+                bundle_valid = bool(bundle and bundle["story_bundle"] and current_route and current_route.get("active")
+                                    and not current_route.get("archived_at")
+                                    and current_route.get("media_id") == source_for_qa.get("media_id")
+                                    and current_route.get("response_mode") == "APPROVED_QA")
+                selected_count = len((bundle or source_for_qa).get("approved_qa_ids") or [])
+                wording = semantic_remainder or user_message
+                normalized = client_qa._normalise_match_text(wording)
+                global_match = client_qa.match(wording, {})
+                contextual_wording = bool(re.search(
+                    r"\b(?:shelf life|storage|expiry|deliver\w*|dispatch|pay\w*|order\w*|book\w*)\b", normalized))
+                independent = bool(client_qa._match_subjects(normalized)) or bool(
+                    OPENING_HOURS_RE.search(wording) or GREETING_ONLY_RE.fullmatch(wording.strip())
+                    or menu_review.weekly_menu_browsing(wording) or order_intake.is_new_order_request(wording)) or bool(
+                    global_match and global_match.entry.context == "general"
+                    and not source_referential_intent(wording) and not is_payment_method_request(wording)
+                    and not contextual_wording
+                    and not re.search(r"\b(?:it|this|that)\b", normalized))
+                if global_match and global_match.entry.qa_id == "delivery_out_of_area_client":
+                    independent = True  # Existing explicitly named delivery-area intent.
+                if not independent:
+                    bundle_active = True
+                    try:
+                        if not bundle_valid:
+                            raise ValueError("Story bundle no longer available")
+                        rows, allowed = instagram_story_qa.effective(db, bundle)
+                        context = {"bengali_home_table": "home_table", "savoury_deliveries": "savoury"}.get(bundle["story_context"], bundle["story_context"])
+                        # Explicit context supplies only disambiguation. The
+                        # effective selected ID set remains answer authority.
+                        narrow_facts = {"last_topic": context, "home_table_context": context == "home_table"}
+                        bundle_match = approved_qa.match(wording, narrow_facts, rows=rows, allowed_qa_ids=allowed)
+                    except Exception:
+                        bundle_match = None
+                    facts["story_bundle_match"] = "matched" if bundle_match else "unresolved"
+                    facts["story_bundle_selected_count"] = selected_count
+                    log.info("STORY_BUNDLE selected_qa_count=%s match=%s matched_qa_id=%s",
+                             selected_count, facts["story_bundle_match"],
+                             bundle_match.entry.qa_id if bundle_match else None)
+                    if not bundle_match:
+                        facts.update(client_qa_id=None, ordered_response_blocks=[], source_context_used=False,
+                                     last_route_source="HUMAN_HANDOFF", last_grounding="story_bundle_unresolved",
+                                     last_actions=[BusinessAction.ESCALATE_TO_TEAM.value], knowledge_sufficient=False)
+                        text = self._generic_fallback()
+                        session_memory.add_turn(user_id, channel, user_message, text)
+                        return text, False, "story_bundle_unresolved", None
         mapped_qa_reference = bool(
             channel == "instagram" and isinstance(source_for_qa, dict)
             and source_for_qa.get("routing_id") and source_for_qa.get("active", True)
@@ -2783,7 +2839,8 @@ class DeterministicResponder:
                 r"what(?:'s|\s+is)\s+(?:this|that)(?:\s+(?:story|post|reel))?(?:\s+about)?|"
                 r"more\s+details?(?:\s+please)?)\s*[?.!]*\s*", user_message, re.I)
         )
-        mapped_qa_match = (client_qa.resolve_effective_approved_qa_by_id(source_for_qa.get("approved_qa_id"))
+        mapped_qa_reference = mapped_qa_reference and not bundle_active
+        mapped_qa_match = bundle_match or (client_qa.resolve_effective_approved_qa_by_id(source_for_qa.get("approved_qa_id"))
                            if mapped_qa_reference else None)
         if mapped_qa_reference and mapped_qa_match is None:
             facts.update({"client_qa_id": None, "ordered_response_blocks": [],
@@ -2864,7 +2921,7 @@ class DeterministicResponder:
                          last_actions=[BusinessAction.ESCALATE_TO_TEAM.value], knowledge_sufficient=False)
             session_memory.add_turn(user_id, channel, user_message, text)
             return text, False, None, None
-        if channel == "instagram" and re.fullmatch(
+        if channel == "instagram" and not bundle_active and re.fullmatch(
                 r"\s*(?:how\s+much\s+time|how\s+long(?:\s+does\s+it\s+take)?|delivery\s+time|how\s+soon|when\s+will\s+it\s+arrive|dispatch\s+time)\s*[?!.]*", user_message, re.I):
             context = " ".join(str(facts.get(key) or "") for key in (
                 "active_topic", "last_topic", "active_product_context"))
@@ -3753,7 +3810,7 @@ class DeterministicResponder:
                 "client_qa_handoff_exact": entry.qa_id == "order_ready_handoff",
                 "ordered_response_blocks": ordered_response_blocks,
             })
-            if entry.qa_id == "sondesh_details_client":
+            if entry.qa_id == "sondesh_details_client" and not bundle_active:
                 # An explicit canonical Sondesh FAQ is a fresh subject. It
                 # must clear an older product-choice prompt and source context
                 # before the next turn can be interpreted as a follow-up.
@@ -3794,6 +3851,9 @@ class DeterministicResponder:
                         re.search(r"bengali\s+home\s+table|home\s+table|kolkata\s+home", source_topic, re.I)
                         and not re.search(r"\b(?:bengali\s+home\s+table|home\s+table|kolkata\s+home)\b", lowered_text, re.I)
                     )
+            if bundle_active:
+                facts["source_context_used"] = True
+                facts["source_context_superseded"] = False
             if asset_missing:
                 handoff, _ = self.build_handover_response(user_message)
                 facts["last_actions"] = [

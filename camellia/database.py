@@ -1899,7 +1899,17 @@ class Database:
             route.get("preview_url"), route.get("media_type"),
             route.get("response_mode") or "CUSTOM", route.get("approved_qa_id"), now,
         )
-        with self.get_connection() as conn:
+        from camellia import approved_qa, instagram_story_qa
+        bundle_write = "approved_qa_ids" in route
+        with (approved_qa._lock if bundle_write else nullcontext()), self.get_connection() as conn:
+            if bundle_write:
+                conn.execute("BEGIN IMMEDIATE")
+                if route["source_type"] != "story" or route.get("response_mode") != "APPROVED_QA":
+                    raise ValueError("Approved Q&A bundles are Story-only")
+                if routing_id is not None:
+                    old_identity = conn.execute("SELECT source_type,media_id,approved_qa_id FROM instagram_source_routes WHERE routing_id=?", (routing_id,)).fetchone()
+                    if not old_identity or old_identity["source_type"] != "story" or old_identity["media_id"] != route.get("media_id"):
+                        raise ValueError("Exact Story identity cannot change")
             if routing_id is None:
                 for field in ("canonical_url", "media_id", "ad_id"):
                     if not route.get(field):
@@ -1930,9 +1940,15 @@ class Database:
                 if any(int(binding["routing_id"]) != routing_id for binding in bindings):
                     raise ValueError("This Ad ID is already bound to a different active source.")
             old_ad_row = conn.execute(
-                "SELECT ad_id FROM instagram_source_routes WHERE routing_id=?", (routing_id,),
+                "SELECT ad_id,approved_qa_id,source_type,media_id FROM instagram_source_routes WHERE routing_id=?", (routing_id,),
             ).fetchone() if routing_id is not None else None
             old_ad_id = str(old_ad_row["ad_id"] or "").strip() if old_ad_row else ""
+            if bundle_write and old_ad_row and (old_ad_row["source_type"] != "story" or old_ad_row["media_id"] != route.get("media_id")):
+                raise ValueError("Exact Story identity cannot change")
+            if not bundle_write and old_ad_row and route.get("response_mode") == "APPROVED_QA":
+                bundle = instagram_story_qa.read(conn, {**dict(old_ad_row), "routing_id": routing_id, "response_mode": "APPROVED_QA"})
+                if bundle and bundle["story_bundle"] and route.get("approved_qa_id") not in bundle["approved_qa_ids"]:
+                    raise ValueError("Save the complete selected Story Q&A set")
             if routing_id is None:
                 cursor = conn.execute(
                     """INSERT INTO instagram_source_routes
@@ -1984,6 +2000,10 @@ class Database:
             if route["source_type"] == "story" and route.get("response_mode", "CUSTOM") == "CUSTOM":
                 conn.execute("DELETE FROM instagram_story_qa_bundle_items WHERE routing_id=?", (routing_id,))
                 conn.execute("DELETE FROM instagram_story_qa_bundles WHERE routing_id=?", (routing_id,))
+            if bundle_write:
+                if old_ad_row and old_ad_row["approved_qa_id"] in route["approved_qa_ids"]:
+                    conn.execute("UPDATE instagram_source_routes SET approved_qa_id=? WHERE routing_id=?", (old_ad_row["approved_qa_id"], routing_id))
+                instagram_story_qa.replace(conn, routing_id, route["media_id"], route.get("story_context"), route["approved_qa_ids"], route.get("bundle_actor") or "admin")
             conn.commit()
             row = conn.execute(
                 "SELECT * FROM instagram_source_routes WHERE routing_id = ?", (routing_id,)

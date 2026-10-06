@@ -14,16 +14,32 @@ SELECTOR_TEMPLATE = r"""<style>[id$="QaFields"][hidden],.source-map-field[hidden
 </div></fieldset>"""
 
 
+STORY_FIELDS = r'''<style>#igStoryApprovedQaId[hidden]{display:none!important;}</style><label class="field-label" for="igStoryQaContext">Context</label>
+<select class="field-control" id="igStoryQaContext" onchange="changeStoryQaContext()"></select>
+<p id="igStoryQaCount" role="status">Selected: 0</p>
+<div id="igStoryQaChecklist" style="max-height:40vh;overflow:auto;overflow-wrap:anywhere"></div>
+<p>Choose each approved question explicitly. General questions are never automatically selected.</p>'''
+
+
 def selector_html(prefix):
     assert prefix in {"ig", "igStory", "igMedia"}
-    return SELECTOR_TEMPLATE.replace("__PREFIX__", prefix)
+    template = SELECTOR_TEMPLATE.replace("__PREFIX__", prefix)
+    if prefix == "igStory":
+        template = template.replace('<label class="field-label" for="igStoryApprovedQaId">Approved Q&amp;A</label>', '')
+        template = template.replace('<select class="field-control" id="igStoryApprovedQaId"', '<select hidden class="field-control" id="igStoryApprovedQaId"')
+        template = template.replace('<p class="source-map-help">', STORY_FIELDS + '<p class="source-map-help">')
+    return template
 
 
 SCRIPT = r"""<script>
 const sourceResponseState = {};
-function sourceResponseHtml(prefix) { return __SELECTOR__.replaceAll('__PREFIX__', prefix); }
+function sourceResponseHtml(prefix) { return prefix==='igStory' ? __STORY_SELECTOR__ : __SELECTOR__.replaceAll('__PREFIX__', prefix); }
 function sourceResponseFields(prefix) {
  const mode=document.querySelector(`input[name="${prefix}ResponseMode"]:checked`)?.value || 'CUSTOM';
+ if(prefix==='igStory' && mode==='APPROVED_QA'){
+  const state=sourceResponseState[prefix];
+  return {response_mode:mode,approved_qa_ids:Array.from(state?.selectedIds||[]),story_context:state?.context??document.getElementById('igStoryQaContext')?.value??'general'};
+ }
  return {response_mode:mode, approved_qa_id:mode==='APPROVED_QA' ? document.getElementById(prefix+'ApprovedQaId')?.value || '' : null};
 }
 function setSourceResponseMode(prefix) {
@@ -35,7 +51,7 @@ function setSourceResponseMode(prefix) {
  previewSourceQa(prefix);
 }
 async function initSourceResponse(prefix, route) {
- const state={selected:route.approved_qa_id || '',records:[]}; sourceResponseState[prefix]=state;
+ const state={selected:route.approved_qa_id || '',records:[],selectedIds:new Set(route.approved_qa_ids || (route.approved_qa_id?[route.approved_qa_id]:[])),context:route.story_context??null}; sourceResponseState[prefix]=state;
  document.querySelector(`input[name="${prefix}ResponseMode"][value="${route.response_mode || 'CUSTOM'}"]`).checked=true;
  document.getElementById(prefix+'QaSearch').value='';
  const select=document.getElementById(prefix+'ApprovedQaId'); select.replaceChildren(new Option('Select Approved Q&A','')); select.disabled=true;
@@ -44,7 +60,13 @@ async function initSourceResponse(prefix, route) {
   const response=await fetch('/admin/instagram-routes/approved-qa-options',{headers:getAuthHeaders()});
   if(!response.ok)throw new Error('Effective Approved Q&A is unavailable.');
   const data=await response.json(); if(sourceResponseState[prefix]!==state)return;
-  state.records=data.records || []; select.disabled=false; filterSourceQa(prefix);
+  state.records=data.records || []; select.disabled=false;
+  if(prefix==='igStory'){
+   state.contexts=data.contexts||Array.from(new Set(['general',...state.records.map(r=>r.context)])).map(value=>({value,label:value}));
+   if(state.context===null)state.context=state.records.find(r=>state.selectedIds.has(r.qa_id))?.context||'general';
+   const context=document.getElementById('igStoryQaContext');context.replaceChildren(...state.contexts.map(o=>new Option(o.label,o.value)));context.value=state.context;
+  }
+  filterSourceQa(prefix);
  } catch(error) {
   if(sourceResponseState[prefix]!==state)return;
   select.replaceChildren(new Option('Approved Q&A unavailable',''));
@@ -53,6 +75,7 @@ async function initSourceResponse(prefix, route) {
 }
 function filterSourceQa(prefix) {
  const state=sourceResponseState[prefix]; if(!state)return;
+ if(prefix==='igStory'){renderStoryQa();return;}
  const select=document.getElementById(prefix+'ApprovedQaId');
  const selected=select.value || state.selected;
  const query=document.getElementById(prefix+'QaSearch').value.trim().toLowerCase();
@@ -68,6 +91,7 @@ function filterSourceQa(prefix) {
 }
 function previewSourceQa(prefix) {
  const state=sourceResponseState[prefix]; if(!state)return;
+ if(prefix==='igStory'){document.getElementById(prefix+'QaPreview').replaceChildren();return;}
  const select=document.getElementById(prefix+'ApprovedQaId'); state.selected=select.value || state.selected;
  const box=document.getElementById(prefix+'QaPreview'); box.replaceChildren();
  const record=state.records.find(r=>r.qa_id===select.value);
@@ -80,4 +104,30 @@ function previewSourceQa(prefix) {
   const item=document.createElement('li');item.textContent=block.kind==='TEXT' ? 'Approved text' : block.kind==='LINK' ? block.url : block.kind+': '+block.value;list.append(item);
  }box.append(list);
 }
-</script>""".replace("__SELECTOR__", json.dumps(SELECTOR_TEMPLATE))
+function changeStoryQaContext(){const state=sourceResponseState.igStory;if(!state)return;state.context=document.getElementById('igStoryQaContext').value;renderStoryQa();}
+function renderStoryQa(){
+ const state=sourceResponseState.igStory;if(!state)return;
+ const box=document.getElementById('igStoryQaChecklist');box.replaceChildren();
+ document.getElementById('igStoryQaCount').textContent='Selected: '+state.selectedIds.size;
+ const query=document.getElementById('igStoryQaSearch').value.trim().toLowerCase();
+ const eligible=state.records.filter(r=>r.context===state.context||r.context==='general');
+ const groups=[['Approved questions for this context',eligible.filter(r=>r.context===state.context)],['General — select explicitly',eligible.filter(r=>r.context==='general'&&state.context!=='general')]];
+ for(const [title,records] of groups){
+  const group=document.createElement('fieldset');group.style.border='0';group.style.padding='0';
+  const legend=document.createElement('legend');legend.textContent=title;group.append(legend);
+  for(const record of records){
+   const searchable=[record.question,record.qa_id,...(record.aliases||[]),...(record.source_aliases||[])].join(' ').toLowerCase();
+   if(query&&!searchable.includes(query))continue;
+   const row=document.createElement('div');row.style.marginBottom='12px';
+   const label=document.createElement('label');const checkbox=document.createElement('input');checkbox.type='checkbox';checkbox.style.width='auto';checkbox.value=record.qa_id;checkbox.checked=state.selectedIds.has(record.qa_id);
+   checkbox.onchange=()=>{if(checkbox.checked)state.selectedIds.add(record.qa_id);else state.selectedIds.delete(record.qa_id);document.getElementById('igStoryQaCount').textContent='Selected: '+state.selectedIds.size;};
+   label.append(checkbox,document.createTextNode(' '+record.question+' — '+record.qa_id));row.append(label);
+   const details=document.createElement('details');const summary=document.createElement('summary');summary.textContent='Read-only approved answer preview';const answer=document.createElement('p');answer.style.whiteSpace='pre-wrap';answer.textContent=record.answer;details.append(summary,answer);row.append(details);group.append(row);
+  }box.append(group);
+ }
+ for(const key of state.selectedIds){if(eligible.some(r=>r.qa_id===key))continue;
+  const warning=document.createElement('p');warning.textContent=key+' — unavailable/expired or context changed. Remove it and choose a current Q&A before saving.';
+  const remove=document.createElement('button');remove.type='button';remove.textContent='Remove selection';remove.onclick=()=>{state.selectedIds.delete(key);renderStoryQa();};warning.append(remove);box.append(warning);
+ }
+}
+</script>""".replace("__SELECTOR__", json.dumps(SELECTOR_TEMPLATE)).replace("__STORY_SELECTOR__", json.dumps(selector_html('igStory')))
