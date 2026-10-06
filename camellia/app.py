@@ -4019,6 +4019,13 @@ def list_instagram_story_sources(
             "has_more": page * page_size < total}
 
 
+@app.get("/admin/instagram-story-bundles/diagnostic")
+def instagram_story_bundle_diagnostic(x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    from camellia.instagram_story_qa import diagnostic
+    return diagnostic(db)
+
+
 @app.get("/admin/instagram-story-sources/{story_media_id}/preview")
 def get_instagram_story_preview(
     story_media_id: str, x_admin_key: Optional[str] = Header(None),
