@@ -146,20 +146,35 @@ def get(qa_id):
     return next((entry for entry in registry() if entry.qa_id == qa_id), None)
 
 
-def match(message, facts=None, *, rows=None):
+def match(message, facts=None, *, rows=None, allowed_qa_ids=None):
     rows = overlays() if rows is None else rows
     active = {entry.qa_id: entry for entry in registry(rows)}
+    if allowed_qa_ids is not None:
+        active = {key: entry for key, entry in active.items() if key in allowed_qa_ids}
     text = client_qa._normalise_match_text(message)
     exact = set()
+    if allowed_qa_ids is not None:
+        # Reuse canonical questions/source aliases, with the same whole-turn
+        # ownership guard. All matching selected IDs participate in ambiguity.
+        for key, entry in active.items():
+            words = [entry.question, *client_qa._PARAPHRASE_ALIASES.get(key, ())]
+            if (any(client_qa._normalise_match_text(word) == text for word in words)
+                    and client_qa.can_candidate_own_turn(message, key)):
+                exact.add(key)
     for key, row in rows.items():
         if key not in active:
             continue
         words = json.loads(row["aliases_json"])
         if row.get("question") is not None:
             words = [row["question"], *words]
-        if any(client_qa._normalise_match_text(word) == text for word in words):
+        if (any(client_qa._normalise_match_text(word) == text for word in words)
+                and (allowed_qa_ids is None or client_qa.can_candidate_own_turn(message, key))):
             exact.add(key)
     original = client_qa._match_base(message, facts)
+    if allowed_qa_ids is not None:
+        independent = client_qa._match_base(message, {})
+        if independent and independent.entry.qa_id in active and active[independent.entry.qa_id].context == "general":
+            exact.add(independent.entry.qa_id)
     if original and original.entry.qa_id in active:
         # Existing QA-S1 semantic authority also participates in ambiguity checks.
         exact.add(original.entry.qa_id)
@@ -167,7 +182,7 @@ def match(message, facts=None, *, rows=None):
         return None
     key = exact.pop()
     entry = active[key]
-    kind = original.match_kind if original and original.entry.qa_id == key else "admin_exact"
+    kind = "story_bundle" if allowed_qa_ids is not None else original.match_kind if original and original.entry.qa_id == key else "admin_exact"
     assets = original.asset_keys if original and original.entry.qa_id == key else entry.asset_keys
     return client_qa.ApprovedMatch(entry, kind, assets)
 

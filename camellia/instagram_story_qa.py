@@ -82,3 +82,19 @@ def diagnostic(database):
         return {'schema_initialized': {'instagram_story_qa_bundles', 'instagram_story_qa_bundle_items'} <= tables,
                 'stored_bundles': conn.execute('SELECT COUNT(*) FROM instagram_story_qa_bundles').fetchone()[0],
                 'stored_items': conn.execute('SELECT COUNT(*) FROM instagram_story_qa_bundle_items').fetchone()[0]}
+
+
+def effective(database, bundle):
+    """Recheck lifecycle and exact context on every use, including context edits."""
+    with database.get_connection() as conn:
+        rows = approved_qa._read(conn)
+    allowed = {entry.qa_id for entry in approved_qa.registry(rows)
+               if entry.qa_id in bundle['approved_qa_ids'] and entry.context in {bundle['story_context'], 'general'}}
+    return rows, allowed
+
+
+def route_contract(database, route):
+    if route and route.get('source_type') == 'story':
+        bundle = database.get_instagram_story_qa_bundle(route['routing_id'])
+        return {**route, **(bundle or {})}
+    return route

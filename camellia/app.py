@@ -3663,7 +3663,8 @@ def approved_source_options(x_admin_key: Optional[str] = Header(None), x_admin_p
     require_admin(x_admin_key, x_admin_pin)
     from camellia import approved_qa
     try:
-        records = [record for record in approved_qa.listing()["records"] if record["status"] == "ACTIVE"]
+        qa_listing = approved_qa.listing()
+        records = [record for record in qa_listing["records"] if record["status"] == "ACTIVE"]
         for record in records:
             record["ordered_blocks"] = []
             for block in record["blocks"]:
@@ -3671,7 +3672,7 @@ def approved_source_options(x_admin_key: Optional[str] = Header(None), x_admin_p
                     record["ordered_blocks"].extend(client_qa.build_home_table_reel_blocks(block["value"]))
                 else:
                     record["ordered_blocks"].append(block)
-        return {"records": records}
+        return {"records": records, "contexts": qa_listing["contexts"]}
     except Exception:
         raise HTTPException(503, "Effective Approved Q&A is unavailable.")
 
@@ -3698,6 +3699,8 @@ def list_instagram_routes(
         topic["topic_id"]: decode_topic(topic)
         for topic in db.list_instagram_topics()
     }
+    from camellia.instagram_story_qa import route_contract
+    routes = [route_contract(db, route) for route in routes]
     route_ids = {route.get("routing_id") for route in routes}
     pairings = {key: value for key, value in db.list_latest_post_pairings().items() if key in route_ids}
     previews = {
@@ -4014,6 +4017,9 @@ def list_instagram_story_sources(
     )
     instagram_story_previews.cleanup(db)
     items = [instagram_story_previews.enrich(item, db) for item in items]
+    for item in items:
+        if item.get("routing_id"):
+            item.update(db.get_instagram_story_qa_bundle(item["routing_id"]) or {})
     return {"status": "success", "story_sources": items, "page": page,
             "page_size": page_size, "total": total,
             "has_more": page * page_size < total}
@@ -4218,7 +4224,10 @@ async def save_instagram_route(
             if existing:
                 routing_id = int(existing["routing_id"])
         route = validate_route_payload(prepare_source_response(body, existing))
+        route["bundle_actor"] = "authenticated_admin" if (_admin_context.get() or {}).get("kind") == "session" else "admin_api_key"
         saved = decode_route(db.save_instagram_source_route(route, routing_id))
+        from camellia.instagram_story_qa import route_contract
+        saved = route_contract(db, saved)
     except (ValueError, TypeError) as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return {"status": "success", "route": saved}

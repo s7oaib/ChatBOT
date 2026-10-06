@@ -338,6 +338,18 @@ def product_ids() -> set[str]:
 def prepare_source_response(payload, existing=None):
     """Keep historical custom content when selecting an effective QA reference."""
     merged = {**(decode_route(existing) if existing else {}), **payload}
+    if "approved_qa_ids" in payload:
+        from camellia import approved_qa, instagram_story_qa
+        if any(key in payload for key in ("answer", "answers", "qa_answers", "blocks")):
+            raise ValueError("Submit stable Q&A IDs, never copied answers")
+        if merged.get("source_type") != "story":
+            raise ValueError("Multiple Approved Q&As are supported only for Stories")
+        if str(merged.get("response_mode") or "CUSTOM").upper() != "APPROVED_QA":
+            raise ValueError("Custom Stories cannot select an Approved Q&A bundle")
+        instagram_story_qa.validate(payload.get("story_context"), payload["approved_qa_ids"], approved_qa.overlays(strict=True))
+        old_primary = (existing or {}).get("approved_qa_id")
+        merged["approved_qa_id"] = old_primary if old_primary in payload["approved_qa_ids"] else payload["approved_qa_ids"][0]
+        merged["story_context"] = payload.get("story_context")
     mode = str(merged.get("response_mode") or "CUSTOM").strip().upper()
     if mode == "APPROVED_QA":
         # The mapping never accepts a copied QA answer, even from a stale client.
@@ -507,6 +519,11 @@ def validate_route_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         raise ValueError("Add an Instagram post/reel link, Media ID, or Ad ID.")
     if len(clean["routing_topic"]) > 160:
         raise ValueError("Routing topic must be 160 characters or fewer.")
+    if "approved_qa_ids" in payload:
+        if source_type != "story" or response_mode != "APPROVED_QA":
+            raise ValueError("Approved Q&A bundles are Story-only")
+        clean["approved_qa_ids"] = payload["approved_qa_ids"]
+        clean["story_context"] = payload.get("story_context")
     return clean
 
 
@@ -565,7 +582,8 @@ def route_for_inbound(
     if media_id and source_type == "story_reply":
         route = db.find_instagram_source_route("media_id", str(media_id), source_type="story")
         if route:
-            return decode_route(route), "story_media_id"
+            from camellia.instagram_story_qa import route_contract
+            return decode_route(route_contract(db, route)), "story_media_id"
     if source_type == "reel" and shortcode:
         route = db.find_instagram_source_route("shortcode", str(shortcode), source_type="reel")
         if route:
