@@ -20,6 +20,26 @@ _snapshots = {}
 _lock = threading.RLock()
 _preview_secret = secrets.token_bytes(32)
 EDIT_FIELDS = {"question", "answer", "context", "aliases", "valid_from", "valid_until"}
+CANONICAL_CONTEXTS = {
+    "general": "General", "savoury_deliveries": "Savoury Deliveries",
+    "sondesh": "Sondesh", "bengali_home_table": "Bengali Home Table",
+}
+
+
+def context_options(rows=None):
+    """Exact stored values, including retained versions, remain editable."""
+    rows = overlays(strict=True) if rows is None else rows
+    values = {entry.context for entry in client_qa.REGISTRY}
+    values.update(row["context"] for row in rows.values() if isinstance(row.get("context"), str))
+    with _database().get_connection() as conn:
+        for row in conn.execute("SELECT snapshot_json FROM approved_qa_versions"):
+            snapshot = json.loads(row["snapshot_json"])
+            if isinstance(snapshot.get("context"), str):
+                values.add(snapshot["context"])
+    return [{"value": key, "label": label, "legacy": False} for key, label in CANONICAL_CONTEXTS.items()] + [
+        {"value": value, "label": (value or "Empty context") + " (existing)", "legacy": True}
+        for value in sorted(values - CANONICAL_CONTEXTS.keys())
+    ]
 
 
 def now_utc():
@@ -171,7 +191,7 @@ def listing():
     records = [_record(entry, rows.get(entry.qa_id, {})) for entry in registry(rows, active_only=False)]
     counts = {key: sum(record["status"] == key for record in records) for key in ("ACTIVE", "SCHEDULED", "EXPIRED", "ARCHIVED")}
     counts["EXPIRING_SOON"] = sum(record["expiring_soon"] for record in records)
-    return {"records": records, "counts": counts, "timezone": "Asia/Kolkata"}
+    return {"records": records, "counts": counts, "timezone": "Asia/Kolkata", "contexts": context_options(rows)}
 
 
 def detail(qa_id):
@@ -214,6 +234,8 @@ def _candidate(body, rows):
                 raise ValueError("Question and approved answer are required")
             if len(value) > (20000 if key == "answer" else 2000):
                 raise ValueError("Approved field is too long")
+            if key == "context" and value not in {option["value"] for option in context_options(rows)}:
+                raise ValueError("Choose an allowed Approved Q&A context")
             # Sending unchanged base copy must not manufacture an override.
             result[key] = None if base and value == getattr(base, key) else value
     if not base and (not result["question"] or not result["answer"]):
