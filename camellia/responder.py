@@ -2739,6 +2739,8 @@ class DeterministicResponder:
         facts["source_referential_intent"] = None
         facts.pop("story_bundle_match", None)
         facts.pop("story_bundle_selected_count", None)
+        facts.pop("source_bundle_match", None)
+        facts.pop("source_bundle_selected_count", None)
 
         # A shortcut owns a whole turn, not just one familiar secondary word.
         # Exact approved coverage remains eligible; otherwise use the existing
@@ -2778,17 +2780,24 @@ class DeterministicResponder:
         bundle_match = None
         bundle_active = False
         if (channel == "instagram" and isinstance(source_for_qa, dict)
-                and source_for_qa.get("source_type") == "story" and source_for_qa.get("routing_id")
+                and source_for_qa.get("source_type") in {"story", "post", "reel"} and source_for_qa.get("routing_id")
                 and source_for_qa.get("active", True) and not facts.get("source_context_superseded")
                 and source_for_qa.get("response_mode") == "APPROVED_QA"):
-            from camellia import approved_qa, instagram_story_qa
+            from camellia import approved_qa, instagram_story_qa, instagram_source_qa
+            is_story = source_for_qa["source_type"] == "story"
+            bundle_store = instagram_story_qa if is_story else instagram_source_qa
+            flag = "story_bundle" if is_story else "qa_bundle"
+            audit = "story_bundle" if is_story else "source_bundle"
+            context_field = "story_context" if is_story else "source_context"
             current_route = db.get_instagram_source_route(source_for_qa["routing_id"])
-            bundle = db.get_instagram_story_qa_bundle(source_for_qa["routing_id"])
-            if (bundle and bundle["story_bundle"]) or source_for_qa.get("story_bundle"):
-                bundle_valid = bool(bundle and bundle["story_bundle"] and current_route and current_route.get("active")
+            bundle = db.get_instagram_story_qa_bundle(source_for_qa["routing_id"]) if is_story else db.get_instagram_source_qa_bundle(source_for_qa["routing_id"])
+            if (bundle and bundle[flag]) or source_for_qa.get(flag):
+                bundle_valid = bool(bundle and bundle[flag] and current_route and current_route.get("active")
                                     and not current_route.get("archived_at")
                                     and current_route.get("media_id") == source_for_qa.get("media_id")
                                     and current_route.get("response_mode") == "APPROVED_QA")
+                if not is_story:
+                    bundle_valid = bundle_valid and all(current_route.get(key) == source_for_qa.get(key) for key in instagram_source_qa.IDENTITY_FIELDS)
                 selected_count = len((bundle or source_for_qa).get("approved_qa_ids") or [])
                 wording = semantic_remainder or user_message
                 normalized = client_qa._normalise_match_text(wording)
@@ -2809,26 +2818,26 @@ class DeterministicResponder:
                     try:
                         if not bundle_valid:
                             raise ValueError("Story bundle no longer available")
-                        rows, allowed = instagram_story_qa.effective(db, bundle)
-                        context = {"bengali_home_table": "home_table", "savoury_deliveries": "savoury"}.get(bundle["story_context"], bundle["story_context"])
+                        rows, allowed = bundle_store.effective(db, bundle)
+                        context = {"bengali_home_table": "home_table", "savoury_deliveries": "savoury"}.get(bundle[context_field], bundle[context_field])
                         # Explicit context supplies only disambiguation. The
                         # effective selected ID set remains answer authority.
                         narrow_facts = {"last_topic": context, "home_table_context": context == "home_table"}
                         bundle_match = approved_qa.match(wording, narrow_facts, rows=rows, allowed_qa_ids=allowed)
                     except Exception:
                         bundle_match = None
-                    facts["story_bundle_match"] = "matched" if bundle_match else "unresolved"
-                    facts["story_bundle_selected_count"] = selected_count
-                    log.info("STORY_BUNDLE selected_qa_count=%s match=%s matched_qa_id=%s",
-                             selected_count, facts["story_bundle_match"],
+                    facts[audit + "_match"] = "matched" if bundle_match else "unresolved"
+                    facts[audit + "_selected_count"] = selected_count
+                    log.info(audit.upper() + " selected_qa_count=%s match=%s matched_qa_id=%s",
+                             selected_count, facts[audit + "_match"],
                              bundle_match.entry.qa_id if bundle_match else None)
                     if not bundle_match:
                         facts.update(client_qa_id=None, ordered_response_blocks=[], source_context_used=False,
-                                     last_route_source="HUMAN_HANDOFF", last_grounding="story_bundle_unresolved",
+                                     last_route_source="HUMAN_HANDOFF", last_grounding=audit + "_unresolved",
                                      last_actions=[BusinessAction.ESCALATE_TO_TEAM.value], knowledge_sufficient=False)
                         text = self._generic_fallback()
                         session_memory.add_turn(user_id, channel, user_message, text)
-                        return text, False, "story_bundle_unresolved", None
+                        return text, False, audit + "_unresolved", None
         mapped_qa_reference = bool(
             channel == "instagram" and isinstance(source_for_qa, dict)
             and source_for_qa.get("routing_id") and source_for_qa.get("active", True)

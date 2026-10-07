@@ -340,4 +340,4 @@ function inputs(node){return [...(node.tag==='input'?[node]:[]),...(node.childre
     result=subprocess.run([node,'-e',harness+script+check],capture_output=True,text=True)
     assert result.returncode==0,result.stderr
     assert 'igStoryQaChecklist' in selector_html('igStory')
-    assert 'QaChecklist' not in selector_html('ig') and 'QaChecklist' not in selector_html('igMedia')
+    assert 'igQaChecklist' in selector_html('ig') and 'igMediaQaChecklist' in selector_html('igMedia')

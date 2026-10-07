@@ -3701,6 +3701,8 @@ def list_instagram_routes(
     }
     from camellia.instagram_story_qa import route_contract
     routes = [route_contract(db, route) for route in routes]
+    from camellia.instagram_source_qa import route_contract as source_contract
+    routes = [source_contract(db, route) for route in routes]
     route_ids = {route.get("routing_id") for route in routes}
     pairings = {key: value for key, value in db.list_latest_post_pairings().items() if key in route_ids}
     previews = {
@@ -3824,7 +3826,8 @@ def list_instagram_media(
     for item in items:
         if item.get("mapping_route"):
             from camellia.instagram_ads import mapping_display
-            item["mapping_route"] = mapping_display(item["mapping_route"])
+            from camellia.instagram_source_qa import route_contract
+            item["mapping_route"] = mapping_display(route_contract(db, item["mapping_route"]))
         item["needs_review"] = bool(item["needs_review"])
         item["active"] = bool(item["active"])
     return {"status": "success", "items": items, "page": page, "page_size": page_size,
@@ -3964,7 +3967,12 @@ async def save_instagram_media_mapping(item_id: int, request: Request, x_admin_k
         "knowledge_scope": json.loads(existing["knowledge_scope"]) if existing else [],
     }
     try:
+        if "approved_qa_ids" in body:
+            route_body.update(approved_qa_ids=body["approved_qa_ids"], source_context=body.get("source_context"))
+            if any(key in body for key in ("answer", "answers", "qa_answers", "blocks")):
+                raise ValueError("Submit stable Q&A IDs, never copied answers")
         route = validate_route_payload(prepare_source_response(route_body, existing))
+        route["bundle_actor"] = "authenticated_admin" if (_admin_context.get() or {}).get("kind") == "session" else "admin_api_key"
         saved = db.save_instagram_source_route(route, int(existing["routing_id"]) if existing else None)
     except (ValueError, TypeError) as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -3972,7 +3980,8 @@ async def save_instagram_media_mapping(item_id: int, request: Request, x_admin_k
         item_id, route_mode="CUSTOM" if route["active"] else "DISABLED",
         topic_id=topic_id, custom_route_id=int(saved["routing_id"]), needs_review=False,
     )
-    return {"status": "success", "item": updated, "route": decode_route(saved)}
+    from camellia.instagram_source_qa import route_contract
+    return {"status": "success", "item": updated, "route": route_contract(db, decode_route(saved))}
 
 
 @app.delete("/admin/instagram-media/{item_id}/mapping")
@@ -4235,6 +4244,8 @@ async def save_instagram_route(
         saved = decode_route(db.save_instagram_source_route(route, routing_id))
         from camellia.instagram_story_qa import route_contract
         saved = route_contract(db, saved)
+        from camellia.instagram_source_qa import route_contract as source_contract
+        saved = source_contract(db, saved)
     except (ValueError, TypeError) as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return {"status": "success", "route": saved}
@@ -10143,6 +10154,7 @@ THIS WEEK'S BENGAL SPECIALS
             const label = type === 'reel' ? 'reel' : type === 'ad' ? 'ad' : 'post';
             document.getElementById('igSourceDescriptionLabel').innerText = `Description for this ${label}`;
             document.getElementById('igSourceDescriptionHelp').innerText = `Used when someone asks what this ${label} is about.`;
+            if(sourceResponseState.ig){setSourceResponseMode('ig');filterSourceQa('ig');}
         }
 
         async function identifyInstagramRoute() {
