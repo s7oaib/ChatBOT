@@ -1234,6 +1234,8 @@ class Database:
             self._ensure_column(cursor, "instagram_source_routes", "approved_qa_id", "TEXT")
             from camellia.instagram_story_qa import initialize as initialize_story_qa
             initialize_story_qa(cursor)
+            from camellia.instagram_source_qa import initialize as initialize_source_qa
+            initialize_source_qa(cursor)
             self._ensure_column(cursor, "instagram_source_routes", "source_description", "TEXT NOT NULL DEFAULT ''")
             # The menu shown for this route. Defaults from the selected
             # Topic's default_menu_id at save time (see validate_route_payload)
@@ -2000,6 +2002,9 @@ class Database:
             if route["source_type"] == "story" and route.get("response_mode", "CUSTOM") == "CUSTOM":
                 conn.execute("DELETE FROM instagram_story_qa_bundle_items WHERE routing_id=?", (routing_id,))
                 conn.execute("DELETE FROM instagram_story_qa_bundles WHERE routing_id=?", (routing_id,))
+            if route["source_type"] in {"post", "reel"} and route.get("response_mode", "CUSTOM") == "CUSTOM":
+                from camellia.instagram_source_qa import clear
+                clear(conn, routing_id)
             if bundle_write:
                 if old_ad_row and old_ad_row["approved_qa_id"] in route["approved_qa_ids"]:
                     conn.execute("UPDATE instagram_source_routes SET approved_qa_id=? WHERE routing_id=?", (old_ad_row["approved_qa_id"], routing_id))
@@ -2100,6 +2105,19 @@ class Database:
                 params,
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def get_instagram_source_qa_bundle(self, routing_id: int):
+        from camellia.instagram_source_qa import read
+        with self.get_connection() as conn:
+            route = conn.execute("SELECT * FROM instagram_source_routes WHERE routing_id=?", (routing_id,)).fetchone()
+            return read(conn, route)
+
+    def replace_instagram_source_qa_bundle(self, routing_id, exact_identity, context, qa_ids, actor):
+        from camellia import approved_qa, instagram_source_qa
+        with approved_qa._lock, self.get_connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            instagram_source_qa.replace(conn, routing_id, exact_identity, context, qa_ids, actor)
+        return self.get_instagram_source_qa_bundle(routing_id)
 
     def get_instagram_story_qa_bundle(self, routing_id: int):
         from camellia.instagram_story_qa import read
