@@ -339,17 +339,20 @@ def prepare_source_response(payload, existing=None):
     """Keep historical custom content when selecting an effective QA reference."""
     merged = {**(decode_route(existing) if existing else {}), **payload}
     if "approved_qa_ids" in payload:
-        from camellia import approved_qa, instagram_story_qa
+        from camellia import approved_qa, instagram_story_qa, instagram_source_qa
         if any(key in payload for key in ("answer", "answers", "qa_answers", "blocks")):
             raise ValueError("Submit stable Q&A IDs, never copied answers")
-        if merged.get("source_type") != "story":
-            raise ValueError("Multiple Approved Q&As are supported only for Stories")
+        source = merged.get("source_type")
+        if source not in {"story", "post", "reel"}:
+            raise ValueError("Multiple Approved Q&As require a Story, Post or Reel")
         if str(merged.get("response_mode") or "CUSTOM").upper() != "APPROVED_QA":
             raise ValueError("Custom Stories cannot select an Approved Q&A bundle")
-        instagram_story_qa.validate(payload.get("story_context"), payload["approved_qa_ids"], approved_qa.overlays(strict=True))
+        context_field = "story_context" if source == "story" else "source_context"
+        store = instagram_story_qa if source == "story" else instagram_source_qa
+        store.validate(payload.get(context_field), payload["approved_qa_ids"], approved_qa.overlays(strict=True))
         old_primary = (existing or {}).get("approved_qa_id")
         merged["approved_qa_id"] = old_primary if old_primary in payload["approved_qa_ids"] else payload["approved_qa_ids"][0]
-        merged["story_context"] = payload.get("story_context")
+        merged[context_field] = payload.get(context_field)
     mode = str(merged.get("response_mode") or "CUSTOM").strip().upper()
     if mode == "APPROVED_QA":
         # The mapping never accepts a copied QA answer, even from a stale client.
@@ -520,10 +523,11 @@ def validate_route_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     if len(clean["routing_topic"]) > 160:
         raise ValueError("Routing topic must be 160 characters or fewer.")
     if "approved_qa_ids" in payload:
-        if source_type != "story" or response_mode != "APPROVED_QA":
-            raise ValueError("Approved Q&A bundles are Story-only")
+        if source_type not in {"story", "post", "reel"} or response_mode != "APPROVED_QA":
+            raise ValueError("Approved Q&A bundles require a Story, Post or Reel")
         clean["approved_qa_ids"] = payload["approved_qa_ids"]
-        clean["story_context"] = payload.get("story_context")
+        context_field = "story_context" if source_type == "story" else "source_context"
+        clean[context_field] = payload.get(context_field)
     return clean
 
 
@@ -574,6 +578,7 @@ def route_for_inbound(
     Legacy callers retain the historical ad-first precedence.
     """
     from camellia.database import db
+    from camellia.instagram_source_qa import route_contract as source_contract
 
     # A Story reply carries the strongest source evidence: the exact Meta
     # Story media id.  Keep ad referral matching unchanged for all other
@@ -587,15 +592,15 @@ def route_for_inbound(
     if source_type == "reel" and shortcode:
         route = db.find_instagram_source_route("shortcode", str(shortcode), source_type="reel")
         if route:
-            return decode_route(route), "shared_media_url"
+            return decode_route(source_contract(db, route)), "shared_media_url"
     if source_type == "post" and post_media_id:
         route = db.find_instagram_source_route("media_id", str(post_media_id), source_type="post")
         if route:
-            return decode_route(route), "shared_post_media_id"
+            return decode_route(source_contract(db, route)), "shared_post_media_id"
     if ad_id:
         route = db.find_instagram_source_route("ad_id", str(ad_id))
         if route:
-            return decode_route(route), "ad_id"
+            return decode_route(source_contract(db, route)), "ad_id"
         legacy = db.get_ad_product_route(str(ad_id))
         if legacy:
             return {
@@ -616,13 +621,13 @@ def route_for_inbound(
             "media_id", str(media_id), source_type="story" if source_type == "story_reply" else None,
         )
         if route:
-            return decode_route(route), "media_id"
+            return decode_route(source_contract(db, route)), "media_id"
     if shortcode:
         route = db.find_instagram_source_route(
             "shortcode", str(shortcode), source_type="reel" if source_type == "reel" else None,
         )
         if route:
-            return decode_route(route), "shared_media_url"
+            return decode_route(source_contract(db, route)), "shared_media_url"
     if post_media_id:
         # A paired post's id lives in the same media_id column a story reply
         # would occupy — it is still an exact Meta identifier once bound, just
@@ -631,7 +636,7 @@ def route_for_inbound(
             "media_id", str(post_media_id), source_type="post" if source_type == "post" else None,
         )
         if route:
-            return decode_route(route), "shared_post_media_id"
+            return decode_route(source_contract(db, route)), "shared_post_media_id"
     return None, None
 
 
