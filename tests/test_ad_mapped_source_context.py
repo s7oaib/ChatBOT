@@ -348,7 +348,8 @@ def test_exact_ad_bundle_uses_canonical_answer_once_on_duplicate_delivery(ad_cus
     assert send.call_count == first_delivery_send_count
 
 
-def test_exact_ad_with_unavailable_selected_qa_fails_closed_to_handoff(ad_customer):
+@pytest.mark.parametrize("missing_qa_id", [None, "expired_or_missing_qa"])
+def test_exact_ad_with_unavailable_selected_qa_fails_closed_to_handoff(ad_customer, missing_qa_id):
     sender, facts, db = ad_customer
     route = _mapped_source(ad_customer, "reel", "invalid-qa-ad", topic_name="Bengali Home Table",
                             response_mode="APPROVED_QA", approved_qa_id="home_table_price")
@@ -356,14 +357,16 @@ def test_exact_ad_with_unavailable_selected_qa_fails_closed_to_handoff(ad_custom
     # saved but whose selected Q&A was later removed or made ineligible.
     with db.get_connection() as conn:
         conn.execute("UPDATE instagram_source_routes SET approved_qa_id=? WHERE routing_id=?",
-                     ("expired_or_missing_qa", route["routing_id"]))
+                     (missing_qa_id, route["routing_id"]))
 
     send = _process(ad_customer, "What is the price?", _ad_entry(sender, "invalid-qa-ad", "What is the price?"))
 
     row = db.get_conversations(limit=1, channel="instagram", user_id=sender)[0]
     assert row["template_id"] == "instagram_support_handoff"
     assert row["bot_response"] != client_qa.effective_entry("home_table_price").answer
-    assert facts.get("client_qa_id") != "expired_or_missing_qa"
+    assert facts.get("client_qa_id") != "home_table_price"
+    if missing_qa_id:
+        assert facts.get("client_qa_id") != missing_qa_id
     assert db.get_active_handoff("instagram", sender)
     assert send.called
 

@@ -2843,8 +2843,7 @@ class DeterministicResponder:
             elif (not is_story and current_route and current_route.get("active")
                   and not current_route.get("archived_at")
                   and current_route.get("response_mode") == "APPROVED_QA"
-                  and current_route.get("approved_qa_id") == source_for_qa.get("approved_qa_id")
-                  and source_for_qa.get("approved_qa_id")):
+                  and current_route.get("approved_qa_id") == source_for_qa.get("approved_qa_id")):
                 # Older Post/Reel mappings store one selected ID on the route
                 # instead of a bundle. Match against that exact effective ID
                 # so a duplicate alias in another context cannot steal the
@@ -2854,28 +2853,31 @@ class DeterministicResponder:
                     for key in instagram_source_qa.IDENTITY_FIELDS
                 )
                 if identity_matches:
-                    try:
-                        rows = approved_qa.overlays(strict=True)
-                        selected_id = source_for_qa["approved_qa_id"]
-                        selected = next(
-                            (entry for entry in approved_qa.registry(rows) if entry.qa_id == selected_id),
-                            None,
-                        )
-                        if selected:
-                            context = selected.context
-                            narrow_facts = {
-                                "last_topic": context,
-                                "home_table_context": context == "home_table",
-                            }
-                            legacy_source_match = approved_qa.match(
-                                user_message, narrow_facts, rows=rows,
-                                allowed_qa_ids={selected_id},
-                            )
-                        else:
-                            legacy_source_unavailable = True
-                    except Exception:
-                        legacy_source_match = None
+                    selected_id = source_for_qa.get("approved_qa_id")
+                    if not selected_id:
                         legacy_source_unavailable = True
+                    else:
+                        try:
+                            rows = approved_qa.overlays(strict=True)
+                            selected = next(
+                                (entry for entry in approved_qa.registry(rows) if entry.qa_id == selected_id),
+                                None,
+                            )
+                            if selected:
+                                context = selected.context
+                                narrow_facts = {
+                                    "last_topic": context,
+                                    "home_table_context": context == "home_table",
+                                }
+                                legacy_source_match = approved_qa.match(
+                                    user_message, narrow_facts, rows=rows,
+                                    allowed_qa_ids={selected_id},
+                                )
+                            else:
+                                legacy_source_unavailable = True
+                        except Exception:
+                            legacy_source_match = None
+                            legacy_source_unavailable = True
         if legacy_source_unavailable:
             # A stale legacy selection must not silently fall through to a
             # different global Q&A just because that wording happens to match.
