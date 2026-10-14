@@ -4336,11 +4336,11 @@ def delete_instagram_route(
 # Shared-post pairing. A shared post carries no shortcode/URL Meta will put
 # in a webhook, and its messaging-attachment id has not been shown to
 # correspond to anything Graph will verify — so a post route only gets a
-# trustworthy media_id through an admin deliberately pairing one: start a
-# short window, share the exact post into the business DM, and whatever id
-# arrives during that window binds to the route. Binding is a one-shot
-# write into instagram_source_routes.media_id; runtime matching then reuses
-# the existing exact media_id lookup, no separate code path required.
+# trustworthy shared-post id through an admin deliberately pairing one: start
+# a short window, share the exact post into the business DM, and whatever id
+# arrives during that window binds to the route as an exact alias on the
+# pairing row. The route's own (synced Graph) media_id is never overwritten;
+# db.find_shared_post_route matches either one.
 # --------------------------------------------------------------------------
 
 @app.post("/admin/instagram-routes/{routing_id}/pairing/start")
@@ -9552,7 +9552,7 @@ THIS WEEK'S BENGAL SPECIALS
                     <div class="source-map-field"><label class="field-label" for="igMediaDescription">Description for this ${item.source_type}</label><p class="source-map-help">Used when someone asks what this ${item.source_type} is about.</p><textarea class="field-control" id="igMediaDescription" rows="5">${escapeHtml(item.source_description || '')}</textarea></div>
                     <div class="source-map-field"><label class="field-label" for="igMediaMenu">Menu / Image <span class="ig-media-muted">Optional</span></label><select class="field-control" id="igMediaMenu" onchange="renderSourceAssetCard('igMediaMenu','igMediaMenuSelected')">${menuOptions}</select><div class="source-secondary-actions"><button class="btn-secondary" type="button" onclick="openMenuModal('igMediaMenu')">+ Add Menu / Image</button></div><div class="source-asset-card" id="igMediaMenuSelected"></div></div>
                     <div class="source-map-field"><b>Use as chatbot context</b><div class="source-switch-row"><span class="source-map-help">Use this mapped Story, Post or Reel to understand short follow-up messages like “tell me more” or “price?”. This does not send a message automatically.</span><label class="source-switch"><input type="checkbox" id="igMediaAutoReply" aria-label="Use as chatbot context" ${item.mapping_route?.active || (!item.mapping_route && item.route_mode !== 'DISABLED') ? 'checked' : ''}><span></span></label></div></div>
-                    ${item.sync_status === 'MANUAL_EXACT_LINK' && item.source_type === 'post' && item.mapping_route ? `<div><button class="btn-secondary" type="button" onclick="pairInstagramPost(${Number(item.mapping_route.routing_id)})">Pair exact shared Post</button><div id="igPairingStatus-${Number(item.mapping_route.routing_id)}"></div></div>` : ''}
+                    ${item.source_type === 'post' && item.mapping_route ? `<div><button class="btn-secondary" type="button" onclick="pairInstagramPost(${Number(item.mapping_route.routing_id)})">Pair exact shared Post</button><div id="igPairingStatus-${Number(item.mapping_route.routing_id)}"></div></div>` : ''}
                     <div><button class="btn-primary source-save" type="button" onclick="saveInstagramMediaRoute(${Number(item.id)})">Save Mapping</button>${item.permalink ? `<div style="margin-top:16px;"><a class="btn-secondary" target="_blank" rel="noopener" href="${escapeHtml(item.permalink)}">Open on Instagram</a></div>` : ''}</div>
                     ${item.mapping_route || item.topic_id ? `<div class="source-danger"><b>Delete Mapping</b><p class="source-map-help">Removes chatbot mapping only. The Instagram ${item.source_type} will not be deleted.</p><button class="btn-danger" type="button" onclick="deleteInstagramMediaMapping(${Number(item.id)})">Delete Mapping</button></div>` : ''}
                 </div>`;
@@ -10629,7 +10629,7 @@ THIS WEEK'S BENGAL SPECIALS
             if (route.archived_at) return { label: 'Archived', className: 'disabled' };
             if (!route.active) return { label: 'Disabled', className: 'disabled' };
             if (route.source_type === 'story') return { label: 'Mapped', className: '' };
-            if (route.source_type !== 'post' || route.media_id) return { label: 'Connected', className: '' };
+            if (route.source_type !== 'post' || route.media_id || route.pairing_status === 'bound') return { label: 'Connected', className: '' };
             if (route.pairing_status === 'pending') return { label: `Waiting for shared post — expires ${route.pairing_expires_at || 'soon'}`, className: 'waiting' };
             return { label: 'Waiting for Post', className: 'waiting' };
         }
@@ -10769,7 +10769,7 @@ THIS WEEK'S BENGAL SPECIALS
             const description = (route.topic_description || '').trim();
             const priority = (route.priority_products || []).map(id => ((igProducts.find(p => p.id === id) || {}).label || id)).join(' → ') || 'Normal conversation routing';
             const link = route.canonical_url ? `<a class="ig-media-link" href="${escapeHtml(route.canonical_url)}" target="_blank" rel="noopener noreferrer">Open Instagram · ${escapeHtml(instagramShortUrl(route.canonical_url))}</a>` : route.source_type === 'story' ? `<span class="ig-media-muted">Story media ID: ${escapeHtml(route.media_id || '—')}</span>` : '<span class="ig-media-muted">Instagram link unavailable</span>';
-            const pairingNote = route.source_type === 'post' && route.media_id && route.pairing_status === 'bound' ? '<span class="ig-media-muted">Connected via Post Pairing</span>' : '';
+            const pairingNote = route.source_type === 'post' && route.pairing_status === 'bound' ? '<span class="ig-media-muted">Connected via Post Pairing</span>' : '';
             const detailsImage = (route.preview_url || route.admin_preview_url) ? instagramPreview(route, true) : '<span class="ig-media-muted">Preview unavailable; route remains active.</span>';
             const previewSource = route.preview_url ? 'Meta-provided preview' : route.admin_preview_url ? 'Admin preview fallback' : 'Placeholder';
             const details = `<details class="ig-media-details"><summary style="cursor:pointer;">Details</summary>${detailsImage}<div>Topic: ${escapeHtml(route.routing_topic || 'Not mapped')}<br>Description: ${escapeHtml(route.source_description || 'No description added.')}<br>Updated: ${escapeHtml(route.updated_at || route.created_at || '—')}</div></details>`;
@@ -10777,7 +10777,7 @@ THIS WEEK'S BENGAL SPECIALS
             if (route.archived_at) {
                 actions = `<button class="btn-secondary" type="button" onclick="restoreInstagramRoute(${route.routing_id})">Restore</button> <button class="btn-danger" type="button" onclick="openIgRemoveModal(${route.routing_id})">Delete</button>`;
             } else if (route.routing_id) {
-                const connect = route.source_type === 'post' ? `<button class="btn-secondary" type="button" onclick="pairInstagramPost(${route.routing_id})">${route.media_id ? 'Reconnect Post' : 'Connect Post'}</button>` : '';
+                const connect = route.source_type === 'post' ? `<button class="btn-secondary" type="button" onclick="pairInstagramPost(${route.routing_id})">${route.media_id || route.pairing_status === 'bound' ? 'Reconnect Post' : 'Connect Post'}</button>` : '';
                 actions = `<button class="btn-secondary" type="button" onclick="editInstagramRoute(${route.routing_id})">Edit Mapping</button><button class="btn-secondary" type="button" onclick="setInstagramRouteActive(${route.routing_id},${!route.active})">${route.active ? 'Context: On' : 'Context: Off'}</button><button class="btn-danger" type="button" onclick="openIgRemoveModal(${route.routing_id})">Delete Mapping</button>${connect}`;
             } else {
                 actions = `<button class="btn-danger" type="button" onclick="removeAdRoute('${escapeHtml(route.ad_id || '')}')">Remove</button>`;

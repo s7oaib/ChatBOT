@@ -153,7 +153,8 @@ def test_existing_verified_shared_post_pairing_keeps_exact_route_bundle(store):
     bound=store.bind_post_pairing(pairing['id'],'verified-shared-post-id')
     assert bound['status']=='bound' and bound['bound_media_id']=='verified-shared-post-id'
     current=store.get_instagram_source_route(target['routing_id'])
-    assert current['media_id']=='verified-shared-post-id'
+    assert current['media_id'] is None
+    assert store.find_shared_post_route('verified-shared-post-id')['routing_id']==target['routing_id']
     assert current['canonical_url']==target['canonical_url'] and current['shortcode']==target['shortcode']
     assert store.get_instagram_source_qa_bundle(target['routing_id'])==before
     with pytest.raises(sqlite3.IntegrityError):

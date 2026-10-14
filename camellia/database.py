@@ -3102,14 +3102,14 @@ class Database:
 
     def bind_post_pairing(self, pairing_id: int, media_id: str) -> Optional[Dict[str, Any]]:
         """
-        Commits one shared post's media id to the route it was paired against.
+        Records one shared post's attachment id as an exact alias of the route
+        it was paired against.
 
-        Writes both sides atomically-enough for SQLite's single-writer model:
-        the pairing row records what was bound and when (for the admin to see
-        it happened and to what), and the route itself gets the verified
-        media_id, which is what the existing exact-match lookup already
-        matches ad-id/story replies against — a paired post needs no matcher
-        of its own once this is set.
+        The id lives only on the pairing row (``bound_media_id``). A DM share
+        id differs from the Graph media id a synced Post already carries, and
+        the media library and ad-creative lookups key routes by that Graph id,
+        so the route's own media_id is never overwritten here — see
+        find_shared_post_route for how aliases are matched.
         """
         now = datetime.utcnow().isoformat()
         with self.get_connection() as conn:
@@ -3124,13 +3124,27 @@ class Database:
                 "UPDATE instagram_post_pairings SET status='bound', bound_media_id=?, bound_at=? WHERE id=?",
                 (media_id, now, pairing_id),
             )
-            conn.execute(
-                "UPDATE instagram_source_routes SET media_id=?, updated_at=? WHERE routing_id=?",
-                (media_id, now, pairing["routing_id"]),
-            )
             conn.commit()
             row = conn.execute("SELECT * FROM instagram_post_pairings WHERE id=?", (pairing_id,)).fetchone()
         return dict(row)
+
+    def find_shared_post_route(self, media_id: str) -> Optional[Dict[str, Any]]:
+        """Active Post route whose own media_id or a bound pairing alias is
+        exactly this shared-post id. An id that resolves to more than one
+        route fails closed rather than picking one."""
+        with self.get_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM instagram_source_routes
+                WHERE source_type='post' AND active=1 AND archived_at IS NULL
+                AND (media_id=? OR routing_id IN (
+                    SELECT routing_id FROM instagram_post_pairings
+                    WHERE status='bound' AND bound_media_id=?))
+                LIMIT 2
+                """,
+                (media_id, media_id),
+            ).fetchall()
+        return dict(rows[0]) if len(rows) == 1 else None
 
     # --- Dynamic menu catalogue ---------------------------------------------
 

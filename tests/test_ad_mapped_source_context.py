@@ -810,3 +810,25 @@ def test_explicit_source_ad_binding_does_not_change_test_only_gate(ad_customer):
 
     assert after["mode"] == before["mode"] == TEST_ONLY
     assert [row["sender_id"] for row in after["test_accounts"]] == [sender]
+
+
+def test_shared_synced_post_resolves_by_paired_alias_without_handoff(ad_customer):
+    """A DM share id never equals the synced Graph media id; an admin-paired
+    alias routes it while the route keeps its Graph id."""
+    sender, facts, db = ad_customer
+    route = _mapped_source(ad_customer, "post", None)
+    pairing = db.start_post_pairing(route["routing_id"], 600, "admin")
+    db.bind_post_pairing(pairing["id"], "dm-share-alias-17914035549495134")
+    event = {
+        "sender": {"id": sender}, "timestamp": 1700000000500,
+        "message": {"mid": "shared-synced-post-mid", "attachments": [{"type": "ig_post", "payload": {
+            "ig_post_media_id": "dm-share-alias-17914035549495134", "title": "non-authoritative caption",
+        }}]},
+    }
+    with patch.object(app_module, "send_instagram_reply", return_value={"status": "sent", "message_id": "m"}), \
+         patch.object(app_module.escalator, "handle_escalation"):
+        _dispatch_durable_instagram_events([event])
+
+    assert db.get_active_handoff("instagram", sender) is None
+    assert facts["source_route"]["routing_id"] == route["routing_id"]
+    assert db.get_instagram_source_route(route["routing_id"])["media_id"] == "meta-post-media-12345"

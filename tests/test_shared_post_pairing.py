@@ -146,19 +146,17 @@ def test_cancelling_closes_the_pending_pairing(post_route):
     assert database.get_active_post_pairing() is None
 
 
-def test_binding_writes_the_media_id_onto_the_route(post_route):
+def test_binding_records_an_alias_without_touching_the_route_media_id(post_route):
     database, routing_id = post_route
     pairing = database.start_post_pairing(routing_id, ttl_seconds=600, started_by="admin")
     bound = database.bind_post_pairing(pairing["id"], POST_MEDIA_ID)
     assert bound["status"] == "bound"
     assert bound["bound_media_id"] == POST_MEDIA_ID
     route = database.get_instagram_source_route(routing_id)
-    assert route["media_id"] == POST_MEDIA_ID
+    assert route["media_id"] is None
 
 
-def test_after_binding_the_post_matches_through_the_normal_lookup(post_route):
-    """Once bound, no special-case matcher is needed — the existing exact
-    media_id lookup (the same one story replies use) finds it."""
+def test_after_binding_the_post_matches_by_its_exact_alias(post_route):
     database, routing_id = post_route
     pairing = database.start_post_pairing(routing_id, ttl_seconds=600, started_by="admin")
     database.bind_post_pairing(pairing["id"], POST_MEDIA_ID)
@@ -183,8 +181,9 @@ def test_establishing_context_during_an_open_window_binds_and_sets_source(post_r
     assert facts["source_match_method"] == "shared_post_media_id"
     assert facts["last_topic"] is None
     assert facts["source_priority_cursor"] == 0
-    # And the route itself is now permanently paired for future customers.
-    assert database.get_instagram_source_route(routing_id)["media_id"] == POST_MEDIA_ID
+    # And the route is now permanently paired for future customers.
+    assert database.get_post_pairing_for_route(routing_id)["bound_media_id"] == POST_MEDIA_ID
+    assert database.get_instagram_source_route(routing_id)["media_id"] is None
 
 
 def test_a_second_customer_sharing_the_same_post_matches_without_a_new_pairing(post_route):
@@ -216,7 +215,7 @@ def test_a_different_post_shared_during_an_open_window_still_binds(post_route):
     session_memory.clear_session("uid_any", "instagram")
     recognized = app_module._establish_shared_post_context("uid_any", THIRD_PARTY_MEDIA_ID)
     assert recognized is True
-    assert database.get_instagram_source_route(routing_id)["media_id"] == THIRD_PARTY_MEDIA_ID
+    assert database.get_post_pairing_for_route(routing_id)["bound_media_id"] == THIRD_PARTY_MEDIA_ID
 
 
 # --- requirement 7: no misleading "can't open" reply for a recognized post -
@@ -397,7 +396,7 @@ def test_caption_never_decides_routing_end_to_end(post_route):
     app_module._establish_shared_post_context("uid_caption", media_id)
     # The caption named the configured topic, but the id is what was bound —
     # not something inferred from the caption text.
-    assert database.get_instagram_source_route(routing_id)["media_id"] == THIRD_PARTY_MEDIA_ID
+    assert database.get_post_pairing_for_route(routing_id)["bound_media_id"] == THIRD_PARTY_MEDIA_ID
 
 
 # --- admin endpoints ---------------------------------------------------
@@ -411,3 +410,71 @@ def test_pairing_endpoints_require_admin_auth():
     assert client.post("/admin/instagram-routes/1/pairing/start").status_code in (401, 403, 503)
     assert client.get("/admin/instagram-routes/1/pairing").status_code in (401, 403, 503)
     assert client.post("/admin/instagram-routes/1/pairing/cancel").status_code in (401, 403, 503)
+
+
+# --- synced Posts: a DM share id is an alias, never the route's media_id ----
+
+SYNCED_GRAPH_ID = "18283067548294124"
+SHARED_DM_ID = "17914035549495134"
+
+
+def _synced_post(database, shortcode="Deb2fHMkwK8", media_id=SYNCED_GRAPH_ID, topic="Experience kolkata"):
+    return database.save_instagram_source_route({
+        "source_type": "post",
+        "canonical_url": f"https://www.instagram.com/p/{shortcode}/",
+        "shortcode": shortcode, "media_id": media_id, "ad_id": None, "campaign_id": None,
+        "routing_topic": topic, "knowledge_scope": [],
+        "escalation_policy": "human_if_unsupported", "priority_products": [], "active": True,
+    })
+
+
+@pytest.mark.parametrize("source_type", ["post", None])
+def test_synced_post_pairs_a_shared_alias_and_keeps_its_graph_media_id(post_route, source_type):
+    database, _manual = post_route
+    synced = _synced_post(database)
+    assert route_for_inbound(ad_id=None, media_id=None, post_media_id=SHARED_DM_ID, source_type=source_type)[0] is None
+
+    pairing = database.start_post_pairing(synced["routing_id"], ttl_seconds=600, started_by="admin")
+    database.bind_post_pairing(pairing["id"], SHARED_DM_ID)
+
+    assert database.get_instagram_source_route(synced["routing_id"])["media_id"] == SYNCED_GRAPH_ID
+    route, method = route_for_inbound(ad_id=None, media_id=None, post_media_id=SHARED_DM_ID, source_type=source_type)
+    assert route["routing_id"] == synced["routing_id"] and method == "shared_post_media_id"
+    # The synced Graph id still resolves, and an unrelated share still does not.
+    assert database.find_shared_post_route(SYNCED_GRAPH_ID)["routing_id"] == synced["routing_id"]
+    assert route_for_inbound(ad_id=None, media_id=None, post_media_id=THIRD_PARTY_MEDIA_ID, source_type="post")[0] is None
+
+
+def test_shared_alias_of_an_archived_or_disabled_route_does_not_match(post_route):
+    database, _manual = post_route
+    synced = _synced_post(database)
+    pairing = database.start_post_pairing(synced["routing_id"], ttl_seconds=600, started_by="admin")
+    database.bind_post_pairing(pairing["id"], SHARED_DM_ID)
+    with database.get_connection() as conn:
+        conn.execute("UPDATE instagram_source_routes SET active=0 WHERE routing_id=?", (synced["routing_id"],))
+        conn.commit()
+    assert database.find_shared_post_route(SHARED_DM_ID) is None
+
+
+def test_shared_alias_ambiguous_across_two_routes_fails_closed(post_route):
+    database, manual_id = post_route
+    synced = _synced_post(database)
+    for routing_id in (manual_id, synced["routing_id"]):
+        pairing = database.start_post_pairing(routing_id, ttl_seconds=600, started_by="admin")
+        database.bind_post_pairing(pairing["id"], SHARED_DM_ID)
+    assert route_for_inbound(ad_id=None, media_id=None, post_media_id=SHARED_DM_ID, source_type="post") == (None, None)
+
+
+def test_shared_alias_colliding_with_another_routes_media_id_fails_closed(post_route):
+    database, manual_id = post_route
+    _synced_post(database, shortcode="Other1", media_id=SHARED_DM_ID, topic="legacy overwritten route")
+    pairing = database.start_post_pairing(manual_id, ttl_seconds=600, started_by="admin")
+    database.bind_post_pairing(pairing["id"], SHARED_DM_ID)
+    assert database.find_shared_post_route(SHARED_DM_ID) is None
+
+
+def test_admin_offers_pairing_for_synced_posts_not_only_manual_links():
+    from fastapi.testclient import TestClient
+    page = TestClient(app_module.app).get("/admin").text
+    assert "${item.source_type === 'post' && item.mapping_route ? `<div><button" in page
+    assert "item.sync_status === 'MANUAL_EXACT_LINK' && item.source_type === 'post'" not in page

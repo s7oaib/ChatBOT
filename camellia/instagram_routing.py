@@ -596,7 +596,7 @@ def route_for_inbound(
         if route:
             return decode_route(source_contract(db, route)), "shared_media_url"
     if source_type == "post" and post_media_id:
-        route = db.find_instagram_source_route("media_id", str(post_media_id), source_type="post")
+        route = db.find_shared_post_route(str(post_media_id))
         if route:
             return decode_route(source_contract(db, route)), "shared_post_media_id"
     if ad_id:
@@ -630,13 +630,11 @@ def route_for_inbound(
         )
         if route:
             return decode_route(source_contract(db, route)), "shared_media_url"
-    if post_media_id:
-        # A paired post's id lives in the same media_id column a story reply
-        # would occupy — it is still an exact Meta identifier once bound, just
-        # one an admin verified rather than one Meta labelled as a reply.
-        route = db.find_instagram_source_route(
-            "media_id", str(post_media_id), source_type="post" if source_type == "post" else None,
-        )
+    if post_media_id and source_type != "post":
+        # A shared post's DM id never equals the synced Graph media id; it
+        # matches only a route's own media_id (legacy pairings) or an exact
+        # alias an admin bound during a pairing window.
+        route = db.find_shared_post_route(str(post_media_id))
         if route:
             return decode_route(source_contract(db, route)), "shared_post_media_id"
     return None, None
