@@ -1290,10 +1290,7 @@ class DeterministicResponder:
 
     def _generic_fallback(self) -> str:
         """Exact client-approved response for knowledge outside the registry."""
-        return (
-            "Thanks for your question. Our Manager of Kitchens will connect "
-            "with you here shortly and help you with this."
-        )
+        return human_handoff.default_handoff_message()
 
     def classify_unmatched_intent(self, text: str) -> str:
         """

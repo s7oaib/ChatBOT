@@ -378,6 +378,27 @@ def customer_facing_message(
     return f"{body}\n\nPlease quote reference {handoff_ref} when you message us."
 
 
+DEFAULT_HANDOFF_MESSAGE = (
+    "Thanks for your question. Our Manager of Kitchens will connect with "
+    "you here shortly and help you with this."
+)
+# Stored as a versioned response override so Admin edits get history/reset.
+HANDOFF_MESSAGE_OVERRIDE_ID = "default_handoff_message"
+HANDOFF_MESSAGE_MAX_LENGTH = 1000
+
+
+def default_handoff_message() -> str:
+    """The Admin-edited handoff copy, or the client-approved default."""
+    try:
+        override = db.get_response_template_override(HANDOFF_MESSAGE_OVERRIDE_ID) or {}
+    except Exception:
+        log.exception("Could not read the handoff message override; using the default.")
+        override = {}
+    if str(override.get("status") or "ACTIVE").upper() != "ACTIVE":
+        return DEFAULT_HANDOFF_MESSAGE
+    return str(override.get("response") or "").strip() or DEFAULT_HANDOFF_MESSAGE
+
+
 def customer_facing_notice(*, order_receipt: bool = False, finalized_order: bool = False) -> str:
     """First Instagram message: the CTA copy, with no URL embedded in it."""
     if finalized_order:
@@ -389,10 +410,7 @@ def customer_facing_notice(*, order_receipt: bool = False, finalized_order: bool
         )
     if order_receipt:
         return "Continue on WhatsApp to send this order draft to our team."
-    return (
-        "Thanks for your question. Our Manager of Kitchens will connect with "
-        "you here shortly and help you with this."
-    )
+    return default_handoff_message()
 
 
 def customer_facing_link_message(

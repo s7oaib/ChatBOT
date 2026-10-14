@@ -4638,6 +4638,62 @@ def get_admin_handoffs(
             "historical_count": overview["historical_count"], "handoffs": handoffs}
 
 
+def _handoff_message_state() -> Dict[str, Any]:
+    from camellia import handoff as human_handoff
+    override = db.get_response_template_override(human_handoff.HANDOFF_MESSAGE_OVERRIDE_ID) or {}
+    return {"message": human_handoff.default_handoff_message(),
+            "default_message": human_handoff.DEFAULT_HANDOFF_MESSAGE,
+            "is_custom": bool(override), "updated_at": override.get("updated_at"),
+            "max_length": human_handoff.HANDOFF_MESSAGE_MAX_LENGTH}
+
+
+def _realign_handoff_copy() -> None:
+    # Handoff-only templates carry this exact copy; refresh them immediately.
+    try:
+        approved_response_alignment.apply_approved_qa_alignment(db, responder.qa_data.get("templates", []))
+    except Exception:
+        log.exception("Handoff message saved, but protected template alignment failed.")
+
+
+@app.get("/admin/handoff-message")
+def get_handoff_message(x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    """The message customers receive whenever the bot hands them to a person."""
+    require_admin(x_admin_key, x_admin_pin)
+    return _handoff_message_state()
+
+
+@app.put("/admin/handoff-message")
+async def save_handoff_message(request: Request, x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    from camellia import handoff as human_handoff
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    message = str((body or {}).get("message") or "").strip()
+    if len(message) > human_handoff.HANDOFF_MESSAGE_MAX_LENGTH:
+        raise HTTPException(status_code=400, detail=f"Keep the message under {human_handoff.HANDOFF_MESSAGE_MAX_LENGTH} characters.")
+    _validate_custom_qa_answer(message)
+    actor = "authenticated_admin" if (_admin_context.get() or {}).get("kind") == "session" else "admin_api_key"
+    if not db.save_response_template_override(
+        human_handoff.HANDOFF_MESSAGE_OVERRIDE_ID, message, actor,
+        change_reason="handoff_message_edited", previous_response=human_handoff.DEFAULT_HANDOFF_MESSAGE,
+    ):
+        raise HTTPException(status_code=400, detail="Could not save the handoff message.")
+    _realign_handoff_copy()
+    return {"status": "success", **_handoff_message_state()}
+
+
+@app.post("/admin/handoff-message/reset")
+def reset_handoff_message(x_admin_key: Optional[str] = Header(None), x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_key, x_admin_pin)
+    from camellia import handoff as human_handoff
+    actor = "authenticated_admin" if (_admin_context.get() or {}).get("kind") == "session" else "admin_api_key"
+    db.reset_response_template_override(human_handoff.HANDOFF_MESSAGE_OVERRIDE_ID, actor)
+    _realign_handoff_copy()
+    return {"status": "success", **_handoff_message_state()}
+
+
 @app.post("/admin/handoffs/{handoff_ref}/seen")
 def mark_admin_handoff_seen(
     handoff_ref: str,
@@ -13533,7 +13589,10 @@ Non-Veg:
         html_content = html_content[:field] + selector_html(prefix) + html_content[field:]
     from camellia.admin_ads import HTML as ADS_HTML, SCRIPT as ADS_SCRIPT
     html_content = html_content.replace('<div id="tab-handoffs"', ADS_HTML + '<div id="tab-handoffs"', 1)
-    html_content = html_content.replace('</body>', REVIEW_SCRIPT + WEEKLY_SCRIPT + APPROVED_SCRIPT + SOURCE_RESPONSE_SCRIPT + ADS_SCRIPT + '</body>', 1)
+    from camellia.admin_handoff_message import HTML as HANDOFF_MESSAGE_HTML, SCRIPT as HANDOFF_MESSAGE_SCRIPT
+    html_content = html_content.replace('<input class="field-control" id="handoffSearch"', HANDOFF_MESSAGE_HTML + '<input class="field-control" id="handoffSearch"', 1)
+    html_content = html_content.replace("if (group === 'handoffs') { loadHandoffs(); }", "if (group === 'handoffs') { loadHandoffs(); if (typeof loadHandoffMessage === 'function') loadHandoffMessage(); }", 1)
+    html_content = html_content.replace('</body>', REVIEW_SCRIPT + WEEKLY_SCRIPT + APPROVED_SCRIPT + SOURCE_RESPONSE_SCRIPT + ADS_SCRIPT + HANDOFF_MESSAGE_SCRIPT + '</body>', 1)
     return HTMLResponse(
         content=html_content,
         headers={
