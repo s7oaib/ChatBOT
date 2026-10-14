@@ -987,6 +987,15 @@ class Database:
                 completed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
             """)
+            # A Post shared into the DM carries the id of the carousel's first
+            # photo, not the carousel's own id. Each complete sync records
+            # which carousel owns each child id so a share resolves exactly.
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS instagram_media_children (
+                child_media_id TEXT PRIMARY KEY,
+                parent_media_id TEXT NOT NULL
+            );
+            """)
 
             # A Story reply is useful evidence even before an operator maps it
             # to a Topic. Keep this registry separate from routes so an
@@ -1706,12 +1715,20 @@ class Database:
                 conn.commit()
         return {"hidden_foreign": int(foreign), "hidden_stale": int(stale)}
 
-    def apply_instagram_media_inventory(self, media, owner_account_id: str, generation: str) -> Dict[str, int]:
+    def apply_instagram_media_inventory(self, media, owner_account_id: str, generation: str,
+                                        children: Optional[Dict[str, str]] = None) -> Dict[str, int]:
         """Atomically publish a complete verified inventory and its reconciliation."""
         with self.get_connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
             for row in media:
                 self.upsert_instagram_media(row, connection=conn)
+            if children is not None:
+                # Same transaction: a partial sync never leaves half a child map.
+                conn.execute("DELETE FROM instagram_media_children")
+                conn.executemany(
+                    "INSERT OR REPLACE INTO instagram_media_children (child_media_id, parent_media_id) VALUES (?, ?)",
+                    list(children.items()),
+                )
             return self.reconcile_instagram_media_inventory(owner_account_id, generation, connection=conn)
 
     def has_successful_instagram_media_inventory_sync(self, owner_account_id: str) -> bool:
@@ -3129,8 +3146,8 @@ class Database:
         return dict(row)
 
     def find_shared_post_route(self, media_id: str) -> Optional[Dict[str, Any]]:
-        """Active Post route whose own media_id or a bound pairing alias is
-        exactly this shared-post id. An id that resolves to more than one
+        """Active Post route whose own media_id, a bound pairing alias, or a
+        synced carousel child id is exactly this shared-post id. An id that resolves to more than one
         route fails closed rather than picking one."""
         with self.get_connection() as conn:
             rows = conn.execute(
@@ -3139,10 +3156,13 @@ class Database:
                 WHERE source_type='post' AND active=1 AND archived_at IS NULL
                 AND (media_id=? OR routing_id IN (
                     SELECT routing_id FROM instagram_post_pairings
-                    WHERE status='bound' AND bound_media_id=?))
+                    WHERE status='bound' AND bound_media_id=?)
+                OR media_id IN (
+                    SELECT parent_media_id FROM instagram_media_children
+                    WHERE child_media_id=?))
                 LIMIT 2
                 """,
-                (media_id, media_id),
+                (media_id, media_id, media_id),
             ).fetchall()
         return dict(rows[0]) if len(rows) == 1 else None
 

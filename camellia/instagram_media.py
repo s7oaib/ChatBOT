@@ -14,7 +14,7 @@ from camellia.config import config
 from camellia.instagram_routing import _graph_failure_category, _media_list_details, normalize_instagram_url
 
 
-_FIELDS = "id,caption,media_type,media_url,permalink,thumbnail_url,timestamp,children{media_type,media_url,thumbnail_url}"
+_FIELDS = "id,caption,media_type,media_url,permalink,thumbnail_url,timestamp,children{id,media_type,media_url,thumbnail_url}"
 _GRAPH_HOSTS = {"graph.instagram.com", "graph.facebook.com"}
 _SYNC_LOCK = Lock()
 
@@ -133,6 +133,7 @@ def _sync_instagram_media(db, diagnostic_permalink: Optional[str] = None) -> Dic
     pages = 0
     visited_pages = set()
     inventory_rows = {}
+    children = {}
     try:
         with httpx.Client(timeout=12.0) as client:
             current_id, current_username, verified_media_url, identity_failure = _resolve_current_account(client, token, version)
@@ -219,6 +220,11 @@ def _sync_instagram_media(db, diagnostic_permalink: Optional[str] = None) -> Dic
                         "sync_status": "SYNCED",
                     }
                     inventory_rows[media_id] = {"instagram_media_id": media_id, **values}
+                    child_rows = raw.get("children") if isinstance(raw.get("children"), dict) else {}
+                    for child in child_rows.get("data") or []:
+                        child_id = str(child.get("id") or "").strip() if isinstance(child, dict) else ""
+                        if child_id and child_id != media_id:
+                            children[child_id] = media_id
                 paging = payload.get("paging")
                 if paging is None:
                     paging = {}
@@ -238,7 +244,7 @@ def _sync_instagram_media(db, diagnostic_permalink: Optional[str] = None) -> Dic
                 counts["updated"] += 1
             else:
                 counts["unchanged"] += 1
-        counts.update(db.apply_instagram_media_inventory(inventory_rows.values(), current_id, generation))
+        counts.update(db.apply_instagram_media_inventory(inventory_rows.values(), current_id, generation, children))
         result = _base_result("COMPLETED", current_account_id=current_id,
                               current_username=current_username, diagnostic_permalink=diagnostic)
         result.update(counts, pagination_complete=True, pages=pages)
