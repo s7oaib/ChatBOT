@@ -1502,6 +1502,8 @@ def _handle_shared_attachment(
                     media_id=post_media_id, shortcode=(reel_identity or {}).get("shortcode"),
                 )
                 return
+            if post_media_id:
+                db.resolve_pending_instagram_media(sender_id, post_media_id)
             _process_instagram_event(
                 sender_id, "", None,
                 EntryPoint(source="shared_media"),

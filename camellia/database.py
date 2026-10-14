@@ -2411,6 +2411,16 @@ class Database:
             """, (str(sender_id), str(media_id))).fetchone()
         return bool(row)
 
+    def resolve_pending_instagram_media(self, sender_id: str, media_id: str) -> None:
+        """A shared Post that matched a route is answered; never finalize it as unmapped."""
+        with self.get_connection() as conn:
+            conn.execute(
+                "UPDATE instagram_pending_media_events SET status='CONSUMED' "
+                "WHERE sender_id=? AND media_id=? AND status='PENDING'",
+                (str(sender_id), str(media_id)),
+            )
+            conn.commit()
+
     def get_pending_instagram_media_status(self, sender_id: str, media_id: str) -> Optional[str]:
         """Return the latest durable event state for one sender/Post pair."""
         with self.get_connection() as conn:
@@ -3110,8 +3120,9 @@ class Database:
     def cancel_post_pairing(self, routing_id: int) -> bool:
         with self.get_connection() as conn:
             cursor = conn.execute(
+                # Also revokes a bound alias, so a wrong capture can be undone.
                 "UPDATE instagram_post_pairings SET status='cancelled' "
-                "WHERE routing_id = ? AND status = 'pending'",
+                "WHERE routing_id = ? AND status IN ('pending', 'bound')",
                 (routing_id,),
             )
             conn.commit()
@@ -3146,23 +3157,31 @@ class Database:
         return dict(row)
 
     def find_shared_post_route(self, media_id: str) -> Optional[Dict[str, Any]]:
-        """Active Post route whose own media_id, a bound pairing alias, or a
-        synced carousel child id is exactly this shared-post id. An id that resolves to more than one
+        """Active route for a shared-post id: a Post's own media_id, a bound
+        pairing alias, a synced carousel child id, or the creative of an ad
+        bound to the route. An id that resolves to more than one
         route fails closed rather than picking one."""
         with self.get_connection() as conn:
             rows = conn.execute(
                 """
                 SELECT * FROM instagram_source_routes
-                WHERE source_type='post' AND active=1 AND archived_at IS NULL
-                AND (media_id=? OR routing_id IN (
-                    SELECT routing_id FROM instagram_post_pairings
-                    WHERE status='bound' AND bound_media_id=?)
-                OR media_id IN (
-                    SELECT parent_media_id FROM instagram_media_children
-                    WHERE child_media_id=?))
+                WHERE active=1 AND archived_at IS NULL
+                AND ((source_type='post' AND (media_id=? OR routing_id IN (
+                        SELECT routing_id FROM instagram_post_pairings
+                        WHERE status='bound' AND bound_media_id=?)
+                    OR media_id IN (
+                        SELECT parent_media_id FROM instagram_media_children
+                        WHERE child_media_id=?)))
+                  -- An ad tap can arrive as a share of the ad's own creative
+                  -- with no referral; it inherits that ad's exact binding.
+                  OR routing_id IN (
+                    SELECT b.routing_id FROM instagram_source_ad_bindings b
+                    JOIN instagram_ads_inventory i ON i.ad_id=b.ad_id
+                    WHERE b.status='BOUND' AND b.active=1
+                    AND i.effective_instagram_media_id=?))
                 LIMIT 2
                 """,
-                (media_id, media_id, media_id),
+                (media_id, media_id, media_id, media_id),
             ).fetchall()
         return dict(rows[0]) if len(rows) == 1 else None
 

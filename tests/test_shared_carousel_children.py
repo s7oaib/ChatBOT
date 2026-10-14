@@ -114,3 +114,83 @@ def test_child_of_a_disabled_route_or_ambiguous_child_fails_closed(database, mon
         conn.execute("UPDATE instagram_source_routes SET active=0 WHERE routing_id=?", (route["routing_id"],))
         conn.commit()
     assert database.find_shared_post_route(SECOND_CHILD_ID) is None
+
+
+# --- an ad tap delivered as a share of the ad's own creative -----------------
+# Production 2026-10-14 (CAM-32946): a customer tapped a MISHTI ad; Meta sent
+# an ig_post share of the creative 17919714294242234 and no referral. The ads
+# sync already knows that creative id for every MISHTI ad bound to Reel 91.
+
+AD_CREATIVE_ID = "17919714294242234"
+
+
+def _reel(store, shortcode="Deak-MkTacu", media_id="17927869947185763"):
+    return store.save_instagram_source_route({
+        "source_type": "reel", "canonical_url": f"https://www.instagram.com/reel/{shortcode}/",
+        "shortcode": shortcode, "media_id": media_id, "ad_id": None, "campaign_id": None,
+        "routing_topic": "sondesh delivery delhi NCR", "source_description": "Sondesh description.",
+        "knowledge_scope": [], "escalation_policy": "human_if_unsupported", "priority_products": [], "active": True,
+    })
+
+
+def _ads(store, *ad_ids, creative=AD_CREATIVE_ID):
+    store.apply_instagram_ads_inventory("act_1", [
+        {"ad_id": ad_id, "name": "MISHTI", "effective_status": "ACTIVE", "effective_instagram_media_id": creative}
+        for ad_id in ad_ids])
+
+
+def test_shared_ad_creative_inherits_the_ads_binding(database):
+    reel = _reel(database)
+    _ads(database, "ad-050540", "ad-630540")
+    for ad_id in ("ad-050540", "ad-630540"):
+        database.bind_instagram_ad(ad_id, reel["routing_id"], bound_by="test")
+
+    matched, method = route_for_inbound(ad_id=None, media_id=None, post_media_id=AD_CREATIVE_ID, source_type="post")
+
+    assert matched["routing_id"] == reel["routing_id"] and method == "shared_post_media_id"
+
+
+def test_shared_ad_creative_fails_closed_when_disabled_or_split_across_routes(database):
+    reel = _reel(database)
+    other = _reel(database, shortcode="OTHERREEL", media_id="other-reel-media")
+    _ads(database, "ad-a", "ad-b")
+    database.bind_instagram_ad("ad-a", reel["routing_id"], bound_by="test")
+    database.bind_instagram_ad("ad-b", other["routing_id"], bound_by="test")
+    assert database.find_shared_post_route(AD_CREATIVE_ID) is None
+    database.set_instagram_ad_binding_active("ad-b", False)
+    assert database.find_shared_post_route(AD_CREATIVE_ID)["routing_id"] == reel["routing_id"]
+    database.set_instagram_ad_binding_active("ad-a", False)
+    assert database.find_shared_post_route(AD_CREATIVE_ID) is None
+
+
+def test_a_matched_shared_post_is_never_finalized_as_unmapped(database, monkeypatch):
+    from unittest.mock import patch
+    monkeypatch.setattr(app_module.config, "BYPASS_AD_GATE", True)
+    reel = _reel(database)
+    _ads(database, "ad-050540")
+    database.bind_instagram_ad("ad-050540", reel["routing_id"], bound_by="test")
+    sender = "ad-creative-sender"
+    session_memory.clear_session(sender, "instagram")
+    database.record_pending_instagram_media("post-event-1", sender, AD_CREATIVE_ID, grace_seconds=0)
+
+    with patch.object(app_module, "_send_or_queue_instagram_reply", return_value={"status": "sent"}), \
+         patch.object(app_module.escalator, "handle_escalation") as escalate:
+        app_module._handle_shared_attachment(sender, None, AD_CREATIVE_ID)
+        app_module._finalize_expired_unmapped_posts()
+
+    assert database.get_pending_instagram_media_status(sender, AD_CREATIVE_ID) == "CONSUMED"
+    assert session_memory.get_facts(sender, "instagram")["source_route"]["routing_id"] == reel["routing_id"]
+    assert database.get_active_handoff("instagram", sender) is None
+    assert not escalate.called
+
+
+def test_cancel_also_revokes_a_wrongly_bound_pairing_alias(database):
+    route = _route(database)
+    pairing = database.start_post_pairing(route["routing_id"], ttl_seconds=600, started_by="admin")
+    database.bind_post_pairing(pairing["id"], AD_CREATIVE_ID)
+    assert database.find_shared_post_route(AD_CREATIVE_ID)["routing_id"] == route["routing_id"]
+
+    assert database.cancel_post_pairing(route["routing_id"]) is True
+
+    assert database.find_shared_post_route(AD_CREATIVE_ID) is None
+    assert database.get_instagram_source_route(route["routing_id"])["media_id"] == CAROUSEL_ID
