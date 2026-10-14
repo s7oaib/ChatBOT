@@ -69,6 +69,8 @@ for Railway and the test suite.
    content claims exist in the approved context it was shown.
 7. Unsupported facts create a canonical `knowledge_gaps` record and use human handoff copy.
 
+Mapped Post/Reel Ads use the exact local Ad ID binding to resolve the existing source route. The route stores its approved opening message and explicit canonical Approved Q&A IDs; ads inherit those fields at read time. Only a greeting-only message carrying that exact trusted ad referral uses the opening message, once in the active session. Organic greetings retain the standard greeting, and organic business messages remain subject to the configured ad gate. Active human handoffs still stop automated replies until an authorized operator resumes them.
+
 ## Knowledge, not phrasing
 
 `camellia/knowledge.py` holds the canonical catalogue. A record is addressed by

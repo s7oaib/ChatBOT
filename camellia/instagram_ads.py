@@ -33,10 +33,32 @@ def ad_account_id():
 def mapping_display(row):
     """Presentation from the already selected authority; never used for identity."""
     from camellia.client_qa import resolve_effective_approved_qa_by_id
+    from camellia import approved_qa, instagram_source_qa
+    from camellia.database import db
     route = decode_route(row)
+    if route.get("source_type") in {"post", "reel"}:
+        route = instagram_source_qa.route_contract(db, route)
     approved = resolve_effective_approved_qa_by_id(route.get("approved_qa_id")) if route.get("response_mode") == "APPROVED_QA" else None
     route["display_label"] = route.get("routing_topic") or (approved.entry.question if approved else "Mapped source")
     route["display_description"] = route.get("source_description") or (approved.entry.answer[:500] if approved else "Approved Q&A unavailable" if route.get("response_mode") == "APPROVED_QA" else "No description added.")
+    route["display_opening_message"] = route.get("approved_opening_message") or ""
+    selected_ids = route.get("approved_qa_ids") or ([route.get("approved_qa_id")] if route.get("approved_qa_id") else [])
+    eligible_ids = set(selected_ids)
+    if route.get("qa_bundle"):
+        rows, eligible_ids = instagram_source_qa.effective(db, route)
+        entries = {entry.qa_id: entry for entry in approved_qa.registry(rows)}
+    else:
+        entries = {}
+    route["display_approved_questions"] = [
+        {"qa_id": qa_id, "question": entries[qa_id].question, "answer": entries[qa_id].answer,
+         "blocks": list(entries[qa_id].blocks)}
+        for qa_id in selected_ids if qa_id in eligible_ids and qa_id in entries
+    ]
+    if not route.get("qa_bundle") and selected_ids and approved:
+        route["display_approved_questions"] = [
+            {"qa_id": approved.entry.qa_id, "question": approved.entry.question,
+             "answer": approved.entry.answer, "blocks": list(approved.entry.blocks)},
+        ]
     return route
 
 

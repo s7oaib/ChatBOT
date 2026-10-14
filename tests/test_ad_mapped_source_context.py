@@ -34,14 +34,16 @@ def ad_customer(tmp_path, monkeypatch):
     return uid, session_memory.get_facts(uid, "instagram"), db
 
 
-def _mapped_source(ad_customer, kind, ad_id, *, topic_name="Bengali Bento"):
+def _mapped_source(ad_customer, kind, ad_id, *, topic_name="Bengali Bento",
+                   approved_opening_message="", response_mode="CUSTOM", approved_qa_ids=None,
+                   source_context="sondesh"):
     _uid, _facts, db = ad_customer
     topic = instagram_routing.create_topic(topic_name)
     db.save_menu_image_draft("aamar_mishti", "/uploads/ad-source-menu.jpg", "fixture")
     db.publish_menu_image("aamar_mishti")
     shortcode = "ADPOST123" if kind == "post" else "ADREEL123"
     url = f"https://www.instagram.com/{'p' if kind == 'post' else 'reel'}/{shortcode}/"
-    route = validate_route_payload({
+    payload = {
         "source_type": kind,
         "url": url,
         "shortcode": shortcode,
@@ -49,10 +51,17 @@ def _mapped_source(ad_customer, kind, ad_id, *, topic_name="Bengali Bento"):
         "ad_id": ad_id,
         "topic_id": topic["topic_id"],
         "source_description": f"Operator-authored {kind} description.",
+        "approved_opening_message": approved_opening_message,
+        "response_mode": response_mode,
         "menu_id": "aamar_mishti",
         "menu_mode": "SELECTED",
         "active": True,
-    })
+    }
+    if approved_qa_ids is not None:
+        payload["approved_qa_ids"] = approved_qa_ids
+        payload["approved_qa_id"] = approved_qa_ids[0]
+        payload["source_context"] = source_context
+    route = validate_route_payload(payload)
     saved = db.save_instagram_source_route(route)
     return saved
 
@@ -284,13 +293,73 @@ def test_ad_source_context_persists_to_next_message_without_referral(ad_customer
     ]
 
 
+def test_first_exact_ad_greeting_uses_source_opening_once_and_duplicate_webhooks_are_idempotent(ad_customer):
+    sender, _facts, db = ad_customer
+    opening = "Welcome to the Bengali Home Table. Here is the full approved introduction.\n\nAsk us anything about this post."
+    _mapped_source(ad_customer, "post", "opening-ad", approved_opening_message=opening)
+    event = {"sender": {"id": sender}, "message": {"mid": "opening-greeting-mid", "text": "Hi",
+             "referral": {"source": "ADS", "ad_id": "opening-ad"}}}
+    repeated = {"sender": {"id": sender}, "message": {"mid": "opening-greeting-repeat", "text": "Hello",
+                 "referral": {"source": "ADS", "ad_id": "opening-ad"}}}
+    with patch.object(app_module, "send_instagram_reply", return_value={"status": "sent", "message_id": "opening-reply"}) as send:
+        _dispatch_durable_instagram_events([event])
+        _dispatch_durable_instagram_events([event])
+        _dispatch_durable_instagram_events([repeated])
+
+    rows = db.get_conversations(limit=20, channel="instagram", user_id=sender)
+    opening_rows = [row for row in rows if row["template_id"] == "source_opening_message"]
+    assert len(opening_rows) == 1
+    assert opening_rows[0]["bot_response"] == opening
+    assert send.call_count >= 1
+
+
+def test_greeting_plus_selected_question_uses_canonical_answer_not_source_opening(ad_customer):
+    sender, facts, db = ad_customer
+    opening = "Approved promotional opening that must not replace a question."
+    _mapped_source(ad_customer, "reel", "opening-question-ad", approved_opening_message=opening,
+                   response_mode="APPROVED_QA", approved_qa_ids=["general_price"], source_context="sondesh")
+
+    send = _process(ad_customer, "Hi, what's the price?", _ad_entry(sender, "opening-question-ad", "Hi, what's the price?"))
+
+    expected = client_qa.effective_entry("general_price").answer
+    row = db.get_conversations(limit=1, channel="instagram", user_id=sender)[0]
+    assert facts["client_qa_id"] == "general_price"
+    assert row["bot_response"] == expected
+    assert row["bot_response"] != opening
+    assert row["template_id"] != "source_opening_message"
+    assert send.called
+
+
+def test_organic_greeting_uses_normal_greeting_and_non_greeting_stays_behind_ad_gate(ad_customer, monkeypatch):
+    sender, facts, db = ad_customer
+    route = _mapped_source(ad_customer, "post", "unrelated-ad", approved_opening_message="Unrelated ad copy.")
+    facts["source_route"] = instagram_routing.decode_route(route)
+    monkeypatch.setattr(config, "BYPASS_AD_GATE", False)
+    organic = {"sender": {"id": sender}, "message": {"mid": "organic-hi-mid", "text": "Hi"}}
+    tasks = BackgroundTasks()
+    app_module._dispatch_instagram_payload({"entry": [{"id": "test-account", "messaging": [organic]}]}, tasks)
+    with patch.object(app_module, "send_instagram_reply", return_value={"status": "sent", "message_id": "organic-reply"}):
+        asyncio.run(tasks())
+
+    greeting = db.get_conversations(limit=1, channel="instagram", user_id=sender)[0]
+    assert greeting["template_id"] in {"greeting", "system_conversation"}
+    assert greeting["bot_response"] != "Unrelated ad copy."
+
+    blocked = {"sender": {"id": sender}, "message": {"mid": "organic-question-mid", "text": "What is the price?"}}
+    result = app_module._dispatch_instagram_payload({"entry": [{"id": "test-account", "messaging": [blocked]}]}, BackgroundTasks())
+    assert result["results"][0]["action"] == "ignored_organic_dm"
+    assert len(db.get_conversations(limit=10, channel="instagram", user_id=sender)) == 1
+
+
 def test_unknown_or_unbound_ad_id_never_guesses_from_title_or_another_route(ad_customer):
-    _mapped_source(ad_customer, "post", "only-bound-ad", topic_name="Private Mapped Source")
+    prior = _mapped_source(ad_customer, "post", "only-bound-ad", topic_name="Private Mapped Source",
+                           approved_opening_message="Prior source opening must not leak.")
 
     assert route_for_inbound(ad_id="unrelated-ad", media_id=None) == (None, None)
     assert route_for_inbound(ad_id="unbound-ad", media_id=None) == (None, None)
     assert route_for_inbound(ad_id=None, media_id=None) == (None, None)
     sender = ad_customer[0]
+    ad_customer[1]["source_route"] = instagram_routing.decode_route(prior)
     _process(ad_customer, "Tell me more", _ad_entry(
         sender, "unrelated-ad", "Tell me more", title="Private Mapped Source",
     ))
@@ -299,6 +368,44 @@ def test_unknown_or_unbound_ad_id_never_guesses_from_title_or_another_route(ad_c
         {"kind": "TEXT", "text": "Operator-authored post description."},
         {"kind": "IMAGE", "urls": ["/uploads/ad-source-menu.jpg"]},
     ]
+
+
+def test_two_exact_ads_keep_opening_messages_and_qa_bundles_isolated(ad_customer):
+    sender, _facts, db = ad_customer
+    first = _mapped_source(ad_customer, "post", "isolated-ad-one", topic_name="Bengali Bento",
+                           approved_opening_message="Opening one.", response_mode="APPROVED_QA",
+                           approved_qa_ids=["general_price"], source_context="sondesh")
+    second = _mapped_source(ad_customer, "reel", "isolated-ad-two", topic_name="Bengali Home Table",
+                            approved_opening_message="Opening two.", response_mode="APPROVED_QA",
+                            approved_qa_ids=["general_details"], source_context="sondesh")
+    one, one_method = route_for_inbound(ad_id="isolated-ad-one", media_id=None)
+    two, two_method = route_for_inbound(ad_id="isolated-ad-two", media_id=None)
+
+    assert one_method == two_method == "ad_id"
+    assert one["routing_id"] == first["routing_id"] and one["approved_qa_ids"] == ["general_price"]
+    assert two["routing_id"] == second["routing_id"] and two["approved_qa_ids"] == ["general_details"]
+    assert one["approved_opening_message"] == "Opening one."
+    assert two["approved_opening_message"] == "Opening two."
+
+    send = _process(ad_customer, "Hi", _ad_entry(sender, "isolated-ad-two", "Hi"))
+    stored = db.get_conversations(limit=1, channel="instagram", user_id=sender)[0]
+    assert stored["bot_response"] == "Opening two."
+    assert send.call_count == 1
+
+
+def test_disabled_exact_binding_does_not_send_source_opening(ad_customer):
+    sender, _facts, db = ad_customer
+    route = _mapped_source(ad_customer, "post", "disabled-opening-ad",
+                           approved_opening_message="Disabled binding copy.")
+    assert db.set_instagram_ad_binding_active("disabled-opening-ad", False)
+
+    _process(ad_customer, "Hi", _ad_entry(sender, "disabled-opening-ad", "Hi"))
+
+    stored = db.get_conversations(limit=1, channel="instagram", user_id=sender)[0]
+    assert stored["bot_response"] != "Disabled binding copy."
+    assert stored["template_id"] != "source_opening_message"
+    assert route_for_inbound(ad_id="disabled-opening-ad", media_id=None) == (None, None)
+    assert route["routing_id"] is not None
 
 
 def test_ad_referral_does_not_claim_a_post_or_reel_identity(ad_customer):

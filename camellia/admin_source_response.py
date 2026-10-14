@@ -34,6 +34,7 @@ def selector_html(prefix):
         template = template.replace('<label class="field-label" for="' + prefix + 'ApprovedQaId">', '<label id="' + prefix + 'QaSingleLabel" class="field-label" for="' + prefix + 'ApprovedQaId">')
         template = template.replace('<p class="source-map-help">', fields + '<p class="source-map-help">')
         template = '<style>[id$="QaBundleFields"][hidden],[id$="ApprovedQaId"][hidden],[id$="QaSingleLabel"][hidden]{display:none!important;}</style>' + template
+        template = template.replace('</fieldset>', '<div class="source-map-field"><label class="field-label" for="' + prefix + 'OpeningMessage">Approved opening message for ad greetings</label><p class="source-map-help">Sent only for a greeting-only message that arrives through an exact active Meta Ad ID binding to this Post or Reel.</p><textarea class="field-control" id="' + prefix + 'OpeningMessage" rows="4" maxlength="2000" placeholder="Enter the approved message to send when a customer opens this ad with a greeting."></textarea></div></fieldset>')
     return template
 
 
@@ -43,11 +44,12 @@ function sourceResponseHtml(prefix) { return prefix==='igStory' ? __STORY_SELECT
 function sourceQaMultiple(prefix){return prefix==='igStory'||prefix==='igMedia'||(prefix==='ig'&&['post','reel'].includes(document.getElementById('igSourceType')?.value||'post'));}
 function sourceResponseFields(prefix) {
  const mode=document.querySelector(`input[name="${prefix}ResponseMode"]:checked`)?.value || 'CUSTOM';
+  const opening=prefix==='igStory'?{}:{approved_opening_message:document.getElementById(prefix+'OpeningMessage')?.value.trim()||''};
  if(sourceQaMultiple(prefix) && mode==='APPROVED_QA'){
   const state=sourceResponseState[prefix];
-  return {response_mode:mode,approved_qa_ids:Array.from(state?.selectedIds||[]),[prefix==='igStory'?'story_context':'source_context']:state?.context??document.getElementById(prefix+'QaContext')?.value??'general'};
+   return {...opening,response_mode:mode,approved_qa_ids:Array.from(state?.selectedIds||[]),[prefix==='igStory'?'story_context':'source_context']:state?.context??document.getElementById(prefix+'QaContext')?.value??'general'};
  }
- return {response_mode:mode, approved_qa_id:mode==='APPROVED_QA' ? document.getElementById(prefix+'ApprovedQaId')?.value || '' : null};
+  return {...opening,response_mode:mode, approved_qa_id:mode==='APPROVED_QA' ? document.getElementById(prefix+'ApprovedQaId')?.value || '' : null};
 }
 function setSourceResponseMode(prefix) {
  if(!sourceResponseState[prefix]){initSourceResponse(prefix,sourceResponseFields(prefix));return;}
@@ -60,6 +62,7 @@ function setSourceResponseMode(prefix) {
 }
 async function initSourceResponse(prefix, route) {
  const state={selected:route.approved_qa_id || '',records:[],selectedIds:new Set(route.approved_qa_ids || (route.approved_qa_id?[route.approved_qa_id]:[])),context:(prefix==='igStory'?route.story_context:route.source_context)??null}; sourceResponseState[prefix]=state;
+ if(prefix!=='igStory')document.getElementById(prefix+'OpeningMessage').value=route.approved_opening_message||'';
  document.querySelector(`input[name="${prefix}ResponseMode"][value="${route.response_mode || 'CUSTOM'}"]`).checked=true;
  document.getElementById(prefix+'QaSearch').value='';
  const select=document.getElementById(prefix+'ApprovedQaId'); select.replaceChildren(new Option('Select Approved Q&A','')); select.disabled=true;
