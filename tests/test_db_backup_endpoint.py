@@ -5,6 +5,7 @@ repo can reach the Railway volume directly, so this endpoint is what makes
 done from here.
 """
 import os
+import sqlite3
 
 from fastapi.testclient import TestClient
 
@@ -35,6 +36,27 @@ def test_backup_copies_the_live_file(tmp_path, monkeypatch):
     assert os.path.exists(data["backup_path"])
     assert data["size_bytes"] > 0
     assert data["backup_path"] != data["source_path"]
+
+
+def test_backup_includes_writes_still_in_the_wal(tmp_path, monkeypatch):
+    database = Database(str(tmp_path / "backup_wal_source.db"))
+    monkeypatch.setattr(app_module, "db", database)
+
+    with sqlite3.connect(database.db_path) as writer:
+        assert writer.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+        writer.execute("CREATE TABLE backup_wal_probe (id INTEGER PRIMARY KEY, value TEXT)")
+        writer.execute("INSERT INTO backup_wal_probe (value) VALUES ('present in WAL')")
+        writer.commit()
+        assert os.path.getsize(f"{database.db_path}-wal") > 0
+        resp = client.post("/admin/db-backup", headers=_auth())
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["verified"] is True
+    assert data["integrity_check"] == "ok"
+    with sqlite3.connect(data["backup_path"]) as backup:
+        assert backup.execute("SELECT COUNT(*) FROM backup_wal_probe").fetchone()[0] == 1
+        assert backup.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
 
 
 def test_backup_fails_cleanly_when_the_file_is_missing(tmp_path, monkeypatch):
