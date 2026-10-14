@@ -844,6 +844,7 @@ class Database:
                 campaign_id TEXT,
                 routing_topic TEXT NOT NULL DEFAULT '',
                 source_description TEXT NOT NULL DEFAULT '',
+                approved_opening_message TEXT NOT NULL DEFAULT '',
                 knowledge_scope TEXT NOT NULL DEFAULT '[]',
                 escalation_policy TEXT NOT NULL DEFAULT 'human_if_unsupported',
                 priority_products TEXT NOT NULL DEFAULT '[]',
@@ -1237,6 +1238,7 @@ class Database:
             from camellia.instagram_source_qa import initialize as initialize_source_qa
             initialize_source_qa(cursor)
             self._ensure_column(cursor, "instagram_source_routes", "source_description", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(cursor, "instagram_source_routes", "approved_opening_message", "TEXT NOT NULL DEFAULT ''")
             # The menu shown for this route. Defaults from the selected
             # Topic's default_menu_id at save time (see validate_route_payload)
             # but is its own column so a route can override it independently —
@@ -1894,7 +1896,8 @@ class Database:
         values = (
             route["source_type"], route.get("canonical_url"), route.get("shortcode"),
             route.get("media_id"), route.get("ad_id"), route.get("campaign_id"),
-            route.get("routing_topic", ""), route.get("source_description", ""), json.dumps(route.get("knowledge_scope", [])),
+            route.get("routing_topic", ""), route.get("source_description", ""),
+            route.get("approved_opening_message", ""), json.dumps(route.get("knowledge_scope", [])),
             route.get("escalation_policy", "human_if_unsupported"),
             json.dumps(route.get("priority_products", [])), int(bool(route.get("active", True))),
             route.get("topic_id"), route.get("menu_id"), menu_mode,
@@ -1960,16 +1963,16 @@ class Database:
                 cursor = conn.execute(
                     """INSERT INTO instagram_source_routes
                     (source_type, canonical_url, shortcode, media_id, ad_id, campaign_id,
-                     routing_topic, source_description, knowledge_scope, escalation_policy, priority_products,
+                     routing_topic, source_description, approved_opening_message, knowledge_scope, escalation_policy, priority_products,
                     active, topic_id, menu_id, menu_mode, preview_url, media_type, response_mode, approved_qa_id, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     values[:-1] + (now, now),
                 )
                 routing_id = int(cursor.lastrowid)
             else:
                 cursor = conn.execute(
                     """UPDATE instagram_source_routes SET source_type=?, canonical_url=?, shortcode=?,
-                    media_id=?, ad_id=?, campaign_id=?, routing_topic=?, source_description=?, knowledge_scope=?,
+                    media_id=?, ad_id=?, campaign_id=?, routing_topic=?, source_description=?, approved_opening_message=?, knowledge_scope=?,
                     escalation_policy=?, priority_products=?, active=?, topic_id=?, menu_id=?, menu_mode=?,
                     preview_url=?, media_type=?, response_mode=?, approved_qa_id=?, updated_at=?, archived_at=NULL
                     WHERE routing_id=?""",

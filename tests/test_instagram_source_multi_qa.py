@@ -14,6 +14,7 @@ from camellia.database import Database
 from camellia.instagram_routing import decode_route, route_for_inbound
 from camellia.responder import responder
 from camellia.session_memory import SessionMemoryManager
+from camellia.instagram_ads import mapping_display
 
 PRICE='sondesh_price_client'; DETAILS='sondesh_details_client'; PAY='general_payment_client'
 HEADERS={'X-Admin-Key':'source-multi-test-key'}
@@ -73,6 +74,65 @@ def test_selected_authority_uses_existing_canonical_output(store,source,message,
     assert result[1] and facts['client_qa_id']==expected and facts['source_context_used']
     assert facts['source_bundle_match']=='matched' and 'story_bundle_match' not in facts
     assert client_qa.effective_entry(expected).answer[:100] in result[0]
+
+
+@pytest.mark.parametrize('source',['post','reel'])
+def test_exact_ad_inherits_post_or_reel_qa_bundle_and_opening_message(store,source):
+    database,_,_=store
+    opening='Approved source-owned opening for this creative.'
+    response=TestClient(app_module.app).post('/admin/instagram-routes',headers=HEADERS,json=dict(
+        source_type=source,url=f'https://www.instagram.com/{"reel" if source=="reel" else "p"}/AdBundle123/',
+        media_id='AdBundle123',response_mode='APPROVED_QA',approved_qa_ids=[PRICE,DETAILS,PAY],
+        source_context='sondesh',approved_opening_message=opening,menu_mode='NONE'))
+    assert response.status_code==200,response.text
+    target=response.json()['route']
+    ad_id=f'exact-{source}-bundle-ad'
+    database.bind_instagram_ad(ad_id,target['routing_id'],bound_by='test')
+
+    inherited,method=route_for_inbound(ad_id=ad_id,media_id=None)
+    assert method=='ad_id' and inherited['routing_id']==target['routing_id']
+    assert inherited['source_type']==source and inherited['source_context']=='sondesh'
+    assert inherited['approved_qa_ids']==[PRICE,DETAILS,PAY]
+    assert inherited['approved_opening_message']==opening
+    assert not database.get_instagram_source_qa_bundle(target['routing_id'])['approved_qa_ids'] is None
+
+    display=mapping_display(database.get_instagram_source_route(target['routing_id']))
+    assert display['display_opening_message']==opening
+    assert [item['qa_id'] for item in display['display_approved_questions']]==[PRICE,DETAILS,PAY]
+    assert all(item['answer']==client_qa.effective_entry(item['qa_id']).answer for item in display['display_approved_questions'])
+
+
+@pytest.mark.parametrize('qa_id',['general_price','general_details','price_is_high','best_time_to_book','general_payment_client'])
+def test_each_requested_selected_qa_id_returns_its_existing_canonical_answer(store,qa_id):
+    entry=client_qa.effective_entry(qa_id)
+    assert entry is not None
+    context=entry.context if entry.context!='general' else 'sondesh'
+    target=mapped(store,'post',f'Canonical{qa_id}',context=context,ids=[qa_id])
+
+    result,facts=reply(store,target,entry.question)
+
+    assert result[1] and facts['client_qa_id']==qa_id
+    assert entry.answer in result[0]
+    assert facts['source_bundle_match']=='matched'
+
+
+def test_ads_follow_source_configuration_updates_without_copied_per_ad_state(store):
+    database,_,api=store
+    target=mapped(store,'reel','LiveConfig123',ids=[PRICE])
+    database.bind_instagram_ad('live-config-ad',target['routing_id'],bound_by='test')
+    updated_opening='Updated approved opening on source.'
+    response=api.post('/admin/instagram-routes',headers=HEADERS,json=dict(
+        routing_id=target['routing_id'],source_type='reel',url='https://www.instagram.com/reel/LiveConfig123/',
+        response_mode='APPROVED_QA',approved_qa_ids=[DETAILS,PAY],source_context='sondesh',
+        approved_opening_message=updated_opening,menu_mode='NONE'))
+    assert response.status_code==200,response.text
+
+    inherited,method=route_for_inbound(ad_id='live-config-ad',media_id=None)
+    display=mapping_display(database.get_instagram_source_route(target['routing_id']))
+    assert method=='ad_id' and inherited['approved_qa_ids']==[DETAILS,PAY]
+    assert inherited['approved_opening_message']==updated_opening
+    assert display['display_opening_message']==updated_opening
+    assert [item['qa_id'] for item in display['display_approved_questions']]==[DETAILS,PAY]
 
 
 def test_same_wording_different_exact_sources_and_selection_precedence(store):

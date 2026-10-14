@@ -483,6 +483,11 @@ def validate_route_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     source_description = str(payload.get("source_description") or "").strip()
     if len(source_description) > 2000:
         raise ValueError("Description must be 2,000 characters or fewer.")
+    approved_opening_message = str(payload.get("approved_opening_message") or "").strip()
+    if len(approved_opening_message) > 2000:
+        raise ValueError("Approved opening message must be 2,000 characters or fewer.")
+    if source_type not in {"post", "reel"} and approved_opening_message:
+        raise ValueError("Approved opening messages are available for Post and Reel sources only.")
 
     preview_url = str(payload.get("preview_url") or "").strip() or None
     if preview_url and (len(preview_url) > 2000 or not preview_url.lower().startswith(("http://", "https://"))):
@@ -513,6 +518,7 @@ def validate_route_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         "media_type": str(payload.get("media_type") or "").strip() or None,
         "routing_topic": routing_topic,
         "source_description": source_description,
+        "approved_opening_message": approved_opening_message,
         "knowledge_scope": scope,
         "escalation_policy": escalation,
         "priority_products": priority,

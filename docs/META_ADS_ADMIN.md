@@ -12,6 +12,8 @@ Ads is the paid inventory workspace. Posts & Reels and Stories manage source map
 6. Confirm the existing source. PR #58's bind endpoint attaches the exact Ad ID to that route; it creates no route. Re-read MAPPED and BOUND/Binding ON.
 7. Change Mapping, Disable/Enable Binding and History operate on local bindings. Edit Mapping opens the existing source editor. Inactive ads keep mapping and history.
 
+Post/Reel source editors own the approved opening message and selected Approved Q&A IDs. Ads display those effective source settings as read-only inherited configuration; changing the linked source updates every bound ad without an ad-specific Q&A copy. A greeting-only message uses the opening message only when it carries the trusted referral for that exact active Ad ID binding. Organic greetings use the normal short greeting. The existing ad gate continues to govern organic non-greeting messages.
+
 No automatic binding or Marketing write is performed. Sync failure does not interrupt customer replies: customer routing reads only local exact bindings and the existing approved-answer/menu/source pipeline. A previous human-handoff conversation must be resumed by an authorized operator before it can serve as a fresh automated-reply acceptance test.
 
 Presentation grouping prefers exact Instagram media ID, then canonical permalink, then creative ID when Instagram identity is absent, then the individual Ad ID. Conflicting exact media/permalink identities remain separate. An unambiguous permalink-only member may join its media group. Titles, captions, thumbnails and bindings never establish group identity. Group membership is not routing authority: each action still submits one exact Ad ID through PR #58.

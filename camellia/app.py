@@ -31,6 +31,7 @@ from slowapi.errors import RateLimitExceeded
 from camellia.config import config, STARTUP_ACTIONS
 from camellia.database import db
 from camellia.ad_gate import EntryPoint, ad_gate, describe_entry_point
+from camellia.intent_guards import GREETING_ONLY_RE
 from camellia.ice_breakers import (
     DEFAULT_ICE_BREAKERS,
     MAX_ICE_BREAKERS,
@@ -846,6 +847,7 @@ def _process_instagram_event(
             post_media_id=shared_post_id,
             source_type="story_reply" if entry.source == "story_reply" else shared_source_type,
         )
+        unbound_ad_referral = bool(entry.from_ad_click and entry.ad_id and not source_route)
         if trace.get("ad_id") and source_route:
             log.info(
                 "INSTAGRAM_AD_ROUTE ad_present=true ad_id_hash=%s binding_status=BOUND routing_id=%s source_type=%s",
@@ -869,6 +871,14 @@ def _process_instagram_event(
                 facts["unmapped_shared_attachment"] = False
                 facts["source_priority_cursor"] = 0
                 facts["active_product_context"] = None
+        elif unbound_ad_referral:
+            # A new trusted Ad referral without an exact active binding cannot
+            # borrow the source context from an earlier conversation/ad.
+            facts["source_route"] = None
+            facts["source_context_superseded"] = True
+            facts["source_priority_cursor"] = 0
+            facts["last_topic"] = None
+            facts["active_product_context"] = None
         elif isinstance(facts.get("source_route"), dict):
             stored_route_id = facts["source_route"].get("routing_id")
             stored_route = db.get_instagram_source_route(int(stored_route_id)) if stored_route_id else None
@@ -950,10 +960,28 @@ def _process_instagram_event(
             bool(source_media_present), bool(str(message_text or "").strip()),
         )
 
-        response_text, was_matched, template_id, image_url = responder.match_and_respond(
-            response_input, user_id=sender_id, channel="instagram",
-            referral_source="ADS", referral_ad_id=trace["ad_id"], referral_ad_title=trace["ad_title"],
+        approved_opening = str((source_route or {}).get("approved_opening_message") or "").strip()
+        exact_ad_source = bool(
+            entry.from_ad_click and source_match_method == "ad_id" and source_route
+            and source_route.get("source_type") in {"post", "reel"}
         )
+        use_ad_opening = bool(
+            exact_ad_source and approved_opening
+            and GREETING_ONLY_RE.fullmatch(response_input)
+            and not facts.get("ad_opening_message_sent")
+        )
+        if use_ad_opening:
+            response_text, was_matched, template_id, image_url = (
+                approved_opening, True, "source_opening_message", None,
+            )
+            facts["ad_opening_message_sent"] = True
+            facts["last_route_source"] = "SOURCE_OPENING"
+            session_memory.add_turn(sender_id, "instagram", customer_message, response_text)
+        else:
+            response_text, was_matched, template_id, image_url = responder.match_and_respond(
+                response_input, user_id=sender_id, channel="instagram",
+                referral_source="ADS", referral_ad_id=trace["ad_id"], referral_ad_title=trace["ad_title"],
+            )
 
         # Human-gated assisted resolution: unresolved Instagram messages only.
         # The draft is durable and reviewable; it is never sent from this path.
@@ -988,6 +1016,7 @@ def _process_instagram_event(
         # Order completion remains deliberately outside this allowlist.
         informational_templates = {
             "system_conversation",
+            "source_opening_message",
             "grounded_derived",
             "source_description",
             "opening_hours",
@@ -3959,6 +3988,7 @@ async def save_instagram_media_mapping(item_id: int, request: Request, x_admin_k
         "approved_qa_id": body.get("approved_qa_id"),
         "media_id": (existing or {}).get("media_id") if manual else item["instagram_media_id"], "shortcode": item.get("shortcode"),
         "topic_id": topic_id, "source_description": body.get("source_description") or "",
+        "approved_opening_message": body.get("approved_opening_message", (existing or {}).get("approved_opening_message", "")),
         "menu_id": body.get("menu_id"), "menu_mode": body.get("menu_mode") or "NONE",
         "preview_url": item.get("thumbnail_url") or item.get("media_url"),
         "media_type": item["media_type"], "active": body.get("auto_reply_enabled", True),

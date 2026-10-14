@@ -8,6 +8,7 @@ from camellia.database import db
 from camellia.config import config
 from camellia.ice_breakers import question_for_payload
 from camellia import instagram_chatbot_control
+from camellia.intent_guards import GREETING_ONLY_RE
 
 log = logging.getLogger("camellia.ad_gate")
 
@@ -301,6 +302,11 @@ class AdGate:
             return True, sender_id, message_text, ad_id
         elif already_qualified:
             # User was previously qualified via Ad in this session
+            return True, sender_id, message_text, None
+        elif GREETING_ONLY_RE.fullmatch(str(message_text or "").strip()):
+            # A pure greeting is the only organic message allowed through the
+            # ad gate. Business questions and other organic DMs retain the
+            # existing policy; greeting handling never inherits ad content.
             return True, sender_id, message_text, None
         else:
             # Organic DM (non-ad): Ignore per PRD Requirement #4
