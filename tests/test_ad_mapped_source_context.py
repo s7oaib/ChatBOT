@@ -832,3 +832,38 @@ def test_shared_synced_post_resolves_by_paired_alias_without_handoff(ad_customer
     assert db.get_active_handoff("instagram", sender) is None
     assert facts["source_route"]["routing_id"] == route["routing_id"]
     assert db.get_instagram_source_route(route["routing_id"])["media_id"] == "meta-post-media-12345"
+
+
+@pytest.mark.parametrize("message", ["Tell me more about", "tell me more about?", "  Tell me more about.  "])
+def test_unfinished_tell_me_more_about_answers_like_tell_me_more(ad_customer, message):
+    # Production 2026-10-14: a shared Experience kolkata carousel resolved to
+    # its route, but "Tell me more about" with no object handed off.
+    _production_shaped_source(ad_customer, "unfinished-ad", "Experience kolkata")
+    sender, facts, db = ad_customer
+    _process(ad_customer, message, _ad_entry(sender, "unfinished-ad", message))
+    assert facts["last_route_source"] == "SOURCE_DESCRIPTION"
+    assert db.get_conversations(limit=1, channel="instagram", user_id=sender)[0]["bot_response"] == "Operator-authored reel description."
+    assert db.get_active_handoff("instagram", sender) is None
+
+
+def test_unfinished_tell_me_more_about_uses_the_selected_details_qa(ad_customer):
+    _mapped_source(ad_customer, "reel", "unfinished-bundle-ad", topic_name="Sondesh", response_mode="APPROVED_QA",
+                   approved_qa_ids=["sondesh_price_client", "sondesh_details_client"], source_context="sondesh")
+    sender, facts, db = ad_customer
+    _process(ad_customer, "Tell me more about", _ad_entry(sender, "unfinished-bundle-ad", "Tell me more about"))
+    assert facts["client_qa_id"] == "sondesh_details_client"
+    assert db.get_active_handoff("instagram", sender) is None
+
+
+def test_unfinished_tell_me_more_about_without_a_source_still_hands_off(ad_customer):
+    sender, facts, db = ad_customer
+    _process(ad_customer, "Tell me more about", EntryPoint(source="typed"))
+    assert facts["last_route_source"] == "HUMAN_HANDOFF"
+    assert db.get_active_handoff("instagram", sender)
+
+
+def test_tell_me_more_about_a_named_product_is_unchanged(ad_customer):
+    _production_shaped_source(ad_customer, "named-ad", "Experience kolkata")
+    sender, facts, db = ad_customer
+    _process(ad_customer, "Tell me more about sondesh", _ad_entry(sender, "named-ad", "Tell me more about sondesh"))
+    assert facts["client_qa_id"] == "sondesh_details_client"

@@ -2701,6 +2701,11 @@ class DeterministicResponder:
         if not user_message or not user_message.strip():
             return self._generic_fallback(), False, None, None
 
+        # "Tell me more about" with nothing after it (sent after sharing a
+        # post or tapping an ad) is the same request as "Tell me more".
+        if re.fullmatch(r"\s*tell\s+me\s+more\s+about\s*[?.!]*\s*", user_message, re.I):
+            user_message = "Tell me more"
+
         lowered_text = user_message.lower().strip()
         opener_name, semantic_remainder = split_conversational_opener(
             lowered_text
