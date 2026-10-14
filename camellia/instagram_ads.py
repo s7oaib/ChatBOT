@@ -41,7 +41,6 @@ def mapping_display(row):
     approved = resolve_effective_approved_qa_by_id(route.get("approved_qa_id")) if route.get("response_mode") == "APPROVED_QA" else None
     route["display_label"] = route.get("routing_topic") or (approved.entry.question if approved else "Mapped source")
     route["display_description"] = route.get("source_description") or (approved.entry.answer[:500] if approved else "Approved Q&A unavailable" if route.get("response_mode") == "APPROVED_QA" else "No description added.")
-    route["display_opening_message"] = route.get("approved_opening_message") or ""
     selected_ids = route.get("approved_qa_ids") or ([route.get("approved_qa_id")] if route.get("approved_qa_id") else [])
     eligible_ids = set(selected_ids)
     if route.get("qa_bundle"):

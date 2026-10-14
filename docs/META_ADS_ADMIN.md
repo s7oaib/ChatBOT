@@ -12,7 +12,7 @@ Ads is the paid inventory workspace. Posts & Reels and Stories manage source map
 6. Confirm the existing source. PR #58's bind endpoint attaches the exact Ad ID to that route; it creates no route. Re-read MAPPED and BOUND/Binding ON.
 7. Change Mapping, Disable/Enable Binding and History operate on local bindings. Edit Mapping opens the existing source editor. Inactive ads keep mapping and history.
 
-Post/Reel source editors own the approved opening message and selected Approved Q&A IDs. Ads display those effective source settings as read-only inherited configuration; changing the linked source updates every bound ad without an ad-specific Q&A copy. A greeting-only message uses the opening message only when it carries the trusted referral for that exact active Ad ID binding. Organic greetings use the normal short greeting. The existing ad gate continues to govern organic non-greeting messages.
+Post/Reel source editors own the selected Approved Q&A IDs. Ads display those effective source responses as read-only inherited configuration; changing the linked source updates every bound ad without an ad-specific Q&A copy. A supported question follows the existing approved-answer pipeline only when its exact active Ad ID binding resolves to that source. Unsupported questions keep the established handoff behavior, and active human handoffs remain paused until an authorized operator resumes them.
 
 No automatic binding or Marketing write is performed. Sync failure does not interrupt customer replies: customer routing reads only local exact bindings and the existing approved-answer/menu/source pipeline. A previous human-handoff conversation must be resumed by an authorized operator before it can serve as a fresh automated-reply acceptance test.
 
