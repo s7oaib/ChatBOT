@@ -1907,6 +1907,15 @@ class Database:
         from camellia import approved_qa, instagram_story_qa, instagram_source_qa
         bundle_write = "approved_qa_ids" in route
         with (approved_qa._lock if bundle_write else nullcontext()), self.get_connection() as conn:
+            if routing_id is not None and "approved_opening_message" not in route:
+                # Preserve legacy values without exposing them in route APIs or
+                # using them as response authority.
+                legacy = conn.execute(
+                    "SELECT approved_opening_message FROM instagram_source_routes WHERE routing_id=?",
+                    (routing_id,),
+                ).fetchone()
+                if legacy:
+                    values = values[:8] + (legacy["approved_opening_message"],) + values[9:]
             if bundle_write:
                 conn.execute("BEGIN IMMEDIATE")
                 if route["source_type"] not in {"story", "post", "reel"} or route.get("response_mode") != "APPROVED_QA":

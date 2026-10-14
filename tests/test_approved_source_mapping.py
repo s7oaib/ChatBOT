@@ -63,7 +63,7 @@ def test_selected_id_uses_canonical_blocks_and_exact_answer(store, kind, message
         result, facts = resolve(store, message, route)
     assert result[0] == client_qa.effective_entry('home_table_details').answer
     assert facts['client_qa_id'] == 'home_table_details'
-    assert facts['client_qa_match_kind'] == 'source_qa_id'
+    assert facts['last_grounding'] == 'exact_approved'
     blocks = facts['ordered_response_blocks']
     assert [b['kind'] for b in blocks] == ['TEXT', 'LINK', 'LINK', 'LINK', 'LINK', 'TEXT']
     assert tuple(b['url'] for b in blocks if b['kind'] == 'LINK') == client_qa.HOME_TABLE_REEL_URLS

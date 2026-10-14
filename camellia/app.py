@@ -31,7 +31,6 @@ from slowapi.errors import RateLimitExceeded
 from camellia.config import config, STARTUP_ACTIONS
 from camellia.database import db
 from camellia.ad_gate import EntryPoint, ad_gate, describe_entry_point
-from camellia.intent_guards import GREETING_ONLY_RE
 from camellia.ice_breakers import (
     DEFAULT_ICE_BREAKERS,
     MAX_ICE_BREAKERS,
@@ -960,28 +959,10 @@ def _process_instagram_event(
             bool(source_media_present), bool(str(message_text or "").strip()),
         )
 
-        approved_opening = str((source_route or {}).get("approved_opening_message") or "").strip()
-        exact_ad_source = bool(
-            entry.from_ad_click and source_match_method == "ad_id" and source_route
-            and source_route.get("source_type") in {"post", "reel"}
+        response_text, was_matched, template_id, image_url = responder.match_and_respond(
+            response_input, user_id=sender_id, channel="instagram",
+            referral_source="ADS", referral_ad_id=trace["ad_id"], referral_ad_title=trace["ad_title"],
         )
-        use_ad_opening = bool(
-            exact_ad_source and approved_opening
-            and GREETING_ONLY_RE.fullmatch(response_input)
-            and not facts.get("ad_opening_message_sent")
-        )
-        if use_ad_opening:
-            response_text, was_matched, template_id, image_url = (
-                approved_opening, True, "source_opening_message", None,
-            )
-            facts["ad_opening_message_sent"] = True
-            facts["last_route_source"] = "SOURCE_OPENING"
-            session_memory.add_turn(sender_id, "instagram", customer_message, response_text)
-        else:
-            response_text, was_matched, template_id, image_url = responder.match_and_respond(
-                response_input, user_id=sender_id, channel="instagram",
-                referral_source="ADS", referral_ad_id=trace["ad_id"], referral_ad_title=trace["ad_title"],
-            )
 
         # Human-gated assisted resolution: unresolved Instagram messages only.
         # The draft is durable and reviewable; it is never sent from this path.
@@ -1016,7 +997,6 @@ def _process_instagram_event(
         # Order completion remains deliberately outside this allowlist.
         informational_templates = {
             "system_conversation",
-            "source_opening_message",
             "grounded_derived",
             "source_description",
             "opening_hours",
@@ -3988,7 +3968,6 @@ async def save_instagram_media_mapping(item_id: int, request: Request, x_admin_k
         "approved_qa_id": body.get("approved_qa_id"),
         "media_id": (existing or {}).get("media_id") if manual else item["instagram_media_id"], "shortcode": item.get("shortcode"),
         "topic_id": topic_id, "source_description": body.get("source_description") or "",
-        "approved_opening_message": body.get("approved_opening_message", (existing or {}).get("approved_opening_message", "")),
         "menu_id": body.get("menu_id"), "menu_mode": body.get("menu_mode") or "NONE",
         "preview_url": item.get("thumbnail_url") or item.get("media_url"),
         "media_type": item["media_type"], "active": body.get("auto_reply_enabled", True),

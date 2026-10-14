@@ -77,13 +77,12 @@ def test_selected_authority_uses_existing_canonical_output(store,source,message,
 
 
 @pytest.mark.parametrize('source',['post','reel'])
-def test_exact_ad_inherits_post_or_reel_qa_bundle_and_opening_message(store,source):
+def test_exact_ad_inherits_post_or_reel_qa_bundle(store,source):
     database,_,_=store
-    opening='Approved source-owned opening for this creative.'
     response=TestClient(app_module.app).post('/admin/instagram-routes',headers=HEADERS,json=dict(
         source_type=source,url=f'https://www.instagram.com/{"reel" if source=="reel" else "p"}/AdBundle123/',
         media_id='AdBundle123',response_mode='APPROVED_QA',approved_qa_ids=[PRICE,DETAILS,PAY],
-        source_context='sondesh',approved_opening_message=opening,menu_mode='NONE'))
+        source_context='sondesh',menu_mode='NONE'))
     assert response.status_code==200,response.text
     target=response.json()['route']
     ad_id=f'exact-{source}-bundle-ad'
@@ -93,11 +92,11 @@ def test_exact_ad_inherits_post_or_reel_qa_bundle_and_opening_message(store,sour
     assert method=='ad_id' and inherited['routing_id']==target['routing_id']
     assert inherited['source_type']==source and inherited['source_context']=='sondesh'
     assert inherited['approved_qa_ids']==[PRICE,DETAILS,PAY]
-    assert inherited['approved_opening_message']==opening
     assert not database.get_instagram_source_qa_bundle(target['routing_id'])['approved_qa_ids'] is None
 
     display=mapping_display(database.get_instagram_source_route(target['routing_id']))
-    assert display['display_opening_message']==opening
+    assert 'approved_opening_message' not in inherited
+    assert 'display_opening_message' not in display
     assert [item['qa_id'] for item in display['display_approved_questions']]==[PRICE,DETAILS,PAY]
     assert all(item['answer']==client_qa.effective_entry(item['qa_id']).answer for item in display['display_approved_questions'])
 
@@ -120,19 +119,44 @@ def test_ads_follow_source_configuration_updates_without_copied_per_ad_state(sto
     database,_,api=store
     target=mapped(store,'reel','LiveConfig123',ids=[PRICE])
     database.bind_instagram_ad('live-config-ad',target['routing_id'],bound_by='test')
-    updated_opening='Updated approved opening on source.'
     response=api.post('/admin/instagram-routes',headers=HEADERS,json=dict(
         routing_id=target['routing_id'],source_type='reel',url='https://www.instagram.com/reel/LiveConfig123/',
         response_mode='APPROVED_QA',approved_qa_ids=[DETAILS,PAY],source_context='sondesh',
-        approved_opening_message=updated_opening,menu_mode='NONE'))
+        menu_mode='NONE'))
     assert response.status_code==200,response.text
 
     inherited,method=route_for_inbound(ad_id='live-config-ad',media_id=None)
     display=mapping_display(database.get_instagram_source_route(target['routing_id']))
     assert method=='ad_id' and inherited['approved_qa_ids']==[DETAILS,PAY]
-    assert inherited['approved_opening_message']==updated_opening
-    assert display['display_opening_message']==updated_opening
     assert [item['qa_id'] for item in display['display_approved_questions']]==[DETAILS,PAY]
+
+
+def test_legacy_opening_storage_is_preserved_but_not_exposed_or_used(store):
+    database,_,api=store
+    target=mapped(store,'reel','LegacyOpening123',ids=[PRICE])
+    with database.get_connection() as conn:
+        conn.execute('UPDATE instagram_source_routes SET approved_opening_message=? WHERE routing_id=?',
+                     ('legacy data stays stored',target['routing_id']))
+    response=api.post('/admin/instagram-routes',headers=HEADERS,json=dict(
+        routing_id=target['routing_id'],source_type='reel',url='https://www.instagram.com/reel/LegacyOpening123/',
+        response_mode='APPROVED_QA',approved_qa_ids=[DETAILS],source_context='sondesh',menu_mode='NONE'))
+    assert response.status_code==200,response.text
+    stored=database.get_instagram_source_route(target['routing_id'])
+    assert stored['approved_opening_message']=='legacy data stays stored'
+    assert 'approved_opening_message' not in response.json()['route']
+    assert 'approved_opening_message' not in route_for_inbound(ad_id=None,media_id=None,shortcode='LegacyOpening123')[0]
+    assert 'display_opening_message' not in mapping_display(stored)
+
+
+def test_opening_message_controls_and_special_template_are_absent(store):
+    from camellia.admin_ads import SCRIPT as ADS_SCRIPT
+    from camellia.app import _process_instagram_event
+    import inspect
+    source_script=SCRIPT
+    assert 'OpeningMessage' not in selector_html('ig')
+    assert 'approved_opening_message' not in source_script
+    assert 'display_opening_message' not in ADS_SCRIPT
+    assert 'source_opening_message' not in inspect.getsource(_process_instagram_event)
 
 
 def test_same_wording_different_exact_sources_and_selection_precedence(store):

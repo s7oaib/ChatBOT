@@ -2778,6 +2778,8 @@ class DeterministicResponder:
 
         source_for_qa = facts.get("source_route") or {}
         bundle_match = None
+        legacy_source_match = None
+        legacy_source_unavailable = False
         bundle_active = False
         if (channel == "instagram" and isinstance(source_for_qa, dict)
                 and source_for_qa.get("source_type") in {"story", "post", "reel"} and source_for_qa.get("routing_id")
@@ -2838,6 +2840,51 @@ class DeterministicResponder:
                         text = self._generic_fallback()
                         session_memory.add_turn(user_id, channel, user_message, text)
                         return text, False, audit + "_unresolved", None
+            elif (not is_story and current_route and current_route.get("active")
+                  and not current_route.get("archived_at")
+                  and current_route.get("response_mode") == "APPROVED_QA"
+                  and current_route.get("approved_qa_id") == source_for_qa.get("approved_qa_id")
+                  and source_for_qa.get("approved_qa_id")):
+                # Older Post/Reel mappings store one selected ID on the route
+                # instead of a bundle. Match against that exact effective ID
+                # so a duplicate alias in another context cannot steal the
+                # answer or turn a valid mapped question into a registry miss.
+                identity_matches = all(
+                    current_route.get(key) == source_for_qa.get(key)
+                    for key in instagram_source_qa.IDENTITY_FIELDS
+                )
+                if identity_matches:
+                    try:
+                        rows = approved_qa.overlays(strict=True)
+                        selected_id = source_for_qa["approved_qa_id"]
+                        selected = next(
+                            (entry for entry in approved_qa.registry(rows) if entry.qa_id == selected_id),
+                            None,
+                        )
+                        if selected:
+                            context = selected.context
+                            narrow_facts = {
+                                "last_topic": context,
+                                "home_table_context": context == "home_table",
+                            }
+                            legacy_source_match = approved_qa.match(
+                                user_message, narrow_facts, rows=rows,
+                                allowed_qa_ids={selected_id},
+                            )
+                        else:
+                            legacy_source_unavailable = True
+                    except Exception:
+                        legacy_source_match = None
+                        legacy_source_unavailable = True
+        if legacy_source_unavailable:
+            # A stale legacy selection must not silently fall through to a
+            # different global Q&A just because that wording happens to match.
+            facts.update({"client_qa_id": None, "ordered_response_blocks": [],
+                          "last_route_source": "HUMAN_HANDOFF", "last_grounding": "approved_qa_unavailable",
+                          "last_actions": [BusinessAction.ESCALATE_TO_TEAM.value], "knowledge_sufficient": False})
+            text = self._generic_fallback()
+            session_memory.add_turn(user_id, channel, user_message, text)
+            return text, False, "approved_qa_unavailable", None
         mapped_qa_reference = bool(
             channel == "instagram" and isinstance(source_for_qa, dict)
             and source_for_qa.get("routing_id") and source_for_qa.get("active", True)
@@ -2849,8 +2896,10 @@ class DeterministicResponder:
                 r"more\s+details?(?:\s+please)?)\s*[?.!]*\s*", user_message, re.I)
         )
         mapped_qa_reference = mapped_qa_reference and not bundle_active
-        mapped_qa_match = bundle_match or (client_qa.resolve_effective_approved_qa_by_id(source_for_qa.get("approved_qa_id"))
-                           if mapped_qa_reference else None)
+        mapped_qa_match = bundle_match or legacy_source_match or (
+            client_qa.resolve_effective_approved_qa_by_id(source_for_qa.get("approved_qa_id"))
+            if mapped_qa_reference else None
+        )
         if mapped_qa_reference and mapped_qa_match is None:
             facts.update({"client_qa_id": None, "ordered_response_blocks": [],
                           "last_route_source": "HUMAN_HANDOFF", "last_grounding": "approved_qa_unavailable",
