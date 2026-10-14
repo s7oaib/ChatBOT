@@ -18,7 +18,8 @@ let handoffMessageState = null;
 function renderHandoffMessage(state, note) {
     handoffMessageState = state;
     document.getElementById('handoffMessageText').value = state.message || '';
-    document.getElementById('handoffMessageReset').hidden = !state.is_custom;
+    // .btn-secondary sets display, which overrides the hidden attribute.
+    document.getElementById('handoffMessageReset').style.display = state.is_custom ? '' : 'none';
     document.getElementById('handoffMessageStatus').textContent = note || (state.is_custom ? 'Using your edited message.' : 'Using the original message.');
 }
 async function loadHandoffMessage() {

@@ -743,3 +743,53 @@ def test_schedule_uses_absolute_instants_across_account_dst_fold(store, monkeypa
     assert result['account_timezone'] == 'America/New_York'
     assert result['schedules']['1']['end_time'] == '2026-11-01T01:45:00-04:00'
     assert ('1' in result['ads']) is included
+
+
+def test_ads_cards_show_plain_status_and_search_all_and_skip_noop_rebind(tmp_path):
+    from camellia.admin_ads import SCRIPT
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node unavailable; separate JavaScript gate is required")
+    fixture = r'''
+const assert = require('assert');
+const nodes = {}; const calls = [];
+global.adminAuthenticated = true;
+global.getAuthHeaders = () => ({});
+global.escapeHtml = value => String(value || '');
+let confirmed = 0; global.confirm = () => { confirmed++; return true; };
+global.document = {querySelectorAll:()=>[],getElementById:id=>nodes[id] ||= {innerHTML:'',textContent:'',value:'',style:{},querySelectorAll:()=>[],close:()=>{},showModal:()=>{}}};
+global.fetch = async (url,options) => { calls.push(url); return {ok:true,json:async()=>({})}; };
+const route = {routing_id:91,source_type:'reel',active:true,display_label:'sondesh delivery delhi NCR',canonical_url:'https://www.instagram.com/reel/X/'};
+const mapped = {ad_id:'111',name:'MISHTI',mapped:true,binding_active:true,routing_id:91,mapping:route,history:[]};
+const unmapped = {ad_id:'222',name:'MISHTI copy',mapped:false,history:[]};
+'''
+    checks = r'''
+(async()=>{
+ adsWorkspace = {items:[mapped,unmapped],routes:[route],counts:{mapped:1,unmapped:1},sync:{}};
+ adsFilter = 'all'; renderAdsWorkspace();
+ assert(nodes.adsSummary.innerHTML.includes('<b>1</b> ads mapped · <b>1</b> not mapped'));
+ assert(nodes.adsList.innerHTML.includes('✅ Mapped to: <b>sondesh delivery delhi NCR</b>'));
+ assert(nodes.adsList.innerHTML.includes('⚪ Not mapped'));
+ assert(nodes.adsList.innerHTML.includes('Change Mapping') && nodes.adsList.innerHTML.includes('Map Ad'));
+ // Technical identifiers stay available but collapsed.
+ assert(nodes.adsList.innerHTML.includes('<summary>More details</summary><div class="ig-media-summary">Meta Ad ID: 111'));
+ // An ID outside the current view offers a one-click switch instead of a dead end.
+ adsFilter = 'running'; adsWorkspace.running_groups = []; nodes.adsExactId.value = '222'; renderAdsWorkspace();
+ assert(nodes.adsList.innerHTML.includes('Search all ads'));
+ adsFilter = 'all'; renderAdsWorkspace();
+ assert(nodes.adsList.innerHTML.includes('data-ad-id="222"'));
+ // Re-mapping an ad to the source it already uses changes nothing and asks nothing.
+ nodes.adsExactId.value = '';
+ openAdsMapping(mapped); await bindAdsMapping(91);
+ assert.equal(confirmed, 0); assert(!calls.some(url => url.endsWith('/bind')));
+ assert(nodes.adsMappingResult.textContent.includes('already mapped to "sondesh delivery delhi NCR"'));
+ // A real change still confirms in plain words first.
+ let text = ''; global.confirm = value => { text = value; return false; };
+ openAdsMapping(unmapped); await bindAdsMapping(91);
+ assert(text.startsWith('Map this ad to "sondesh delivery delhi NCR"?'));
+})().catch(error=>{console.error(error);process.exitCode=1;});
+'''
+    target = tmp_path / "ads-plain.js"
+    target.write_text(fixture + SCRIPT.replace("<script>", "").replace("</script>", "") + checks, encoding="utf-8")
+    result = subprocess.run([node, str(target)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
