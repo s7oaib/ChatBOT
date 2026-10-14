@@ -861,7 +861,11 @@ def _process_instagram_event(
                 source_match_method = facts.get("source_match_method") or "shared_post_media_id"
         if source_route:
             facts["source_route"] = source_route
-            if source_media_present:
+            # This event's own ADS referral resolved an exact binding: the same
+            # fresh subject as a shared Post/Reel, so a returning customer's
+            # earlier topic or superseded flag cannot hide the mapped source.
+            exact_ad_click = bool(entry.from_ad_click and entry.ad_id and source_match_method == "ad_id")
+            if source_media_present or exact_ad_click:
                 # A newly identified exact source is a fresh subject. Do not
                 # let an older conversational topic prevent the mapped
                 # Post/Reel/Story from answering "price?".

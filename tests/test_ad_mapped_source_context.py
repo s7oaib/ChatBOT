@@ -311,6 +311,82 @@ def test_ad_tell_me_more_sends_bound_description_then_exact_selected_image(ad_cu
     assert [call.kwargs.get("image_url") for call in send.call_args_list] == [None, ["/uploads/ad-source-menu.jpg"]]
 
 
+def _production_shaped_source(ad_customer, ad_id, topic_name):
+    """A CUSTOM Reel as production maps them: description only, no menu or product."""
+    _uid, _facts, db = ad_customer
+    topic = instagram_routing.create_topic(topic_name)
+    return db.save_instagram_source_route(validate_route_payload({
+        "source_type": "reel", "url": "https://www.instagram.com/reel/PRODSHAPE1/",
+        "shortcode": "PRODSHAPE1", "media_id": "prod-shape-media-1", "ad_id": ad_id,
+        "topic_id": topic["topic_id"], "routing_topic": topic_name,
+        "source_description": "Operator-authored reel description.",
+        "response_mode": "CUSTOM", "menu_mode": "NONE", "active": True,
+    }))
+
+
+@pytest.mark.parametrize("earlier_turn", [
+    "How do I order for a party?",   # order intake supersedes source context
+    "Hi",                            # no earlier superseding state
+])
+@pytest.mark.parametrize("message,topic,expected", [
+    ("Tell me more", "Savoury Delivery Delhi NCR", "description"),
+    ("tell me more", "sondesh delivery delhi NCR", "description"),
+    ("What is the price?", "Bengali Home Table", "home_table_price"),
+    ("what is the price", "Bengali Home Table", "home_table_price"),
+    ("How much does it cost?", "Bengali Home Table", "home_table_price"),
+])
+def test_returning_customer_ad_click_uses_newly_bound_source(
+        ad_customer, earlier_turn, message, topic, expected):
+    # Production: a customer whose earlier turn superseded source context
+    # clicked a mapped ad; the exact binding resolved but was ignored, so
+    # "Tell me more" handed off and Home Table "price" got generic savoury copy.
+    _production_shaped_source(ad_customer, "returning-ad", topic)
+    sender, facts, db = ad_customer
+    _process(ad_customer, earlier_turn, EntryPoint(source="typed"))
+
+    send = _process(ad_customer, message, _ad_entry(sender, "returning-ad", message))
+
+    row = db.get_conversations(limit=1, channel="instagram", user_id=sender)[0]
+    if expected == "description":
+        assert facts["last_route_source"] == "SOURCE_DESCRIPTION"
+        assert row["bot_response"] == "Operator-authored reel description."
+    else:
+        assert facts["client_qa_id"] == expected
+        assert row["bot_response"] == client_qa.effective_entry(expected).answer
+    assert db.get_active_handoff("instagram", sender) is None
+    assert send.called
+
+
+def test_ad_click_with_no_product_or_selected_qa_still_hands_off_price(ad_customer):
+    # A free-form routing topic is not answer authority: without a canonical
+    # product or selected Approved Q&A the source owns no price answer.
+    _production_shaped_source(ad_customer, "unpriced-ad", "Savoury Delivery Delhi NCR")
+    sender, facts, db = ad_customer
+
+    _process(ad_customer, "How much does it cost?", _ad_entry(sender, "unpriced-ad", "How much does it cost?"))
+
+    assert facts["last_route_source"] == "HUMAN_HANDOFF"
+    assert facts.get("client_qa_id") is None
+    assert db.get_active_handoff("instagram", sender)
+
+
+def test_fresh_ad_click_does_not_resume_a_human_owned_conversation(ad_customer):
+    _production_shaped_source(ad_customer, "owned-ad", "Bengali Home Table")
+    sender, facts, db = ad_customer
+    db.get_or_create_handoff(
+        handoff_ref="CAM-OWNED", source_channel="instagram", source_user_id=sender,
+        reason="CUSTOMER_REQUESTED_HUMAN", summary="Earlier support request.",
+        known_entities={}, unresolved_topic="refund", escalation_id=None, expires_at=None,
+    )
+
+    send = _process(ad_customer, "What is the price?", _ad_entry(sender, "owned-ad", "What is the price?"))
+
+    row = db.get_conversations(limit=1, channel="instagram", user_id=sender)[0]
+    assert row["template_id"] == "waiting_for_human"
+    assert db.get_active_handoff("instagram", sender)["handoff_ref"] == "CAM-OWNED"
+    assert not send.called
+
+
 def test_ad_source_context_persists_to_next_message_without_referral(ad_customer):
     _mapped_source(ad_customer, "post", "ad-followup-42")
     sender = ad_customer[0]
