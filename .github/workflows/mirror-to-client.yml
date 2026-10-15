@@ -1,0 +1,34 @@
+name: Mirror main to client repo
+
+# Our repo is the source of truth. Every push to main is copied to the
+# client's GitHub repo, whose Railway project deploys it. Needs a
+# CLIENT_REPO repository variable (owner/name) and a CLIENT_REPO_DEPLOY_KEY
+# secret (private half of a write-enabled deploy key on that repo).
+# Not a force push: if someone commits directly in the client repo, this
+# fails instead of erasing their work.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: mirror-to-client
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    if: ${{ vars.CLIENT_REPO != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Push main to client repo
+        env:
+          DEPLOY_KEY: ${{ secrets.CLIENT_REPO_DEPLOY_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan github.com >> ~/.ssh/known_hosts
+          git push "git@github.com:${{ vars.CLIENT_REPO }}.git" HEAD:main
