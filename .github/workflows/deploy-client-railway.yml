@@ -1,0 +1,24 @@
+name: Deploy to client Railway
+
+# The repo stays ours; the client's Railway project only receives builds.
+# Needs a RAILWAY_TOKEN secret (client's project token) and a
+# RAILWAY_SERVICE_ID repository variable. Skipped until the variable exists.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-client-railway
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: ${{ vars.RAILWAY_SERVICE_ID != '' }}
+    runs-on: ubuntu-latest
+    container: ghcr.io/railwayapp/cli:latest
+    env:
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: railway up --service="${{ vars.RAILWAY_SERVICE_ID }}" --ci
