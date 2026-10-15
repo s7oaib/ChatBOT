@@ -5,11 +5,18 @@ name: Mirror main to client repo
 # CLIENT_REPO repository variable (owner/name) and a CLIENT_REPO_DEPLOY_KEY
 # secret (private half of a write-enabled deploy key on that repo).
 # Not a force push: if someone commits directly in the client repo, this
-# fails instead of erasing their work.
+# fails instead of erasing their work. After a history rewrite, run it by
+# hand with replace_sha set to the client's current main: it then replaces
+# their main only if it is still exactly that commit.
 on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      replace_sha:
+        description: "Client main commit to replace (only after a history rewrite)"
+        required: false
+        default: ""
 
 concurrency:
   group: mirror-to-client
@@ -17,7 +24,8 @@ concurrency:
 
 jobs:
   mirror:
-    if: ${{ vars.CLIENT_REPO != '' }}
+    # A forced push can never fast-forward the client; use replace_sha instead.
+    if: ${{ vars.CLIENT_REPO != '' && !github.event.forced }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -26,9 +34,15 @@ jobs:
       - name: Push main to client repo
         env:
           DEPLOY_KEY: ${{ secrets.CLIENT_REPO_DEPLOY_KEY }}
+          CLIENT_REPO: ${{ vars.CLIENT_REPO }}
+          REPLACE_SHA: ${{ inputs.replace_sha }}
         run: |
           mkdir -p ~/.ssh
           printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan github.com >> ~/.ssh/known_hosts
-          git push "git@github.com:${{ vars.CLIENT_REPO }}.git" HEAD:main
+          if [ -n "$REPLACE_SHA" ]; then
+            git push --force-with-lease="main:$REPLACE_SHA" "git@github.com:$CLIENT_REPO.git" HEAD:main
+          else
+            git push "git@github.com:$CLIENT_REPO.git" HEAD:main
+          fi
