@@ -131,6 +131,9 @@ class Config:
     # Browser authentication is username + Argon2id password, not a legacy PIN.
     ADMIN_USERNAME: str = _env_secret("ADMIN_USERNAME")
     ADMIN_PASSWORD_HASH: str = _env_secret("ADMIN_PASSWORD_HASH")
+    # Plain password the client can change directly in Railway. When set it
+    # takes precedence over ADMIN_PASSWORD_HASH.
+    ADMIN_PASSWORD: str = _env_secret("ADMIN_PASSWORD")
     ADMIN_REQUIRE_HTTPS: bool = os.getenv("ADMIN_REQUIRE_HTTPS", "true").lower() in ("true", "1", "t", "yes")
     # Deliberate operational lock for the browser Admin portal and every
     # /admin API. Keep the default off so a deployment is reversible by config

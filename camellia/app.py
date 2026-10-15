@@ -127,7 +127,7 @@ _instagram_job_context: ContextVar[Optional[Dict[str, int]]] = ContextVar(
 
 def _admin_security_version() -> str:
     return security_digest(
-        f"{config.ADMIN_PASSWORD_HASH}\x00{config.ADMIN_USERNAME}"
+        f"{config.ADMIN_PASSWORD or config.ADMIN_PASSWORD_HASH}\x00{config.ADMIN_USERNAME}"
     )
 
 
@@ -287,7 +287,7 @@ async def lifespan(app: FastAPI):
                 "unsigned Instagram webhook POSTs can be accepted. Configure the Meta app "
                 "secret and enable REQUIRE_WEBHOOK_SIGNATURE."
             )
-    if not (config.ADMIN_USERNAME and config.ADMIN_PASSWORD_HASH):
+    if not (config.ADMIN_USERNAME and (config.ADMIN_PASSWORD or config.ADMIN_PASSWORD_HASH)):
         log.critical("Browser admin authentication is not configured; password login fails closed.")
     if config.ADMIN_API_KEY:
         log.info("Machine admin API authentication is configured separately from browser sessions.")
@@ -3405,7 +3405,7 @@ def _health_details():
             "outbound_delivery": outbound,
             "instagram_token": instagram_token,
             "admin_auth": {
-                "password_configured": bool(config.ADMIN_USERNAME and config.ADMIN_PASSWORD_HASH),
+                "password_configured": bool(config.ADMIN_USERNAME and (config.ADMIN_PASSWORD or config.ADMIN_PASSWORD_HASH)),
                 "machine_api_configured": bool(config.ADMIN_API_KEY),
                 "https_required": bool(config.ADMIN_REQUIRE_HTTPS),
             },
@@ -3505,7 +3505,10 @@ async def admin_login(request: Request):
         return _generic_login_failure(retry_after)
 
     configured_username = normalize_username(config.ADMIN_USERNAME)
-    password_ok = verify_password(password, config.ADMIN_PASSWORD_HASH)
+    if config.ADMIN_PASSWORD:
+        password_ok = hmac.compare_digest(password.encode(), config.ADMIN_PASSWORD.encode())
+    else:
+        password_ok = verify_password(password, config.ADMIN_PASSWORD_HASH)
     username_ok = bool(configured_username) and hmac.compare_digest(
         normalize_username(username), configured_username
     )

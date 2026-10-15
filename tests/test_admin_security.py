@@ -20,6 +20,7 @@ def security_client(tmp_path, monkeypatch):
     monkeypatch.setattr(app_module, "db", database)
     monkeypatch.setattr(config, "ADMIN_USERNAME", USERNAME)
     monkeypatch.setattr(config, "ADMIN_PASSWORD_HASH", hash_password(PASSWORD))
+    monkeypatch.setattr(config, "ADMIN_PASSWORD", "")
     monkeypatch.setattr(config, "ADMIN_REQUIRE_HTTPS", True)
     monkeypatch.setattr(config, "ADMIN_API_KEY", "machine-api-key-never-in-browser")
     limiter_enabled = app.state.limiter.enabled
@@ -69,6 +70,18 @@ def test_authenticated_session_survives_dashboard_refresh_and_protected_navigati
     # A separate browser without the session cookie remains unauthenticated.
     unauthenticated = TestClient(app, base_url="https://testserver")
     assert unauthenticated.get("/admin/session").status_code == 403
+
+
+def test_plain_admin_password_overrides_hash_and_ends_old_sessions(security_client, monkeypatch):
+    client, _database = security_client
+    assert _login(client).status_code == 200
+
+    # The client changes the password directly in Railway; the stale hash is ignored.
+    monkeypatch.setattr(config, "ADMIN_PASSWORD", "a new plain railway password")
+    assert client.get("/admin/session").status_code == 403
+    assert _login(client).status_code == 401
+    assert _login(client, password="a new plain railway password").status_code == 200
+    assert client.get("/admin/session").status_code == 200
 
 
 def test_wrong_and_unknown_credentials_are_generic(security_client):

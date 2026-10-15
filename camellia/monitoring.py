@@ -17,7 +17,8 @@ def sanitize_log_text(value: str) -> str:
     """Defence in depth for common secret/PII shapes, not arbitrary prose."""
     text = str(value)
     for name in ("GROQ_API_KEY", "META_APP_SECRET", "META_VERIFY_TOKEN",
-                 "INSTAGRAM_ACCESS_TOKEN", "ADMIN_API_KEY", "ADMIN_PASSWORD_HASH"):
+                 "INSTAGRAM_ACCESS_TOKEN", "ADMIN_API_KEY", "ADMIN_PASSWORD_HASH",
+                 "ADMIN_PASSWORD"):
         secret = getattr(config, name, None)
         if secret:
             text = text.replace(str(secret), "[REDACTED]")
