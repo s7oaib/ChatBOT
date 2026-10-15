@@ -90,6 +90,21 @@ def format_story_sequence_date_display(date_value: Optional[str]) -> Optional[st
         return None
 
 
+class _ClosingConnection(sqlite3.Connection):
+    """Commits or rolls back like sqlite3, then closes when the with-block ends.
+
+    A plain sqlite3 connection's with-block never closes it, and its statement
+    cache keeps it in a reference cycle, so each one held its file handles until
+    the garbage collector happened to run.
+    """
+
+    def __exit__(self, *exc):
+        try:
+            return super().__exit__(*exc)
+        finally:
+            self.close()
+
+
 class Database:
     def __init__(self, db_path: str = None):
         self.db_path = db_path or config.DB_PATH
@@ -203,7 +218,7 @@ class Database:
             cls._ensure_column(cursor, "instagram_outbound_audit", column, declaration)
 
     def get_connection(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, timeout=10.0)
+        conn = sqlite3.connect(self.db_path, timeout=10.0, factory=_ClosingConnection)
         conn.row_factory = sqlite3.Row
         return conn
 
